@@ -123,6 +123,35 @@ npm run dev
 
 Frontend Vite dev server proxies `/api` and `/proxy` back to the backend.
 
+## Codex E2E smoke test
+
+The highest-value host-level E2E check is the **Codex adoption flow**:
+
+- Agent Console creates a **hidden detached tmux session** for a new Codex conversation
+- your prompt is sent into that bound session
+- Codex writes a real transcript under the configured local Codex sessions root
+- the backend reconciles the temporary `pending:*` node to the real saved Codex conversation ref
+- releasing the session tears down the tmux session cleanly
+
+Run it against a running backend:
+
+```bash
+npm run smoke:codex -- --project <project-slug> --password '<login-password>'
+```
+
+Useful options:
+
+```bash
+npm run smoke:codex -- \
+  --project demo-web \
+  --password 'your-password' \
+  --base-url http://127.0.0.1:4317 \
+  --config ~/.config/agent-console/config.json \
+  --timeout-ms 180000
+```
+
+This script proves the saved conversation lands under the expected Codex sessions root. It does **not** inspect GUI terminals, because the product model is a hidden tmux session on the Linux host rather than a visible local terminal window.
+
 ## Remote access model
 
 The intended deployment path is **Tailscale first**.

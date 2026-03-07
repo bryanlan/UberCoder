@@ -102,4 +102,79 @@ describe('IndexingService', () => {
     expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref)).toEqual(['real-conversation']);
     db.close();
   });
+
+  it('does not adopt a pending conversation into an unrelated history node when the user hash does not match', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:mismatch',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      boundSessionId: 'session-mismatch',
+      isBound: true,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'expected-hash',
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-mismatch',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:mismatch',
+      tmuxSessionName: 'ac-codex-demo-mismatch',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const unrelatedConversations: ConversationSummary[] = [{
+      ref: 'real-but-wrong',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Real conversation',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/real-but-wrong.jsonl',
+      providerConversationId: 'real-but-wrong',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+        lastUserTextHash: 'different-hash',
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? unrelatedConversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getBoundSessionById('session-mismatch')?.conversationRef).toBe('pending:mismatch');
+    expect(db.getPendingConversation('pending:mismatch')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
+
+    const tree = indexing.getTree();
+    expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref).sort()).toEqual(['pending:mismatch', 'real-but-wrong']);
+    db.close();
+  });
 });

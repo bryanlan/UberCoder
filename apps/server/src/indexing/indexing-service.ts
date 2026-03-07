@@ -270,8 +270,8 @@ export class IndexingService {
       rawMetadata.firstUserTextHash,
     ].filter((value): value is string => typeof value === 'string');
 
-    if (pendingLastUserHash && candidateHashes.includes(pendingLastUserHash)) {
-      return 0;
+    if (pendingLastUserHash) {
+      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
     }
 
     const pendingPreview = typeof pending.rawMetadata?.lastUserInputPreview === 'string' ? pending.rawMetadata.lastUserInputPreview : undefined;

@@ -11,7 +11,8 @@
     "build": "npm run build -w @agent-console/shared && npm run build -w @agent-console/server && npm run build -w @agent-console/web",
     "test": "npm run build -w @agent-console/shared && npm run test -w @agent-console/server",
     "typecheck": "npm run build -w @agent-console/shared && npm run typecheck -w @agent-console/server && npm run typecheck -w @agent-console/web",
-    "auth:hash": "node ./scripts/generate-password-hash.mjs"
+    "auth:hash": "node ./scripts/generate-password-hash.mjs",
+    "smoke:codex": "node ./scripts/smoke-codex-adoption.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
