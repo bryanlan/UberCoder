@@ -1,0 +1,71 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 4317,
+    "publicBaseUrl": "http://127.0.0.1:4317",
+    "webDistPath": "/opt/agent-console/apps/web/dist"
+  },
+  "projectsRoot": "/srv/projects",
+  "runtimeDir": "~/.local/share/agent-console/runtime",
+  "databasePath": "~/.local/share/agent-console/agent-console.sqlite",
+  "security": {
+    "passwordHash": "REPLACE_WITH_OUTPUT_FROM_NPM_RUN_AUTH_HASH",
+    "sessionSecret": "REPLACE_WITH_64_PLUS_CHAR_RANDOM_HEX_SECRET",
+    "cookieSecure": false,
+    "sessionTtlHours": 168,
+    "loginRateLimitMax": 10,
+    "loginRateLimitWindowMs": 900000,
+    "trustTailscaleHeaders": true,
+    "tailscaleAllowedUserLogin": "single-user@example.com"
+  },
+  "providers": {
+    "codex": {
+      "enabled": true,
+      "discoveryRoot": "~/.codex",
+      "commands": {
+        "newCommand": ["codex", "--no-alt-screen"],
+        "resumeCommand": ["codex", "resume", "--no-alt-screen", "{{conversationId}}"],
+        "continueCommand": ["codex", "resume", "--no-alt-screen", "--last"],
+        "env": {}
+      }
+    },
+    "claude": {
+      "enabled": true,
+      "discoveryRoot": "~/.claude",
+      "commands": {
+        "newCommand": ["claude", "--effort", "medium"],
+        "resumeCommand": ["claude", "--resume", "{{conversationId}}", "--effort", "medium"],
+        "continueCommand": ["claude", "--continue", "--effort", "medium"],
+        "env": {}
+      }
+    }
+  },
+  "projects": {
+    "demo-web": {
+      "active": true,
+      "displayName": "Demo Web",
+      "allowedLocalhostPorts": [3000, 5173],
+      "tags": ["frontend", "primary"],
+      "notes": "Main web surface",
+      "providers": {
+        "codex": {
+          "commands": {
+            "env": {
+              "CODEX_HOME": "~/.codex"
+            }
+          }
+        }
+      }
+    },
+    "api-service": {
+      "active": true,
+      "displayName": "API Service",
+      "allowedLocalhostPorts": [8080],
+      "tags": ["backend"]
+    },
+    "archive": {
+      "active": false,
+      "displayName": "Archive"
+    }
+  }
+}

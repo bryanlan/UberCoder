@@ -1,0 +1,2 @@
+{"timestamp":"2026-02-14T10:00:00.000Z","cwd":"/tmp/demo-project","role":"user","text":"Plan the auth flow"}
+{"timestamp":"2026-02-14T10:00:05.000Z","cwd":"/tmp/demo-project","role":"assistant","text":"I will inspect the current auth stack and propose a minimal secure design."}

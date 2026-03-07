@@ -1,0 +1,16 @@
+# Host requirements for Agent Console
+# This is an environment checklist, not a Python dependency file.
+
+nodejs >= 22
+npm >= 10
+tmux >= 3.4
+git
+build-essential
+python3
+
+# Required external CLIs
+codex
+claude
+
+# Optional but recommended for remote access
+tailscale

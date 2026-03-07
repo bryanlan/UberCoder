@@ -1,0 +1,105 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { describe, expect, it } from 'vitest';
+import type { ConversationSummary } from '@agent-console/shared';
+import { AppDatabase } from '../src/db/database.js';
+import type { MergedProviderSettings } from '../src/config/service.js';
+import { IndexingService } from '../src/indexing/indexing-service.js';
+import type { ActiveProject } from '../src/projects/project-service.js';
+import { RealtimeEventBus } from '../src/realtime/event-bus.js';
+
+const project: ActiveProject = {
+  slug: 'demo',
+  directoryName: 'demo',
+  displayName: 'Demo',
+  path: '/tmp/demo-project',
+  allowedLocalhostPorts: [],
+  tags: [],
+  config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
+};
+
+const providerSettings = {
+  id: 'codex',
+  enabled: true,
+  discoveryRoot: '/tmp/codex',
+  commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+} satisfies MergedProviderSettings;
+
+describe('IndexingService', () => {
+  it('adopts pending conversations into real history nodes and hides the pending alias from the tree', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:test',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      boundSessionId: 'session-1',
+      isBound: true,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'match-hash',
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-1',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:test',
+      tmuxSessionName: 'ac-codex-demo',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const conversations: ConversationSummary[] = [{
+      ref: 'real-conversation',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Real conversation',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/real-conversation.jsonl',
+      providerConversationId: 'real-conversation',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+        lastUserTextHash: 'match-hash',
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? conversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getBoundSessionById('session-1')?.conversationRef).toBe('real-conversation');
+    expect(db.getPendingConversation('pending:test')?.rawMetadata?.adoptedConversationRef).toBe('real-conversation');
+    expect(db.getPendingConversation('pending:test')?.boundSessionId).toBeUndefined();
+
+    const tree = indexing.getTree();
+    expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref)).toEqual(['real-conversation']);
+    db.close();
+  });
+});

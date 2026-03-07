@@ -1,0 +1,401 @@
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import type { BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
+import { nowIso } from '../lib/time.js';
+import { commandToShell } from '../lib/shell.js';
+import { sleep } from '../lib/async.js';
+import { normalizeComparableText, stableTextHash, truncate } from '../lib/text.js';
+import { AppDatabase } from '../db/database.js';
+import type { ActiveProject } from '../projects/project-service.js';
+import type { MergedProviderSettings } from '../config/service.js';
+import type { ProviderAdapter } from '../providers/types.js';
+import type { TmuxClient } from './tmux-client.js';
+import { RealtimeEventBus } from '../realtime/event-bus.js';
+
+interface WatchState {
+  offset: number;
+  watcher?: fs.FSWatcher;
+  processing: boolean;
+  queued: boolean;
+  pendingChunk: string;
+  flushTimer?: NodeJS.Timeout;
+}
+
+export class SessionManager {
+  private readonly watchers = new Map<string, WatchState>();
+
+  constructor(
+    private readonly db: AppDatabase,
+    private readonly tmuxClient: TmuxClient,
+    private readonly runtimeDir: string,
+    private readonly eventBus: RealtimeEventBus,
+  ) {
+    fs.mkdirSync(this.runtimeDir, { recursive: true });
+  }
+
+  listActiveSessions(): BoundSession[] {
+    return this.db.listBoundSessions().filter((session) => ['starting', 'bound', 'releasing'].includes(session.status));
+  }
+
+  async recoverSessions(): Promise<void> {
+    for (const session of this.listActiveSessions()) {
+      await this.refreshSessionState(session);
+    }
+  }
+
+  async bindConversation(input: {
+    project: ActiveProject;
+    provider: ProviderAdapter;
+    providerSettings: MergedProviderSettings;
+    conversationRef: string;
+    title: string;
+    kind: ConversationSummary['kind'];
+  }): Promise<BoundSession> {
+    const existing = this.db.getBoundSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
+    if (existing) {
+      const liveSession = await this.refreshSessionState(existing);
+      if (liveSession) {
+        return liveSession;
+      }
+    }
+
+    const sessionId = randomUUID();
+    const tmuxSessionName = this.buildTmuxSessionName(input.project.slug, input.provider.id, input.conversationRef);
+    const sessionDir = path.join(this.runtimeDir, sessionId);
+    const rawLogPath = path.join(sessionDir, 'raw.log');
+    const eventLogPath = path.join(sessionDir, 'events.jsonl');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(rawLogPath, '', { flag: 'a' });
+    fs.writeFileSync(eventLogPath, '', { flag: 'a' });
+
+    const launch = input.provider.getLaunchCommand(input.project, input.kind === 'pending' ? null : input.conversationRef, input.providerSettings);
+    const now = nowIso();
+    const session: BoundSession = {
+      id: sessionId,
+      provider: input.provider.id,
+      projectSlug: input.project.slug,
+      conversationRef: input.conversationRef,
+      tmuxSessionName,
+      status: 'starting',
+      title: input.title,
+      startedAt: now,
+      updatedAt: now,
+      lastActivityAt: now,
+      rawLogPath,
+      eventLogPath,
+    };
+    this.db.upsertBoundSession(session);
+
+    let tmuxCreated = false;
+    try {
+      await this.tmuxClient.newDetachedSession(tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
+      tmuxCreated = true;
+      await this.tmuxClient.pipePaneToFile(tmuxSessionName, rawLogPath);
+      await this.tmuxClient.setUserOption(tmuxSessionName, '@agent_console_session_id', sessionId);
+      await this.tmuxClient.setUserOption(tmuxSessionName, '@agent_console_conversation_ref', input.conversationRef);
+      await this.tmuxClient.setUserOption(tmuxSessionName, '@agent_console_provider', input.provider.id);
+      const pid = await this.tmuxClient.getPanePid(tmuxSessionName);
+
+      const boundSession: BoundSession = {
+        ...session,
+        status: 'bound',
+        updatedAt: nowIso(),
+        pid,
+      };
+      this.db.upsertBoundSession(boundSession);
+      this.appendEvent(boundSession, { type: 'status', text: `Bound ${input.provider.id} session in ${input.project.displayName}.`, timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: boundSession });
+      this.watchSessionOutput(boundSession);
+      await this.waitForStartupOutput(boundSession);
+      return boundSession;
+    } catch (error) {
+      if (tmuxCreated) {
+        try {
+          await this.tmuxClient.killSession(tmuxSessionName);
+        } catch {
+          // Best-effort cleanup after partial launch failure.
+        }
+      }
+      const failed: BoundSession = {
+        ...session,
+        status: 'error',
+        updatedAt: nowIso(),
+      };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, {
+        type: 'status',
+        text: `Failed to bind session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+        timestamp: nowIso(),
+      });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      throw error;
+    }
+  }
+
+  async sendInput(sessionId: string, text: string): Promise<BoundSession> {
+    const session = this.mustGetSession(sessionId);
+    const liveSession = await this.refreshSessionState(session);
+    if (!liveSession) {
+      throw new Error('Session is no longer running.');
+    }
+    await this.tmuxClient.sendLiteralInput(liveSession.tmuxSessionName, text);
+    const updated: BoundSession = {
+      ...liveSession,
+      updatedAt: nowIso(),
+      lastActivityAt: nowIso(),
+    };
+    this.db.upsertBoundSession(updated);
+    if (updated.conversationRef.startsWith('pending:')) {
+      const pending = this.db.getPendingConversation(updated.conversationRef);
+      if (pending) {
+        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
+        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(text));
+        rawMetadata.lastUserInputPreview = truncate(text, 120);
+        this.db.putPendingConversation({
+          ...pending,
+          updatedAt: nowIso(),
+          isBound: true,
+          boundSessionId: updated.id,
+          rawMetadata,
+        });
+      }
+    }
+    this.appendEvent(updated, { type: 'user-input', text, timestamp: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: updated });
+    return updated;
+  }
+
+  async releaseSession(sessionId: string): Promise<void> {
+    const session = this.mustGetSession(sessionId);
+    const releasing = { ...session, status: 'releasing' as const, updatedAt: nowIso() };
+    this.db.upsertBoundSession(releasing);
+    this.eventBus.emit({ type: 'session.updated', session: releasing });
+    this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
+
+    const wasAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
+    if (wasAlive) {
+      try {
+        await this.tmuxClient.interrupt(session.tmuxSessionName);
+        await sleep(300);
+      } catch {
+        // Best effort interrupt.
+      }
+
+      try {
+        await this.tmuxClient.killSession(session.tmuxSessionName);
+      } catch {
+        // Re-check below before claiming success.
+      }
+    }
+
+    const stillAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => true);
+    if (stillAlive) {
+      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso() };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, { type: 'status', text: 'Failed to release tmux session cleanly.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      throw new Error(`Failed to release tmux session ${session.tmuxSessionName}`);
+    }
+
+    this.stopWatching(session.id);
+    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso() };
+    this.db.upsertBoundSession(ended);
+    if (session.conversationRef.startsWith('pending:')) {
+      const pending = this.db.getPendingConversation(session.conversationRef);
+      if (pending) {
+        this.db.putPendingConversation({
+          ...pending,
+          isBound: false,
+          boundSessionId: undefined,
+          updatedAt: nowIso(),
+        });
+      }
+    }
+    this.eventBus.emit({ type: 'session.released', sessionId: session.id, conversationRef: session.conversationRef, projectSlug: session.projectSlug, provider: session.provider, timestamp: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: ended });
+  }
+
+  getSessionById(sessionId: string): BoundSession | undefined {
+    return this.db.getBoundSessionById(sessionId);
+  }
+
+  private buildTmuxSessionName(projectSlug: string, provider: ProviderId, conversationRef: string): string {
+    const digest = createHash('sha1').update(`${projectSlug}:${provider}:${conversationRef}`).digest('hex').slice(0, 10);
+    return `ac-${provider}-${projectSlug}`.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 40) + `-${digest}`;
+  }
+
+  private mustGetSession(sessionId: string): BoundSession {
+    const session = this.db.getBoundSessionById(sessionId);
+    if (!session) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+    return session;
+  }
+
+  private async refreshSessionState(session: BoundSession): Promise<BoundSession | undefined> {
+    const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
+    if (!alive) {
+      this.stopWatching(session.id);
+      const terminalStatus = session.status === 'releasing' ? 'ended' : 'error';
+      const ended: BoundSession = {
+        ...session,
+        status: terminalStatus,
+        updatedAt: nowIso(),
+      };
+      this.db.upsertBoundSession(ended);
+      if (terminalStatus === 'error') {
+        this.appendEvent(ended, {
+          type: 'status',
+          text: 'Session exited unexpectedly.',
+          timestamp: nowIso(),
+        });
+      }
+      this.eventBus.emit({ type: 'session.updated', session: ended });
+      return undefined;
+    }
+
+    const nextStatus = session.status === 'starting' ? 'bound' : session.status;
+    const refreshed: BoundSession = nextStatus === session.status
+      ? session
+      : {
+          ...session,
+          status: nextStatus,
+          updatedAt: nowIso(),
+        };
+    if (refreshed !== session) {
+      this.db.upsertBoundSession(refreshed);
+      this.eventBus.emit({ type: 'session.updated', session: refreshed });
+    }
+    this.watchSessionOutput(refreshed);
+    return refreshed;
+  }
+
+  private appendEvent(session: BoundSession, event: { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string }): void {
+    if (!session.eventLogPath) return;
+    fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
+    if (event.type === 'raw-output') {
+      this.eventBus.emit({
+        type: 'session.raw-output',
+        sessionId: session.id,
+        projectSlug: session.projectSlug,
+        provider: session.provider,
+        conversationRef: session.conversationRef,
+        chunk: event.text,
+        timestamp: event.timestamp,
+      });
+    }
+  }
+
+  private watchSessionOutput(session: BoundSession): void {
+    if (!session.rawLogPath) return;
+    if (this.watchers.has(session.id)) return;
+
+    const initialOffset = session.eventLogPath && fs.existsSync(session.eventLogPath) && fs.statSync(session.eventLogPath).size > 0 && fs.existsSync(session.rawLogPath)
+      ? fs.statSync(session.rawLogPath).size
+      : 0;
+    const state: WatchState = { offset: initialOffset, processing: false, queued: false, pendingChunk: '' };
+    this.watchers.set(session.id, state);
+    const pump = async (): Promise<void> => {
+      if (state.processing) {
+        state.queued = true;
+        return;
+      }
+      state.processing = true;
+      try {
+        const stat = await fsPromises.stat(session.rawLogPath!);
+        if (stat.size <= state.offset) return;
+        const handle = await fsPromises.open(session.rawLogPath!, 'r');
+        try {
+          const length = stat.size - state.offset;
+          const buffer = Buffer.alloc(length);
+          await handle.read(buffer, 0, length, state.offset);
+          state.offset = stat.size;
+          const chunk = buffer.toString('utf8');
+          if (chunk.trim()) {
+            state.pendingChunk += chunk;
+            this.scheduleRawOutputFlush(session.id, state);
+          }
+        } finally {
+          await handle.close();
+        }
+      } catch {
+        // keep watcher alive even if file is briefly unavailable
+      } finally {
+        state.processing = false;
+        if (state.queued) {
+          state.queued = false;
+          void pump();
+        }
+      }
+    };
+
+    state.watcher = fs.watch(session.rawLogPath, { persistent: false }, () => {
+      void pump();
+    });
+    void pump();
+  }
+
+  private stopWatching(sessionId: string): void {
+    const state = this.watchers.get(sessionId);
+    if (state?.flushTimer) {
+      clearTimeout(state.flushTimer);
+      this.flushPendingChunk(sessionId, state);
+    }
+    state?.watcher?.close();
+    this.watchers.delete(sessionId);
+  }
+
+  private scheduleRawOutputFlush(sessionId: string, state: WatchState): void {
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer);
+    }
+    state.flushTimer = setTimeout(() => {
+      state.flushTimer = undefined;
+      this.flushPendingChunk(sessionId, state);
+    }, 120);
+  }
+
+  private flushPendingChunk(sessionId: string, state: WatchState): void {
+    const chunk = state.pendingChunk;
+    state.pendingChunk = '';
+    if (!chunk.trim()) return;
+    try {
+      const updated = { ...this.mustGetSession(sessionId), updatedAt: nowIso(), lastActivityAt: nowIso() };
+      this.db.upsertBoundSession(updated);
+      this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: updated });
+    } catch {
+      // Session may have ended while the debounce timer was pending.
+    }
+  }
+
+  private async waitForStartupOutput(session: BoundSession): Promise<void> {
+    if (!session.rawLogPath) return;
+
+    const deadline = Date.now() + 5000;
+    let sawOutput = false;
+    let lastSize = 0;
+    const startedAt = Date.now();
+    let stableSince = Date.now();
+
+    while (Date.now() < deadline) {
+      try {
+        const size = fs.statSync(session.rawLogPath).size;
+        if (size !== lastSize) {
+          lastSize = size;
+          stableSince = Date.now();
+          sawOutput ||= size > 0;
+        } else if (sawOutput && Date.now() - stableSince >= 350) {
+          return;
+        } else if (!sawOutput && Date.now() - startedAt >= 500) {
+          return;
+        }
+      } catch {
+        return;
+      }
+      await sleep(100);
+    }
+  }
+}
