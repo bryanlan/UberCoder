@@ -55,10 +55,17 @@ export interface NormalizedMessage {
   rawMetadata?: Record<string, unknown>;
 }
 
+export interface SessionScreen {
+  content: string;
+  status: string;
+  capturedAt: string;
+}
+
 export interface ConversationTimeline {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
   boundSession?: BoundSession;
+  liveScreen?: SessionScreen;
 }
 
 export interface BoundSession {

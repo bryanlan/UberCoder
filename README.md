@@ -2,7 +2,7 @@
 
 Agent Console is a production-leaning MVP for Ubuntu/Linux that lets one user manage **local Codex CLI and Claude Code sessions** across multiple project folders from a desktop browser or phone.
 
-The backend runs on the Linux box and stays authoritative. The frontend is a thin React PWA that renders a normalized chat UI instead of mirroring terminal frames.
+The backend runs on the Linux box and stays authoritative. The frontend is a thin React PWA that renders an abstracted live session surface instead of exposing tmux or Linux terminals to clients.
 
 ## What it does
 
@@ -10,7 +10,7 @@ The backend runs on the Linux box and stays authoritative. The frontend is a thi
 - indexes Codex and Claude local histories into a project/provider/conversation tree
 - binds a selected conversation to a hidden detached tmux session
 - sends user input to the bound agent session without exposing terminal control directly
-- merges parsed provider history with live session output in a normalized timeline
+- renders bound sessions as a backend-owned live `output + input + status` view
 - exposes a collapsible raw-output/debug drawer
 - securely reverse-proxies allowlisted project-local localhost apps, including websocket upgrades
 - supports secure single-user remote access with cookie auth and optional Tailscale identity bootstrap

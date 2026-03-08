@@ -12,13 +12,16 @@ import type { MergedProviderSettings } from '../src/config/service.js';
 
 class FakeTmux implements TmuxClient {
   created: string[] = [];
+  createdCommands: string[] = [];
   sent: string[] = [];
   alive = new Set<string>();
   failPipePane = false;
   failKill = false;
+  paneText = '';
 
-  async newDetachedSession(sessionName: string): Promise<void> {
+  async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
     this.created.push(sessionName);
+    this.createdCommands.push(shellCommand);
     this.alive.add(sessionName);
   }
   async pipePaneToFile(): Promise<void> {
@@ -27,6 +30,7 @@ class FakeTmux implements TmuxClient {
     }
   }
   async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
+  async capturePane(): Promise<string> { return this.paneText; }
   async interrupt(): Promise<void> {}
   async killSession(sessionName: string): Promise<void> {
     if (this.failKill) {
@@ -54,8 +58,12 @@ const provider: ProviderAdapter = {
   async discoverLocalState() { return {}; },
   async listConversations() { return []; },
   async getConversation() { return null; },
-  getLaunchCommand() {
-    return { cwd: '/srv/demo', argv: ['codex'], env: {} };
+  getLaunchCommand(_project, _conversationRef, _settings, options) {
+    return {
+      cwd: '/srv/demo',
+      argv: ['codex', ...(options?.initialPrompt ? [options.initialPrompt] : [])],
+      env: {},
+    };
   },
 };
 
@@ -162,6 +170,67 @@ describe('SessionManager', () => {
     tmux.failKill = true;
     await expect(manager.releaseSession(session.id)).rejects.toThrow(/Failed to release/);
     expect(db.getBoundSessionById(session.id)?.status).toBe('error');
+    db.close();
+  });
+
+  it('captures a live screen snapshot for bound sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Reviewing repository state…',
+      'Applying patch…',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-screen',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const liveScreen = await manager.getSessionScreen(session.id);
+    expect(liveScreen?.screen.content).toContain('Reviewing repository state…');
+    expect(liveScreen?.screen.status).toContain('98% left');
+    db.close();
+  });
+
+  it('launches pending sessions with an initial prompt argument when requested', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:launch-arg',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:launch-arg',
+      title: 'New conversation',
+      kind: 'pending',
+      initialPrompt: 'Reply with exactly: smoke-token',
+    });
+
+    expect(tmux.createdCommands[0]).toContain('Reply with exactly: smoke-token');
+    expect(db.getPendingConversation('pending:launch-arg')?.rawMetadata?.lastUserInputHash).toBeTruthy();
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('"type":"user-input"');
     db.close();
   });
 });

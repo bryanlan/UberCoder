@@ -155,9 +155,21 @@ function collectAuthoritativeProjectPaths(record: Record<string, unknown>, into 
 }
 
 function inferRole(record: Record<string, unknown>): MessageRole | undefined {
-  const directRole = record.role ?? (record.message && typeof record.message === 'object' ? (record.message as Record<string, unknown>).role : undefined);
+  const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : undefined;
+  const directRole =
+    record.role
+    ?? payload?.role
+    ?? (record.message && typeof record.message === 'object' ? (record.message as Record<string, unknown>).role : undefined)
+    ?? (payload?.message && typeof payload.message === 'object' ? (payload.message as Record<string, unknown>).role : undefined);
   if (typeof directRole === 'string' && ROLE_ALIASES[directRole.toLowerCase()]) {
     return ROLE_ALIASES[directRole.toLowerCase()];
+  }
+
+  if (typeof record.type === 'string' && record.type === 'event_msg' && payload?.type === 'user_message') {
+    return 'user';
+  }
+  if (typeof record.type === 'string' && record.type === 'event_msg' && payload?.type === 'agent_message') {
+    return 'assistant';
   }
 
   const typeValues = [record.type, record.event, record.kind, record.category].flatMap((value) => extractCandidateStrings(value).slice(0, 4));
@@ -174,7 +186,19 @@ function inferRole(record: Record<string, unknown>): MessageRole | undefined {
 }
 
 function extractText(record: Record<string, unknown>): string {
+  const payload = record.payload && typeof record.payload === 'object' ? record.payload as Record<string, unknown> : undefined;
   const priority = [
+    payload?.text,
+    payload?.message,
+    payload?.delta,
+    payload?.content,
+    payload?.output,
+    payload?.input,
+    payload?.summary,
+    payload?.description,
+    payload?.result,
+    payload?.value,
+    payload?.message_text,
     record.text,
     record.message,
     record.delta,

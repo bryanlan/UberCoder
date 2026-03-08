@@ -1,9 +1,9 @@
 import { ArrowRight, Bug, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
-import type { BoundSession, ConversationTimeline, ProjectSummary } from '@agent-console/shared';
+import type { ConversationTimeline, ProjectSummary } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useRef, useState } from 'react';
 
-function MessageBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
+function TranscriptBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
   const isUser = role === 'user';
   const isStatus = role === 'status' || role === 'system';
   return (
@@ -19,6 +19,24 @@ function MessageBubble({ role, text, timestamp }: { role: string; text: string; 
         <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">{role}</div>
         <div>{text}</div>
         <div className="mt-2 text-[11px] text-slate-500">{new Date(timestamp).toLocaleString()}</div>
+      </div>
+    </div>
+  );
+}
+
+function LiveSessionSurface({ content, status }: { content: string; status: string }) {
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <div className="rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
+        <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
+        <pre className="min-h-[20rem] whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100">
+          {content.trim() || 'Waiting for session output…'}
+        </pre>
+      </div>
+
+      <div className="rounded-[1.5rem] border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-panel">
+        <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Status</div>
+        <div className="font-mono text-sm text-slate-200">{status || 'Session active'}</div>
       </div>
     </div>
   );
@@ -58,17 +76,19 @@ export function ConversationPane({
   const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const boundSession = timeline?.boundSession;
+  const liveScreen = timeline?.liveScreen;
+  const liveMode = Boolean(boundSession && liveScreen);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [timeline?.messages.length, rawOutput]);
+  }, [timeline?.messages.length, rawOutput, liveScreen?.capturedAt, liveScreen?.content]);
 
   if (!timeline) {
     return (
       <div className="flex h-full items-center justify-center p-8 text-center text-slate-400">
         <div>
           <div className="mb-2 text-lg font-medium text-slate-200">{loading ? 'Loading conversation…' : 'Pick a conversation'}</div>
-          <div>{loading ? 'Fetching normalized history and live state.' : 'Choose an indexed history item or start a new conversation from the project tree.'}</div>
+          <div>{loading ? 'Fetching saved history and live session state.' : 'Choose an indexed history item or start a new conversation from the project tree.'}</div>
         </div>
       </div>
     );
@@ -146,13 +166,22 @@ export function ConversationPane({
       <div ref={scrollRef} className="scrollbar-thin flex-1 space-y-4 overflow-y-auto px-4 py-5">
         {loading ? (
           <div className="text-sm text-slate-400">Loading conversation…</div>
+        ) : liveMode && liveScreen ? (
+          <LiveSessionSurface content={liveScreen.content} status={liveScreen.status} />
         ) : timeline.messages.length > 0 ? (
-          timeline.messages.map((message) => (
-            <MessageBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
-          ))
+          <div className="space-y-4">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
+            {timeline.messages.map((message) => (
+              <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
+            ))}
+          </div>
+        ) : boundSession ? (
+          <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
+            Waiting for the live session surface to populate.
+          </div>
         ) : (
           <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
-            No messages yet. Start the conversation from the composer below.
+            No saved transcript yet. Bind this conversation and use the composer below to drive the live session.
           </div>
         )}
       </div>
@@ -183,7 +212,7 @@ export function ConversationPane({
           <textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
-            placeholder={boundSession ? 'Send input to the bound agent session…' : 'Bind this conversation to unlock the composer.'}
+            placeholder={boundSession ? 'Send input to the live session…' : 'Bind this conversation to unlock the composer.'}
             disabled={!boundSession || sending}
             rows={3}
             className="min-h-[5rem] flex-1 resize-y rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400 disabled:cursor-not-allowed disabled:opacity-60"

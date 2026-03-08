@@ -64,7 +64,10 @@ export async function registerConversationRoutes(
     }
 
     const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
-    const liveMessages = boundSession ? await readLiveMessages(boundSession) : [];
+    const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
+    const liveScreen = liveSessionState?.screen;
+    const resolvedBoundSession = liveSessionState?.session;
+    const liveMessages = resolvedBoundSession ? await readLiveMessages(resolvedBoundSession) : [];
     const providerHasTranscript = messages.some((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool');
     const mergedMessages = uniqueBy(
       [
@@ -85,11 +88,12 @@ export async function registerConversationRoutes(
     return {
       conversation: {
         ...summary,
-        isBound: Boolean(boundSession),
-        boundSessionId: boundSession?.id,
+        isBound: Boolean(resolvedBoundSession),
+        boundSessionId: resolvedBoundSession?.id,
       },
       messages: mergedMessages,
-      boundSession,
+      boundSession: resolvedBoundSession,
+      liveScreen,
     };
   });
 

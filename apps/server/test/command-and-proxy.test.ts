@@ -34,6 +34,13 @@ describe('command construction and proxy allowlisting', () => {
     expect(command.env).toEqual({ CODEX_HOME: '/home/user/.codex' });
   });
 
+  it('appends an initial prompt when starting a fresh Codex session', () => {
+    const command = new CodexProvider().getLaunchCommand(project, null, settings, {
+      initialPrompt: 'Reply with exactly: smoke-token',
+    });
+    expect(command.argv).toEqual(['codex', 'Reply with exactly: smoke-token']);
+  });
+
   it('parses proxy URLs and enforces project port allowlists', () => {
     const parsed = parseProxyPath('/proxy/demo/5173/socket.io/?EIO=4');
     expect(parsed).toEqual({ projectSlug: 'demo', port: 5173, proxiedPath: '/socket.io/?EIO=4' });

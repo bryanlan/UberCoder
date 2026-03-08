@@ -3,7 +3,6 @@ import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/sh
 import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService } from '../config/service.js';
 import { AppDatabase } from '../db/database.js';
-import { normalizeComparableText, stableTextHash } from '../lib/text.js';
 import { nowIso } from '../lib/time.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
@@ -229,18 +228,18 @@ export class IndexingService {
       if (!matchedConversation) continue;
       claimedRefs.add(matchedConversation.ref);
 
-      if (pending.boundSessionId) {
-        const session = this.db.getBoundSessionById(pending.boundSessionId);
-        if (session && ['starting', 'bound', 'releasing'].includes(session.status) && session.conversationRef === pending.ref) {
-          const reboundSession = {
-            ...session,
-            conversationRef: matchedConversation.ref,
-            title: matchedConversation.title,
-            updatedAt: nowIso(),
-          };
-          this.db.upsertBoundSession(reboundSession);
-          this.eventBus.emit({ type: 'session.updated', session: reboundSession });
-        }
+      const session = pending.boundSessionId
+        ? this.db.getBoundSessionById(pending.boundSessionId)
+        : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);
+      if (session && ['starting', 'bound', 'releasing'].includes(session.status) && session.conversationRef === pending.ref) {
+        const reboundSession = {
+          ...session,
+          conversationRef: matchedConversation.ref,
+          title: matchedConversation.title,
+          updatedAt: nowIso(),
+        };
+        this.db.upsertBoundSession(reboundSession);
+        this.eventBus.emit({ type: 'session.updated', session: reboundSession });
       }
 
       this.db.putPendingConversation({
@@ -274,11 +273,6 @@ export class IndexingService {
       return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
     }
 
-    const pendingPreview = typeof pending.rawMetadata?.lastUserInputPreview === 'string' ? pending.rawMetadata.lastUserInputPreview : undefined;
-    if (pendingPreview && stableTextHash(normalizeComparableText(conversation.title)) === stableTextHash(normalizeComparableText(pendingPreview))) {
-      return 1;
-    }
-
-    return 2;
+    return -1;
   }
 }

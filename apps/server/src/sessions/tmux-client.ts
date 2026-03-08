@@ -34,6 +34,7 @@ export interface TmuxClient {
   newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void>;
   pipePaneToFile(sessionName: string, filePath: string): Promise<void>;
   sendLiteralInput(sessionName: string, text: string): Promise<void>;
+  capturePane(sessionName: string, startLine?: number): Promise<string>;
   interrupt(sessionName: string): Promise<void>;
   killSession(sessionName: string): Promise<void>;
   hasSession(sessionName: string): Promise<boolean>;
@@ -59,6 +60,14 @@ export class ShellTmuxClient implements TmuxClient {
       }
       await runTmux(['send-keys', '-t', sessionName, 'Enter']);
     }
+  }
+
+  async capturePane(sessionName: string, startLine = -240): Promise<string> {
+    const args = ['capture-pane', '-p', '-J', '-t', sessionName];
+    if (Number.isFinite(startLine)) {
+      args.push('-S', String(startLine));
+    }
+    return await runTmux(args);
   }
 
   async interrupt(sessionName: string): Promise<void> {

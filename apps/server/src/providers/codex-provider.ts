@@ -69,15 +69,24 @@ export class CodexProvider implements ProviderAdapter {
     };
   }
 
-  getLaunchCommand(project: ActiveProject, conversationRef: string | null, settings: MergedProviderSettings): LaunchCommand {
+  getLaunchCommand(
+    project: ActiveProject,
+    conversationRef: string | null,
+    settings: MergedProviderSettings,
+    options?: { initialPrompt?: string },
+  ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
+    const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
     return {
       cwd: project.path,
-      argv: renderTemplateTokens(template, {
-        conversationId: conversationRef ?? '',
-        projectPath: project.path,
-        projectSlug: project.slug,
-      }),
+      argv: [
+        ...renderTemplateTokens(template, {
+          conversationId: conversationRef ?? '',
+          projectPath: project.path,
+          projectSlug: project.slug,
+        }),
+        ...(initialPrompt ? [initialPrompt] : []),
+      ],
       env: settings.commands.env,
     };
   }

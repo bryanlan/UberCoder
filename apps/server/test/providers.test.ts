@@ -171,6 +171,56 @@ describe('provider history discovery', () => {
     expect(conversations).toEqual([]);
   });
 
+  it('parses modern Codex response_item payload messages into user and assistant history', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '08');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const transcriptPath = path.join(sessionsDir, 'rollout-modern-response-item.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: '/tmp/demo-project',
+          id: 'modern-response-item',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-08T00:01:39.494Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Reply with exactly: smoke-token' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-08T00:01:45.439Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'smoke-token' }],
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversations = await provider.listConversations(project, settings);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.title).toContain('Reply with exactly: smoke-token');
+    expect(conversations[0]?.rawMetadata?.lastUserTextHash).toBeTruthy();
+
+    const conversation = await provider.getConversation(project, conversations[0]!.ref, settings);
+    expect(conversation?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+  });
+
   it('filters Claude transcripts that explicitly belong to a different project', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-'));
     const projectDir = path.join(tempDir, 'projects', '-tmp-demo-project-');

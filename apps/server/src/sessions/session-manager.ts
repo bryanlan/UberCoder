@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -13,6 +13,7 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
+import { parseSessionScreenSnapshot } from './session-screen.js';
 
 interface WatchState {
   offset: number;
@@ -52,6 +53,7 @@ export class SessionManager {
     conversationRef: string;
     title: string;
     kind: ConversationSummary['kind'];
+    initialPrompt?: string;
   }): Promise<BoundSession> {
     const existing = this.db.getBoundSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
@@ -70,7 +72,12 @@ export class SessionManager {
     fs.writeFileSync(rawLogPath, '', { flag: 'a' });
     fs.writeFileSync(eventLogPath, '', { flag: 'a' });
 
-    const launch = input.provider.getLaunchCommand(input.project, input.kind === 'pending' ? null : input.conversationRef, input.providerSettings);
+    const launch = input.provider.getLaunchCommand(
+      input.project,
+      input.kind === 'pending' ? null : input.conversationRef,
+      input.providerSettings,
+      { initialPrompt: input.initialPrompt },
+    );
     const now = nowIso();
     const session: BoundSession = {
       id: sessionId,
@@ -105,6 +112,23 @@ export class SessionManager {
         pid,
       };
       this.db.upsertBoundSession(boundSession);
+      const initialPrompt = input.initialPrompt?.trim();
+      if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
+        const pending = this.db.getPendingConversation(boundSession.conversationRef);
+        if (pending) {
+          const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
+          rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(initialPrompt));
+          rawMetadata.lastUserInputPreview = truncate(initialPrompt, 120);
+          this.db.putPendingConversation({
+            ...pending,
+            updatedAt: nowIso(),
+            isBound: true,
+            boundSessionId: boundSession.id,
+            rawMetadata,
+          });
+        }
+        this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: nowIso() });
+      }
       this.appendEvent(boundSession, { type: 'status', text: `Bound ${input.provider.id} session in ${input.project.displayName}.`, timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: boundSession });
       this.watchSessionOutput(boundSession);
@@ -167,6 +191,29 @@ export class SessionManager {
     return updated;
   }
 
+  async restartPendingSessionWithInitialPrompt(input: {
+    sessionId: string;
+    project: ActiveProject;
+    provider: ProviderAdapter;
+    providerSettings: MergedProviderSettings;
+    initialPrompt: string;
+  }): Promise<BoundSession> {
+    const session = this.mustGetSession(input.sessionId);
+    if (!session.conversationRef.startsWith('pending:')) {
+      throw new Error('Only pending sessions can be restarted with an initial prompt.');
+    }
+    await this.releaseSession(session.id);
+    return await this.bindConversation({
+      project: input.project,
+      provider: input.provider,
+      providerSettings: input.providerSettings,
+      conversationRef: session.conversationRef,
+      title: session.title ?? 'New conversation',
+      kind: 'pending',
+      initialPrompt: input.initialPrompt,
+    });
+  }
+
   async releaseSession(sessionId: string): Promise<void> {
     const session = this.mustGetSession(sessionId);
     const releasing = { ...session, status: 'releasing' as const, updatedAt: nowIso() };
@@ -219,6 +266,19 @@ export class SessionManager {
 
   getSessionById(sessionId: string): BoundSession | undefined {
     return this.db.getBoundSessionById(sessionId);
+  }
+
+  async getSessionScreen(sessionId: string): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
+    const session = this.mustGetSession(sessionId);
+    const liveSession = await this.refreshSessionState(session);
+    if (!liveSession) {
+      return undefined;
+    }
+    const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
+    return {
+      session: liveSession,
+      screen: parseSessionScreenSnapshot(snapshot, nowIso()),
+    };
   }
 
   private buildTmuxSessionName(projectSlug: string, provider: ProviderId, conversationRef: string): string {

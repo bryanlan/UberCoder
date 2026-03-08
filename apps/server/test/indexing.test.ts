@@ -28,6 +28,9 @@ const conversation = {
   updatedAt: '2026-03-07T00:01:00.000Z',
   isBound: false,
   degraded: false,
+  rawMetadata: {
+    lastUserTextHash: 'match-hash',
+  },
 };
 
 const provider: ProviderAdapter = {
@@ -56,6 +59,10 @@ describe('IndexingService', () => {
       isBound: true,
       boundSessionId: 'session-1',
       degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'match-hash',
+      },
     });
     db.upsertBoundSession({
       id: 'session-1',

@@ -46,7 +46,7 @@ Local vendor state on disk
 
 ### Backend owns truth
 
-The frontend only renders normalized state and submits intent. This keeps phone, laptop, refreshes, and reconnects consistent.
+The frontend only renders backend-owned state and submits intent. For bound sessions, that means a parsed live screen model (`output + status`) rather than direct terminal control. This keeps phone, laptop, refreshes, and reconnects consistent.
 
 ### tmux is a runtime primitive, not a UI primitive
 
@@ -91,6 +91,7 @@ Responsible for the runtime lifecycle of bound sessions:
 - deterministic tmux session naming
 - create detached tmux session in project cwd
 - pipe pane output to a runtime log
+- capture the current tmux screen and project it into a simplified live session surface
 - append live event JSONL for UI replay after refresh
 - send input to tmux
 - terminate cleanly on release

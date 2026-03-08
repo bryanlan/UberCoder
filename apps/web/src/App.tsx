@@ -49,7 +49,7 @@ function AppShell() {
     queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
     queryFn: () => api.timeline(selectedProjectSlug!, selectedProvider!, selectedConversationRef!),
     enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
-    refetchInterval: (query) => query.state.data?.boundSession ? 2000 : realtimeDegraded ? 5000 : false,
+    refetchInterval: (query) => query.state.data?.boundSession ? 1500 : realtimeDegraded ? 5000 : false,
   });
 
   useEffect(() => {
@@ -80,6 +80,7 @@ function AppShell() {
         }
         if (parsed.type === 'session.raw-output') {
           if (parsed.sessionId === timelineQuery.data?.boundSession?.id) {
+            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
           }
           return;
@@ -275,7 +276,7 @@ function AppShell() {
             </button>
             <div>
               <div className="text-sm font-medium text-slate-100">Server-first remote session control</div>
-              <div className="text-xs text-slate-500">Thin browser client · hidden tmux sessions · normalized chat UI</div>
+              <div className="text-xs text-slate-500">Thin browser client · hidden tmux sessions · abstracted live session UI</div>
             </div>
           </div>
           <div className="flex items-center gap-2">

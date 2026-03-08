@@ -18,5 +18,10 @@ export interface ProviderAdapter {
   discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>>;
   listConversations(project: ActiveProject, settings: MergedProviderSettings): Promise<ConversationSummary[]>;
   getConversation(project: ActiveProject, conversationRef: string, settings: MergedProviderSettings): Promise<ProviderConversation | null>;
-  getLaunchCommand(project: ActiveProject, conversationRef: string | null, settings: MergedProviderSettings): LaunchCommand;
+  getLaunchCommand(
+    project: ActiveProject,
+    conversationRef: string | null,
+    settings: MergedProviderSettings,
+    options?: { initialPrompt?: string },
+  ): LaunchCommand;
 }

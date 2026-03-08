@@ -177,4 +177,145 @@ describe('IndexingService', () => {
     expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref).sort()).toEqual(['pending:mismatch', 'real-but-wrong']);
     db.close();
   });
+
+  it('rebinds an adopted live session even if the pending snapshot lost its boundSessionId', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:stale-snapshot',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'match-hash',
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-stale',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:stale-snapshot',
+      tmuxSessionName: 'ac-codex-demo-stale',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const conversations: ConversationSummary[] = [{
+      ref: 'real-stale-fallback',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Real conversation',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/real-stale-fallback.jsonl',
+      providerConversationId: 'real-stale-fallback',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+        lastUserTextHash: 'match-hash',
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? conversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getBoundSessionById('session-stale')?.conversationRef).toBe('real-stale-fallback');
+    expect(indexing.getTree().projects[0]?.providers.codex.conversations[0]?.isBound).toBe(true);
+    db.close();
+  });
+
+  it('does not adopt a blank pending conversation before the first prompt hash is known', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:no-hash-yet',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-no-hash',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-no-hash',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:no-hash-yet',
+      tmuxSessionName: 'ac-codex-demo-no-hash',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const conversations: ConversationSummary[] = [{
+      ref: 'existing-recent-conversation',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Recent conversation',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/existing-recent-conversation.jsonl',
+      providerConversationId: 'existing-recent-conversation',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? conversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getBoundSessionById('session-no-hash')?.conversationRef).toBe('pending:no-hash-yet');
+    expect(db.getPendingConversation('pending:no-hash-yet')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
+    db.close();
+  });
 });
