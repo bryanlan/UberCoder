@@ -219,6 +219,141 @@ describe('provider history discovery', () => {
 
     const conversation = await provider.getConversation(project, conversations[0]!.ref, settings);
     expect(conversation?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(conversation?.allMessages?.map((message) => message.role)).toEqual(['user', 'assistant']);
+  });
+
+  it('keeps internal transcript events out of the visible history while preserving them in allMessages', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '10');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const transcriptPath = path.join(sessionsDir, 'rollout-visible-history.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: '/tmp/demo-project',
+          id: 'visible-history',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:00.000Z',
+        role: 'system',
+        text: 'Harness context',
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:01.000Z',
+        role: 'user',
+        text: 'Show only what I visibly typed and saw',
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:02.000Z',
+        role: 'tool',
+        text: 'Read file foo.ts',
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:03.000Z',
+        role: 'assistant',
+        text: 'Visible assistant reply',
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:04.000Z',
+        role: 'status',
+        text: 'Internal completion event',
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversation = await provider.getConversation(project, 'visible-history', settings);
+    expect(conversation?.messages.map((message) => message.role)).toEqual(['user', 'assistant']);
+    expect(conversation?.allMessages?.map((message) => message.role)).toEqual(['system', 'user', 'tool', 'assistant', 'status']);
+    expect(conversation?.summary.excerpt).toBe('Visible assistant reply');
+  });
+
+  it('hides Codex harness instruction and environment wrapper messages from visible history', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '10');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const transcriptPath = path.join(sessionsDir, 'rollout-codex-wrapper-filter.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: '/tmp/demo-project',
+          id: 'codex-wrapper-filter',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '# AGENTS.md instructions for /tmp/demo-project\n\n<INSTRUCTIONS>\nDo the thing\n</INSTRUCTIONS>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '<environment_context>\n  <cwd>/tmp/demo-project</cwd>\n</environment_context>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: 'Real user prompt',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{
+            type: 'output_text',
+            text: 'Real assistant reply',
+          }],
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversation = await provider.getConversation(project, 'codex-wrapper-filter', settings);
+    expect(conversation?.messages.map((message) => message.text)).toEqual([
+      'Real user prompt',
+      'Real assistant reply',
+    ]);
+    expect(conversation?.allMessages?.map((message) => message.text)).toContain('# AGENTS.md instructions for /tmp/demo-project\n\n<INSTRUCTIONS>\nDo the thing\n</INSTRUCTIONS>');
+    expect(conversation?.allMessages?.map((message) => message.text)).toContain('<environment_context>\n  <cwd>/tmp/demo-project</cwd>\n</environment_context>');
   });
 
   it('filters Claude transcripts that explicitly belong to a different project', async () => {
@@ -272,5 +407,107 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.title).toContain('Top-level transcript');
+  });
+
+  it('extracts only visible Claude text from nested progress envelopes and drops metadata fields', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-'));
+    const projectDir = path.join(tempDir, 'projects', '-tmp-demo-project-');
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(path.join(projectDir, 'metadata-leak.jsonl'), [
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Help me review this transcript parser',
+        },
+      }),
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:01.000Z',
+        type: 'progress',
+        data: {
+          message: {
+            type: 'assistant',
+            message: {
+              model: 'claude-haiku-4-5-20251001',
+              id: 'msg_01G6Zj8HzQRWjKxmuRmDwFsU',
+              type: 'message',
+              role: 'assistant',
+              content: [
+                { type: 'text', text: 'Visible assistant reply only.' },
+              ],
+            },
+          },
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new ClaudeProvider();
+    const settings = {
+      id: 'claude',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversation = await provider.getConversation(project, 'metadata-leak', settings);
+    expect(conversation?.messages.map((message) => message.text)).toEqual([
+      'Help me review this transcript parser',
+      'Visible assistant reply only.',
+    ]);
+    expect(conversation?.allMessages?.some((message) => message.text.includes('claude-haiku-4-5-20251001'))).toBe(false);
+    expect(conversation?.allMessages?.some((message) => message.text.includes('msg_01G6Zj8HzQRWjKxmuRmDwFsU'))).toBe(false);
+  });
+
+  it('hides Claude local-command wrapper messages from the visible transcript but keeps them in allMessages', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-'));
+    const projectDir = path.join(tempDir, 'projects', '-tmp-demo-project-');
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(path.join(projectDir, 'local-command-filter.jsonl'), [
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '<command-name>/model</command-name>',
+        },
+      }),
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:01.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Real visible user text',
+        },
+      }),
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:02.000Z',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Real visible assistant text' }],
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new ClaudeProvider();
+    const settings = {
+      id: 'claude',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversation = await provider.getConversation(project, 'local-command-filter', settings);
+    expect(conversation?.messages.map((message) => message.text)).toEqual([
+      'Real visible user text',
+      'Real visible assistant text',
+    ]);
+    expect(conversation?.allMessages?.map((message) => message.text)).toContain('<command-name>/model</command-name>');
   });
 });

@@ -67,6 +67,7 @@ export interface SessionScreen {
 export interface ConversationTimeline {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
+  allMessages?: NormalizedMessage[];
   boundSession?: BoundSession;
   liveScreen?: SessionScreen;
 }

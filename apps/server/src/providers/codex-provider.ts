@@ -4,8 +4,9 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { listFilesRecursive, pathExists, readTextHead } from './file-utils.js';
-import { conversationBelongsToProject, deriveConversationRef, extractAuthoritativeProjectPathsFromText, parseJsonlConversationFile } from './jsonl.js';
 import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './types.js';
+import { conversationBelongsToProject, deriveConversationRef, extractAuthoritativeProjectPathsFromJsonlText } from './transcripts/base.js';
+import { parseCodexConversationFile } from './transcripts/codex.js';
 
 export class CodexProvider implements ProviderAdapter {
   readonly id = 'codex' as const;
@@ -29,12 +30,12 @@ export class CodexProvider implements ProviderAdapter {
     const files = await listFilesRecursive(sessionsRoot, (candidate) => candidate.endsWith('.jsonl'));
     const conversations: ConversationSummary[] = [];
     for (const filePath of files) {
-      const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromText(await readTextHead(filePath));
+      const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
       if (authoritativeProjectPaths.size > 0 && !conversationBelongsToProject(project.path, authoritativeProjectPaths)) {
         continue;
       }
       const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseJsonlConversationFile({
+      const parsed = await parseCodexConversationFile({
         filePath,
         provider: this.id,
         projectSlug: project.slug,
@@ -57,7 +58,7 @@ export class CodexProvider implements ProviderAdapter {
     const files = await listFilesRecursive(sessionsRoot, (candidate) => candidate.endsWith('.jsonl') && candidate.includes(conversationRef));
     const filePath = files[0];
     if (!filePath) return null;
-    const parsed = await parseJsonlConversationFile({
+    const parsed = await parseCodexConversationFile({
       filePath,
       provider: this.id,
       projectSlug: project.slug,
@@ -65,7 +66,8 @@ export class CodexProvider implements ProviderAdapter {
     });
     return {
       summary: parsed.summary,
-      messages: parsed.messages,
+      messages: parsed.displayMessages,
+      allMessages: parsed.messages,
     };
   }
 

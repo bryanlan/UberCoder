@@ -6,6 +6,7 @@ import { AppDatabase } from '../db/database.js';
 import { uniqueBy } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
+import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
 import { AuthService } from '../security/auth-service.js';
 import { readLiveMessages } from '../sessions/live-output.js';
 import { SessionManager } from '../sessions/session-manager.js';
@@ -54,12 +55,15 @@ export async function registerConversationRoutes(
     const cachedSummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
     let messages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
+    let visibleMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
+    let allMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
 
     if (!pendingSummary || adoptedConversationRef) {
       const conversation = await provider.getConversation(project, resolvedConversationRef, providerSettings);
       if (conversation) {
         summary = { ...conversation.summary, isBound: Boolean(cachedSummary?.isBound), boundSessionId: cachedSummary?.boundSessionId };
-        messages = conversation.messages;
+        visibleMessages = conversation.messages;
+        allMessages = conversation.allMessages ?? conversation.messages;
       }
     }
 
@@ -68,10 +72,10 @@ export async function registerConversationRoutes(
     const liveScreen = liveSessionState?.screen;
     const resolvedBoundSession = liveSessionState?.session;
     const liveMessages = resolvedBoundSession ? await readLiveMessages(resolvedBoundSession) : [];
-    const providerHasTranscript = messages.some((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool');
-    const mergedMessages = uniqueBy(
+    const providerHasTranscript = allMessages.some((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool');
+    const mergedAllMessages = uniqueBy(
       [
-        ...messages,
+        ...allMessages,
         ...(providerHasTranscript
           ? liveMessages.filter((message) => message.role === 'status')
           : liveMessages),
@@ -79,6 +83,15 @@ export async function registerConversationRoutes(
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const mergedMessages = uniqueBy(
+      [
+        ...visibleMessages,
+        ...(providerHasTranscript
+          ? liveMessages.filter((message) => message.role === 'user' || message.role === 'assistant')
+          : filterUserVisibleMessages(liveMessages)),
+      ],
+      (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
+    ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });
@@ -92,6 +105,7 @@ export async function registerConversationRoutes(
         boundSessionId: resolvedBoundSession?.id,
       },
       messages: mergedMessages,
+      allMessages: mergedAllMessages,
       boundSession: resolvedBoundSession,
       liveScreen,
     };

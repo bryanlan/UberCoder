@@ -6,8 +6,9 @@ import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { toPosixPath } from '../lib/path-utils.js';
 import { listFilesRecursive, pathExists } from './file-utils.js';
-import { conversationBelongsToProject, deriveConversationRef, parseJsonlConversationFile } from './jsonl.js';
 import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './types.js';
+import { conversationBelongsToProject, deriveConversationRef } from './transcripts/base.js';
+import { parseClaudeConversationFile } from './transcripts/claude.js';
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
@@ -86,7 +87,7 @@ export class ClaudeProvider implements ProviderAdapter {
     for (const filePath of files) {
       if (!(await pathExists(filePath))) continue;
       const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseJsonlConversationFile({
+      const parsed = await parseClaudeConversationFile({
         filePath,
         provider: this.id,
         projectSlug: project.slug,
@@ -106,7 +107,7 @@ export class ClaudeProvider implements ProviderAdapter {
     const files = await this.resolveTranscriptFiles(project, settings);
     const filePath = files.find((candidate) => candidate.includes(conversationRef));
     if (!filePath) return null;
-    const parsed = await parseJsonlConversationFile({
+    const parsed = await parseClaudeConversationFile({
       filePath,
       provider: this.id,
       projectSlug: project.slug,
@@ -114,7 +115,8 @@ export class ClaudeProvider implements ProviderAdapter {
     });
     return {
       summary: parsed.summary,
-      messages: parsed.messages,
+      messages: parsed.displayMessages,
+      allMessages: parsed.messages,
     };
   }
 

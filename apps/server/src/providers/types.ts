@@ -11,6 +11,7 @@ export interface LaunchCommand {
 export interface ProviderConversation {
   summary: ConversationSummary;
   messages: NormalizedMessage[];
+  allMessages?: NormalizedMessage[];
 }
 
 export interface ProviderAdapter {
