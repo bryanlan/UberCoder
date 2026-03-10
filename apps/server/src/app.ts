@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
@@ -19,6 +20,7 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
+import { RestartService } from './runtime/restart-service.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -39,11 +41,27 @@ export async function buildApp(options: AppOptions = {}) {
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
   });
+  const restartService = new RestartService(() => app.close());
 
   await app.register(fastifyCookie);
   await app.register(fastifyRateLimit, {
     global: false,
     hook: 'preHandler',
+  });
+  app.addHook('onSend', async (request, reply, payload) => {
+    const contentType = reply.getHeader('content-type');
+    const baseName = path.basename(request.url.split('?')[0] || '');
+    const isServiceWorkerAsset = baseName === 'manifest.webmanifest'
+      || baseName === 'sw.js'
+      || baseName === 'registerSW.js'
+      || /^workbox-[^.]+\.js$/.test(baseName);
+    const isHtmlDocument = typeof contentType === 'string' && contentType.includes('text/html');
+
+    if (isHtmlDocument || isServiceWorkerAsset) {
+      reply.header('Cache-Control', 'no-store');
+    }
+
+    return payload;
   });
 
   app.get('/api/health', async () => ({ ok: true }));
@@ -53,7 +71,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);
-  await registerSettingsRoutes(app, authService, configService);
+  await registerSettingsRoutes(app, authService, configService, projectService, restartService);
   new LocalhostProxyService(projectService, authService).register(app);
 
   if (fs.existsSync(config.server.webDistPath)) {

@@ -16,6 +16,17 @@ export interface ActiveProject {
   config: ProjectConfig;
 }
 
+export interface ProjectSettingsSummary {
+  directoryName: string;
+  path: string;
+  exists: boolean;
+  active: boolean;
+  displayName?: string;
+  allowedLocalhostPorts: number[];
+  tags: string[];
+  notes?: string;
+}
+
 export class ProjectService {
   constructor(private readonly configService: ConfigService) {}
 
@@ -43,6 +54,37 @@ export class ProjectService {
 
     projects.sort((a, b) => a.displayName.localeCompare(b.displayName));
     return projects;
+  }
+
+  async listProjectSettings(): Promise<ProjectSettingsSummary[]> {
+    const root = this.configService.getProjectsRoot();
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
+    const existingDirectories = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
+    const names = new Set<string>([
+      ...existingDirectories,
+      ...this.configService.getConfiguredProjectDirectoryNames(),
+    ]);
+
+    return [...names]
+      .map((directoryName) => {
+        const config = this.configService.getProjectConfig(directoryName);
+        return {
+          directoryName,
+          path: path.join(root, directoryName),
+          exists: existingDirectories.has(directoryName),
+          active: config?.active ?? false,
+          displayName: config?.displayName,
+          allowedLocalhostPorts: [...(config?.allowedLocalhostPorts ?? [])].sort((a, b) => a - b),
+          tags: [...(config?.tags ?? [])],
+          notes: config?.notes,
+        };
+      })
+      .sort((a, b) => {
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        const aLabel = a.displayName ?? a.directoryName;
+        const bLabel = b.displayName ?? b.directoryName;
+        return aLabel.localeCompare(bLabel);
+      });
   }
 
   async getProjectBySlug(slug: string): Promise<ActiveProject | undefined> {

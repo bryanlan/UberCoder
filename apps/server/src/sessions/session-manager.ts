@@ -26,6 +26,7 @@ interface WatchState {
 
 export class SessionManager {
   private readonly watchers = new Map<string, WatchState>();
+  private readonly lastScreenHashes = new Map<string, string>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -133,6 +134,7 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: boundSession });
       this.watchSessionOutput(boundSession);
       await this.waitForStartupOutput(boundSession);
+      await this.emitScreenUpdate(boundSession);
       return boundSession;
     } catch (error) {
       if (tmuxCreated) {
@@ -187,7 +189,31 @@ export class SessionManager {
       }
     }
     this.appendEvent(updated, { type: 'user-input', text, timestamp: nowIso() });
-    this.eventBus.emit({ type: 'session.updated', session: updated });
+    await this.emitScreenUpdate(updated);
+    return updated;
+  }
+
+  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[] }): Promise<BoundSession> {
+    const session = this.mustGetSession(sessionId);
+    const liveSession = await this.refreshSessionState(session);
+    if (!liveSession) {
+      throw new Error('Session is no longer running.');
+    }
+
+    if (payload.text) {
+      await this.tmuxClient.sendLiteralText(liveSession.tmuxSessionName, payload.text);
+    }
+    if (payload.keys?.length) {
+      await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
+    }
+
+    const updated: BoundSession = {
+      ...liveSession,
+      updatedAt: nowIso(),
+      lastActivityAt: nowIso(),
+    };
+    this.db.upsertBoundSession(updated);
+    await this.emitScreenUpdate(updated);
     return updated;
   }
 
@@ -247,6 +273,7 @@ export class SessionManager {
     }
 
     this.stopWatching(session.id);
+    this.lastScreenHashes.delete(session.id);
     const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso() };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
@@ -298,6 +325,7 @@ export class SessionManager {
     const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
     if (!alive) {
       this.stopWatching(session.id);
+      this.lastScreenHashes.delete(session.id);
       const terminalStatus = session.status === 'releasing' ? 'ended' : 'error';
       const ended: BoundSession = {
         ...session,
@@ -421,14 +449,34 @@ export class SessionManager {
     const chunk = state.pendingChunk;
     state.pendingChunk = '';
     if (!chunk.trim()) return;
+    const now = nowIso();
     try {
-      const updated = { ...this.mustGetSession(sessionId), updatedAt: nowIso(), lastActivityAt: nowIso() };
+      const updated = { ...this.mustGetSession(sessionId), updatedAt: now, lastActivityAt: now };
       this.db.upsertBoundSession(updated);
-      this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: nowIso() });
-      this.eventBus.emit({ type: 'session.updated', session: updated });
+      this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
+      void this.emitScreenUpdate(updated);
     } catch {
       // Session may have ended while the debounce timer was pending.
     }
+  }
+
+  private async emitScreenUpdate(session: BoundSession): Promise<void> {
+    const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
+    const screen = parseSessionScreenSnapshot(snapshot, nowIso());
+    const nextHash = stableTextHash(`${screen.content}\n---\n${screen.status}`);
+    if (this.lastScreenHashes.get(session.id) === nextHash) {
+      return;
+    }
+    this.lastScreenHashes.set(session.id, nextHash);
+    this.eventBus.emit({
+      type: 'session.screen-updated',
+      sessionId: session.id,
+      projectSlug: session.projectSlug,
+      provider: session.provider,
+      conversationRef: session.conversationRef,
+      screen,
+      timestamp: screen.capturedAt,
+    });
   }
 
   private async waitForStartupOutput(session: BoundSession): Promise<void> {

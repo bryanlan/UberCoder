@@ -14,6 +14,7 @@ class FakeTmux implements TmuxClient {
   created: string[] = [];
   createdCommands: string[] = [];
   sent: string[] = [];
+  sentKeys: string[][] = [];
   alive = new Set<string>();
   failPipePane = false;
   failKill = false;
@@ -29,6 +30,8 @@ class FakeTmux implements TmuxClient {
       throw new Error('pipe-pane failed');
     }
   }
+  async sendLiteralText(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
+  async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
   async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
   async capturePane(): Promise<string> { return this.paneText; }
   async interrupt(): Promise<void> {}
@@ -93,6 +96,7 @@ describe('SessionManager', () => {
     expect(session.status).toBe('bound');
     await manager.sendInput(session.id, 'Hello agent');
     expect(tmux.sent).toEqual(['Hello agent']);
+    expect(tmux.sentKeys).toEqual([]);
 
     await manager.releaseSession(session.id);
     const ended = db.getBoundSessionById(session.id);
@@ -198,6 +202,76 @@ describe('SessionManager', () => {
     const liveScreen = await manager.getSessionScreen(session.id);
     expect(liveScreen?.screen.content).toContain('Reviewing repository state…');
     expect(liveScreen?.screen.status).toContain('98% left');
+    db.close();
+  });
+
+  it('emits visible screen updates when bound session output changes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Thinking about the repository…',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    const events: string[] = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        events.push(event.screen.content);
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-screen-events',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Thinking about the repository…',
+      'Applying patch now…',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    await manager.sendInput(session.id, 'continue');
+
+    expect(events.at(-1)).toContain('Applying patch now…');
+    unsubscribe();
+    db.close();
+  });
+
+  it('sends raw keystrokes directly to the tmux session without synthesizing chat input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Select model',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-keys',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '3', keys: ['Enter'] });
+
+    expect(tmux.sent).toEqual(['3']);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
     db.close();
   });
 

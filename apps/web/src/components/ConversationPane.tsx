@@ -1,5 +1,5 @@
-import { ArrowRight, Bug, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
-import type { ConversationTimeline, ProjectSummary } from '@agent-console/shared';
+import { Bug, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
+import type { ConversationTimeline, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useRef, useState } from 'react';
 
@@ -25,11 +25,20 @@ function TranscriptBubble({ role, text, timestamp }: { role: string; text: strin
 }
 
 function LiveSessionSurface({ content, status }: { content: string; status: string }) {
+  const outputRef = useRef<HTMLPreElement | null>(null);
+
+  useEffect(() => {
+    outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: 'auto' });
+  }, [content, status]);
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
+      <div className="flex min-h-0 flex-1 flex-col rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
         <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
-        <pre className="min-h-[20rem] whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100">
+        <pre
+          ref={outputRef}
+          className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100"
+        >
           {content.trim() || 'Waiting for session output…'}
         </pre>
       </div>
@@ -42,14 +51,216 @@ function LiveSessionSurface({ content, status }: { content: string; status: stri
   );
 }
 
+type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
+
+const specialKeyButtons = [
+  { label: 'Enter', keys: ['Enter'] },
+  { label: 'Esc', keys: ['Escape'] },
+  { label: '↑', keys: ['Up'] },
+  { label: '↓', keys: ['Down'] },
+  { label: '←', keys: ['Left'] },
+  { label: '→', keys: ['Right'] },
+  { label: 'Backspace', keys: ['BSpace'] },
+  { label: 'Tab', keys: ['Tab'] },
+] satisfies Array<{ label: string; keys: SessionKeyToken[] }>;
+
+function LiveSessionInputBridge({
+  sessionId,
+  provider,
+  conversationKind,
+  rawMetadata,
+  onSendText,
+  onSendKeystrokes,
+  sendingText,
+}: {
+  sessionId: string;
+  provider: ConversationTimeline['conversation']['provider'];
+  conversationKind: ConversationTimeline['conversation']['kind'];
+  rawMetadata?: Record<string, unknown>;
+  onSendText: (sessionId: string, text: string) => Promise<boolean>;
+  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  sendingText: boolean;
+}) {
+  const [firstPrompt, setFirstPrompt] = useState('');
+  const captureRef = useRef<HTMLTextAreaElement | null>(null);
+  const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingTextRef = useRef('');
+  const flushTimerRef = useRef<number | undefined>(undefined);
+
+  const needsBufferedFirstCodexTurn =
+    provider === 'codex'
+    && conversationKind === 'pending'
+    && typeof rawMetadata?.lastUserInputHash !== 'string';
+
+  useEffect(() => {
+    if (!needsBufferedFirstCodexTurn) {
+      captureRef.current?.focus();
+    }
+  }, [needsBufferedFirstCodexTurn, sessionId]);
+
+  useEffect(() => () => {
+    if (flushTimerRef.current !== undefined) {
+      window.clearTimeout(flushTimerRef.current);
+    }
+  }, []);
+
+  function enqueueKeystrokes(payload: SessionKeystrokeRequest): void {
+    keyQueueRef.current = keyQueueRef.current
+      .then(async () => {
+        const ok = await onSendKeystrokes(sessionId, payload);
+        if (!ok) {
+          throw new Error('keystroke-send-failed');
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  function flushBufferedText(): void {
+    if (!pendingTextRef.current) {
+      return;
+    }
+    const text = pendingTextRef.current;
+    pendingTextRef.current = '';
+    if (flushTimerRef.current !== undefined) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = undefined;
+    }
+    enqueueKeystrokes({ text });
+  }
+
+  function scheduleBufferedTextFlush(): void {
+    if (flushTimerRef.current !== undefined) {
+      window.clearTimeout(flushTimerRef.current);
+    }
+    flushTimerRef.current = window.setTimeout(() => {
+      flushBufferedText();
+    }, 45);
+  }
+
+  function appendLiteralText(text: string): void {
+    pendingTextRef.current += text;
+    scheduleBufferedTextFlush();
+  }
+
+  async function submitFirstPrompt(): Promise<void> {
+    const nextPrompt = firstPrompt.trim();
+    if (!nextPrompt) {
+      return;
+    }
+    const sent = await onSendText(sessionId, nextPrompt);
+    if (sent) {
+      setFirstPrompt('');
+    }
+  }
+
+  if (needsBufferedFirstCodexTurn) {
+    return (
+      <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4">
+        <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">First prompt</div>
+        <div className="mb-3 text-sm text-slate-400">Codex first-turn startup is buffered locally until you press Enter, then it is launched into the hidden session.</div>
+        <textarea
+          value={firstPrompt}
+          onChange={(event) => setFirstPrompt(event.target.value)}
+          onKeyDown={async (event) => {
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              await submitFirstPrompt();
+            }
+          }}
+          placeholder="Type the first prompt, then press Enter…"
+          disabled={sendingText}
+          rows={3}
+          className="min-h-[5rem] w-full resize-y rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4">
+      <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Live input bridge</div>
+      <div className="mb-3 text-sm text-slate-400">Click the capture box and type directly. Keystrokes go to the hidden session, not to a local chat buffer.</div>
+      <textarea
+        ref={captureRef}
+        value=""
+        onChange={() => undefined}
+        onBlur={() => flushBufferedText()}
+        onPaste={(event) => {
+          event.preventDefault();
+          const text = event.clipboardData.getData('text');
+          if (text) {
+            appendLiteralText(text);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+          if (event.ctrlKey && event.key.toLowerCase() === 'c') {
+            event.preventDefault();
+            flushBufferedText();
+            enqueueKeystrokes({ keys: ['C-c'] });
+            return;
+          }
+          const specialKeyMap: Record<string, SessionKeyToken> = {
+            Enter: 'Enter',
+            Escape: 'Escape',
+            ArrowUp: 'Up',
+            ArrowDown: 'Down',
+            ArrowLeft: 'Left',
+            ArrowRight: 'Right',
+            Backspace: 'BSpace',
+            Tab: 'Tab',
+          };
+          const specialKey = specialKeyMap[event.key];
+          if (specialKey) {
+            event.preventDefault();
+            if (specialKey === 'BSpace' && pendingTextRef.current.length > 0) {
+              pendingTextRef.current = pendingTextRef.current.slice(0, -1);
+              return;
+            }
+            flushBufferedText();
+            enqueueKeystrokes({ keys: [specialKey] });
+            return;
+          }
+          if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+            event.preventDefault();
+            appendLiteralText(event.key);
+          }
+        }}
+        placeholder="Type directly into the live session…"
+        rows={2}
+        className="min-h-[4.25rem] w-full resize-none rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
+      />
+      <div className="mt-3 flex flex-wrap gap-2">
+        {specialKeyButtons.map((button) => (
+          <button
+            key={button.label}
+            type="button"
+            onClick={() => {
+              flushBufferedText();
+              enqueueKeystrokes({ keys: button.keys });
+              captureRef.current?.focus();
+            }}
+            className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+          >
+            {button.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface ConversationPaneProps {
   project?: ProjectSummary;
   timeline?: ConversationTimeline;
   loading: boolean;
   onBind: () => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
-  onSend: (sessionId: string, text: string) => Promise<boolean>;
-  sending: boolean;
+  onSendText: (sessionId: string, text: string) => Promise<boolean>;
+  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  sendingText: boolean;
   binding: boolean;
   releasing: boolean;
   debugOpen: boolean;
@@ -64,8 +275,9 @@ export function ConversationPane({
   loading,
   onBind,
   onRelease,
-  onSend,
-  sending,
+  onSendText,
+  onSendKeystrokes,
+  sendingText,
   binding,
   releasing,
   debugOpen,
@@ -73,15 +285,17 @@ export function ConversationPane({
   rawOutput,
   rawLoading,
 }: ConversationPaneProps) {
-  const [text, setText] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
 
   useEffect(() => {
+    if (liveMode) {
+      return;
+    }
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [timeline?.messages.length, rawOutput, liveScreen?.capturedAt, liveScreen?.content]);
+  }, [liveMode, timeline?.messages.length, rawOutput, liveScreen?.capturedAt, liveScreen?.content]);
 
   if (!timeline) {
     return (
@@ -97,7 +311,7 @@ export function ConversationPane({
   const proxyLinks = project?.allowedLocalhostPorts ?? [];
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="border-b border-slate-800 bg-slate-950/90 px-4 py-4 backdrop-blur">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -163,7 +377,13 @@ export function ConversationPane({
         )}
       </div>
 
-      <div ref={scrollRef} className="scrollbar-thin flex-1 space-y-4 overflow-y-auto px-4 py-5">
+      <div
+        ref={scrollRef}
+        className={clsx(
+          'flex-1 min-h-0 px-4 py-5',
+          liveMode ? 'overflow-hidden' : 'scrollbar-thin space-y-4 overflow-y-auto',
+        )}
+      >
         {loading ? (
           <div className="text-sm text-slate-400">Loading conversation…</div>
         ) : liveMode && liveScreen ? (
@@ -196,37 +416,21 @@ export function ConversationPane({
         </div>
       )}
 
-      <form
-        onSubmit={async (event) => {
-          event.preventDefault();
-          if (!boundSession || !text.trim()) return;
-          const currentText = text.trim();
-          const sent = await onSend(boundSession.id, currentText);
-          if (sent) {
-            setText('');
-          }
-        }}
-        className="border-t border-slate-800 bg-slate-950/90 px-4 py-4"
-      >
-        <div className="flex items-end gap-3">
-          <textarea
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            placeholder={boundSession ? 'Send input to the live session…' : 'Bind this conversation to unlock the composer.'}
-            disabled={!boundSession || sending}
-            rows={3}
-            className="min-h-[5rem] flex-1 resize-y rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
-          />
-          <button
-            type="submit"
-            disabled={!boundSession || !text.trim() || sending}
-            className="inline-flex h-12 items-center gap-2 rounded-2xl border border-sky-400/30 bg-sky-500/10 px-4 text-sm font-medium text-sky-50 transition hover:bg-sky-500/20 disabled:opacity-50"
-          >
-            <ArrowRight className="h-4 w-4" />
-            Send
-          </button>
+      {boundSession ? (
+        <LiveSessionInputBridge
+          sessionId={boundSession.id}
+          provider={timeline.conversation.provider}
+          conversationKind={timeline.conversation.kind}
+          rawMetadata={timeline.conversation.rawMetadata}
+          onSendText={onSendText}
+          onSendKeystrokes={onSendKeystrokes}
+          sendingText={sendingText}
+        />
+      ) : (
+        <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
+          Bind this conversation to unlock the live input bridge.
         </div>
-      </form>
+      )}
     </div>
   );
 }

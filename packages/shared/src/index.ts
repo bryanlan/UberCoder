@@ -88,6 +88,11 @@ export interface SessionInputRequest {
   text: string;
 }
 
+export interface SessionKeystrokeRequest {
+  text?: string;
+  keys?: string[];
+}
+
 export interface LoginRequest {
   password: string;
 }
@@ -103,6 +108,17 @@ export interface AuthState {
   csrfToken?: string;
 }
 
+export interface EditableProjectSettings {
+  directoryName: string;
+  path: string;
+  exists: boolean;
+  active: boolean;
+  displayName?: string;
+  allowedLocalhostPorts: number[];
+  tags: string[];
+  notes?: string;
+}
+
 export interface TreeResponse {
   projects: ProjectSummary[];
   boundSessions: BoundSession[];
@@ -111,6 +127,7 @@ export interface TreeResponse {
 
 export interface SettingsSummary {
   configPath: string;
+  agentConsolePath: string;
   projectsRoot: string;
   serverHost: string;
   serverPort: number;
@@ -119,12 +136,53 @@ export interface SettingsSummary {
     cookieSecure: boolean;
     sessionTtlHours: number;
   };
+  projects: EditableProjectSettings[];
+}
+
+export interface DirectoryBrowserEntry {
+  name: string;
+  path: string;
+  isSymlink: boolean;
+}
+
+export interface DirectoryBrowserResponse {
+  currentPath: string;
+  parentPath?: string;
+  homePath: string;
+  rootPath: string;
+  directories: DirectoryBrowserEntry[];
+}
+
+export interface UpdateGlobalSettingsRequest {
+  projectsRoot: string;
+  serverHost: string;
+  serverPort: number;
+  sessionTtlHours: number;
+  cookieSecure: boolean;
+  trustTailscaleHeaders: boolean;
+}
+
+export interface UpdateProjectSettingsRequest {
+  active: boolean;
+  displayName?: string;
+  allowedLocalhostPorts: number[];
+  tags: string[];
+  notes?: string;
 }
 
 export type SessionEvent =
   | {
       type: 'session.updated';
       session: BoundSession;
+    }
+  | {
+      type: 'session.screen-updated';
+      sessionId: string;
+      projectSlug: string;
+      provider: ProviderId;
+      conversationRef: string;
+      screen: SessionScreen;
+      timestamp: string;
     }
   | {
       type: 'session.raw-output';

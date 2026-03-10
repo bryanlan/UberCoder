@@ -12,6 +12,13 @@ import { SessionManager } from '../sessions/session-manager.js';
 const inputBodySchema = z.object({
   text: z.string().min(1),
 });
+const keystrokeKeySchema = z.enum(['Enter', 'Escape', 'Up', 'Down', 'Left', 'Right', 'BSpace', 'Tab', 'C-c']);
+const keystrokeBodySchema = z.object({
+  text: z.string().min(1).optional(),
+  keys: z.array(keystrokeKeySchema).min(1).optional(),
+}).refine((value) => Boolean(value.text || value.keys?.length), {
+  message: 'Expected literal text or at least one key token.',
+});
 
 export async function registerSessionRoutes(
   app: FastifyInstance,
@@ -103,5 +110,20 @@ export async function registerSessionRoutes(
     } catch {
       return { text: '' };
     }
+  });
+
+  app.post('/api/sessions/:sessionId/keys', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const parsed = keystrokeBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400).send({ error: 'Invalid keystroke payload.', details: parsed.error.flatten() });
+      return;
+    }
+    const sessionId = (request.params as { sessionId: string }).sessionId;
+    return await sessions.sendKeystrokes(sessionId, parsed.data);
   });
 }

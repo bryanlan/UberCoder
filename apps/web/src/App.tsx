@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
-import type { ProviderId, SessionEvent } from '@agent-console/shared';
+import type { ConversationTimeline, ProviderId, SessionEvent, SessionKeystrokeRequest } from '@agent-console/shared';
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
@@ -24,7 +24,7 @@ function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
-  const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open', false);
+  const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -49,7 +49,10 @@ function AppShell() {
     queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
     queryFn: () => api.timeline(selectedProjectSlug!, selectedProvider!, selectedConversationRef!),
     enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
-    refetchInterval: (query) => query.state.data?.boundSession ? 1500 : realtimeDegraded ? 5000 : false,
+    refetchInterval: (query) => {
+      if (!realtimeDegraded) return false;
+      return query.state.data?.boundSession ? 1000 : 5000;
+    },
   });
 
   useEffect(() => {
@@ -65,8 +68,14 @@ function AppShell() {
     queryKey: ['raw-output', timelineQuery.data?.boundSession?.id],
     queryFn: () => api.rawOutput(timelineQuery.data!.boundSession!.id),
     enabled: Boolean(debugOpen && timelineQuery.data?.boundSession?.id),
-    refetchInterval: timelineQuery.data?.boundSession ? 2000 : false,
+    refetchInterval: realtimeDegraded && timelineQuery.data?.boundSession ? 1000 : false,
   });
+
+  function closeSidebarIfMobile(): void {
+    if (globalThis.matchMedia?.('(max-width: 1023px)').matches) {
+      setNavOpen(false);
+    }
+  }
 
   useEffect(() => {
     if (!authQuery.data?.authenticated) return;
@@ -78,9 +87,23 @@ function AppShell() {
         if (parsed.type === 'heartbeat') {
           return;
         }
+        if (parsed.type === 'session.screen-updated') {
+          const matchesSelectedSession = parsed.sessionId === timelineQuery.data?.boundSession?.id
+            || (
+              parsed.projectSlug === selectedProjectSlug
+              && parsed.provider === selectedProvider
+              && parsed.conversationRef === selectedConversationRef
+            );
+          if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
+            queryClient.setQueryData<ConversationTimeline | undefined>(
+              ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+              (current) => current ? { ...current, liveScreen: parsed.screen } : current,
+            );
+          }
+          return;
+        }
         if (parsed.type === 'session.raw-output') {
-          if (parsed.sessionId === timelineQuery.data?.boundSession?.id) {
-            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+          if (parsed.sessionId === timelineQuery.data?.boundSession?.id && debugOpen) {
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
           }
           return;
@@ -135,7 +158,7 @@ function AppShell() {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       navigate(`/projects/${encodeURIComponent(variables.projectSlug)}/${variables.provider}/${encodeURIComponent(conversationRef)}`);
-      setNavOpen(false);
+      closeSidebarIfMobile();
     },
     onSettled: () => {
       setCreatingConversationKey(undefined);
@@ -214,7 +237,7 @@ function AppShell() {
     }
   }
 
-  async function handleSend(sessionId: string, text: string): Promise<boolean> {
+  async function handleSendText(sessionId: string, text: string): Promise<boolean> {
     setActionError(undefined);
     try {
       await sendMutation.mutateAsync({ sessionId, text });
@@ -225,8 +248,19 @@ function AppShell() {
     }
   }
 
+  async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
+    setActionError(undefined);
+    try {
+      await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
+      return false;
+    }
+  }
+
   if (authQuery.isLoading) {
-    return <div className="flex min-h-screen items-center justify-center text-slate-400">Loading Agent Console…</div>;
+    return <div className="flex h-screen items-center justify-center text-slate-400">Loading Agent Console…</div>;
   }
 
   if (!authQuery.data?.authenticated) {
@@ -245,17 +279,17 @@ function AppShell() {
   }
 
   return (
-    <div className="flex min-h-screen bg-slate-950">
+    <div className="flex h-screen overflow-hidden bg-slate-950">
       <Sidebar
         tree={treeQuery.data}
         open={navOpen}
-        onClose={() => setNavOpen(false)}
+        onClose={closeSidebarIfMobile}
         onNewConversation={handleNewConversation}
         creatingConversationKey={creatingConversationKey}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />
-      <div className="flex min-h-screen min-w-0 flex-1 flex-col">
+      <div className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3 backdrop-blur lg:px-6">
           <div className="flex items-center gap-3">
             <button
@@ -307,9 +341,9 @@ function AppShell() {
           </div>
         )}
 
-        <main className="min-h-0 flex-1">
+        <main className="min-h-0 flex-1 overflow-hidden">
           {location.pathname === '/settings' ? (
-            <SettingsPage settings={settingsQuery.data} />
+            <SettingsPage settings={settingsQuery.data} csrfToken={authQuery.data?.csrfToken} />
           ) : (
             <ConversationPane
               project={project}
@@ -317,8 +351,9 @@ function AppShell() {
               loading={timelineQuery.isLoading}
               onBind={handleBindExisting}
               onRelease={handleRelease}
-              onSend={handleSend}
-              sending={sendMutation.isPending}
+              onSendText={handleSendText}
+              onSendKeystrokes={handleSendKeystrokes}
+              sendingText={sendMutation.isPending}
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
               debugOpen={debugOpen}

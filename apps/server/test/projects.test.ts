@@ -11,6 +11,7 @@ async function setup(): Promise<{ configPath: string; root: string }> {
   await fs.mkdir(root, { recursive: true });
   await fs.mkdir(path.join(root, 'demo'));
   await fs.mkdir(path.join(root, 'hidden'));
+  await fs.mkdir(path.join(root, 'unconfigured'));
   const configPath = path.join(tempDir, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({
     projectsRoot: root,
@@ -38,5 +39,29 @@ describe('ProjectService', () => {
     expect(projects).toHaveLength(1);
     expect(projects[0]?.slug).toBe('demo');
     expect(projects[0]?.allowedLocalhostPorts).toEqual([3000]);
+  });
+
+  it('lists editable settings for configured and discovered projects', async () => {
+    const { configPath } = await setup();
+    const service = new ProjectService(new ConfigService(configPath));
+    const projects = await service.listProjectSettings();
+
+    expect(projects.map((project) => project.directoryName)).toEqual(['demo', 'hidden', 'unconfigured']);
+    expect(projects.find((project) => project.directoryName === 'demo')).toMatchObject({
+      active: true,
+      displayName: 'Demo',
+      exists: true,
+      allowedLocalhostPorts: [3000],
+    });
+    expect(projects.find((project) => project.directoryName === 'hidden')).toMatchObject({
+      active: false,
+      exists: true,
+    });
+    expect(projects.find((project) => project.directoryName === 'unconfigured')).toMatchObject({
+      active: false,
+      exists: true,
+      allowedLocalhostPorts: [],
+      tags: [],
+    });
   });
 });

@@ -33,6 +33,8 @@ async function runTmux(args: string[]): Promise<string> {
 export interface TmuxClient {
   newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void>;
   pipePaneToFile(sessionName: string, filePath: string): Promise<void>;
+  sendLiteralText(sessionName: string, text: string): Promise<void>;
+  sendKeys(sessionName: string, keys: string[]): Promise<void>;
   sendLiteralInput(sessionName: string, text: string): Promise<void>;
   capturePane(sessionName: string, startLine?: number): Promise<string>;
   interrupt(sessionName: string): Promise<void>;
@@ -52,13 +54,27 @@ export class ShellTmuxClient implements TmuxClient {
     await runTmux(['pipe-pane', '-o', '-t', sessionName, `cat >> ${shellEscape(filePath)}`]);
   }
 
+  async sendLiteralText(sessionName: string, text: string): Promise<void> {
+    if (!text.length) {
+      return;
+    }
+    await runTmux(['send-keys', '-t', sessionName, '-l', '--', text]);
+  }
+
+  async sendKeys(sessionName: string, keys: string[]): Promise<void> {
+    if (!keys.length) {
+      return;
+    }
+    await runTmux(['send-keys', '-t', sessionName, ...keys]);
+  }
+
   async sendLiteralInput(sessionName: string, text: string): Promise<void> {
     const lines = text.split(/\r?\n/);
     for (const line of lines) {
       if (line.length > 0) {
-        await runTmux(['send-keys', '-t', sessionName, '-l', '--', line]);
+        await this.sendLiteralText(sessionName, line);
       }
-      await runTmux(['send-keys', '-t', sessionName, 'Enter']);
+      await this.sendKeys(sessionName, ['Enter']);
     }
   }
 

@@ -2,8 +2,13 @@ import type {
   AuthState,
   BoundSession,
   ConversationTimeline,
+  DirectoryBrowserResponse,
+  EditableProjectSettings,
   SettingsSummary,
+  SessionKeystrokeRequest,
   TreeResponse,
+  UpdateGlobalSettingsRequest,
+  UpdateProjectSettingsRequest,
 } from '@agent-console/shared';
 
 export class ApiError extends Error {
@@ -50,7 +55,16 @@ export const api = {
   bindConversation: (projectSlug: string, provider: string, conversationRef: string, csrfToken?: string) => request<{ session: BoundSession }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`, { method: 'POST', body: '{}' }, csrfToken),
   bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string) => request<{ session: BoundSession; conversationRef: string }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`, { method: 'POST', body: '{}' }, csrfToken),
   sendInput: (sessionId: string, text: string, csrfToken?: string) => request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/input`, { method: 'POST', body: JSON.stringify({ text }) }, csrfToken),
+  sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
+    request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
+  browseDirectories: (directoryPath?: string) =>
+    request<DirectoryBrowserResponse>(directoryPath ? `/api/settings/directories?path=${encodeURIComponent(directoryPath)}` : '/api/settings/directories'),
+  updateGlobalSettings: (body: UpdateGlobalSettingsRequest, csrfToken?: string) =>
+    request<{ settings: SettingsSummary; restartRequired: boolean }>('/api/settings/global', { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+  updateProjectSettings: (directoryName: string, body: UpdateProjectSettingsRequest, csrfToken?: string) =>
+    request<{ project: EditableProjectSettings }>(`/api/settings/projects/${encodeURIComponent(directoryName)}`, { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+  restartServer: (csrfToken?: string) => request<{ restarting: boolean }>('/api/settings/restart', { method: 'POST', body: '{}' }, csrfToken),
 };
