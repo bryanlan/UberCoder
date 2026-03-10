@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
@@ -106,7 +107,19 @@ export async function registerSessionRoutes(
       return;
     }
     try {
-      return { text: await fs.readFile(session.rawLogPath, 'utf8') };
+      const rawText = await fs.readFile(session.rawLogPath, 'utf8');
+      const debugLogPath = path.join(path.dirname(session.rawLogPath), 'debug.log');
+      let debugText = '';
+      try {
+        debugText = await fs.readFile(debugLogPath, 'utf8');
+      } catch {
+        debugText = '';
+      }
+      return {
+        text: debugText.trim()
+          ? `${rawText}\n\n===== session-debug =====\n${debugText}`
+          : rawText,
+      };
     } catch {
       return { text: '' };
     }

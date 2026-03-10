@@ -79,7 +79,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async capturePane(sessionName: string, startLine = -240): Promise<string> {
-    const args = ['capture-pane', '-p', '-J', '-t', sessionName];
+    const args = ['capture-pane', '-e', '-p', '-J', '-t', sessionName];
     if (Number.isFinite(startLine)) {
       args.push('-S', String(startLine));
     }

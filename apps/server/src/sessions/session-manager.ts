@@ -200,6 +200,9 @@ export class SessionManager {
       throw new Error('Session is no longer running.');
     }
 
+    const beforeSnapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
+    const beforeScreen = parseSessionScreenSnapshot(beforeSnapshot, nowIso());
+
     if (payload.text) {
       await this.tmuxClient.sendLiteralText(liveSession.tmuxSessionName, payload.text);
     }
@@ -213,7 +216,16 @@ export class SessionManager {
       lastActivityAt: nowIso(),
     };
     this.db.upsertBoundSession(updated);
-    await this.emitScreenUpdate(updated);
+    await this.emitScreenUpdate(updated, { waitForChange: Boolean(payload.keys?.length) });
+    const afterSnapshot = await this.tmuxClient.capturePane(updated.tmuxSessionName).catch(() => '');
+    const afterScreen = parseSessionScreenSnapshot(afterSnapshot, nowIso());
+    this.appendDebugTrace(updated, {
+      action: 'send-keystrokes',
+      text: payload.text,
+      keys: payload.keys,
+      before: beforeScreen,
+      after: afterScreen,
+    });
     return updated;
   }
 
@@ -376,6 +388,31 @@ export class SessionManager {
     }
   }
 
+  private appendDebugTrace(session: BoundSession, input: {
+    action: string;
+    text?: string;
+    keys?: string[];
+    before: SessionScreen;
+    after: SessionScreen;
+  }): void {
+    const debugLogPath = session.rawLogPath ? path.join(path.dirname(session.rawLogPath), 'debug.log') : undefined;
+    if (!debugLogPath) {
+      return;
+    }
+    const lines = [
+      `[${nowIso()}] ${input.action}`,
+      `  text=${JSON.stringify(input.text ?? '')} keys=${JSON.stringify(input.keys ?? [])}`,
+      `  before.input=${JSON.stringify(input.before.inputText)}`,
+      `  before.status=${JSON.stringify(input.before.status)}`,
+      `  before.tail=${JSON.stringify(input.before.content.split('\n').slice(-4))}`,
+      `  after.input=${JSON.stringify(input.after.inputText)}`,
+      `  after.status=${JSON.stringify(input.after.status)}`,
+      `  after.tail=${JSON.stringify(input.after.content.split('\n').slice(-4))}`,
+      '',
+    ].join('\n');
+    fs.appendFileSync(debugLogPath, lines);
+  }
+
   private watchSessionOutput(session: BoundSession): void {
     if (!session.rawLogPath) return;
     if (this.watchers.has(session.id)) return;
@@ -460,23 +497,34 @@ export class SessionManager {
     }
   }
 
-  private async emitScreenUpdate(session: BoundSession): Promise<void> {
-    const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
-    const screen = parseSessionScreenSnapshot(snapshot, nowIso());
-    const nextHash = stableTextHash(`${screen.content}\n---\n${screen.status}`);
-    if (this.lastScreenHashes.get(session.id) === nextHash) {
-      return;
+  private async emitScreenUpdate(session: BoundSession, options: { waitForChange?: boolean } = {}): Promise<void> {
+    const previousHash = this.lastScreenHashes.get(session.id);
+    const deadline = options.waitForChange && previousHash ? Date.now() + 220 : Date.now();
+
+    while (true) {
+      const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
+      const screen = parseSessionScreenSnapshot(snapshot, nowIso());
+      const nextHash = stableTextHash(
+        `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
+      );
+      if (previousHash !== nextHash) {
+        this.lastScreenHashes.set(session.id, nextHash);
+        this.eventBus.emit({
+          type: 'session.screen-updated',
+          sessionId: session.id,
+          projectSlug: session.projectSlug,
+          provider: session.provider,
+          conversationRef: session.conversationRef,
+          screen,
+          timestamp: screen.capturedAt,
+        });
+        return;
+      }
+      if (!options.waitForChange || Date.now() >= deadline) {
+        return;
+      }
+      await sleep(35);
     }
-    this.lastScreenHashes.set(session.id, nextHash);
-    this.eventBus.emit({
-      type: 'session.screen-updated',
-      sessionId: session.id,
-      projectSlug: session.projectSlug,
-      provider: session.provider,
-      conversationRef: session.conversationRef,
-      screen,
-      timestamp: screen.capturedAt,
-    });
   }
 
   private async waitForStartupOutput(session: BoundSession): Promise<void> {

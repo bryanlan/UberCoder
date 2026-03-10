@@ -1,7 +1,34 @@
 import { Bug, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
 import type { ConversationTimeline, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
+import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
+
+function renderAnsiHtml(text: string): string {
+  const converter = new AnsiUp();
+  converter.escape_html = true;
+  return converter.ansi_to_html(text);
+}
+
+function LiveAnsiBlock({
+  text,
+  ansiText,
+  className,
+  containerRef,
+}: {
+  text: string;
+  ansiText?: string;
+  className: string;
+  containerRef?: RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div
+      ref={containerRef}
+      className={className}
+      dangerouslySetInnerHTML={{ __html: renderAnsiHtml(ansiText ?? text) }}
+    />
+  );
+}
 
 function TranscriptBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
   const isUser = role === 'user';
@@ -24,29 +51,35 @@ function TranscriptBubble({ role, text, timestamp }: { role: string; text: strin
   );
 }
 
-function LiveSessionSurface({ content, status }: { content: string; status: string }) {
-  const outputRef = useRef<HTMLPreElement | null>(null);
+function LiveSessionOutput({ content, contentAnsi }: { content: string; contentAnsi?: string }) {
+  const outputRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: 'auto' });
-  }, [content, status]);
+  }, [content]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      <div className="flex min-h-0 flex-1 flex-col rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
-        <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
-        <pre
-          ref={outputRef}
-          className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100"
-        >
-          {content.trim() || 'Waiting for session output…'}
-        </pre>
-      </div>
+    <div className="flex h-full min-h-0 flex-col rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
+      <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
+      <LiveAnsiBlock
+        containerRef={outputRef}
+        text={content.trim() || 'Waiting for session output…'}
+        ansiText={contentAnsi}
+        className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100"
+      />
+    </div>
+  );
+}
 
-      <div className="rounded-[1.5rem] border border-slate-800 bg-slate-900/90 px-4 py-3 shadow-panel">
-        <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Status</div>
-        <div className="font-mono text-sm text-slate-200">{status || 'Session active'}</div>
-      </div>
+function LiveSessionStatus({ status, statusAnsi }: { status: string; statusAnsi?: string }) {
+  return (
+    <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
+      <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Status</div>
+      <LiveAnsiBlock
+        text={status || 'Session active'}
+        ansiText={statusAnsi}
+        className="scrollbar-thin max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-200"
+      />
     </div>
   );
 }
@@ -69,6 +102,7 @@ function LiveSessionInputBridge({
   provider,
   conversationKind,
   rawMetadata,
+  inputText,
   onSendText,
   onSendKeystrokes,
   sendingText,
@@ -77,6 +111,7 @@ function LiveSessionInputBridge({
   provider: ConversationTimeline['conversation']['provider'];
   conversationKind: ConversationTimeline['conversation']['kind'];
   rawMetadata?: Record<string, unknown>;
+  inputText: string;
   onSendText: (sessionId: string, text: string) => Promise<boolean>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   sendingText: boolean;
@@ -97,6 +132,10 @@ function LiveSessionInputBridge({
       captureRef.current?.focus();
     }
   }, [needsBufferedFirstCodexTurn, sessionId]);
+
+  useEffect(() => {
+    pendingTextRef.current = '';
+  }, [sessionId]);
 
   useEffect(() => () => {
     if (flushTimerRef.current !== undefined) {
@@ -182,7 +221,7 @@ function LiveSessionInputBridge({
       <div className="mb-3 text-sm text-slate-400">Click the capture box and type directly. Keystrokes go to the hidden session, not to a local chat buffer.</div>
       <textarea
         ref={captureRef}
-        value=""
+        value={inputText}
         onChange={() => undefined}
         onBlur={() => flushBufferedText()}
         onPaste={(event) => {
@@ -228,9 +267,9 @@ function LiveSessionInputBridge({
             appendLiteralText(event.key);
           }
         }}
-        placeholder="Type directly into the live session…"
-        rows={2}
-        className="min-h-[4.25rem] w-full resize-none rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
+        placeholder={inputText ? undefined : 'Type directly into the live session…'}
+        rows={3}
+        className="min-h-[5rem] w-full resize-none rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
       />
       <div className="mt-3 flex flex-wrap gap-2">
         {specialKeyButtons.map((button) => (
@@ -238,6 +277,12 @@ function LiveSessionInputBridge({
             key={button.label}
             type="button"
             onClick={() => {
+              const specialKey = button.keys[0];
+              if (specialKey === 'BSpace' && pendingTextRef.current.length > 0) {
+                pendingTextRef.current = pendingTextRef.current.slice(0, -1);
+                captureRef.current?.focus();
+                return;
+              }
               flushBufferedText();
               enqueueKeystrokes({ keys: button.keys });
               captureRef.current?.focus();
@@ -387,7 +432,7 @@ export function ConversationPane({
         {loading ? (
           <div className="text-sm text-slate-400">Loading conversation…</div>
         ) : liveMode && liveScreen ? (
-          <LiveSessionSurface content={liveScreen.content} status={liveScreen.status} />
+          <LiveSessionOutput content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} />
         ) : timeline.messages.length > 0 ? (
           <div className="space-y-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
@@ -406,22 +451,13 @@ export function ConversationPane({
         )}
       </div>
 
-      {debugOpen && (
-        <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
-          <div className="mb-2 flex items-center justify-between text-sm text-slate-300">
-            <div className="font-medium">Raw terminal/debug output</div>
-            <div className="text-xs text-slate-500">{rawLoading ? 'Refreshing…' : 'Live view'}</div>
-          </div>
-          <pre className="scrollbar-thin max-h-52 overflow-auto rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs leading-6 text-slate-300">{rawOutput?.trim() || 'No raw output captured yet.'}</pre>
-        </div>
-      )}
-
       {boundSession ? (
         <LiveSessionInputBridge
           sessionId={boundSession.id}
           provider={timeline.conversation.provider}
           conversationKind={timeline.conversation.kind}
           rawMetadata={timeline.conversation.rawMetadata}
+          inputText={liveScreen?.inputText ?? ''}
           onSendText={onSendText}
           onSendKeystrokes={onSendKeystrokes}
           sendingText={sendingText}
@@ -429,6 +465,20 @@ export function ConversationPane({
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
           Bind this conversation to unlock the live input bridge.
+        </div>
+      )}
+
+      {liveMode && liveScreen && (
+        <LiveSessionStatus status={liveScreen.status} statusAnsi={liveScreen.statusAnsi} />
+      )}
+
+      {debugOpen && (
+        <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
+          <div className="mb-2 flex items-center justify-between text-sm text-slate-300">
+            <div className="font-medium">Raw terminal/debug output</div>
+            <div className="text-xs text-slate-500">{rawLoading ? 'Refreshing…' : 'Live view'}</div>
+          </div>
+          <pre className="scrollbar-thin max-h-52 overflow-auto rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs leading-6 text-slate-300">{rawOutput?.trim() || 'No raw output captured yet.'}</pre>
         </div>
       )}
     </div>

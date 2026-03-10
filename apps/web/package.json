@@ -12,6 +12,7 @@
   "dependencies": {
     "@agent-console/shared": "0.1.0",
     "@tanstack/react-query": "^5.90.2",
+    "ansi_up": "^6.0.6",
     "clsx": "^2.1.1",
     "lucide-react": "^0.542.0",
     "react": "^19.1.1",

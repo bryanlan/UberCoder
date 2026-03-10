@@ -19,6 +19,7 @@ class FakeTmux implements TmuxClient {
   failPipePane = false;
   failKill = false;
   paneText = '';
+  captureSequence: string[] = [];
 
   async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
     this.created.push(sessionName);
@@ -33,7 +34,15 @@ class FakeTmux implements TmuxClient {
   async sendLiteralText(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
   async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
   async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
-  async capturePane(): Promise<string> { return this.paneText; }
+  async capturePane(): Promise<string> {
+    if (this.captureSequence.length > 0) {
+      const next = this.captureSequence.shift();
+      if (next !== undefined) {
+        this.paneText = next;
+      }
+    }
+    return this.paneText;
+  }
   async interrupt(): Promise<void> {}
   async killSession(sessionName: string): Promise<void> {
     if (this.failKill) {
@@ -272,6 +281,55 @@ describe('SessionManager', () => {
 
     expect(tmux.sent).toEqual(['3']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
+    db.close();
+  });
+
+  it('waits for a visible screen change after special-key input before emitting the update', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      '  1. Default',
+      '❯ 2. Sonnet',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    const screens: string[] = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screens.push(event.screen.content);
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-key-change',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    tmux.captureSequence = [
+      tmux.paneText,
+      [
+        'Claude Code',
+        '',
+        '  1. Default',
+        '  2. Sonnet',
+        '❯ 3. Haiku',
+        'Enter to confirm · Esc to exit',
+      ].join('\n'),
+    ];
+
+    await manager.sendKeystrokes(session.id, { keys: ['Down'] });
+
+    expect(tmux.sentKeys).toContainEqual(['Down']);
+    expect(screens.at(-1)).toContain('❯ 3. Haiku');
+    unsubscribe();
     db.close();
   });
 

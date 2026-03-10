@@ -57,7 +57,10 @@ export interface NormalizedMessage {
 
 export interface SessionScreen {
   content: string;
+  contentAnsi?: string;
+  inputText: string;
   status: string;
+  statusAnsi?: string;
   capturedAt: string;
 }
 
