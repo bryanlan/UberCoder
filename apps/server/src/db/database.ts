@@ -233,6 +233,37 @@ export class AppDatabase {
     } : undefined;
   }
 
+  setConversationTitleOverride(projectSlug: string, provider: string, ref: string, title: string, updatedAt: string): void {
+    this.sqlite.prepare(`
+      insert into conversation_title_overrides (project_slug, provider, ref, title, updated_at)
+      values (?, ?, ?, ?, ?)
+      on conflict(project_slug, provider, ref) do update set
+        title = excluded.title,
+        updated_at = excluded.updated_at
+    `).run(projectSlug, provider, ref, title, updatedAt);
+  }
+
+  getConversationTitleOverride(projectSlug: string, provider: string, ref: string): { title: string; updatedAt: string } | undefined {
+    const row = this.sqlite.prepare(`
+      select title, updated_at
+      from conversation_title_overrides
+      where project_slug = ? and provider = ? and ref = ?
+      limit 1
+    `).get(projectSlug, provider, ref) as { title: string; updated_at: string } | undefined;
+    if (!row) return undefined;
+    return {
+      title: row.title,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  deleteConversationTitleOverride(projectSlug: string, provider: string, ref: string): void {
+    this.sqlite.prepare(`
+      delete from conversation_title_overrides
+      where project_slug = ? and provider = ? and ref = ?
+    `).run(projectSlug, provider, ref);
+  }
+
   putPendingConversation(item: ConversationSummary): void {
     this.sqlite.prepare(`
       insert into pending_conversations (
@@ -263,8 +294,10 @@ export class AppDatabase {
 
   listPendingConversations(): ConversationSummary[] {
     const rows = this.sqlite.prepare(`
-      select pc.*, bs.id as bound_session_id
+      select pc.*, cto.title as override_title, bs.id as bound_session_id
       from pending_conversations pc
+      left join conversation_title_overrides cto
+        on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
       left join bound_sessions bs on bs.id = pc.bound_session_id and bs.status in ('starting','bound','releasing')
       order by pc.updated_at desc
     `).all() as Array<Record<string, unknown>>;
@@ -273,7 +306,7 @@ export class AppDatabase {
       kind: 'pending',
       projectSlug: String(row.project_slug),
       provider: String(row.provider) as ConversationSummary['provider'],
-      title: String(row.title),
+      title: String(row.override_title ?? row.title),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
       transcriptPath: row.transcript_path ? String(row.transcript_path) : undefined,
@@ -287,8 +320,10 @@ export class AppDatabase {
 
   getPendingConversation(ref: string): ConversationSummary | undefined {
     const row = this.sqlite.prepare(`
-      select pc.*, bs.id as bound_session_id
+      select pc.*, cto.title as override_title, bs.id as bound_session_id
       from pending_conversations pc
+      left join conversation_title_overrides cto
+        on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
       left join bound_sessions bs on bs.id = pc.bound_session_id and bs.status in ('starting','bound','releasing')
       where pc.ref = ?
       limit 1
@@ -299,7 +334,7 @@ export class AppDatabase {
       kind: 'pending',
       projectSlug: String(row.project_slug),
       provider: String(row.provider) as ConversationSummary['provider'],
-      title: String(row.title),
+      title: String(row.override_title ?? row.title),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
       transcriptPath: row.transcript_path ? String(row.transcript_path) : undefined,

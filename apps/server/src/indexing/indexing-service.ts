@@ -228,6 +228,18 @@ export class IndexingService {
       if (!matchedConversation) continue;
       claimedRefs.add(matchedConversation.ref);
 
+      const titleOverride = this.db.getConversationTitleOverride(projectSlug, providerId, pending.ref);
+      if (titleOverride) {
+        this.db.setConversationTitleOverride(
+          projectSlug,
+          providerId,
+          matchedConversation.ref,
+          titleOverride.title,
+          nowIso(),
+        );
+        this.db.deleteConversationTitleOverride(projectSlug, providerId, pending.ref);
+      }
+
       const session = pending.boundSessionId
         ? this.db.getBoundSessionById(pending.boundSessionId)
         : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);

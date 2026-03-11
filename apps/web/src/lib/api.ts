@@ -4,6 +4,7 @@ import type {
   ConversationTimeline,
   DirectoryBrowserResponse,
   EditableProjectSettings,
+  RenameConversationRequest,
   SettingsSummary,
   SessionKeystrokeRequest,
   TreeResponse,
@@ -54,6 +55,12 @@ export const api = {
   timeline: (projectSlug: string, provider: string, conversationRef: string) => request<ConversationTimeline>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/messages`),
   bindConversation: (projectSlug: string, provider: string, conversationRef: string, csrfToken?: string) => request<{ session: BoundSession }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`, { method: 'POST', body: '{}' }, csrfToken),
   bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string) => request<{ session: BoundSession; conversationRef: string }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`, { method: 'POST', body: '{}' }, csrfToken),
+  renameConversation: (projectSlug: string, provider: string, conversationRef: string, body: RenameConversationRequest, csrfToken?: string) =>
+    request<{ conversation: ConversationTimeline['conversation'] }>(
+      `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/title`,
+      { method: 'PUT', body: JSON.stringify(body) },
+      csrfToken,
+    ),
   sendInput: (sessionId: string, text: string, csrfToken?: string) => request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/input`, { method: 'POST', body: JSON.stringify({ text }) }, csrfToken),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),

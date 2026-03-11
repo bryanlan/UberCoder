@@ -68,7 +68,7 @@ export async function buildApp(options: AppOptions = {}) {
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
   await registerProjectRoutes(app, authService, indexing, sessions);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, projectService, restartService);

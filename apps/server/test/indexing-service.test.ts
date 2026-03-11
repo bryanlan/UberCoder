@@ -318,4 +318,65 @@ describe('IndexingService', () => {
     expect(db.getPendingConversation('pending:no-hash-yet')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
     db.close();
   });
+
+  it('carries a manual pending title override onto the adopted real conversation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:renamed',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-renamed',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'match-hash',
+      },
+    });
+    db.setConversationTitleOverride('demo', 'codex', 'pending:renamed', 'My renamed pending title', '2026-03-07T00:00:10.000Z');
+
+    const conversations: ConversationSummary[] = [{
+      ref: 'real-renamed',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Vendor title',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/real-renamed.jsonl',
+      providerConversationId: 'real-renamed',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+        lastUserTextHash: 'match-hash',
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? conversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getConversationIndexEntry('demo', 'codex', 'real-renamed')?.title).toBe('My renamed pending title');
+    expect(db.getConversationTitleOverride('demo', 'codex', 'pending:renamed')).toBeUndefined();
+    db.close();
+  });
 });

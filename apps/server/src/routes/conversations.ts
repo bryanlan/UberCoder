@@ -7,12 +7,16 @@ import { uniqueBy } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
+import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { AuthService } from '../security/auth-service.js';
 import { readLiveMessages } from '../sessions/live-output.js';
 import { SessionManager } from '../sessions/session-manager.js';
 import { nowIso } from '../lib/time.js';
 
 const providerSchema = z.enum(PROVIDERS);
+const renameConversationBodySchema = z.object({
+  title: z.string().trim().min(1).max(200),
+});
 
 function parseProvider(raw: string): ProviderId {
   return providerSchema.parse(raw);
@@ -31,6 +35,7 @@ export async function registerConversationRoutes(
   projectService: ProjectService,
   providerRegistry: ProviderRegistry,
   sessions: SessionManager,
+  eventBus: RealtimeEventBus,
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', async (request, reply) => {
     try {
@@ -61,7 +66,12 @@ export async function registerConversationRoutes(
     if (!pendingSummary || adoptedConversationRef) {
       const conversation = await provider.getConversation(project, resolvedConversationRef, providerSettings);
       if (conversation) {
-        summary = { ...conversation.summary, isBound: Boolean(cachedSummary?.isBound), boundSessionId: cachedSummary?.boundSessionId };
+        summary = {
+          ...conversation.summary,
+          title: cachedSummary?.title ?? pendingSummary?.title ?? conversation.summary.title,
+          isBound: Boolean(cachedSummary?.isBound),
+          boundSessionId: cachedSummary?.boundSessionId,
+        };
         visibleMessages = conversation.messages;
         allMessages = conversation.allMessages ?? conversation.messages;
       }
@@ -201,5 +211,67 @@ export async function registerConversationRoutes(
       kind: 'history',
     });
     return { session };
+  });
+
+  app.put('/api/conversations/:projectSlug/:provider/:conversationRef/title', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
+    const providerId = parseProvider(providerRaw);
+    const parsedBody = renameConversationBodySchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid conversation title.', details: parsedBody.error.flatten() });
+      return;
+    }
+    const project = await projectService.getProjectBySlug(projectSlug);
+    if (!project) {
+      reply.code(404).send({ error: 'Project not found.' });
+      return;
+    }
+
+    const pendingSummary = db.getPendingConversation(conversationRef);
+    const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
+    const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
+    const historySummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+    const summary = adoptedConversationRef ? (historySummary ?? pendingSummary) : (pendingSummary ?? historySummary);
+    if (!summary) {
+      reply.code(404).send({ error: 'Conversation not found.' });
+      return;
+    }
+
+    const updatedAt = nowIso();
+    const title = parsedBody.data.title.trim();
+    db.setConversationTitleOverride(projectSlug, providerId, resolvedConversationRef, title, updatedAt);
+
+    const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+    if (boundSession) {
+      db.upsertBoundSession({
+        ...boundSession,
+        title,
+        updatedAt,
+      });
+    }
+
+    const updatedConversation = resolvedConversationRef.startsWith('pending:')
+      ? db.getPendingConversation(resolvedConversationRef)
+      : db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+
+    if (!updatedConversation) {
+      reply.code(500).send({ error: 'Updated conversation could not be loaded.' });
+      return;
+    }
+
+    eventBus.emit({
+      type: 'conversation.index-updated',
+      projectSlug,
+      provider: providerId,
+      conversationRef: resolvedConversationRef,
+      timestamp: updatedAt,
+    });
+
+    return { conversation: updatedConversation };
   });
 }

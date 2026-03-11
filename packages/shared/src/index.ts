@@ -174,6 +174,10 @@ export interface UpdateProjectSettingsRequest {
   notes?: string;
 }
 
+export interface RenameConversationRequest {
+  title: string;
+}
+
 export type SessionEvent =
   | {
       type: 'session.updated';
