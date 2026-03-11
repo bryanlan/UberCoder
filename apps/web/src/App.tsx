@@ -20,15 +20,25 @@ function useLocalStorageBoolean(key: string, fallback: boolean) {
   return [value, setValue] as const;
 }
 
+function useLocalStorageString(key: string, fallback: string) {
+  const [value, setValue] = useState<string>(() => globalThis.localStorage?.getItem(key) ?? fallback);
+  useEffect(() => {
+    globalThis.localStorage?.setItem(key, value);
+  }, [key, value]);
+  return [value, setValue] as const;
+}
+
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
+  const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
+  const [renamingConversationKey, setRenamingConversationKey] = useState<string>();
   const realtimeDegraded = Boolean(eventError);
 
   const authQuery = useQuery({ queryKey: ['auth'], queryFn: api.authState, retry: false });
@@ -39,11 +49,17 @@ function AppShell() {
     refetchInterval: authQuery.data?.authenticated && realtimeDegraded ? 5000 : false,
   });
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: authQuery.data?.authenticated && location.pathname === '/settings' });
+  const inSettings = location.pathname === '/settings';
 
-  const selection = matchPath('/projects/:projectSlug/:provider/:conversationRef', location.pathname);
-  const selectedProjectSlug = selection?.params.projectSlug;
-  const selectedProvider = selection?.params.provider as ProviderId | undefined;
-  const selectedConversationRef = selection?.params.conversationRef ? decodeURIComponent(selection.params.conversationRef) : undefined;
+  const conversationSelection = matchPath({ path: '/projects/:projectSlug/:provider/:conversationRef', end: true }, location.pathname);
+  const providerSelection = matchPath({ path: '/projects/:projectSlug/:provider', end: true }, location.pathname);
+  const projectSelection = matchPath({ path: '/projects/:projectSlug', end: true }, location.pathname);
+
+  const selectedProjectSlug = conversationSelection?.params.projectSlug
+    ?? providerSelection?.params.projectSlug
+    ?? projectSelection?.params.projectSlug;
+  const selectedProvider = (conversationSelection?.params.provider ?? providerSelection?.params.provider) as ProviderId | undefined;
+  const selectedConversationRef = conversationSelection?.params.conversationRef ? decodeURIComponent(conversationSelection.params.conversationRef) : undefined;
 
   const timelineQuery = useQuery({
     queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
@@ -70,6 +86,12 @@ function AppShell() {
     enabled: Boolean(debugOpen && timelineQuery.data?.boundSession?.id),
     refetchInterval: realtimeDegraded && timelineQuery.data?.boundSession ? 1000 : false,
   });
+
+  useEffect(() => {
+    if (location.pathname !== '/settings' && location.pathname !== '/login') {
+      setLastConsolePath(location.pathname);
+    }
+  }, [location.pathname, setLastConsolePath]);
 
   function closeSidebarIfMobile(): void {
     if (globalThis.matchMedia?.('(max-width: 1023px)').matches) {
@@ -109,7 +131,7 @@ function AppShell() {
           return;
         }
         queryClient.invalidateQueries({ queryKey: ['tree'] });
-        if (selection?.params.conversationRef) {
+        if (conversationSelection?.params.conversationRef) {
           queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
         }
       } catch {
@@ -120,7 +142,7 @@ function AppShell() {
       setEventError('Realtime connection dropped. The page is still usable and polling the project tree and selected conversation.');
     };
     return () => source.close();
-  }, [authQuery.data?.authenticated, queryClient, selection?.params.conversationRef, selectedConversationRef, selectedProjectSlug, selectedProvider, timelineQuery.data?.boundSession?.id]);
+  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, queryClient, selectedConversationRef, selectedProjectSlug, selectedProvider, timelineQuery.data?.boundSession?.id]);
 
   function describeError(error: unknown, fallback: string): string {
     return error instanceof ApiError ? error.message : fallback;
@@ -162,6 +184,51 @@ function AppShell() {
     },
     onSettled: () => {
       setCreatingConversationKey(undefined);
+    },
+  });
+
+  const renameConversationMutation = useMutation({
+    mutationFn: ({ projectSlug, provider, conversationRef, title }: { projectSlug: string; provider: ProviderId; conversationRef: string; title: string }) =>
+      api.renameConversation(projectSlug, provider, conversationRef, { title }, authQuery.data?.csrfToken),
+    onSuccess: ({ conversation }, variables) => {
+      setActionError(undefined);
+      queryClient.setQueryData(['tree'], (current: typeof treeQuery.data | undefined) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.map((project) => (
+            project.slug !== variables.projectSlug
+              ? project
+              : {
+                  ...project,
+                  providers: {
+                    ...project.providers,
+                    [variables.provider]: {
+                      ...project.providers[variables.provider],
+                      conversations: project.providers[variables.provider].conversations.map((item) => (
+                        item.ref === conversation.ref ? { ...item, title: conversation.title } : item
+                      )),
+                    },
+                  },
+                }
+          )),
+        };
+      });
+      queryClient.setQueryData<ConversationTimeline | undefined>(
+        ['timeline', variables.projectSlug, variables.provider, variables.conversationRef],
+        (current) => current ? { ...current, conversation: { ...current.conversation, title: conversation.title } } : current,
+      );
+      if (conversation.ref !== variables.conversationRef) {
+        queryClient.setQueryData<ConversationTimeline | undefined>(
+          ['timeline', variables.projectSlug, variables.provider, conversation.ref],
+          (current) => current ? { ...current, conversation: { ...current.conversation, title: conversation.title } } : current,
+        );
+      }
+      queryClient.invalidateQueries({ queryKey: ['tree'] });
+      queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
+    },
+    onSettled: () => {
+      setRenamingConversationKey(undefined);
     },
   });
 
@@ -259,6 +326,18 @@ function AppShell() {
     }
   }
 
+  async function handleRenameConversation(projectSlug: string, provider: ProviderId, conversationRef: string, title: string): Promise<boolean> {
+    setActionError(undefined);
+    setRenamingConversationKey(`${projectSlug}:${provider}:${conversationRef}`);
+    try {
+      await renameConversationMutation.mutateAsync({ projectSlug, provider, conversationRef, title });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to rename this conversation.'));
+      return false;
+    }
+  }
+
   if (authQuery.isLoading) {
     return <div className="flex h-screen items-center justify-center text-slate-400">Loading Agent Console…</div>;
   }
@@ -285,7 +364,9 @@ function AppShell() {
         open={navOpen}
         onClose={closeSidebarIfMobile}
         onNewConversation={handleNewConversation}
+        onRenameConversation={handleRenameConversation}
         creatingConversationKey={creatingConversationKey}
+        renamingConversationKey={renamingConversationKey}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />
@@ -314,9 +395,12 @@ function AppShell() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Link to="/settings" className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800">
+            <Link
+              to={inSettings ? lastConsolePath : '/settings'}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+            >
               <Settings className="h-4 w-4" />
-              Settings
+              {inSettings ? 'Back to Console' : 'Settings'}
             </Link>
             <button
               type="button"
@@ -343,10 +427,12 @@ function AppShell() {
 
         <main className="min-h-0 flex-1 overflow-hidden">
           {location.pathname === '/settings' ? (
-            <SettingsPage settings={settingsQuery.data} csrfToken={authQuery.data?.csrfToken} />
+            <SettingsPage settings={settingsQuery.data} csrfToken={authQuery.data?.csrfToken} backHref={lastConsolePath} />
           ) : (
             <ConversationPane
+              projects={treeQuery.data?.projects}
               project={project}
+              selectedProvider={selectedProvider}
               timeline={timelineQuery.data}
               loading={timelineQuery.isLoading}
               onBind={handleBindExisting}

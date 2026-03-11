@@ -6,6 +6,7 @@ import type {
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
 } from '@agent-console/shared';
+import { Link } from 'react-router-dom';
 import { ApiError, api } from '../lib/api';
 import { DirectoryPickerModal } from '../components/DirectoryPickerModal';
 
@@ -105,7 +106,7 @@ function getRestartUrl(current: SettingsSummary, next: UpdateGlobalSettingsReque
   return nextUrl.toString();
 }
 
-export function SettingsPage({ settings, csrfToken }: { settings?: SettingsSummary; csrfToken?: string }) {
+export function SettingsPage({ settings, csrfToken, backHref }: { settings?: SettingsSummary; csrfToken?: string; backHref: string }) {
   const queryClient = useQueryClient();
   const [globalDraft, setGlobalDraft] = useState<GlobalDraft>();
   const [globalMessage, setGlobalMessage] = useState<string>();
@@ -343,6 +344,12 @@ export function SettingsPage({ settings, csrfToken }: { settings?: SettingsSumma
       <div className="h-full overflow-y-auto p-6">
         <div className="mx-auto max-w-5xl space-y-6">
         <div>
+          <Link
+            to={backHref}
+            className="mb-3 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+          >
+            Back to Console
+          </Link>
           <h1 className="text-2xl font-semibold">Settings</h1>
           <p className="mt-1 text-sm text-slate-400">Project settings save immediately. Global settings save to the config file and can optionally trigger a restart so runtime catches up.</p>
         </div>
