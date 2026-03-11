@@ -168,9 +168,10 @@ export function extractAuthoritativeProjectPathsFromJsonlText(text: string): Set
   return authoritativeProjectPaths;
 }
 
-export function conversationBelongsToProject(projectPath: string, parsedPaths: Set<string>): boolean {
+export function conversationBelongsToProject(projectPaths: Iterable<string>, parsedPaths: Set<string>): boolean {
+  const candidates = [...projectPaths];
   for (const candidate of parsedPaths) {
-    if (samePath(candidate, projectPath)) return true;
+    if (candidates.some((projectPath) => samePath(candidate, projectPath))) return true;
   }
   return false;
 }

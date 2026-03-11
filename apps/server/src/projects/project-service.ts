@@ -1,4 +1,3 @@
-import type { Dirent } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ProviderId } from '@agent-console/shared';
@@ -9,7 +8,9 @@ export interface ActiveProject {
   slug: string;
   directoryName: string;
   displayName: string;
+  rootPath: string;
   path: string;
+  matchPaths: string[];
   allowedLocalhostPorts: number[];
   tags: string[];
   notes?: string;
@@ -31,20 +32,23 @@ export class ProjectService {
   constructor(private readonly configService: ConfigService) {}
 
   async listActiveProjects(): Promise<ActiveProject[]> {
-    const root = this.configService.getProjectsRoot();
-    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
     const projects: ActiveProject[] = [];
+    const projectsRoot = this.configService.getProjectsRoot();
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const config = this.configService.getProjectConfig(entry.name);
+    for (const directoryName of this.configService.getConfiguredProjectDirectoryNames()) {
+      const config = this.configService.getProjectConfig(directoryName);
       if (!config?.active) continue;
+      const projectPath = this.resolveProjectPath(directoryName, config);
+      if (!(await this.isDirectory(projectPath))) continue;
+      const { rootPath, matchPaths } = this.buildProjectPaths(directoryName, projectPath, projectsRoot);
 
       projects.push({
-        slug: entry.name,
-        directoryName: entry.name,
-        displayName: config.displayName ?? entry.name,
-        path: path.join(root, entry.name),
+        slug: directoryName,
+        directoryName,
+        displayName: config.displayName ?? path.basename(projectPath),
+        rootPath,
+        path: projectPath,
+        matchPaths,
         allowedLocalhostPorts: [...config.allowedLocalhostPorts].sort((a, b) => a - b),
         tags: [...config.tags],
         notes: config.notes,
@@ -57,34 +61,28 @@ export class ProjectService {
   }
 
   async listProjectSettings(): Promise<ProjectSettingsSummary[]> {
-    const root = this.configService.getProjectsRoot();
-    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => [] as Dirent[]);
-    const existingDirectories = new Set(entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
-    const names = new Set<string>([
-      ...existingDirectories,
-      ...this.configService.getConfiguredProjectDirectoryNames(),
-    ]);
+    const names = this.configService.getConfiguredProjectDirectoryNames();
+    const projects = await Promise.all(names.map(async (directoryName) => {
+      const config = this.configService.getProjectConfig(directoryName);
+      const projectPath = this.resolveProjectPath(directoryName, config);
+      return {
+        directoryName,
+        path: projectPath,
+        exists: await this.isDirectory(projectPath),
+        active: config?.active ?? false,
+        displayName: config?.displayName,
+        allowedLocalhostPorts: [...(config?.allowedLocalhostPorts ?? [])].sort((a, b) => a - b),
+        tags: [...(config?.tags ?? [])],
+        notes: config?.notes,
+      };
+    }));
 
-    return [...names]
-      .map((directoryName) => {
-        const config = this.configService.getProjectConfig(directoryName);
-        return {
-          directoryName,
-          path: path.join(root, directoryName),
-          exists: existingDirectories.has(directoryName),
-          active: config?.active ?? false,
-          displayName: config?.displayName,
-          allowedLocalhostPorts: [...(config?.allowedLocalhostPorts ?? [])].sort((a, b) => a - b),
-          tags: [...(config?.tags ?? [])],
-          notes: config?.notes,
-        };
-      })
-      .sort((a, b) => {
-        if (a.active !== b.active) return a.active ? -1 : 1;
-        const aLabel = a.displayName ?? a.directoryName;
-        const bLabel = b.displayName ?? b.directoryName;
-        return aLabel.localeCompare(bLabel);
-      });
+    return projects.sort((a, b) => {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      const aLabel = a.displayName ?? a.directoryName;
+      const bLabel = b.displayName ?? b.directoryName;
+      return aLabel.localeCompare(bLabel);
+    });
   }
 
   async getProjectBySlug(slug: string): Promise<ActiveProject | undefined> {
@@ -94,5 +92,31 @@ export class ProjectService {
 
   getMergedProviderSettings(project: ActiveProject, provider: ProviderId): MergedProviderSettings {
     return this.configService.getMergedProviderSettings(project.directoryName, provider);
+  }
+
+  private resolveProjectPath(directoryName: string, config: ProjectConfig | undefined): string {
+    return config?.path ?? path.join(this.configService.getProjectsRoot(), directoryName);
+  }
+
+  private buildProjectPaths(directoryName: string, projectPath: string, projectsRoot: string): { rootPath: string; matchPaths: string[] } {
+    const relativePath = path.relative(projectsRoot, projectPath);
+    const [firstSegment] = relativePath.split(path.sep).filter(Boolean);
+    const rootPath = firstSegment && firstSegment === directoryName
+      ? path.join(projectsRoot, firstSegment)
+      : projectPath;
+
+    return {
+      rootPath,
+      matchPaths: Array.from(new Set([projectPath, rootPath])),
+    };
+  }
+
+  private async isDirectory(candidatePath: string): Promise<boolean> {
+    try {
+      const stats = await fs.stat(candidatePath);
+      return stats.isDirectory();
+    } catch {
+      return false;
+    }
   }
 }

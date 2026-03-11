@@ -137,6 +137,156 @@ describe('ConfigService', () => {
     expect(reloaded.getProjectConfig('demo')?.providers.codex?.enabled).toBe(false);
   });
 
+  it('creates and deletes explicit project path entries', async () => {
+    const configPath = await writeTempConfig({
+      projectsRoot: '/tmp/projects',
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: {
+          enabled: true,
+          discoveryRoot: '~/.codex',
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        },
+        claude: {
+          enabled: true,
+          discoveryRoot: '~/.claude',
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        },
+      },
+      projects: {},
+    });
+
+    const service = new ConfigService(configPath);
+    const created = service.createProjectConfig({
+      path: '/tmp/projects/UberCoder/agent-console-mvp/agent-console',
+    });
+
+    expect(created.directoryName).toBe('UberCoder--agent-console-mvp--agent-console');
+    expect(service.getProjectConfig(created.directoryName)?.path).toBe('/tmp/projects/UberCoder/agent-console-mvp/agent-console');
+    expect(service.findProjectDirectoryNameByPath('/tmp/projects/UberCoder/agent-console-mvp/agent-console')).toBe(created.directoryName);
+
+    expect(service.deleteProjectConfig(created.directoryName)).toBe(true);
+    expect(service.getProjectConfig(created.directoryName)).toBeUndefined();
+  });
+
+  it('migrates saved top-level project entries to explicit marker paths while preserving their existing keys', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-legacy-project-'));
+    const projectsRoot = path.join(tempDir, 'projects');
+    const nestedProjectPath = path.join(projectsRoot, 'UberCoder', 'agent-console-mvp', 'agent-console');
+    await fs.mkdir(nestedProjectPath, { recursive: true });
+    await fs.writeFile(path.join(nestedProjectPath, 'AGENTS.md'), '# project');
+    const configPath = await writeTempConfig({
+      projectsRoot,
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: {
+          enabled: true,
+          discoveryRoot: '~/.codex',
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        },
+        claude: {
+          enabled: true,
+          discoveryRoot: '~/.claude',
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        },
+      },
+      projects: {
+        UberCoder: {
+          active: true,
+          path: path.join(projectsRoot, 'UberCoder'),
+          allowedLocalhostPorts: [],
+          tags: [],
+        },
+      },
+    });
+
+    const service = new ConfigService(configPath);
+    const reloaded = new ConfigService(configPath);
+
+    expect(service.getProjectConfig('UberCoder')?.path).toBe(nestedProjectPath);
+    expect(reloaded.getProjectConfig('UberCoder')?.path).toBe(nestedProjectPath);
+  });
+
+  it('generates project keys from the stored root after a global root change pending restart', async () => {
+    const configPath = await writeTempConfig({
+      projectsRoot: '/tmp/projects',
+      server: {
+        host: '127.0.0.1',
+        port: 4317,
+        webDistPath: '../web/dist',
+      },
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: {
+          enabled: true,
+          discoveryRoot: '~/.codex',
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        },
+        claude: {
+          enabled: true,
+          discoveryRoot: '~/.claude',
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        },
+      },
+      projects: {},
+    });
+
+    const service = new ConfigService(configPath);
+    service.updateGlobalSettings({
+      projectsRoot: '/srv/new-projects',
+      serverHost: '0.0.0.0',
+      serverPort: 9001,
+      sessionTtlHours: 72,
+      cookieSecure: true,
+      trustTailscaleHeaders: true,
+    });
+
+    const created = service.createProjectConfig({
+      path: '/srv/new-projects/UberCoder/agent-console-mvp/agent-console',
+    });
+
+    expect(created.directoryName).toBe('UberCoder--agent-console-mvp--agent-console');
+  });
+
   it('stores global settings for restart without changing the current runtime snapshot', async () => {
     const configPath = await writeTempConfig({
       projectsRoot: '/tmp/projects',

@@ -31,7 +31,7 @@ export class CodexProvider implements ProviderAdapter {
     const conversations: ConversationSummary[] = [];
     for (const filePath of files) {
       const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
-      if (authoritativeProjectPaths.size > 0 && !conversationBelongsToProject(project.path, authoritativeProjectPaths)) {
+      if (authoritativeProjectPaths.size > 0 && !conversationBelongsToProject(project.matchPaths, authoritativeProjectPaths)) {
         continue;
       }
       const conversationRef = deriveConversationRef(filePath);
@@ -42,7 +42,7 @@ export class CodexProvider implements ProviderAdapter {
         conversationRef,
       });
       const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
-      const belongs = conversationBelongsToProject(project.path, projectPaths);
+      const belongs = conversationBelongsToProject(project.matchPaths, projectPaths);
       if (!belongs || projectPaths.size === 0) continue;
       conversations.push({
         ...parsed.summary,

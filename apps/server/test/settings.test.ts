@@ -7,8 +7,10 @@ import { buildApp } from '../src/app.js';
 async function setup(): Promise<{ configPath: string; root: string }> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-settings-'));
   const root = path.join(tempDir, 'projects');
-  await fs.mkdir(path.join(root, 'demo'), { recursive: true });
-  await fs.mkdir(path.join(root, 'alpha'), { recursive: true });
+  await fs.mkdir(path.join(root, 'demo', 'app'), { recursive: true });
+  await fs.mkdir(path.join(root, 'alpha', 'service'), { recursive: true });
+  await fs.writeFile(path.join(root, 'demo', 'app', 'AGENTS.md'), '# demo');
+  await fs.writeFile(path.join(root, 'alpha', 'service', 'claude.md'), '# alpha');
   await fs.writeFile(path.join(root, 'README.txt'), 'not a directory');
   const configPath = path.join(tempDir, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({
@@ -54,6 +56,7 @@ async function setup(): Promise<{ configPath: string; root: string }> {
     projects: {
       demo: {
         active: true,
+        path: path.join(root, 'demo', 'app'),
         displayName: 'Demo',
         allowedLocalhostPorts: [3000],
         tags: ['primary'],
@@ -65,7 +68,7 @@ async function setup(): Promise<{ configPath: string; root: string }> {
 }
 
 describe('settings routes', () => {
-  it('returns and updates editable project settings', async () => {
+  it('returns, creates, updates, and deletes explicit project settings', async () => {
     const expectedAgentConsolePath = path.resolve(process.cwd(), '../..');
     const { configPath, root } = await setup();
     const { app } = await buildApp({ configPath });
@@ -96,6 +99,7 @@ describe('settings routes', () => {
           directoryName: 'demo',
           active: true,
           allowedLocalhostPorts: [3000],
+          path: path.join(root, 'demo', 'app'),
         }),
       ]));
 
@@ -111,6 +115,24 @@ describe('settings routes', () => {
           { name: 'alpha', path: path.join(root, 'alpha'), isSymlink: false },
           { name: 'demo', path: path.join(root, 'demo'), isSymlink: false },
         ],
+      });
+
+      const create = await app.inject({
+        method: 'POST',
+        url: '/api/settings/projects',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+        payload: {
+          path: path.join(root, 'alpha', 'service'),
+        },
+      });
+      expect(create.statusCode).toBe(200);
+      expect(create.json().project).toMatchObject({
+        directoryName: 'alpha--service',
+        active: true,
+        path: path.join(root, 'alpha', 'service'),
       });
 
       const update = await app.inject({
@@ -136,6 +158,7 @@ describe('settings routes', () => {
         displayName: 'Demo Updated',
         allowedLocalhostPorts: [3000, 5173],
         tags: ['secondary'],
+        path: path.join(root, 'demo', 'app'),
       });
 
       const after = await app.inject({
@@ -151,8 +174,23 @@ describe('settings routes', () => {
           displayName: 'Demo Updated',
           allowedLocalhostPorts: [3000, 5173],
           tags: ['secondary'],
+          path: path.join(root, 'demo', 'app'),
+        }),
+        expect.objectContaining({
+          directoryName: 'alpha--service',
+          path: path.join(root, 'alpha', 'service'),
         }),
       ]));
+
+      const remove = await app.inject({
+        method: 'DELETE',
+        url: '/api/settings/projects/alpha--service',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+      });
+      expect(remove.statusCode).toBe(204);
 
       const globalUpdate = await app.inject({
         method: 'PUT',

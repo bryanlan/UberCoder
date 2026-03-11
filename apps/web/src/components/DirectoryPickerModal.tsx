@@ -7,11 +7,19 @@ export function DirectoryPickerModal({
   initialPath,
   onClose,
   onSelect,
+  title = 'Choose projects root',
+  description = 'Browse folders on the Linux host. The selected path is written into config as `projectsRoot`.',
+  confirmLabel = 'Use this folder',
+  helperText = 'Choose the currently shown folder to use it as the projects root.',
 }: {
   open: boolean;
   initialPath: string;
   onClose: () => void;
   onSelect: (path: string) => void;
+  title?: string;
+  description?: string;
+  confirmLabel?: string;
+  helperText?: string;
 }) {
   const [currentPath, setCurrentPath] = useState(initialPath);
 
@@ -50,8 +58,8 @@ export function DirectoryPickerModal({
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-semibold text-slate-100">Choose projects root</h2>
-            <p className="mt-1 text-sm text-slate-400">Browse folders on the Linux host. The selected path is written into config as `projectsRoot`.</p>
+            <h2 className="text-lg font-semibold text-slate-100">{title}</h2>
+            <p className="mt-1 text-sm text-slate-400">{description}</p>
           </div>
           <button
             type="button"
@@ -116,13 +124,13 @@ export function DirectoryPickerModal({
         </div>
 
         <div className="mt-4 flex items-center justify-between gap-3">
-          <p className="text-sm text-slate-400">Choose the currently shown folder to use it as the projects root.</p>
+          <p className="text-sm text-slate-400">{helperText}</p>
           <button
             type="button"
             onClick={() => onSelect(current)}
             className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400"
           >
-            Use this folder
+            {confirmLabel}
           </button>
         </div>
       </div>

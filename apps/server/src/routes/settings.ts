@@ -22,6 +22,10 @@ const updateProjectSettingsBodySchema = z.object({
   notes: z.string().trim().max(1000).optional(),
 });
 
+const createProjectBodySchema = z.object({
+  path: z.string().trim().min(1),
+});
+
 const updateGlobalSettingsBodySchema = z.object({
   projectsRoot: z.string().trim().min(1),
   serverHost: z.string().trim().min(1),
@@ -35,10 +39,29 @@ const browseDirectoriesQuerySchema = z.object({
   path: z.string().optional(),
 });
 
+const PROJECT_MARKER_FILES = ['AGENTS.md', 'agents.md', 'CLAUDE.md', 'claude.md'];
+
 function normalizeOptionalText(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function hasProjectMarkerFile(projectPath: string): Promise<boolean> {
+  for (const fileName of PROJECT_MARKER_FILES) {
+    try {
+      const stats = await fs.stat(path.join(projectPath, fileName));
+      if (stats.isFile()) return true;
+    } catch {
+      // ignore missing marker file
+    }
+  }
+  return false;
 }
 
 export async function registerSettingsRoutes(
@@ -164,6 +187,58 @@ export async function registerSettingsRoutes(
     };
   });
 
+  app.post('/api/settings/projects', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+
+    const parsedBody = createProjectBodySchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid project settings.', details: parsedBody.error.flatten() });
+      return;
+    }
+
+    const projectsRoot = normalizeFsPath(configService.getStoredConfig().projectsRoot ?? os.homedir());
+    const projectPath = normalizeFsPath(parsedBody.data.path);
+    if (!isPathInsideRoot(projectsRoot, projectPath)) {
+      reply.code(400).send({ error: 'Project path must be inside the current projects root.' });
+      return;
+    }
+
+    try {
+      const stats = await fs.stat(projectPath);
+      if (!stats.isDirectory()) {
+        reply.code(400).send({ error: 'Project path must be a directory.' });
+        return;
+      }
+    } catch {
+      reply.code(404).send({ error: 'Project path not found.' });
+      return;
+    }
+
+    if (!(await hasProjectMarkerFile(projectPath))) {
+      reply.code(400).send({ error: 'Project folder must contain AGENTS.md or CLAUDE.md.' });
+      return;
+    }
+
+    const existingDirectoryName = configService.findProjectDirectoryNameByPath(projectPath);
+    if (existingDirectoryName) {
+      reply.code(409).send({ error: 'Project is already added.' });
+      return;
+    }
+
+    const created = configService.createProjectConfig({ path: projectPath, active: true, displayName: path.basename(projectPath) });
+    const project = (await projectService.listProjectSettings()).find((item) => item.directoryName === created.directoryName);
+    if (!project) {
+      reply.code(500).send({ error: 'Project was created but could not be loaded.' });
+      return;
+    }
+
+    return { project };
+  });
+
   app.put('/api/settings/projects/:directoryName', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
@@ -211,6 +286,28 @@ export async function registerSettingsRoutes(
         notes: updated.notes,
       },
     };
+  });
+
+  app.delete('/api/settings/projects/:directoryName', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+
+    const parsedParams = paramsSchema.safeParse(request.params);
+    if (!parsedParams.success) {
+      reply.code(400).send({ error: 'Invalid project directory.', details: parsedParams.error.flatten() });
+      return;
+    }
+
+    const deleted = configService.deleteProjectConfig(parsedParams.data.directoryName);
+    if (!deleted) {
+      reply.code(404).send({ error: 'Project not found.' });
+      return;
+    }
+
+    reply.code(204).send();
   });
 
   app.post('/api/settings/restart', async (request, reply) => {

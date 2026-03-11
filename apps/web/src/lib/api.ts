@@ -2,6 +2,7 @@ import type {
   AuthState,
   BoundSession,
   ConversationTimeline,
+  CreateProjectSettingsRequest,
   DirectoryBrowserResponse,
   EditableProjectSettings,
   RenameConversationRequest,
@@ -71,7 +72,11 @@ export const api = {
     request<DirectoryBrowserResponse>(directoryPath ? `/api/settings/directories?path=${encodeURIComponent(directoryPath)}` : '/api/settings/directories'),
   updateGlobalSettings: (body: UpdateGlobalSettingsRequest, csrfToken?: string) =>
     request<{ settings: SettingsSummary; restartRequired: boolean }>('/api/settings/global', { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+  createProject: (body: CreateProjectSettingsRequest, csrfToken?: string) =>
+    request<{ project: EditableProjectSettings }>('/api/settings/projects', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   updateProjectSettings: (directoryName: string, body: UpdateProjectSettingsRequest, csrfToken?: string) =>
     request<{ project: EditableProjectSettings }>(`/api/settings/projects/${encodeURIComponent(directoryName)}`, { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+  deleteProject: (directoryName: string, csrfToken?: string) =>
+    request<void>(`/api/settings/projects/${encodeURIComponent(directoryName)}`, { method: 'DELETE' }, csrfToken),
   restartServer: (csrfToken?: string) => request<{ restarting: boolean }>('/api/settings/restart', { method: 'POST', body: '{}' }, csrfToken),
 };

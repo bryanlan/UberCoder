@@ -174,6 +174,10 @@ export interface UpdateProjectSettingsRequest {
   notes?: string;
 }
 
+export interface CreateProjectSettingsRequest {
+  path: string;
+}
+
 export interface RenameConversationRequest {
   title: string;
 }

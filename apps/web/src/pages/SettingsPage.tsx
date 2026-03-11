@@ -93,6 +93,13 @@ function sameProjectDraft(project: EditableProjectSettings, draft: ProjectDraft)
   return JSON.stringify(toProjectDraft(project)) === JSON.stringify(draft);
 }
 
+function sortProjects(a: EditableProjectSettings, b: EditableProjectSettings): number {
+  if (a.active !== b.active) return a.active ? -1 : 1;
+  const aLabel = a.displayName ?? a.directoryName;
+  const bLabel = b.displayName ?? b.directoryName;
+  return aLabel.localeCompare(bLabel);
+}
+
 function getRestartUrl(current: SettingsSummary, next: UpdateGlobalSettingsRequest): string {
   const currentUrl = new URL(window.location.href);
   const currentMatchesServer = currentUrl.hostname === current.serverHost
@@ -113,6 +120,7 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
   const [projectDrafts, setProjectDrafts] = useState<Record<string, ProjectDraft>>({});
   const [projectMessages, setProjectMessages] = useState<Record<string, string | undefined>>({});
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
 
   useEffect(() => {
     if (!settings) return;
@@ -121,6 +129,13 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
     setGlobalMessage(undefined);
     setProjectMessages({});
   }, [settings]);
+
+  async function refreshProjectTree(): Promise<void> {
+    await queryClient.fetchQuery({
+      queryKey: ['tree'],
+      queryFn: () => api.refreshTree(csrfToken),
+    });
+  }
 
   const restartMutation = useMutation({
     mutationFn: () => api.restartServer(csrfToken),
@@ -153,34 +168,64 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
   const projectMutation = useMutation({
     mutationFn: ({ directoryName, body }: { directoryName: string; body: UpdateProjectSettingsRequest }) =>
       api.updateProjectSettings(directoryName, body, csrfToken),
-    onSuccess: ({ project }) => {
+    onSuccess: async ({ project }) => {
       queryClient.setQueryData<SettingsSummary | undefined>(['settings'], (current) => {
         if (!current) return current;
         return {
           ...current,
           projects: current.projects
             .map((item) => (item.directoryName === project.directoryName ? project : item))
-            .sort((a, b) => {
-              if (a.active !== b.active) return a.active ? -1 : 1;
-              const aLabel = a.displayName ?? a.directoryName;
-              const bLabel = b.displayName ?? b.directoryName;
-              return aLabel.localeCompare(bLabel);
-            }),
+            .sort(sortProjects),
         };
       });
-      queryClient.invalidateQueries({ queryKey: ['tree'] });
+      await refreshProjectTree();
       setProjectDrafts((current) => ({ ...current, [project.directoryName]: toProjectDraft(project) }));
       setProjectMessages((current) => ({ ...current, [project.directoryName]: 'Saved.' }));
     },
   });
 
+  const createProjectMutation = useMutation({
+    mutationFn: ({ path }: { path: string }) => api.createProject({ path }, csrfToken),
+    onSuccess: async ({ project }) => {
+      queryClient.setQueryData<SettingsSummary | undefined>(['settings'], (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: [...current.projects, project].sort(sortProjects),
+        };
+      });
+      await refreshProjectTree();
+      setProjectDrafts((current) => ({ ...current, [project.directoryName]: toProjectDraft(project) }));
+      setProjectMessages((current) => ({ ...current, [project.directoryName]: 'Saved.' }));
+    },
+  });
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: ({ directoryName }: { directoryName: string }) => api.deleteProject(directoryName, csrfToken),
+    onSuccess: async (_result, variables) => {
+      queryClient.setQueryData<SettingsSummary | undefined>(['settings'], (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.filter((project) => project.directoryName !== variables.directoryName),
+        };
+      });
+      await refreshProjectTree();
+      setProjectDrafts((current) => {
+        const next = { ...current };
+        delete next[variables.directoryName];
+        return next;
+      });
+      setProjectMessages((current) => {
+        const next = { ...current };
+        delete next[variables.directoryName];
+        return next;
+      });
+    },
+  });
+
   const orderedProjects = useMemo(
-    () => [...(settings?.projects ?? [])].sort((a, b) => {
-      if (a.active !== b.active) return a.active ? -1 : 1;
-      const aLabel = a.displayName ?? a.directoryName;
-      const bLabel = b.displayName ?? b.directoryName;
-      return aLabel.localeCompare(bLabel);
-    }),
+    () => [...(settings?.projects ?? [])].sort(sortProjects),
     [settings?.projects],
   );
 
@@ -189,14 +234,14 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
   }
 
   const savingProjectDirectory = projectMutation.variables?.directoryName;
+  const deletingProjectDirectory = deleteProjectMutation.variables?.directoryName;
   const globalUnchanged = sameGlobalDraft(settings, globalDraft);
-  const discoveredProjects = orderedProjects.filter((project) => project.exists);
-  const detachedProjects = orderedProjects.filter((project) => !project.exists);
 
-  function renderProjectCard(project: EditableProjectSettings, detached = false) {
+  function renderProjectCard(project: EditableProjectSettings) {
     const draft = projectDrafts[project.directoryName] ?? toProjectDraft(project);
     const unchanged = sameProjectDraft(project, draft);
     const isSaving = projectMutation.isPending && savingProjectDirectory === project.directoryName;
+    const isDeleting = deleteProjectMutation.isPending && deletingProjectDirectory === project.directoryName;
     const message = savingProjectDirectory === project.directoryName && projectMutation.error instanceof ApiError
       ? projectMutation.error.message
       : projectMessages[project.directoryName];
@@ -206,13 +251,9 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-slate-100">{project.displayName ?? project.directoryName}</h2>
-            {detached ? (
-              <p className="mt-1 text-xs text-amber-300">
-                Stored project config key: <span className="font-mono">{project.directoryName}</span>. It will only apply if a child folder with this exact name exists under the current projects root.
-              </p>
-            ) : (
-              <p className="mt-1 break-all text-xs text-slate-500">{project.path}</p>
-            )}
+            <p className="mt-1 break-all text-xs text-slate-500">{project.path}</p>
+            <p className="mt-1 text-xs text-slate-600">Config key: <span className="font-mono">{project.directoryName}</span></p>
+            {!project.exists ? <p className="mt-1 text-xs text-amber-300">This saved project path is missing under the current projects root.</p> : null}
           </div>
           <label className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-3 py-2 text-sm text-slate-200">
             <input
@@ -305,25 +346,39 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
           <p className={`text-sm ${message === 'Saved.' ? 'text-emerald-300' : 'text-rose-300'}`}>
             {message ?? ' '}
           </p>
-          <button
-            type="button"
-            disabled={isSaving || unchanged}
-            onClick={() => {
-              try {
-                const body = normalizeProjectDraft(draft);
-                setProjectMessages((current) => ({ ...current, [project.directoryName]: undefined }));
-                projectMutation.mutate({ directoryName: project.directoryName, body });
-              } catch (error) {
-                setProjectMessages((current) => ({
-                  ...current,
-                  [project.directoryName]: error instanceof Error ? error.message : 'Unable to save project settings.',
-                }));
-              }
-            }}
-            className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-          >
-            {isSaving ? 'Saving…' : unchanged ? 'Saved' : 'Save changes'}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={() => {
+                const confirmed = window.confirm(`Remove ${project.displayName ?? project.directoryName} from saved projects?`);
+                if (!confirmed) return;
+                deleteProjectMutation.mutate({ directoryName: project.directoryName });
+              }}
+              className="rounded-2xl border border-rose-800 px-4 py-2 text-sm font-medium text-rose-200 transition hover:border-rose-600 hover:bg-rose-950/40 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+            >
+              {isDeleting ? 'Removing…' : 'Remove project'}
+            </button>
+            <button
+              type="button"
+              disabled={isSaving || isDeleting || unchanged}
+              onClick={() => {
+                try {
+                  const body = normalizeProjectDraft(draft);
+                  setProjectMessages((current) => ({ ...current, [project.directoryName]: undefined }));
+                  projectMutation.mutate({ directoryName: project.directoryName, body });
+                } catch (error) {
+                  setProjectMessages((current) => ({
+                    ...current,
+                    [project.directoryName]: error instanceof Error ? error.message : 'Unable to save project settings.',
+                  }));
+                }
+              }}
+              className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            >
+              {isSaving ? 'Saving…' : unchanged ? 'Saved' : 'Save changes'}
+            </button>
+          </div>
         </div>
       </section>
     );
@@ -335,181 +390,198 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
         open={directoryPickerOpen}
         initialPath={globalDraft.projectsRoot}
         onClose={() => setDirectoryPickerOpen(false)}
+        title="Choose projects root"
+        description="Browse folders on the Linux host. The selected path is written into config as `projectsRoot`."
+        confirmLabel="Use this folder"
+        helperText="Choose the currently shown folder to use it as the projects root."
         onSelect={(nextPath) => {
           setGlobalDraft((current) => current ? { ...current, projectsRoot: nextPath } : current);
           setGlobalMessage(undefined);
           setDirectoryPickerOpen(false);
         }}
       />
+      <DirectoryPickerModal
+        open={projectPickerOpen}
+        initialPath={globalDraft.projectsRoot}
+        onClose={() => setProjectPickerOpen(false)}
+        title="Add project"
+        description="Choose a folder under the current projects root. It must contain AGENTS.md or CLAUDE.md."
+        confirmLabel="Add this project"
+        helperText="The selected folder will be saved as an explicit project path."
+        onSelect={(nextPath) => {
+          createProjectMutation.mutate({ path: nextPath });
+          setProjectPickerOpen(false);
+        }}
+      />
       <div className="h-full overflow-y-auto p-6">
         <div className="mx-auto max-w-5xl space-y-6">
-        <div>
-          <Link
-            to={backHref}
-            className="mb-3 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-          >
-            Back to Console
-          </Link>
-          <h1 className="text-2xl font-semibold">Settings</h1>
-          <p className="mt-1 text-sm text-slate-400">Project settings save immediately. Global settings save to the config file and can optionally trigger a restart so runtime catches up.</p>
-        </div>
-
-        <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-panel">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-100">Global settings</h2>
-              <p className="mt-1 break-all text-xs text-slate-500">Config file: {settings.configPath}</p>
-            </div>
-          </div>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <div className="rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3">
-              <div className="text-xs uppercase tracking-wide text-slate-500">Agent Console path</div>
-              <div className="mt-1 break-all text-sm text-slate-200">{settings.agentConsolePath}</div>
-              <div className="mt-2 text-xs text-slate-500">This is where the app itself is currently running. It is separate from `projectsRoot`.</div>
-            </div>
-            <div className="rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3">
-              <div className="text-xs uppercase tracking-wide text-slate-500">Config file</div>
-              <div className="mt-1 break-all text-sm text-slate-200">{settings.configPath}</div>
-              <div className="mt-2 text-xs text-slate-500">Global setting edits are written here and may require restart to take effect.</div>
-            </div>
-          </div>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-2">
-            <div className="space-y-2 md:col-span-2">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-xs uppercase tracking-wide text-slate-500">Projects root</span>
-                <button
-                  type="button"
-                  onClick={() => setDirectoryPickerOpen(true)}
-                  className="rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-                >
-                  Browse folders
-                </button>
-              </div>
-              <input
-                type="text"
-                value={globalDraft.projectsRoot}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, projectsRoot: event.target.value } : current);
-                  setGlobalMessage(undefined);
-                }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
-              />
-            </div>
-
-            <label className="space-y-2">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Server host</span>
-              <input
-                type="text"
-                value={globalDraft.serverHost}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, serverHost: event.target.value } : current);
-                  setGlobalMessage(undefined);
-                }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
-              />
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Server port</span>
-              <input
-                type="text"
-                value={globalDraft.serverPort}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, serverPort: event.target.value } : current);
-                  setGlobalMessage(undefined);
-                }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
-              />
-            </label>
-
-            <label className="space-y-2">
-              <span className="text-xs uppercase tracking-wide text-slate-500">Session TTL hours</span>
-              <input
-                type="text"
-                value={globalDraft.sessionTtlHours}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, sessionTtlHours: event.target.value } : current);
-                  setGlobalMessage(undefined);
-                }}
-                className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
-              />
-            </label>
-
-            <label className="inline-flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-cyan-500"
-                checked={globalDraft.cookieSecure}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, cookieSecure: event.target.checked } : current);
-                  setGlobalMessage(undefined);
-                }}
-              />
-              Cookie secure
-            </label>
-
-            <label className="inline-flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200">
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-cyan-500"
-                checked={globalDraft.trustTailscaleHeaders}
-                onChange={(event) => {
-                  setGlobalDraft((current) => current ? { ...current, trustTailscaleHeaders: event.target.checked } : current);
-                  setGlobalMessage(undefined);
-                }}
-              />
-              Trust Tailscale headers
-            </label>
-          </div>
-
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <p className={`text-sm ${globalMessage === 'Saved.' || globalMessage?.startsWith('Saved.') || globalMessage === 'Restarting server...' ? 'text-emerald-300' : 'text-rose-300'}`}>
-              {globalMutation.error instanceof ApiError ? globalMutation.error.message : globalMessage ?? ' '}
-            </p>
-            <button
-              type="button"
-              disabled={globalMutation.isPending || restartMutation.isPending || globalUnchanged}
-              onClick={() => {
-                try {
-                  const body = normalizeGlobalDraft(globalDraft);
-                  setGlobalMessage(undefined);
-                  globalMutation.mutate(body);
-                } catch (error) {
-                  setGlobalMessage(error instanceof Error ? error.message : 'Unable to save global settings.');
-                }
-              }}
-              className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+          <div>
+            <Link
+              to={backHref}
+              className="mb-3 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
             >
-              {globalMutation.isPending || restartMutation.isPending ? 'Saving…' : globalUnchanged ? 'Saved' : 'Save global settings'}
-            </button>
+              Back to Console
+            </Link>
+            <h1 className="text-2xl font-semibold">Settings</h1>
+            <p className="mt-1 text-sm text-slate-400">Project settings save immediately. Global settings save to the config file and can optionally trigger a restart so runtime catches up.</p>
           </div>
-        </section>
 
-        <div className="space-y-6">
-          <section className="space-y-4">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-100">Projects under current root</h2>
-              <p className="mt-1 text-sm text-slate-400">These are immediate child directories currently found under the selected `projectsRoot`.</p>
+          <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-panel">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Global settings</h2>
+                <p className="mt-1 break-all text-xs text-slate-500">Config file: {settings.configPath}</p>
+              </div>
             </div>
-            {discoveredProjects.length ? discoveredProjects.map((project) => renderProjectCard(project)) : (
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500">Agent Console path</div>
+                <div className="mt-1 break-all text-sm text-slate-200">{settings.agentConsolePath}</div>
+                <div className="mt-2 text-xs text-slate-500">This is where the app itself is currently running. It is separate from `projectsRoot`.</div>
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 px-4 py-3">
+                <div className="text-xs uppercase tracking-wide text-slate-500">Config file</div>
+                <div className="mt-1 break-all text-sm text-slate-200">{settings.configPath}</div>
+                <div className="mt-2 text-xs text-slate-500">Global setting edits are written here and may require restart to take effect.</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 md:col-span-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs uppercase tracking-wide text-slate-500">Projects root</span>
+                  <button
+                    type="button"
+                    onClick={() => setDirectoryPickerOpen(true)}
+                    className="rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+                  >
+                    Browse folders
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={globalDraft.projectsRoot}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, projectsRoot: event.target.value } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </div>
+
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Server host</span>
+                <input
+                  type="text"
+                  value={globalDraft.serverHost}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, serverHost: event.target.value } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Server port</span>
+                <input
+                  type="text"
+                  value={globalDraft.serverPort}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, serverPort: event.target.value } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Session TTL hours</span>
+                <input
+                  type="text"
+                  value={globalDraft.sessionTtlHours}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, sessionTtlHours: event.target.value } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+
+              <label className="inline-flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-cyan-500"
+                  checked={globalDraft.cookieSecure}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, cookieSecure: event.target.checked } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                />
+                Cookie secure
+              </label>
+
+              <label className="inline-flex items-center gap-3 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-cyan-500"
+                  checked={globalDraft.trustTailscaleHeaders}
+                  onChange={(event) => {
+                    setGlobalDraft((current) => current ? { ...current, trustTailscaleHeaders: event.target.checked } : current);
+                    setGlobalMessage(undefined);
+                  }}
+                />
+                Trust Tailscale headers
+              </label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className={`text-sm ${globalMessage === 'Saved.' || globalMessage?.startsWith('Saved.') || globalMessage === 'Restarting server...' ? 'text-emerald-300' : 'text-rose-300'}`}>
+                {globalMutation.error instanceof ApiError ? globalMutation.error.message : globalMessage ?? ' '}
+              </p>
+              <button
+                type="button"
+                disabled={globalMutation.isPending || restartMutation.isPending || globalUnchanged}
+                onClick={() => {
+                  try {
+                    const body = normalizeGlobalDraft(globalDraft);
+                    setGlobalMessage(undefined);
+                    globalMutation.mutate(body);
+                  } catch (error) {
+                    setGlobalMessage(error instanceof Error ? error.message : 'Unable to save global settings.');
+                  }
+                }}
+                className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                {globalMutation.isPending || restartMutation.isPending ? 'Saving…' : globalUnchanged ? 'Saved' : 'Save global settings'}
+              </button>
+            </div>
+          </section>
+
+          <section className="space-y-4">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-100">Saved projects</h2>
+                <p className="mt-1 text-sm text-slate-400">Projects are explicit folders under `projectsRoot`. Add only folders that contain AGENTS.md or CLAUDE.md.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProjectPickerOpen(true)}
+                className="rounded-2xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+              >
+                Add project
+              </button>
+            </div>
+            <p className="text-sm text-rose-300">
+              {createProjectMutation.error instanceof ApiError ? createProjectMutation.error.message : ' '}
+            </p>
+            {orderedProjects.length ? orderedProjects.map((project) => renderProjectCard(project)) : (
               <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 text-sm text-slate-400 shadow-panel">
-                No project directories were found under the current projects root.
+                No saved projects yet. Add a folder under the current projects root to make it appear in the console.
               </div>
             )}
           </section>
-
-          {detachedProjects.length ? (
-            <section className="space-y-4">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-100">Stored project configs not found under current root</h2>
-                <p className="mt-1 text-sm text-slate-400">These are saved config entries keyed by directory name. They are not real directories under the current root, so their settings will not apply until matching child folders exist there.</p>
-              </div>
-              {detachedProjects.map((project) => renderProjectCard(project, true))}
-            </section>
-          ) : null}
-        </div>
         </div>
       </div>
     </>

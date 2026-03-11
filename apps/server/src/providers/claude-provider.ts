@@ -14,18 +14,20 @@ function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
 }
 
-function encodeClaudeCandidates(projectPath: string): string[] {
-  const posix = toPosixPath(projectPath);
-  const encoded = posix.replace(/[^A-Za-z0-9]/g, '-');
-  return Array.from(new Set([
-    encoded,
-    encoded.endsWith('-') ? encoded : `${encoded}-`,
-    encoded.startsWith('-') ? encoded.slice(1) : encoded,
-    encoded.startsWith('-') ? encoded : `-${encoded}`,
-  ]));
+function encodeClaudeCandidates(projectPaths: string[]): string[] {
+  return Array.from(new Set(projectPaths.flatMap((projectPath) => {
+    const posix = toPosixPath(projectPath);
+    const encoded = posix.replace(/[^A-Za-z0-9]/g, '-');
+    return [
+      encoded,
+      encoded.endsWith('-') ? encoded : `${encoded}-`,
+      encoded.startsWith('-') ? encoded.slice(1) : encoded,
+      encoded.startsWith('-') ? encoded : `-${encoded}`,
+    ];
+  })));
 }
 
-async function readClaudeHistory(projectPath: string, claudeHome: string): Promise<string[]> {
+async function readClaudeHistory(projectPaths: string[], claudeHome: string): Promise<string[]> {
   const historyPath = path.join(claudeHome, 'history.jsonl');
   if (!(await pathExists(historyPath))) return [];
   const lines = (await fs.readFile(historyPath, 'utf8')).split(/\r?\n/).filter(Boolean);
@@ -35,7 +37,12 @@ async function readClaudeHistory(projectPath: string, claudeHome: string): Promi
       const record = JSON.parse(line) as Record<string, unknown>;
       const pathCandidate = typeof record.cwd === 'string' ? record.cwd : typeof record.project_path === 'string' ? record.project_path : undefined;
       const transcriptPath = typeof record.transcript_path === 'string' ? record.transcript_path : undefined;
-      if (pathCandidate && path.resolve(pathCandidate) === path.resolve(projectPath) && transcriptPath && isTopLevelClaudeTranscript(transcriptPath)) {
+      if (
+        pathCandidate
+        && conversationBelongsToProject(projectPaths, new Set([path.resolve(pathCandidate)]))
+        && transcriptPath
+        && isTopLevelClaudeTranscript(transcriptPath)
+      ) {
         files.push(transcriptPath);
       }
     } catch {
@@ -51,7 +58,7 @@ export class ClaudeProvider implements ProviderAdapter {
   async discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>> {
     const claudeHome = settings.discoveryRoot;
     const projectsRoot = path.join(claudeHome, 'projects');
-    const candidates = encodeClaudeCandidates(project.path).map((candidate) => path.join(projectsRoot, candidate));
+    const candidates = encodeClaudeCandidates(project.matchPaths).map((candidate) => path.join(projectsRoot, candidate));
     return {
       claudeHome,
       projectsRoot,
@@ -63,7 +70,7 @@ export class ClaudeProvider implements ProviderAdapter {
   private async resolveTranscriptFiles(project: ActiveProject, settings: MergedProviderSettings): Promise<string[]> {
     const claudeHome = settings.discoveryRoot;
     const projectsRoot = path.join(claudeHome, 'projects');
-    const candidates = encodeClaudeCandidates(project.path);
+    const candidates = encodeClaudeCandidates(project.matchPaths);
     const files = new Set<string>();
     for (const candidate of candidates) {
       const candidatePath = path.join(projectsRoot, candidate);
@@ -73,7 +80,7 @@ export class ClaudeProvider implements ProviderAdapter {
         }
       }
     }
-    for (const filePath of await readClaudeHistory(project.path, claudeHome)) {
+    for (const filePath of await readClaudeHistory(project.matchPaths, claudeHome)) {
       if (isTopLevelClaudeTranscript(filePath)) {
         files.add(filePath);
       }
@@ -93,7 +100,7 @@ export class ClaudeProvider implements ProviderAdapter {
         projectSlug: project.slug,
         conversationRef,
       });
-      const belongs = parsed.projectPaths.size === 0 || conversationBelongsToProject(project.path, parsed.projectPaths);
+      const belongs = parsed.projectPaths.size === 0 || conversationBelongsToProject(project.matchPaths, parsed.projectPaths);
       if (!belongs) continue;
       summaries.push({
         ...parsed.summary,

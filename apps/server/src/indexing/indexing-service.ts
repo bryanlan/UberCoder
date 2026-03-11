@@ -13,6 +13,7 @@ export class IndexingService {
   private watchers: FSWatcher[] = [];
   private refreshTimer?: NodeJS.Timeout;
   private projectCache: Awaited<ReturnType<ProjectService['listActiveProjects']>> = [];
+  private watchConfigSignature?: string;
 
   constructor(
     private readonly configService: ConfigService,
@@ -24,28 +25,6 @@ export class IndexingService {
 
   async start(): Promise<void> {
     await this.refreshAll();
-    const config = await this.collectWatchConfig();
-    this.watchers = [
-      chokidar.watch(config.projectsRoot, {
-        ignoreInitial: true,
-        depth: 1,
-        ignored: ['**/node_modules/**', '**/.git/**'],
-      }),
-      chokidar.watch(config.providerRoots, {
-        ignoreInitial: true,
-        depth: 8,
-        ignored: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**'],
-      }),
-    ];
-
-    for (const watcher of this.watchers) {
-      watcher.on('all', () => {
-        this.scheduleRefresh();
-      });
-      watcher.on('error', () => {
-        // Keep the app running even if the host is near its watch limit.
-      });
-    }
   }
 
   async stop(): Promise<void> {
@@ -64,6 +43,8 @@ export class IndexingService {
   async refreshAll(): Promise<void> {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
+    this.persistProjectMetadata(projects);
+    this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
     const pendingConversations = this.db.listPendingConversations();
     for (const project of projects) {
       for (const providerId of PROVIDERS) {
@@ -86,6 +67,7 @@ export class IndexingService {
     const timestamp = nowIso();
     this.db.setMeta('lastIndexedAt', timestamp);
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
+    await this.syncWatchers();
   }
 
   getTree(): TreeResponse {
@@ -109,15 +91,6 @@ export class IndexingService {
           claude: { id: 'claude', label: 'Claude', conversations: [] },
         },
       });
-      this.db.setMeta(`project:${project.slug}`, JSON.stringify({
-        slug: project.slug,
-        directoryName: project.directoryName,
-        displayName: project.displayName,
-        path: project.path,
-        tags: project.tags,
-        notes: project.notes,
-        allowedLocalhostPorts: project.allowedLocalhostPorts,
-      }));
     }
 
     for (const conversation of [...history, ...pending]) {
@@ -161,33 +134,17 @@ export class IndexingService {
   async primeProjectMetadata(): Promise<void> {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
-    for (const project of projects) {
-      this.db.setMeta(`project:${project.slug}`, JSON.stringify({
-        slug: project.slug,
-        directoryName: project.directoryName,
-        displayName: project.displayName,
-        path: project.path,
-        tags: project.tags,
-        notes: project.notes,
-        allowedLocalhostPorts: project.allowedLocalhostPorts,
-      }));
-    }
+    this.persistProjectMetadata(projects);
   }
 
-  private async collectWatchConfig(): Promise<{ projectsRoot: string; providerRoots: string[] }> {
+  private async collectWatchConfig(): Promise<{ projectsRoot: string; projectPaths: string[]; providerRoots: string[] }> {
     const providerRoots = new Set<string>();
+    const projectPaths = new Set<string>();
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
+    this.persistProjectMetadata(projects);
     for (const project of projects) {
-      this.db.setMeta(`project:${project.slug}`, JSON.stringify({
-        slug: project.slug,
-        directoryName: project.directoryName,
-        displayName: project.displayName,
-        path: project.path,
-        tags: project.tags,
-        notes: project.notes,
-        allowedLocalhostPorts: project.allowedLocalhostPorts,
-      }));
+      projectPaths.add(project.path);
       for (const providerId of PROVIDERS) {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         providerRoots.add(settings.discoveryRoot);
@@ -195,8 +152,59 @@ export class IndexingService {
     }
     return {
       projectsRoot: this.configService.getProjectsRoot(),
+      projectPaths: [...projectPaths],
       providerRoots: [...providerRoots],
     };
+  }
+
+  private async syncWatchers(): Promise<void> {
+    const config = await this.collectWatchConfig();
+    const signature = JSON.stringify({
+      projectsRoot: config.projectsRoot,
+      projectPaths: [...config.projectPaths].sort(),
+      providerRoots: [...config.providerRoots].sort(),
+    });
+    if (signature === this.watchConfigSignature) {
+      return;
+    }
+
+    await Promise.all(this.watchers.map((watcher) => watcher.close()));
+    this.watchers = [];
+    this.watchConfigSignature = signature;
+
+    this.watchers = [
+      chokidar.watch(config.projectsRoot, {
+        ignoreInitial: true,
+        depth: 1,
+        ignored: ['**/node_modules/**', '**/.git/**'],
+      }),
+      chokidar.watch(config.projectPaths, {
+        ignoreInitial: true,
+        depth: 0,
+        ignored: ['**/node_modules/**', '**/.git/**'],
+      }),
+      chokidar.watch(config.providerRoots, {
+        ignoreInitial: true,
+        depth: 8,
+        ignored: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**'],
+      }),
+    ];
+
+    this.watchers[0]?.on('all', () => {
+      this.scheduleRefresh(200);
+    });
+    this.watchers[1]?.on('all', () => {
+      this.scheduleRefresh(200);
+    });
+    this.watchers[2]?.on('all', () => {
+      this.scheduleRefresh();
+    });
+
+    for (const watcher of this.watchers) {
+      watcher.on('error', () => {
+        // Keep the app running even if the host is near its watch limit.
+      });
+    }
   }
 
   private reconcilePendingConversations(
@@ -286,5 +294,19 @@ export class IndexingService {
     }
 
     return -1;
+  }
+
+  private persistProjectMetadata(projects: Awaited<ReturnType<ProjectService['listActiveProjects']>>): void {
+    for (const project of projects) {
+      this.db.setMeta(`project:${project.slug}`, JSON.stringify({
+        slug: project.slug,
+        directoryName: project.directoryName,
+        displayName: project.displayName,
+        path: project.path,
+        tags: project.tags,
+        notes: project.notes,
+        allowedLocalhostPorts: project.allowedLocalhostPorts,
+      }));
+    }
   }
 }

@@ -11,7 +11,9 @@ const project: ActiveProject = {
   slug: 'demo',
   directoryName: 'demo',
   displayName: 'Demo',
+  rootPath: '/tmp/demo-project',
   path: '/tmp/demo-project',
+  matchPaths: ['/tmp/demo-project'],
   allowedLocalhostPorts: [],
   tags: [],
   config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
@@ -105,6 +107,77 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.rawMetadata?.projectPaths).toContain('/tmp/demo-project');
+  });
+
+  it('keeps older Codex transcripts attached when the saved project now resolves to a nested git repo', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '07');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const transcriptPath = path.join(sessionsDir, 'rollout-retroactive-parent-path.jsonl');
+    await fs.writeFile(transcriptPath, `${JSON.stringify({
+      type: 'session_meta',
+      payload: {
+        cwd: '/tmp/demo-project',
+        id: 'retroactive-parent-path',
+      },
+    })}\n`);
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const nestedRepoProject: ActiveProject = {
+      ...project,
+      rootPath: '/tmp/demo-project',
+      path: '/tmp/demo-project/apps/web',
+      matchPaths: ['/tmp/demo-project/apps/web', '/tmp/demo-project'],
+    };
+
+    const conversations = await provider.listConversations(nestedRepoProject, settings);
+    expect(conversations).toHaveLength(1);
+  });
+
+  it('keeps older Claude transcripts attached when history points at the pre-repo parent folder', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-'));
+    const legacyProjectDir = path.join(tempDir, 'projects', '-tmp-demo-project-');
+    await fs.mkdir(legacyProjectDir, { recursive: true });
+    await fs.writeFile(path.join(legacyProjectDir, 'retroactive-parent-path.jsonl'), [
+      JSON.stringify({
+        cwd: '/tmp/demo-project',
+        timestamp: '2026-03-10T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Legacy project path conversation',
+        },
+      }),
+    ].join('\n'));
+    await fs.writeFile(path.join(tempDir, 'history.jsonl'), `${JSON.stringify({
+      cwd: '/tmp/demo-project',
+      transcript_path: path.join(legacyProjectDir, 'retroactive-parent-path.jsonl'),
+    })}\n`);
+
+    const provider = new ClaudeProvider();
+    const settings = {
+      id: 'claude',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const nestedRepoProject: ActiveProject = {
+      ...project,
+      rootPath: '/tmp/demo-project',
+      path: '/tmp/demo-project/apps/web',
+      matchPaths: ['/tmp/demo-project/apps/web', '/tmp/demo-project'],
+    };
+
+    const conversations = await provider.listConversations(nestedRepoProject, settings);
+    expect(conversations).toHaveLength(1);
   });
 
   it('skips Codex transcripts that provide no project signal at all', async () => {

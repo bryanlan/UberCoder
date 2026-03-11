@@ -9,9 +9,8 @@ async function setup(): Promise<{ configPath: string; root: string }> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-projects-'));
   const root = path.join(tempDir, 'projects');
   await fs.mkdir(root, { recursive: true });
-  await fs.mkdir(path.join(root, 'demo'));
-  await fs.mkdir(path.join(root, 'hidden'));
-  await fs.mkdir(path.join(root, 'unconfigured'));
+  await fs.mkdir(path.join(root, 'demo', 'workspace'), { recursive: true });
+  await fs.mkdir(path.join(root, 'hidden'), { recursive: true });
   const configPath = path.join(tempDir, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({
     projectsRoot: root,
@@ -24,44 +23,43 @@ async function setup(): Promise<{ configPath: string; root: string }> {
       claude: { commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} } },
     },
     projects: {
-      demo: { active: true, displayName: 'Demo', allowedLocalhostPorts: [3000] },
-      hidden: { active: false },
+      demo: { active: true, path: path.join(root, 'demo', 'workspace'), displayName: 'Demo', allowedLocalhostPorts: [3000] },
+      hidden: { active: false, path: path.join(root, 'hidden') },
     },
   }, null, 2));
   return { configPath, root };
 }
 
 describe('ProjectService', () => {
-  it('discovers only immediate child directories marked active', async () => {
-    const { configPath } = await setup();
+  it('lists only configured active projects using their explicit saved paths', async () => {
+    const { configPath, root } = await setup();
     const service = new ProjectService(new ConfigService(configPath));
     const projects = await service.listActiveProjects();
     expect(projects).toHaveLength(1);
     expect(projects[0]?.slug).toBe('demo');
     expect(projects[0]?.allowedLocalhostPorts).toEqual([3000]);
+    expect(projects[0]?.rootPath).toBe(path.join(root, 'demo'));
+    expect(projects[0]?.matchPaths).toEqual([path.join(root, 'demo', 'workspace'), path.join(root, 'demo')]);
+    expect(projects[0]?.path).toBe(path.join(root, 'demo', 'workspace'));
   });
 
-  it('lists editable settings for configured and discovered projects', async () => {
-    const { configPath } = await setup();
+  it('lists editable settings for configured projects only', async () => {
+    const { configPath, root } = await setup();
     const service = new ProjectService(new ConfigService(configPath));
     const projects = await service.listProjectSettings();
 
-    expect(projects.map((project) => project.directoryName)).toEqual(['demo', 'hidden', 'unconfigured']);
+    expect(projects.map((project) => project.directoryName)).toEqual(['demo', 'hidden']);
     expect(projects.find((project) => project.directoryName === 'demo')).toMatchObject({
       active: true,
       displayName: 'Demo',
       exists: true,
       allowedLocalhostPorts: [3000],
+      path: path.join(root, 'demo', 'workspace'),
     });
     expect(projects.find((project) => project.directoryName === 'hidden')).toMatchObject({
       active: false,
       exists: true,
-    });
-    expect(projects.find((project) => project.directoryName === 'unconfigured')).toMatchObject({
-      active: false,
-      exists: true,
-      allowedLocalhostPorts: [],
-      tags: [],
+      path: path.join(root, 'hidden'),
     });
   });
 });
