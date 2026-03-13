@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
-import type { ConversationTimeline, ProviderId, SessionEvent, SessionKeystrokeRequest } from '@agent-console/shared';
+import type { ConversationTimeline, ProjectSummary, ProviderId, SessionEvent, SessionKeystrokeRequest } from '@agent-console/shared';
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
@@ -39,6 +39,7 @@ function AppShell() {
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
+  const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
   const [renamingConversationKey, setRenamingConversationKey] = useState<string>();
   const realtimeDegraded = Boolean(eventError);
 
@@ -233,6 +234,43 @@ function AppShell() {
     },
   });
 
+  const renameProjectMutation = useMutation({
+    mutationFn: ({ project, displayName }: { project: ProjectSummary; displayName?: string }) =>
+      api.updateProjectSettings(
+        project.directoryName,
+        {
+          active: true,
+          displayName,
+          allowedLocalhostPorts: project.allowedLocalhostPorts,
+          tags: project.tags,
+          notes: project.notes,
+        },
+        authQuery.data?.csrfToken,
+      ),
+    onSuccess: ({ project: updated }, variables) => {
+      setActionError(undefined);
+      queryClient.setQueryData(['tree'], (current: typeof treeQuery.data | undefined) => {
+        if (!current) return current;
+        return {
+          ...current,
+          projects: current.projects.map((item) => (
+            item.slug !== variables.project.slug
+              ? item
+              : {
+                  ...item,
+                  displayName: updated.displayName ?? item.path.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).at(-1) ?? item.directoryName,
+                }
+          )),
+        };
+      });
+      queryClient.invalidateQueries({ queryKey: ['tree'] });
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+    },
+    onSettled: () => {
+      setRenamingProjectKey(undefined);
+    },
+  });
+
   const releaseMutation = useMutation({
     mutationFn: (sessionId: string) => api.releaseSession(sessionId, authQuery.data?.csrfToken),
     onSuccess: () => {
@@ -339,6 +377,18 @@ function AppShell() {
     }
   }
 
+  async function handleRenameProject(project: ProjectSummary, displayName?: string): Promise<boolean> {
+    setActionError(undefined);
+    setRenamingProjectKey(project.slug);
+    try {
+      await renameProjectMutation.mutateAsync({ project, displayName });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to rename this project.'));
+      return false;
+    }
+  }
+
   if (authQuery.isLoading) {
     return <div className="flex h-screen items-center justify-center text-slate-400">Loading Agent Console…</div>;
   }
@@ -367,8 +417,10 @@ function AppShell() {
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
         onNewConversation={handleNewConversation}
+        onRenameProject={handleRenameProject}
         onRenameConversation={handleRenameConversation}
         creatingConversationKey={creatingConversationKey}
+        renamingProjectKey={renamingProjectKey}
         renamingConversationKey={renamingConversationKey}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}

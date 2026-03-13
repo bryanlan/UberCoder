@@ -135,6 +135,7 @@ export class IndexingService {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
+    this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
   }
 
   private async collectWatchConfig(): Promise<{ projectsRoot: string; projectPaths: string[]; providerRoots: string[] }> {

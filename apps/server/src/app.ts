@@ -71,7 +71,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);
-  await registerSettingsRoutes(app, authService, configService, projectService, restartService);
+  await registerSettingsRoutes(app, authService, configService, indexing, projectService, restartService);
   new LocalhostProxyService(projectService, authService).register(app);
 
   if (fs.existsSync(config.server.webDistPath)) {

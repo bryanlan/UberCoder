@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { AuthService } from '../security/auth-service.js';
 import { ConfigService } from '../config/service.js';
+import { IndexingService } from '../indexing/indexing-service.js';
 import { ProjectService } from '../projects/project-service.js';
 import { RestartService } from '../runtime/restart-service.js';
 import { getAgentConsolePath } from '../lib/agent-console-path.js';
@@ -68,6 +69,7 @@ export async function registerSettingsRoutes(
   app: FastifyInstance,
   authService: AuthService,
   configService: ConfigService,
+  indexing: IndexingService,
   projectService: ProjectService,
   restartService: RestartService,
 ): Promise<void> {
@@ -230,6 +232,7 @@ export async function registerSettingsRoutes(
     }
 
     const created = configService.createProjectConfig({ path: projectPath, active: true, displayName: path.basename(projectPath) });
+    await indexing.primeProjectMetadata();
     const project = (await projectService.listProjectSettings()).find((item) => item.directoryName === created.directoryName);
     if (!project) {
       reply.code(500).send({ error: 'Project was created but could not be loaded.' });
@@ -273,6 +276,7 @@ export async function registerSettingsRoutes(
       tags: dedupedTags,
       notes: normalizeOptionalText(parsedBody.data.notes),
     });
+    await indexing.primeProjectMetadata();
 
     return {
       project: {
@@ -306,6 +310,8 @@ export async function registerSettingsRoutes(
       reply.code(404).send({ error: 'Project not found.' });
       return;
     }
+
+    await indexing.primeProjectMetadata();
 
     reply.code(204).send();
   });

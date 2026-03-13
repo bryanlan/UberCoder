@@ -161,6 +161,19 @@ describe('settings routes', () => {
         path: path.join(root, 'demo', 'app'),
       });
 
+      const treeAfterUpdate = await app.inject({
+        method: 'GET',
+        url: '/api/projects/tree',
+        headers: { cookie },
+      });
+      expect(treeAfterUpdate.statusCode).toBe(200);
+      expect(treeAfterUpdate.json().projects).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          slug: 'alpha--service',
+          displayName: 'service',
+        }),
+      ]));
+
       const after = await app.inject({
         method: 'GET',
         url: '/api/settings',
@@ -179,6 +192,36 @@ describe('settings routes', () => {
         expect.objectContaining({
           directoryName: 'alpha--service',
           path: path.join(root, 'alpha', 'service'),
+        }),
+      ]));
+
+      const reactivate = await app.inject({
+        method: 'PUT',
+        url: '/api/settings/projects/demo',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+        payload: {
+          active: true,
+          displayName: 'CFP agent',
+          allowedLocalhostPorts: [3000],
+          tags: ['secondary'],
+          notes: '',
+        },
+      });
+      expect(reactivate.statusCode).toBe(200);
+
+      const treeAfterRename = await app.inject({
+        method: 'GET',
+        url: '/api/projects/tree',
+        headers: { cookie },
+      });
+      expect(treeAfterRename.statusCode).toBe(200);
+      expect(treeAfterRename.json().projects).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          slug: 'demo',
+          displayName: 'CFP agent',
         }),
       ]));
 
