@@ -5,7 +5,6 @@ import { appConfigSchema, projectConfigSchema, type AppConfig, type ProjectConfi
 import { expandHome, normalizeFsPath } from '../lib/path-utils.js';
 
 const PROJECT_MARKER_FILES = new Set(['AGENTS.md', 'agents.md', 'CLAUDE.md', 'claude.md']);
-const IGNORED_PROJECT_SCAN_DIRS = new Set(['.git', 'node_modules', 'dist', 'build']);
 
 export interface MergedProviderSettings extends Omit<ProviderSettings, 'discoveryRoot'> {
   id: ProviderId;
@@ -21,10 +20,10 @@ export class ConfigService {
     this.configPath = normalizeFsPath(configPath ?? process.env.AGENT_CONSOLE_CONFIG ?? '~/.config/agent-console/config.json');
     const raw = JSON.parse(readFileSync(this.configPath, 'utf8'));
     const parsed = appConfigSchema.parse(raw);
-    const migrated = this.migrateLegacyProjects(parsed);
-    this.runtimeConfig = migrated.config;
-    this.storedConfig = migrated.config;
-    if (migrated.changed) {
+    const cleaned = this.cleanupLegacyProjects(parsed);
+    this.runtimeConfig = cleaned.config;
+    this.storedConfig = cleaned.config;
+    if (cleaned.changed) {
       this.persist();
     }
   }
@@ -285,25 +284,27 @@ export class ConfigService {
     return normalizeFsPath(this.storedConfig.projectsRoot);
   }
 
-  private migrateLegacyProjects(config: AppConfig): { config: AppConfig; changed: boolean } {
+  private cleanupLegacyProjects(config: AppConfig): { config: AppConfig; changed: boolean } {
     const projectsRoot = normalizeFsPath(config.projectsRoot);
     let changed = false;
-    const migratedProjects = Object.fromEntries(Object.entries(config.projects).map(([directoryName, project]) => {
+    const cleanedProjects = Object.fromEntries(Object.entries(config.projects).flatMap(([directoryName, project]) => {
       const legacyProjectPath = normalizeFsPath(path.join(projectsRoot, directoryName));
-      const configuredPath = normalizeFsPath(project.path ?? legacyProjectPath);
-      if (project.path && configuredPath !== legacyProjectPath) {
-        return [directoryName, project];
-      }
+      const configuredPath = project.path ? normalizeFsPath(project.path) : undefined;
 
-      const nextPath = this.resolveLegacyProjectPath(legacyProjectPath);
-      if (!project.path || nextPath !== configuredPath) {
+      if (!configuredPath) {
         changed = true;
+        return [];
       }
 
-      return [directoryName, projectConfigSchema.parse({
+      if (configuredPath === legacyProjectPath && !this.hasProjectMarkerFile(configuredPath)) {
+        changed = true;
+        return [];
+      }
+
+      return [[directoryName, projectConfigSchema.parse({
         ...project,
-        path: nextPath,
-      })];
+        path: configuredPath,
+      })]];
     }));
 
     if (!changed) {
@@ -313,43 +314,21 @@ export class ConfigService {
     return {
       config: appConfigSchema.parse({
         ...config,
-        projects: migratedProjects,
+        projects: cleanedProjects,
       }),
       changed: true,
     };
   }
 
-  private resolveLegacyProjectPath(legacyProjectPath: string): string {
-    return this.findSingleMarkedProjectPath(legacyProjectPath) ?? legacyProjectPath;
-  }
-
-  private findSingleMarkedProjectPath(candidatePath: string): string | undefined {
+  private hasProjectMarkerFile(candidatePath: string): boolean {
     let entries;
     try {
       entries = readdirSync(candidatePath, { withFileTypes: true });
     } catch {
-      return undefined;
+      return false;
     }
 
-    if (entries.some((entry) => entry.isFile() && PROJECT_MARKER_FILES.has(entry.name))) {
-      return candidatePath;
-    }
-
-    let match: string | undefined;
-    const childDirectories = entries
-      .filter((entry) => entry.isDirectory() && !IGNORED_PROJECT_SCAN_DIRS.has(entry.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
-
-    for (const child of childDirectories) {
-      const childMatch = this.findSingleMarkedProjectPath(path.join(candidatePath, child.name));
-      if (!childMatch) continue;
-      if (match && match !== childMatch) {
-        return undefined;
-      }
-      match = childMatch;
-    }
-
-    return match;
+    return entries.some((entry) => entry.isFile() && PROJECT_MARKER_FILES.has(entry.name));
   }
 
   private getPreferredProjectDirectoryName(projectPath: string): string {

@@ -10,6 +10,7 @@ async function setup(): Promise<{ configPath: string; databasePath: string }> {
   const root = path.join(tempDir, 'projects');
   const databasePath = path.join(tempDir, 'agent-console.sqlite');
   await fs.mkdir(path.join(root, 'demo'), { recursive: true });
+  await fs.writeFile(path.join(root, 'demo', 'AGENTS.md'), '# Demo');
   await fs.mkdir(path.join(tempDir, 'codex-home'), { recursive: true });
   await fs.mkdir(path.join(tempDir, 'claude-home'), { recursive: true });
 
@@ -57,6 +58,7 @@ async function setup(): Promise<{ configPath: string; databasePath: string }> {
     projects: {
       demo: {
         active: true,
+        path: path.join(root, 'demo'),
         displayName: 'Demo',
         allowedLocalhostPorts: [],
         tags: [],

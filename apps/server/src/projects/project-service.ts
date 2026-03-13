@@ -101,7 +101,7 @@ export class ProjectService {
   private buildProjectPaths(directoryName: string, projectPath: string, projectsRoot: string): { rootPath: string; matchPaths: string[] } {
     const relativePath = path.relative(projectsRoot, projectPath);
     const [firstSegment] = relativePath.split(path.sep).filter(Boolean);
-    const rootPath = firstSegment && firstSegment === directoryName
+    const rootPath = firstSegment && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)
       ? path.join(projectsRoot, firstSegment)
       : projectPath;
 

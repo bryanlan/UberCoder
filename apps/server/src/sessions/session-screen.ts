@@ -113,6 +113,10 @@ function joinAnsi(lines: ScreenLine[]): string {
   return lines.map((line) => line.raw).join('\n').trim();
 }
 
+function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
+  return lines.filter((line) => isLikelyFooterStatus(line.plain));
+}
+
 function toScreenLines(snapshot: string): ScreenLine[] {
   return snapshot
     .replace(/\r\n?/g, '\n')
@@ -226,8 +230,9 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const { contentLines, inputText, footerLines } = extractActiveInput(baseContentLines);
   const content = joinPlain(contentLines) || 'Waiting for session output…';
   const contentAnsi = joinAnsi(contentLines) || content;
-  const footerText = joinPlain(footerLines);
-  const footerAnsi = joinAnsi(footerLines);
+  const footerStatusLines = filterFooterStatusLines(footerLines);
+  const footerText = joinPlain(footerStatusLines);
+  const footerAnsi = joinAnsi(footerStatusLines);
 
   return {
     content,

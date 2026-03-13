@@ -11,6 +11,8 @@ async function setup(): Promise<{ configPath: string; root: string }> {
   await fs.mkdir(root, { recursive: true });
   await fs.mkdir(path.join(root, 'demo', 'workspace'), { recursive: true });
   await fs.mkdir(path.join(root, 'hidden'), { recursive: true });
+  await fs.writeFile(path.join(root, 'demo', 'workspace', 'AGENTS.md'), '# Demo');
+  await fs.writeFile(path.join(root, 'hidden', 'claude.md'), '# Hidden');
   const configPath = path.join(tempDir, 'config.json');
   await fs.writeFile(configPath, JSON.stringify({
     projectsRoot: root,

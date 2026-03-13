@@ -7,6 +7,16 @@ async function login(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/$/);
 }
 
+async function addProject(page: Page, segments: string[]): Promise<void> {
+  await page.goto('/settings');
+  await page.getByRole('button', { name: 'Add project' }).click();
+  await expect(page.getByRole('heading', { name: 'Add project' })).toBeVisible();
+  for (const segment of segments) {
+    await page.getByRole('button', { name: segment }).click();
+  }
+  await page.getByRole('button', { name: 'Add this project' }).click();
+}
+
 async function addAlphaProject(page: Page): Promise<void> {
   await page.goto('/settings');
   const pageText = await page.locator('body').textContent();
@@ -14,32 +24,27 @@ async function addAlphaProject(page: Page): Promise<void> {
     return;
   }
 
-  await page.getByRole('button', { name: 'Add project' }).click();
-  await expect(page.getByRole('heading', { name: 'Add project' })).toBeVisible();
-  await page.getByRole('button', { name: 'alpha' }).click();
-  await page.getByRole('button', { name: 'service' }).click();
-  await page.getByRole('button', { name: 'Add this project' }).click();
+  await addProject(page, ['alpha', 'service']);
   await expect(page.locator('body')).toContainText('alpha--service');
   await expect(page.locator('body')).toContainText('alpha/service');
 }
 
 test.describe('settings project management', () => {
-  test('preserves legacy history when startup migrates a saved top-level project to a nested path', async ({ page }) => {
+  test('does not keep legacy top-level saved projects from the old auto-discovery model', async ({ page }) => {
     await login(page);
 
-    await expect(page.locator('body')).toContainText('UberCoder');
-    await expect(page.locator('body')).toContainText('Legacy migrated Codex conversation');
-
     await page.goto('/settings');
-    await expect(page.locator('body')).toContainText('Config key: UberCoder');
-    await expect(page.locator('body')).toContainText('agent-console-mvp/agent-console');
+    await expect(page.locator('body')).toContainText('No saved projects yet');
+    await expect(page.locator('body')).not.toContainText('UberCoder');
   });
 
   test('adds a nested explicit project from Settings and surfaces its history in the console tree', async ({ page }) => {
     await login(page);
-    await addAlphaProject(page);
+    await addProject(page, ['UberCoder', 'agent-console-mvp', 'agent-console']);
+    await expect(page.locator('body')).toContainText('UberCoder--agent-console-mvp--agent-console');
+    await expect(page.locator('body')).toContainText('agent-console-mvp/agent-console');
     await page.getByRole('link', { name: 'Back to Console' }).click();
-    await expect(page.locator('body')).toContainText('Alpha nested Claude conversation');
+    await expect(page.locator('body')).toContainText('Legacy migrated Codex conversation');
   });
 
   test('removes a saved project and keeps it out of the console after reload', async ({ page }) => {

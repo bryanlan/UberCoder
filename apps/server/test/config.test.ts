@@ -13,8 +13,13 @@ async function writeTempConfig(body: object): Promise<string> {
 
 describe('ConfigService', () => {
   it('parses config and merges project provider overrides predictably', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-config-project-'));
+    const projectsRoot = path.join(tempDir, 'projects');
+    const demoProjectPath = path.join(projectsRoot, 'demo');
+    await fs.mkdir(demoProjectPath, { recursive: true });
+    await fs.writeFile(path.join(demoProjectPath, 'AGENTS.md'), '# Demo');
     const configPath = await writeTempConfig({
-      projectsRoot: '/tmp/projects',
+      projectsRoot,
       security: {
         passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -44,6 +49,7 @@ describe('ConfigService', () => {
       projects: {
         demo: {
           active: true,
+          path: demoProjectPath,
           displayName: 'Demo Project',
           allowedLocalhostPorts: [3000, 5173],
           providers: {
@@ -62,7 +68,7 @@ describe('ConfigService', () => {
     const merged = service.getMergedProviderSettings('demo', 'codex');
     const globalMerged = service.getMergedProviderSettings('__global__', 'codex');
 
-    expect(service.getConfig().projectsRoot).toBe('/tmp/projects');
+    expect(service.getConfig().projectsRoot).toBe(projectsRoot);
     expect(merged.commands.resumeCommand).toEqual(['codex', 'resume', '--last']);
     expect(merged.commands.env).toEqual({ CODEX_HOME: '/srv/codex-home' });
     expect(globalMerged.commands.env).toEqual({ CODEX_HOME: path.join(os.homedir(), '.codex') });
@@ -70,8 +76,13 @@ describe('ConfigService', () => {
   });
 
   it('persists updated project settings while preserving provider overrides', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-config-project-'));
+    const projectsRoot = path.join(tempDir, 'projects');
+    const demoProjectPath = path.join(projectsRoot, 'demo');
+    await fs.mkdir(demoProjectPath, { recursive: true });
+    await fs.writeFile(path.join(demoProjectPath, 'AGENTS.md'), '# Demo');
     const configPath = await writeTempConfig({
-      projectsRoot: '/tmp/projects',
+      projectsRoot,
       security: {
         passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -101,6 +112,7 @@ describe('ConfigService', () => {
       projects: {
         demo: {
           active: false,
+          path: demoProjectPath,
           displayName: 'Old Name',
           allowedLocalhostPorts: [3000],
           tags: ['legacy'],
@@ -182,7 +194,7 @@ describe('ConfigService', () => {
     expect(service.getProjectConfig(created.directoryName)).toBeUndefined();
   });
 
-  it('migrates saved top-level project entries to explicit marker paths while preserving their existing keys', async () => {
+  it('drops legacy saved top-level project entries so only explicit added projects remain', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-legacy-project-'));
     const projectsRoot = path.join(tempDir, 'projects');
     const nestedProjectPath = path.join(projectsRoot, 'UberCoder', 'agent-console-mvp', 'agent-console');
@@ -229,8 +241,10 @@ describe('ConfigService', () => {
     const service = new ConfigService(configPath);
     const reloaded = new ConfigService(configPath);
 
-    expect(service.getProjectConfig('UberCoder')?.path).toBe(nestedProjectPath);
-    expect(reloaded.getProjectConfig('UberCoder')?.path).toBe(nestedProjectPath);
+    expect(service.getProjectConfig('UberCoder')).toBeUndefined();
+    expect(service.getConfiguredProjectDirectoryNames()).toEqual([]);
+    expect(reloaded.getProjectConfig('UberCoder')).toBeUndefined();
+    expect(reloaded.getConfiguredProjectDirectoryNames()).toEqual([]);
   });
 
   it('generates project keys from the stored root after a global root change pending restart', async () => {

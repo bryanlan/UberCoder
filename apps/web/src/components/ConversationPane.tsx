@@ -287,10 +287,14 @@ function LiveSessionInputBridge({
   sendingText: boolean;
 }) {
   const [firstPrompt, setFirstPrompt] = useState('');
+  const [textBypassEnabled, setTextBypassEnabled] = useState(false);
+  const [draftText, setDraftText] = useState(inputText);
+  const [draftDirty, setDraftDirty] = useState(false);
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingTextRef = useRef('');
   const flushTimerRef = useRef<number | undefined>(undefined);
+  const committedInputRef = useRef(inputText);
 
   const needsBufferedFirstCodexTurn =
     provider === 'codex'
@@ -305,7 +309,18 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     pendingTextRef.current = '';
+    committedInputRef.current = inputText;
+    setTextBypassEnabled(false);
+    setDraftText(inputText);
+    setDraftDirty(false);
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!textBypassEnabled && !draftDirty) {
+      committedInputRef.current = inputText;
+      setDraftText(inputText);
+    }
+  }, [draftDirty, inputText, textBypassEnabled]);
 
   useEffect(() => () => {
     if (flushTimerRef.current !== undefined) {
@@ -313,20 +328,34 @@ function LiveSessionInputBridge({
     }
   }, []);
 
-  function enqueueKeystrokes(payload: SessionKeystrokeRequest): void {
-    keyQueueRef.current = keyQueueRef.current
-      .then(async () => {
-        const ok = await onSendKeystrokes(sessionId, payload);
-        if (!ok) {
-          throw new Error('keystroke-send-failed');
-        }
-      })
-      .catch(() => undefined);
+  useEffect(() => {
+    const capture = captureRef.current;
+    if (!capture) {
+      return;
+    }
+    const value = textBypassEnabled ? inputText : draftText;
+    if (document.activeElement === capture) {
+      const end = value.length;
+      capture.setSelectionRange(end, end);
+    }
+    capture.scrollTop = capture.scrollHeight;
+  }, [draftText, inputText, textBypassEnabled]);
+
+  function queueKeystrokes(payload: SessionKeystrokeRequest): Promise<boolean> {
+    const task = keyQueueRef.current
+      .then(async () => await onSendKeystrokes(sessionId, payload))
+      .catch(() => false);
+    keyQueueRef.current = task.then(() => undefined, () => undefined);
+    return task;
   }
 
-  function flushBufferedText(): void {
+  function enqueueKeystrokes(payload: SessionKeystrokeRequest): void {
+    void queueKeystrokes(payload);
+  }
+
+  async function flushBufferedText(): Promise<boolean> {
     if (!pendingTextRef.current) {
-      return;
+      return true;
     }
     const text = pendingTextRef.current;
     pendingTextRef.current = '';
@@ -334,7 +363,7 @@ function LiveSessionInputBridge({
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = undefined;
     }
-    enqueueKeystrokes({ text });
+    return await queueKeystrokes({ text });
   }
 
   function scheduleBufferedTextFlush(): void {
@@ -349,6 +378,119 @@ function LiveSessionInputBridge({
   function appendLiteralText(text: string): void {
     pendingTextRef.current += text;
     scheduleBufferedTextFlush();
+  }
+
+  function appendDraftText(text: string): void {
+    setDraftDirty(true);
+    setDraftText((current) => current + text);
+  }
+
+  function removeDraftText(): void {
+    setDraftDirty(true);
+    setDraftText((current) => current.slice(0, -1));
+  }
+
+  async function syncDraftToRemote(extraKeys: SessionKeyToken[] = [], options: { clearAfterSend?: boolean } = {}): Promise<boolean> {
+    const baseText = committedInputRef.current;
+    const nextText = draftText;
+    let prefixLength = 0;
+    while (prefixLength < baseText.length && prefixLength < nextText.length && baseText[prefixLength] === nextText[prefixLength]) {
+      prefixLength += 1;
+    }
+    const backspaces = baseText.length - prefixLength;
+    const appendedText = nextText.slice(prefixLength);
+
+    if (backspaces > 0) {
+      const ok = await onSendKeystrokes(sessionId, { keys: Array.from({ length: backspaces }, () => 'BSpace' as const) });
+      if (!ok) {
+        return false;
+      }
+    }
+
+    if (appendedText) {
+      const ok = await onSendKeystrokes(sessionId, { text: appendedText });
+      if (!ok) {
+        return false;
+      }
+    }
+
+    if (extraKeys.length > 0) {
+      const ok = await onSendKeystrokes(sessionId, { keys: extraKeys });
+      if (!ok) {
+        return false;
+      }
+    }
+
+    committedInputRef.current = options.clearAfterSend ? '' : nextText;
+    setDraftDirty(false);
+    if (options.clearAfterSend) {
+      setDraftText('');
+    }
+    return true;
+  }
+
+  async function syncDraftAndEnableBypass(extraKeys: SessionKeyToken[] = []): Promise<void> {
+    const ok = await syncDraftToRemote(extraKeys);
+    if (!ok) {
+      return;
+    }
+    setTextBypassEnabled(true);
+    captureRef.current?.focus();
+  }
+
+  async function handleToggleTextBypass(): Promise<void> {
+    if (textBypassEnabled) {
+      const ok = await flushBufferedText();
+      if (!ok) {
+        return;
+      }
+      committedInputRef.current = inputText;
+      setDraftText(inputText);
+      setDraftDirty(false);
+      setTextBypassEnabled(false);
+      captureRef.current?.focus();
+      return;
+    }
+
+    if (draftDirty) {
+      const ok = await syncDraftToRemote();
+      if (!ok) {
+        return;
+      }
+    }
+    setTextBypassEnabled(true);
+    captureRef.current?.focus();
+  }
+
+  async function handleSpecialKey(specialKey: SessionKeyToken): Promise<void> {
+    if (specialKey === 'BSpace') {
+      if (textBypassEnabled) {
+        if (pendingTextRef.current.length > 0) {
+          pendingTextRef.current = pendingTextRef.current.slice(0, -1);
+          return;
+        }
+        enqueueKeystrokes({ keys: ['BSpace'] });
+        return;
+      }
+      removeDraftText();
+      return;
+    }
+
+    if (textBypassEnabled) {
+      const ok = await flushBufferedText();
+      if (!ok) {
+        return;
+      }
+      enqueueKeystrokes({ keys: [specialKey] });
+      return;
+    }
+
+    if (specialKey === 'Enter') {
+      await syncDraftToRemote(['Enter'], { clearAfterSend: true });
+      return;
+    }
+
+    await syncDraftAndEnableBypass([specialKey]);
   }
 
   async function submitFirstPrompt(): Promise<void> {
@@ -388,17 +530,29 @@ function LiveSessionInputBridge({
   return (
     <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4">
       <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Live input bridge</div>
-      <div className="mb-3 text-sm text-slate-400">Click the capture box and type directly. Keystrokes go to the hidden session, not to a local chat buffer.</div>
+      <div className="mb-3 text-sm text-slate-400">
+        {textBypassEnabled
+          ? 'Text bypass is on. Characters stream straight into the hidden session as you type.'
+          : 'Text bypass is off. Characters stay local in the bridge until you press Enter, which removes typing latency.'}
+      </div>
       <textarea
         ref={captureRef}
-        value={inputText}
+        value={textBypassEnabled ? inputText : draftText}
         onChange={() => undefined}
-        onBlur={() => flushBufferedText()}
+        onBlur={() => {
+          if (textBypassEnabled) {
+            void flushBufferedText();
+          }
+        }}
         onPaste={(event) => {
           event.preventDefault();
           const text = event.clipboardData.getData('text');
           if (text) {
-            appendLiteralText(text);
+            if (textBypassEnabled) {
+              appendLiteralText(text);
+            } else {
+              appendDraftText(text);
+            }
           }
         }}
         onKeyDown={(event) => {
@@ -407,8 +561,16 @@ function LiveSessionInputBridge({
           }
           if (event.ctrlKey && event.key.toLowerCase() === 'c') {
             event.preventDefault();
-            flushBufferedText();
-            enqueueKeystrokes({ keys: ['C-c'] });
+            if (textBypassEnabled) {
+              void flushBufferedText().then((ok) => {
+                if (!ok) {
+                  return;
+                }
+                enqueueKeystrokes({ keys: ['C-c'] });
+              });
+            } else {
+              void syncDraftAndEnableBypass(['C-c']);
+            }
             return;
           }
           const specialKeyMap: Record<string, SessionKeyToken> = {
@@ -423,23 +585,25 @@ function LiveSessionInputBridge({
           };
           const specialKey = specialKeyMap[event.key];
           if (specialKey) {
-            event.preventDefault();
-            if (specialKey === 'BSpace' && pendingTextRef.current.length > 0) {
-              pendingTextRef.current = pendingTextRef.current.slice(0, -1);
+            if (!textBypassEnabled && ['Up', 'Down', 'Left', 'Right'].includes(specialKey)) {
               return;
             }
-            flushBufferedText();
-            enqueueKeystrokes({ keys: [specialKey] });
+            event.preventDefault();
+            void handleSpecialKey(specialKey);
             return;
           }
           if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
             event.preventDefault();
-            appendLiteralText(event.key);
+            if (textBypassEnabled) {
+              appendLiteralText(event.key);
+            } else {
+              appendDraftText(event.key);
+            }
           }
         }}
-        placeholder={inputText ? undefined : 'Type directly into the live session…'}
+        placeholder={(textBypassEnabled ? inputText : draftText) ? undefined : 'Type directly into the live session…'}
         rows={3}
-        className="min-h-[5rem] w-full resize-none rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
+        className="h-24 w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
       />
       <div className="mt-3 flex flex-wrap gap-2">
         {specialKeyButtons.map((button) => (
@@ -447,14 +611,7 @@ function LiveSessionInputBridge({
             key={button.label}
             type="button"
             onClick={() => {
-              const specialKey = button.keys[0];
-              if (specialKey === 'BSpace' && pendingTextRef.current.length > 0) {
-                pendingTextRef.current = pendingTextRef.current.slice(0, -1);
-                captureRef.current?.focus();
-                return;
-              }
-              flushBufferedText();
-              enqueueKeystrokes({ keys: button.keys });
+              void handleSpecialKey(button.keys[0]!);
               captureRef.current?.focus();
             }}
             className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
@@ -462,6 +619,21 @@ function LiveSessionInputBridge({
             {button.label}
           </button>
         ))}
+        <button
+          type="button"
+          aria-pressed={textBypassEnabled}
+          onClick={() => {
+            void handleToggleTextBypass();
+          }}
+          className={clsx(
+            'rounded-xl border px-3 py-2 text-xs font-medium transition',
+            textBypassEnabled
+              ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
+              : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+          )}
+        >
+          Text Bypass
+        </button>
       </div>
     </div>
   );
