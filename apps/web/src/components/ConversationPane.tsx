@@ -5,10 +5,48 @@ import clsx from 'clsx';
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 
+type AnsiPaletteColor = {
+  rgb: [number, number, number];
+  class_name: string;
+};
+
+type MutableAnsiConverter = {
+  use_classes: boolean;
+  escape_html: boolean;
+  ansi_colors: [AnsiPaletteColor[], AnsiPaletteColor[]];
+  palette_256: AnsiPaletteColor[];
+  ansi_to_html(text: string): string;
+};
+
+const ansiConverter = new AnsiUp() as unknown as MutableAnsiConverter;
+ansiConverter.use_classes = false;
+ansiConverter.escape_html = true;
+ansiConverter.ansi_colors = [
+  [
+    { rgb: [12, 16, 24], class_name: 'ansi-black' },
+    { rgb: [255, 92, 87], class_name: 'ansi-red' },
+    { rgb: [94, 234, 140], class_name: 'ansi-green' },
+    { rgb: [241, 250, 140], class_name: 'ansi-yellow' },
+    { rgb: [96, 165, 250], class_name: 'ansi-blue' },
+    { rgb: [255, 121, 198], class_name: 'ansi-magenta' },
+    { rgb: [139, 233, 253], class_name: 'ansi-cyan' },
+    { rgb: [226, 232, 240], class_name: 'ansi-white' },
+  ],
+  [
+    { rgb: [100, 116, 139], class_name: 'ansi-bright-black' },
+    { rgb: [255, 110, 118], class_name: 'ansi-bright-red' },
+    { rgb: [134, 239, 172], class_name: 'ansi-bright-green' },
+    { rgb: [253, 224, 71], class_name: 'ansi-bright-yellow' },
+    { rgb: [147, 197, 253], class_name: 'ansi-bright-blue' },
+    { rgb: [244, 114, 182], class_name: 'ansi-bright-magenta' },
+    { rgb: [103, 232, 249], class_name: 'ansi-bright-cyan' },
+    { rgb: [248, 250, 252], class_name: 'ansi-bright-white' },
+  ],
+];
+ansiConverter.palette_256.splice(0, 16, ...ansiConverter.ansi_colors[0], ...ansiConverter.ansi_colors[1]);
+
 function renderAnsiHtml(text: string): string {
-  const converter = new AnsiUp();
-  converter.escape_html = true;
-  return converter.ansi_to_html(text);
+  return ansiConverter.ansi_to_html(text);
 }
 
 function LiveAnsiBlock({
@@ -53,11 +91,34 @@ function TranscriptBubble({ role, text, timestamp }: { role: string; text: strin
 }
 
 function LiveSessionOutput({ content, contentAnsi }: { content: string; contentAnsi?: string }) {
+  return <LiveSessionOutputBlock content={content} contentAnsi={contentAnsi} compact={false} />;
+}
+
+function LiveSessionOutputBlock({
+  content,
+  contentAnsi,
+  compact,
+}: {
+  content: string;
+  contentAnsi?: string;
+  compact: boolean;
+}) {
   const outputRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     outputRef.current?.scrollTo({ top: outputRef.current.scrollHeight, behavior: 'auto' });
   }, [content]);
+
+  if (compact) {
+    return (
+      <LiveAnsiBlock
+        containerRef={outputRef}
+        text={content.trim() || 'Waiting for session output…'}
+        ansiText={contentAnsi}
+        className="scrollbar-thin h-full min-h-0 overflow-auto whitespace-pre-wrap break-words bg-slate-950/80 px-4 py-4 font-mono text-[13px] leading-6 text-slate-300"
+      />
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
@@ -66,7 +127,7 @@ function LiveSessionOutput({ content, contentAnsi }: { content: string; contentA
         containerRef={outputRef}
         text={content.trim() || 'Waiting for session output…'}
         ansiText={contentAnsi}
-        className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-100"
+        className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-300"
       />
     </div>
   );
@@ -79,7 +140,7 @@ function LiveSessionStatus({ status, statusAnsi }: { status: string; statusAnsi?
       <LiveAnsiBlock
         text={status || 'Session active'}
         ansiText={statusAnsi}
-        className="scrollbar-thin max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-200"
+        className="scrollbar-thin max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-300"
       />
     </div>
   );
@@ -286,6 +347,7 @@ function LiveSessionInputBridge({
   onSendText,
   onSendKeystrokes,
   sendingText,
+  compact,
 }: {
   sessionId: string;
   provider: ConversationTimeline['conversation']['provider'];
@@ -295,6 +357,7 @@ function LiveSessionInputBridge({
   onSendText: (sessionId: string, text: string) => Promise<boolean>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   sendingText: boolean;
+  compact: boolean;
 }) {
   const bridgeInputText = sanitizeBridgeInputText(provider, inputText);
   const [firstPrompt, setFirstPrompt] = useState('');
@@ -541,11 +604,6 @@ function LiveSessionInputBridge({
   return (
     <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4">
       <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">Live input bridge</div>
-      <div className="mb-3 text-sm text-slate-400">
-        {textBypassEnabled
-          ? 'Text bypass is on. Characters stream straight into the hidden session as you type.'
-          : 'Text bypass is off. Characters stay local in the bridge until you press Enter, which removes typing latency.'}
-      </div>
       <textarea
         ref={captureRef}
         value={textBypassEnabled ? bridgeInputText : draftText}
@@ -614,7 +672,10 @@ function LiveSessionInputBridge({
         }}
         placeholder={(textBypassEnabled ? bridgeInputText : draftText) ? undefined : 'Type directly into the live session…'}
         rows={3}
-        className="h-24 w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
+        className={clsx(
+          'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
+          compact ? 'h-48' : 'h-24',
+        )}
       />
       <div className="mt-3 flex flex-wrap gap-2">
         {specialKeyButtons.map((button) => (
@@ -656,6 +717,7 @@ interface ConversationPaneProps {
   selectedProvider?: ProviderId;
   timeline?: ConversationTimeline;
   loading: boolean;
+  workMode: boolean;
   onBind: () => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSendText: (sessionId: string, text: string) => Promise<boolean>;
@@ -675,6 +737,7 @@ export function ConversationPane({
   selectedProvider,
   timeline,
   loading,
+  workMode,
   onBind,
   onRelease,
   onSendText,
@@ -691,6 +754,7 @@ export function ConversationPane({
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
+  const compactBoundLayout = workMode && liveMode;
 
   useEffect(() => {
     if (liveMode) {
@@ -710,13 +774,46 @@ export function ConversationPane({
         </div>
       );
     }
+    if (workMode) {
+      return (
+        <div className="flex h-full items-center justify-center px-6 text-center">
+          <div className="max-w-md">
+            <div className="text-lg font-medium text-slate-100">Work mode</div>
+            <div className="mt-2 text-sm text-slate-400">Select a bound session from the left pane or start a new Codex or Claude session there.</div>
+          </div>
+        </div>
+      );
+    }
     return <ExplorerPane projects={projects} project={project} selectedProvider={selectedProvider} />;
+  }
+
+  if (workMode && !liveMode) {
+    return (
+      <div className="flex h-full items-center justify-center px-6 text-center">
+        <div className="max-w-md">
+          <div className="text-lg font-medium text-slate-100">{timeline.conversation.title}</div>
+          <div className="mt-2 text-sm text-slate-400">This conversation is not currently bound. Start a new session from the left pane, or bind this one to continue working here.</div>
+          <div className="mt-5">
+            <button
+              type="button"
+              onClick={() => void onBind()}
+              disabled={binding}
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
+            >
+              <PlugZap className="h-4 w-4" />
+              Bind / resume
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const proxyLinks = project?.allowedLocalhostPorts ?? [];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {!compactBoundLayout && (
       <div className="border-b border-slate-800 bg-slate-950/90 px-4 py-4 backdrop-blur">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -781,18 +878,25 @@ export function ConversationPane({
           </div>
         )}
       </div>
+      )}
 
       <div
         ref={scrollRef}
         className={clsx(
-          'flex-1 min-h-0 px-4 py-5',
-          liveMode ? 'overflow-hidden' : 'scrollbar-thin space-y-4 overflow-y-auto',
+          'flex-1 min-h-0',
+          compactBoundLayout
+            ? 'overflow-hidden'
+            : liveMode
+              ? 'overflow-hidden px-4 py-5'
+              : 'scrollbar-thin space-y-4 overflow-y-auto px-4 py-5',
         )}
       >
         {loading ? (
           <div className="text-sm text-slate-400">Loading conversation…</div>
         ) : liveMode && liveScreen ? (
-          <LiveSessionOutput content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} />
+          compactBoundLayout
+            ? <LiveSessionOutputBlock content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} compact />
+            : <LiveSessionOutput content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} />
         ) : timeline.messages.length > 0 ? (
           <div className="space-y-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
@@ -821,6 +925,7 @@ export function ConversationPane({
           onSendText={onSendText}
           onSendKeystrokes={onSendKeystrokes}
           sendingText={sendingText}
+          compact={compactBoundLayout}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">

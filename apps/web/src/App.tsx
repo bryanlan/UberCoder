@@ -34,6 +34,7 @@ function AppShell() {
   const location = useLocation();
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
+  const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -363,6 +364,8 @@ function AppShell() {
         tree={treeQuery.data}
         open={navOpen}
         onClose={closeSidebarIfMobile}
+        workMode={workMode}
+        onToggleWorkMode={() => setWorkMode((current) => !current)}
         onNewConversation={handleNewConversation}
         onRenameConversation={handleRenameConversation}
         creatingConversationKey={creatingConversationKey}
@@ -412,13 +415,13 @@ function AppShell() {
           </div>
         </header>
 
-        {eventError && (
+        {!workMode && eventError && (
           <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6">
             <AlertTriangle className="h-4 w-4" />
             {eventError}
           </div>
         )}
-        {actionError && (
+        {!workMode && actionError && (
           <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 lg:mx-6">
             <AlertTriangle className="h-4 w-4" />
             {actionError}
@@ -435,6 +438,7 @@ function AppShell() {
               selectedProvider={selectedProvider}
               timeline={timelineQuery.data}
               loading={timelineQuery.isLoading}
+              workMode={workMode}
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSendText={handleSendText}

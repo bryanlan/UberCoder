@@ -25,6 +25,8 @@ interface SidebarProps {
   tree?: TreeResponse;
   open: boolean;
   onClose: () => void;
+  workMode: boolean;
+  onToggleWorkMode: () => void;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
   creatingConversationKey?: string;
@@ -38,6 +40,7 @@ function ConversationLink({
   provider,
   conversationRef,
   title,
+  prefixLabel,
   isBound,
   onClose,
   onRenameConversation,
@@ -47,6 +50,7 @@ function ConversationLink({
   provider: ProviderId;
   conversationRef: string;
   title: string;
+  prefixLabel?: string;
   isBound: boolean;
   onClose: () => void;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
@@ -139,7 +143,10 @@ function ConversationLink({
         )}
       >
         <span className={clsx('h-2.5 w-2.5 rounded-full', isBound ? 'bg-emerald-400' : 'bg-transparent border border-slate-700')} />
-        <span className="line-clamp-1">{title}</span>
+        {prefixLabel ? (
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
+        ) : null}
+        <span className="line-clamp-1 min-w-0">{title}</span>
       </Link>
       <button
         type="button"
@@ -157,6 +164,8 @@ export function Sidebar({
   tree,
   open,
   onClose,
+  workMode,
+  onToggleWorkMode,
   onNewConversation,
   onRenameConversation,
   creatingConversationKey,
@@ -166,17 +175,18 @@ export function Sidebar({
 }: SidebarProps) {
   const location = useLocation();
   const creatingAnyConversation = Boolean(creatingConversationKey);
-  const [showBoundOnly, setShowBoundOnly] = useLocalStorageBoolean('agent-console:sidebar-bound-only', false);
   const [sortByRecency, setSortByRecency] = useLocalStorageBoolean('agent-console:sidebar-recency-sort', false);
+  const [providerPickerProjectSlug, setProviderPickerProjectSlug] = useState<string>();
+  const autoSortByRecency = workMode || sortByRecency;
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
   const visibleProjects = (tree?.projects ?? [])
     .map((project) => {
       const providerEntries = (['codex', 'claude'] as const).map((provider) => {
         const conversations = project.providers[provider].conversations
-          .filter((conversation) => !showBoundOnly || conversation.isBound)
+          .filter((conversation) => !workMode || conversation.isBound)
           .sort((a, b) => {
-            if (!sortByRecency) {
+            if (!autoSortByRecency) {
               return b.updatedAt.localeCompare(a.updatedAt);
             }
             const aSession = boundSessionMap.get(`${project.slug}:${provider}:${a.ref}`);
@@ -187,12 +197,27 @@ export function Sidebar({
           });
         return [provider, { ...project.providers[provider], conversations }] as const;
       });
+      const combinedConversations = (['codex', 'claude'] as const)
+        .flatMap((provider) => project.providers[provider].conversations.map((conversation) => ({ provider, conversation })))
+        .filter(({ conversation }) => !workMode || conversation.isBound)
+        .sort((a, b) => {
+          const aSession = boundSessionMap.get(`${project.slug}:${a.provider}:${a.conversation.ref}`);
+          const bSession = boundSessionMap.get(`${project.slug}:${b.provider}:${b.conversation.ref}`);
+          const aTimestamp = autoSortByRecency
+            ? (aSession?.lastActivityAt ?? aSession?.updatedAt ?? a.conversation.updatedAt)
+            : a.conversation.updatedAt;
+          const bTimestamp = autoSortByRecency
+            ? (bSession?.lastActivityAt ?? bSession?.updatedAt ?? b.conversation.updatedAt)
+            : b.conversation.updatedAt;
+          return bTimestamp.localeCompare(aTimestamp);
+        });
       return {
         ...project,
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
+        combinedConversations,
       };
     })
-    .filter((project) => !showBoundOnly || (['codex', 'claude'] as const).some((provider) => project.providers[provider].conversations.length > 0));
+    .filter((project) => !workMode || project.combinedConversations.length > 0);
   return (
     <>
       <div className={clsx('fixed inset-0 z-20 bg-slate-950/70 lg:hidden', open ? 'block' : 'hidden')} onClick={onClose} />
@@ -220,118 +245,117 @@ export function Sidebar({
           <div className="flex flex-wrap gap-2 border-b border-slate-800 px-4 py-3">
             <button
               type="button"
-              onClick={() => setShowBoundOnly((current) => !current)}
+              onClick={onToggleWorkMode}
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition',
-                showBoundOnly
+                workMode
                   ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
-              Bound only
+              Work mode
             </button>
-            <button
-              type="button"
-              onClick={() => setSortByRecency((current) => !current)}
-              className={clsx(
-                'rounded-full border px-3 py-1.5 text-xs font-medium transition',
-                sortByRecency
-                  ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
-                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-              )}
-            >
-              Auto sort by recency
-            </button>
+            {!workMode && (
+              <button
+                type="button"
+                onClick={() => setSortByRecency((current) => !current)}
+                className={clsx(
+                  'rounded-full border px-3 py-1.5 text-xs font-medium transition',
+                  sortByRecency
+                    ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
+                    : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+                )}
+              >
+                Auto sort by recency
+              </button>
+            )}
           </div>
           <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
             {visibleProjects.length ? visibleProjects.map((project) => (
-              <section key={project.slug} className="mb-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-3 shadow-panel">
-                <Link
-                  to={`/projects/${encodeURIComponent(project.slug)}`}
-                  onClick={onClose}
-                  className={clsx(
-                    'mb-3 flex items-start gap-3 rounded-2xl p-2 transition',
-                    location.pathname === `/projects/${encodeURIComponent(project.slug)}`
-                      ? 'bg-sky-500/10'
-                      : 'hover:bg-slate-800/60',
-                  )}
-                >
-                  <div className="mt-0.5 rounded-xl border border-slate-700 bg-slate-900 p-2 text-sky-300">
-                    <FolderTree className="h-4 w-4" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium">{project.displayName}</div>
-                    <div className="truncate text-xs text-slate-400">{project.path}</div>
+              <section key={project.slug} className="mb-4">
+                <div className="flex items-start justify-between gap-3">
+                  <Link
+                    to={`/projects/${encodeURIComponent(project.slug)}`}
+                    onClick={onClose}
+                    className={clsx(
+                      'flex min-w-0 flex-1 items-center gap-3 rounded-xl px-2 py-1.5 transition',
+                      location.pathname === `/projects/${encodeURIComponent(project.slug)}`
+                        ? 'bg-sky-500/10 text-sky-100'
+                        : 'text-slate-100 hover:bg-slate-800/60',
+                    )}
+                  >
+                    <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
+                    <div className="min-w-0 flex-1 truncate font-medium">{project.displayName}</div>
+                  </Link>
+                  <div className="flex shrink-0 items-center gap-2">
                     {project.tags.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
+                      <div className="hidden max-w-[8rem] flex-wrap justify-end gap-1.5 xl:flex">
                         {project.tags.map((tag) => (
                           <span key={tag} className="rounded-full border border-slate-700 px-2 py-0.5 text-[11px] text-slate-300">{tag}</span>
                         ))}
                       </div>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setProviderPickerProjectSlug((current) => current === project.slug ? undefined : project.slug)}
+                      disabled={creatingAnyConversation}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                      aria-label={`New conversation in ${project.displayName}`}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      {creatingConversationKey?.startsWith(`${project.slug}:`) ? 'Starting…' : 'New'}
+                    </button>
                   </div>
-                </Link>
-
-                <div className="space-y-3">
-                  {(['codex', 'claude'] as const)
-                    .filter((provider) => !showBoundOnly || project.providers[provider].conversations.length > 0)
-                    .map((provider) => {
-                    const meta = providerMeta(provider);
-                    const Icon = meta.icon;
-                    const conversations = project.providers[provider].conversations;
-                    const creationKey = `${project.slug}:${provider}`;
-                    const creating = creatingConversationKey === creationKey;
-                    return (
-                      <div key={provider} className="rounded-xl border border-slate-800 bg-slate-900/90 p-2">
-                        <div className="mb-2 flex items-center justify-between gap-2 px-1">
-                          <Link
-                            to={`/projects/${encodeURIComponent(project.slug)}/${provider}`}
-                            onClick={onClose}
-                            className={clsx(
-                              'flex items-center gap-2 rounded-lg px-2 py-1 text-sm font-medium transition',
-                              location.pathname === `/projects/${encodeURIComponent(project.slug)}/${provider}`
-                                ? 'bg-sky-500/10 text-sky-100'
-                                : 'text-slate-100 hover:bg-slate-800',
-                            )}
-                          >
-                            <Icon className="h-4 w-4 text-sky-300" />
-                            {meta.label}
-                          </Link>
-                          <button
-                            type="button"
-                            onClick={() => onNewConversation(project.slug, provider)}
-                            disabled={creatingAnyConversation}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            <Plus className="h-3.5 w-3.5" />
-                            {creating ? 'Starting…' : 'New'}
-                          </button>
-                        </div>
-                        <div className="space-y-1">
-                          {conversations.length > 0 ? conversations.map((conversation) => (
-                            <ConversationLink
-                              key={conversation.ref}
-                              project={project}
-                              provider={provider}
-                              conversationRef={conversation.ref}
-                              title={conversation.title}
-                              isBound={conversation.isBound}
-                              onClose={onClose}
-                              onRenameConversation={onRenameConversation}
-                              renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
-                            />
-                          )) : (
-                            <div className="rounded-xl px-3 py-2 text-sm text-slate-500">No conversations indexed yet.</div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+                </div>
+                {providerPickerProjectSlug === project.slug && (
+                  <div className="ml-7 mt-2 flex flex-wrap gap-2">
+                    {(['codex', 'claude'] as const).map((provider) => {
+                      const meta = providerMeta(provider);
+                      const Icon = meta.icon;
+                      return (
+                        <button
+                          key={provider}
+                          type="button"
+                          onClick={() => {
+                            setProviderPickerProjectSlug(undefined);
+                            onNewConversation(project.slug, provider);
+                          }}
+                          disabled={creatingAnyConversation}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <Icon className="h-3.5 w-3.5 text-sky-300" />
+                          {meta.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
+                  {project.combinedConversations.length > 0 ? (
+                    <div className="space-y-1">
+                      {project.combinedConversations.map(({ provider, conversation }) => (
+                        <ConversationLink
+                          key={`${provider}:${conversation.ref}`}
+                          project={project}
+                          provider={provider}
+                          conversationRef={conversation.ref}
+                          title={conversation.title}
+                          prefixLabel={`${provider.toUpperCase()}:`}
+                          isBound={conversation.isBound}
+                          onClose={onClose}
+                          onRenameConversation={onRenameConversation}
+                          renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="px-3 py-2 text-sm text-slate-500">No conversations indexed yet.</div>
+                  )}
                 </div>
               </section>
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
-                {showBoundOnly ? 'No bound conversations are visible right now.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
+                {workMode ? 'No bound sessions are active right now.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
               </div>
             )}
           </div>
