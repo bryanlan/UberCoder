@@ -267,6 +267,16 @@ const specialKeyButtons = [
   { label: 'Tab', keys: ['Tab'] },
 ] satisfies Array<{ label: string; keys: SessionKeyToken[] }>;
 
+function sanitizeBridgeInputText(
+  provider: ConversationTimeline['conversation']['provider'],
+  inputText: string,
+): string {
+  if (provider === 'codex' && inputText.trim() === 'Explain this codebase') {
+    return '';
+  }
+  return inputText;
+}
+
 function LiveSessionInputBridge({
   sessionId,
   provider,
@@ -286,15 +296,16 @@ function LiveSessionInputBridge({
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   sendingText: boolean;
 }) {
+  const bridgeInputText = sanitizeBridgeInputText(provider, inputText);
   const [firstPrompt, setFirstPrompt] = useState('');
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
-  const [draftText, setDraftText] = useState(inputText);
+  const [draftText, setDraftText] = useState(bridgeInputText);
   const [draftDirty, setDraftDirty] = useState(false);
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingTextRef = useRef('');
   const flushTimerRef = useRef<number | undefined>(undefined);
-  const committedInputRef = useRef(inputText);
+  const committedInputRef = useRef(bridgeInputText);
 
   const needsBufferedFirstCodexTurn =
     provider === 'codex'
@@ -309,18 +320,18 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     pendingTextRef.current = '';
-    committedInputRef.current = inputText;
+    committedInputRef.current = bridgeInputText;
     setTextBypassEnabled(false);
-    setDraftText(inputText);
+    setDraftText(bridgeInputText);
     setDraftDirty(false);
   }, [sessionId]);
 
   useEffect(() => {
     if (!textBypassEnabled && !draftDirty) {
-      committedInputRef.current = inputText;
-      setDraftText(inputText);
+      committedInputRef.current = bridgeInputText;
+      setDraftText(bridgeInputText);
     }
-  }, [draftDirty, inputText, textBypassEnabled]);
+  }, [bridgeInputText, draftDirty, textBypassEnabled]);
 
   useEffect(() => () => {
     if (flushTimerRef.current !== undefined) {
@@ -333,13 +344,13 @@ function LiveSessionInputBridge({
     if (!capture) {
       return;
     }
-    const value = textBypassEnabled ? inputText : draftText;
+    const value = textBypassEnabled ? bridgeInputText : draftText;
     if (document.activeElement === capture) {
       const end = value.length;
       capture.setSelectionRange(end, end);
     }
     capture.scrollTop = capture.scrollHeight;
-  }, [draftText, inputText, textBypassEnabled]);
+  }, [bridgeInputText, draftText, textBypassEnabled]);
 
   function queueKeystrokes(payload: SessionKeystrokeRequest): Promise<boolean> {
     const task = keyQueueRef.current
@@ -444,8 +455,8 @@ function LiveSessionInputBridge({
       if (!ok) {
         return;
       }
-      committedInputRef.current = inputText;
-      setDraftText(inputText);
+      committedInputRef.current = bridgeInputText;
+      setDraftText(bridgeInputText);
       setDraftDirty(false);
       setTextBypassEnabled(false);
       captureRef.current?.focus();
@@ -537,7 +548,7 @@ function LiveSessionInputBridge({
       </div>
       <textarea
         ref={captureRef}
-        value={textBypassEnabled ? inputText : draftText}
+        value={textBypassEnabled ? bridgeInputText : draftText}
         onChange={() => undefined}
         onBlur={() => {
           if (textBypassEnabled) {
@@ -601,7 +612,7 @@ function LiveSessionInputBridge({
             }
           }
         }}
-        placeholder={(textBypassEnabled ? inputText : draftText) ? undefined : 'Type directly into the live session…'}
+        placeholder={(textBypassEnabled ? bridgeInputText : draftText) ? undefined : 'Type directly into the live session…'}
         rows={3}
         className="h-24 w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400"
       />
