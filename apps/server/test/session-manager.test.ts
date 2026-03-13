@@ -367,4 +367,25 @@ describe('SessionManager', () => {
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('"type":"user-input"');
     db.close();
   });
+
+  it('forces color output for tmux-launched provider sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'conv-color',
+      title: 'Color session',
+      kind: 'conversation',
+    });
+
+    expect(tmux.createdCommands[0]).toContain('unset CLAUDECODE NO_COLOR');
+    expect(tmux.createdCommands[0]).toContain("export FORCE_COLOR='1'");
+    expect(tmux.createdCommands[0]).toContain("export CLICOLOR_FORCE='1'");
+    db.close();
+  });
 });

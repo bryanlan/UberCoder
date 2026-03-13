@@ -374,6 +374,11 @@ function LiveSessionInputBridge({
     provider === 'codex'
     && conversationKind === 'pending'
     && typeof rawMetadata?.lastUserInputHash !== 'string';
+  const showingPrefilledPrompt =
+    !textBypassEnabled
+    && !draftDirty
+    && draftText === bridgeInputText
+    && bridgeInputText.length > 0;
 
   useEffect(() => {
     if (!needsBufferedFirstCodexTurn) {
@@ -409,11 +414,19 @@ function LiveSessionInputBridge({
     }
     const value = textBypassEnabled ? bridgeInputText : draftText;
     if (document.activeElement === capture) {
-      const end = value.length;
-      capture.setSelectionRange(end, end);
+      if (textBypassEnabled) {
+        const end = value.length;
+        capture.setSelectionRange(end, end);
+      } else if (showingPrefilledPrompt) {
+        capture.setSelectionRange(0, 0);
+      }
     }
-    capture.scrollTop = capture.scrollHeight;
-  }, [bridgeInputText, draftText, textBypassEnabled]);
+    if (textBypassEnabled) {
+      capture.scrollTop = capture.scrollHeight;
+    } else if (showingPrefilledPrompt) {
+      capture.scrollTop = 0;
+    }
+  }, [bridgeInputText, draftText, showingPrefilledPrompt, textBypassEnabled]);
 
   function queueKeystrokes(payload: SessionKeystrokeRequest): Promise<boolean> {
     const task = keyQueueRef.current
@@ -454,14 +467,12 @@ function LiveSessionInputBridge({
     scheduleBufferedTextFlush();
   }
 
-  function appendDraftText(text: string): void {
+  function replaceDraftText(text: string): void {
     setDraftDirty(true);
-    setDraftText((current) => current + text);
-  }
-
-  function removeDraftText(): void {
-    setDraftDirty(true);
-    setDraftText((current) => current.slice(0, -1));
+    setDraftText(text);
+    window.requestAnimationFrame(() => {
+      captureRef.current?.setSelectionRange(text.length, text.length);
+    });
   }
 
   async function syncDraftToRemote(extraKeys: SessionKeyToken[] = [], options: { clearAfterSend?: boolean } = {}): Promise<boolean> {
@@ -536,7 +547,24 @@ function LiveSessionInputBridge({
     captureRef.current?.focus();
   }
 
-  async function handleSpecialKey(specialKey: SessionKeyToken): Promise<void> {
+  async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
+    if (source === 'button') {
+      if (specialKey === 'Enter') {
+        await syncDraftToRemote(['Enter'], { clearAfterSend: true });
+        return;
+      }
+      if (textBypassEnabled) {
+        const ok = await flushBufferedText();
+        if (!ok) {
+          return;
+        }
+        enqueueKeystrokes({ keys: [specialKey] });
+        return;
+      }
+      await syncDraftAndEnableBypass([specialKey]);
+      return;
+    }
+
     if (specialKey === 'BSpace') {
       if (textBypassEnabled) {
         if (pendingTextRef.current.length > 0) {
@@ -546,7 +574,7 @@ function LiveSessionInputBridge({
         enqueueKeystrokes({ keys: ['BSpace'] });
         return;
       }
-      removeDraftText();
+      replaceDraftText(draftText.slice(0, -1));
       return;
     }
 
@@ -607,39 +635,59 @@ function LiveSessionInputBridge({
       <textarea
         ref={captureRef}
         value={textBypassEnabled ? bridgeInputText : draftText}
-        onChange={() => undefined}
+        onFocus={(event) => {
+          if (textBypassEnabled) {
+            const end = bridgeInputText.length;
+            event.currentTarget.setSelectionRange(end, end);
+            return;
+          }
+          if (showingPrefilledPrompt) {
+            event.currentTarget.setSelectionRange(0, 0);
+          }
+        }}
+        onChange={(event) => {
+          if (textBypassEnabled) {
+            return;
+          }
+          setDraftDirty(true);
+          setDraftText(event.target.value);
+        }}
         onBlur={() => {
           if (textBypassEnabled) {
             void flushBufferedText();
           }
         }}
         onPaste={(event) => {
+          if (!textBypassEnabled) {
+            if (showingPrefilledPrompt) {
+              event.preventDefault();
+              replaceDraftText(event.clipboardData.getData('text'));
+            }
+            return;
+          }
           event.preventDefault();
           const text = event.clipboardData.getData('text');
           if (text) {
-            if (textBypassEnabled) {
-              appendLiteralText(text);
-            } else {
-              appendDraftText(text);
-            }
+            appendLiteralText(text);
           }
         }}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing) {
             return;
           }
-          if (event.ctrlKey && event.key.toLowerCase() === 'c') {
+          if (!textBypassEnabled && showingPrefilledPrompt && event.key === 'Delete') {
             event.preventDefault();
-            if (textBypassEnabled) {
-              void flushBufferedText().then((ok) => {
-                if (!ok) {
-                  return;
-                }
-                enqueueKeystrokes({ keys: ['C-c'] });
-              });
-            } else {
-              void syncDraftAndEnableBypass(['C-c']);
-            }
+            replaceDraftText('');
+            return;
+          }
+          if (textBypassEnabled && event.ctrlKey && event.key.toLowerCase() === 'c') {
+            event.preventDefault();
+            void flushBufferedText().then((ok) => {
+              if (!ok) {
+                return;
+              }
+              enqueueKeystrokes({ keys: ['C-c'] });
+            });
             return;
           }
           const specialKeyMap: Record<string, SessionKeyToken> = {
@@ -654,7 +702,16 @@ function LiveSessionInputBridge({
           };
           const specialKey = specialKeyMap[event.key];
           if (specialKey) {
-            if (!textBypassEnabled && ['Up', 'Down', 'Left', 'Right'].includes(specialKey)) {
+            if (!textBypassEnabled) {
+              if (showingPrefilledPrompt && (specialKey === 'BSpace' || event.key === 'Delete')) {
+                event.preventDefault();
+                replaceDraftText('');
+                return;
+              }
+              if (specialKey === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                void handleSpecialKey('Enter');
+              }
               return;
             }
             event.preventDefault();
@@ -662,12 +719,15 @@ function LiveSessionInputBridge({
             return;
           }
           if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
-            event.preventDefault();
-            if (textBypassEnabled) {
-              appendLiteralText(event.key);
-            } else {
-              appendDraftText(event.key);
+            if (!textBypassEnabled && showingPrefilledPrompt) {
+              event.preventDefault();
+              replaceDraftText(event.key);
+              return;
             }
+          }
+          if (textBypassEnabled && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
+            event.preventDefault();
+            appendLiteralText(event.key);
           }
         }}
         placeholder={(textBypassEnabled ? bridgeInputText : draftText) ? undefined : 'Type directly into the live session…'}
@@ -683,7 +743,7 @@ function LiveSessionInputBridge({
             key={button.label}
             type="button"
             onClick={() => {
-              void handleSpecialKey(button.keys[0]!);
+              void handleSpecialKey(button.keys[0]!, 'button');
               captureRef.current?.focus();
             }}
             className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
