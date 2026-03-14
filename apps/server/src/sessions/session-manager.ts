@@ -6,14 +6,14 @@ import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } fro
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
-import { normalizeComparableText, stableTextHash, truncate } from '../lib/text.js';
+import { normalizeComparableText, normalizeWhitespace, stableTextHash, truncate } from '../lib/text.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
-import { parseSessionScreenSnapshot } from './session-screen.js';
+import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
 
 interface WatchState {
   offset: number;
@@ -24,9 +24,66 @@ interface WatchState {
   flushTimer?: NodeJS.Timeout;
 }
 
+const WORKING_PULSE_GRACE_MS = 4_000;
+const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
+const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
+
+function sessionScreenShowsWorking(screen: SessionScreen): boolean {
+  return [screen.status, screen.statusAnsi ?? '', ...screen.content.split('\n').slice(-8)]
+    .flatMap((block) => block.split('\n'))
+    .map((line) => normalizeWhitespace(line))
+    .some((line) => isWorkingStatusLine(line));
+}
+
+function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const timestamp of timestamps) {
+    if (!timestamp) {
+      continue;
+    }
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed) || parsed <= latestMs) {
+      continue;
+    }
+    latest = timestamp;
+    latestMs = parsed;
+  }
+  return latest;
+}
+
+function isRecentTimestamp(timestamp: string | undefined, referenceTimestamp: string, maxAgeMs: number): boolean {
+  if (!timestamp) {
+    return false;
+  }
+
+  const referenceMs = Date.parse(referenceTimestamp);
+  const valueMs = Date.parse(timestamp);
+  if (!Number.isFinite(referenceMs) || !Number.isFinite(valueMs)) {
+    return false;
+  }
+
+  return referenceMs - valueMs <= maxAgeMs;
+}
+
+function hashScreen(screen: SessionScreen): string {
+  return stableTextHash(
+    `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
+  );
+}
+
+function combinedTextKeySettleWaitMs(text: string): number {
+  const lengthFactorMs = Math.max(0, text.length - 32) * 4;
+  return Math.min(
+    MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS,
+    Math.max(MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS, 450 + lengthFactorMs),
+  );
+}
+
 export class SessionManager {
   private readonly watchers = new Map<string, WatchState>();
   private readonly lastScreenHashes = new Map<string, string>();
+  private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -92,6 +149,8 @@ export class SessionManager {
       updatedAt: now,
       lastActivityAt: now,
       lastOutputAt: undefined,
+      lastCompletedAt: undefined,
+      isWorking: false,
       rawLogPath,
       eventLogPath,
     };
@@ -149,6 +208,7 @@ export class SessionManager {
         ...session,
         status: 'error',
         updatedAt: nowIso(),
+        isWorking: false,
       };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, {
@@ -201,11 +261,24 @@ export class SessionManager {
       throw new Error('Session is no longer running.');
     }
 
-    const beforeSnapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
-    const beforeScreen = parseSessionScreenSnapshot(beforeSnapshot, nowIso());
+    const beforeScreen = await this.captureSessionScreen(liveSession);
+    let latestObservedScreen = beforeScreen;
+    let latestObservedHash = hashScreen(beforeScreen);
 
     if (payload.text) {
       await this.tmuxClient.sendLiteralText(liveSession.tmuxSessionName, payload.text);
+      if (payload.keys?.length) {
+        const textSettledScreen = await this.waitForScreenChange(
+          liveSession,
+          latestObservedHash,
+          combinedTextKeySettleWaitMs(payload.text),
+        );
+        if (textSettledScreen) {
+          latestObservedScreen = textSettledScreen;
+          latestObservedHash = hashScreen(textSettledScreen);
+          this.publishScreenUpdate(liveSession, textSettledScreen);
+        }
+      }
     }
     if (payload.keys?.length) {
       await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
@@ -218,13 +291,13 @@ export class SessionManager {
     };
     this.db.upsertBoundSession(updated);
     await this.emitScreenUpdate(updated, { waitForChange: Boolean(payload.keys?.length) });
-    const afterSnapshot = await this.tmuxClient.capturePane(updated.tmuxSessionName).catch(() => '');
-    const afterScreen = parseSessionScreenSnapshot(afterSnapshot, nowIso());
+    const afterScreen = await this.captureSessionScreen(updated);
+    this.publishScreenUpdate(updated, afterScreen);
     this.appendDebugTrace(updated, {
       action: 'send-keystrokes',
       text: payload.text,
       keys: payload.keys,
-      before: beforeScreen,
+      before: latestObservedScreen,
       after: afterScreen,
     });
     return updated;
@@ -255,7 +328,7 @@ export class SessionManager {
 
   async releaseSession(sessionId: string): Promise<void> {
     const session = this.mustGetSession(sessionId);
-    const releasing = { ...session, status: 'releasing' as const, updatedAt: nowIso() };
+    const releasing = { ...session, status: 'releasing' as const, updatedAt: nowIso(), isWorking: false };
     this.db.upsertBoundSession(releasing);
     this.eventBus.emit({ type: 'session.updated', session: releasing });
     this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
@@ -278,7 +351,7 @@ export class SessionManager {
 
     const stillAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => true);
     if (stillAlive) {
-      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso() };
+      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to release tmux session cleanly.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
@@ -287,7 +360,7 @@ export class SessionManager {
 
     this.stopWatching(session.id);
     this.lastScreenHashes.delete(session.id);
-    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso() };
+    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(session.conversationRef);
@@ -315,9 +388,11 @@ export class SessionManager {
       return undefined;
     }
     const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
+    const screen = this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso()));
+    this.syncSessionScreenState(this.mustGetSession(liveSession.id), screen);
     return {
-      session: liveSession,
-      screen: this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso())),
+      session: this.mustGetSession(liveSession.id),
+      screen,
     };
   }
 
@@ -344,6 +419,7 @@ export class SessionManager {
         ...session,
         status: terminalStatus,
         updatedAt: nowIso(),
+        isWorking: false,
       };
       this.db.upsertBoundSession(ended);
       if (terminalStatus === 'error') {
@@ -370,6 +446,9 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     this.watchSessionOutput(refreshed);
+    if (!this.lastScreenHashes.has(refreshed.id)) {
+      await this.emitScreenUpdate(refreshed);
+    }
     return refreshed;
   }
 
@@ -471,6 +550,70 @@ export class SessionManager {
     }
     state?.watcher?.close();
     this.watchers.delete(sessionId);
+    this.clearWorkingExpiry(sessionId);
+  }
+
+  private clearWorkingExpiry(sessionId: string): void {
+    const timer = this.workingIdleTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.workingIdleTimers.delete(sessionId);
+    }
+  }
+
+  private scheduleWorkingExpiry(sessionId: string, heartbeatAt: string): void {
+    const heartbeatMs = Date.parse(heartbeatAt);
+    if (!Number.isFinite(heartbeatMs)) {
+      this.clearWorkingExpiry(sessionId);
+      return;
+    }
+
+    const existing = this.workingIdleTimers.get(sessionId);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const delayMs = Math.max(0, heartbeatMs + WORKING_PULSE_GRACE_MS - Date.now()) + 100;
+    const timer = setTimeout(() => {
+      this.workingIdleTimers.delete(sessionId);
+      void this.handleWorkingIdleExpiry(sessionId, heartbeatAt);
+    }, delayMs);
+    this.workingIdleTimers.set(sessionId, timer);
+  }
+
+  private async handleWorkingIdleExpiry(sessionId: string, expectedHeartbeatAt: string): Promise<void> {
+    try {
+      const session = this.mustGetSession(sessionId);
+      if (!session.isWorking) {
+        this.clearWorkingExpiry(sessionId);
+        return;
+      }
+
+      const latestHeartbeatAt = latestTimestamp(session.lastOutputAt, session.lastActivityAt);
+      if (latestHeartbeatAt && latestHeartbeatAt !== expectedHeartbeatAt) {
+        this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
+        return;
+      }
+
+      if (isRecentTimestamp(latestHeartbeatAt, nowIso(), WORKING_PULSE_GRACE_MS)) {
+        if (latestHeartbeatAt) {
+          this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
+        }
+        return;
+      }
+
+      this.clearWorkingExpiry(sessionId);
+      const completedAt = latestTimestamp(session.lastOutputAt, session.lastCompletedAt, session.lastActivityAt) ?? nowIso();
+      const updated: BoundSession = {
+        ...session,
+        updatedAt: nowIso(),
+        isWorking: false,
+        lastCompletedAt: completedAt,
+      };
+      this.db.upsertBoundSession(updated);
+      this.eventBus.emit({ type: 'session.updated', session: updated });
+    } catch {
+      this.clearWorkingExpiry(sessionId);
+    }
   }
 
   private scheduleRawOutputFlush(sessionId: string, state: WatchState): void {
@@ -489,8 +632,17 @@ export class SessionManager {
     if (!chunk.trim()) return;
     const now = nowIso();
     try {
-      const updated = { ...this.mustGetSession(sessionId), updatedAt: now, lastActivityAt: now, lastOutputAt: now };
+      const session = this.mustGetSession(sessionId);
+      const updated = {
+        ...session,
+        updatedAt: now,
+        lastActivityAt: now,
+        lastOutputAt: now,
+      };
       this.db.upsertBoundSession(updated);
+      if (session.isWorking) {
+        this.scheduleWorkingExpiry(sessionId, now);
+      }
       this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       void this.emitScreenUpdate(updated);
     } catch {
@@ -498,34 +650,99 @@ export class SessionManager {
     }
   }
 
-  private async emitScreenUpdate(session: BoundSession, options: { waitForChange?: boolean } = {}): Promise<void> {
-    const previousHash = this.lastScreenHashes.get(session.id);
-    const deadline = options.waitForChange && previousHash ? Date.now() + 220 : Date.now();
+  private publishScreenUpdate(session: BoundSession, screen: SessionScreen): boolean {
+    const nextHash = hashScreen(screen);
+    if (this.lastScreenHashes.get(session.id) === nextHash) {
+      return false;
+    }
+
+    this.lastScreenHashes.set(session.id, nextHash);
+    this.syncSessionScreenState(this.mustGetSession(session.id), screen);
+    const currentSession = this.mustGetSession(session.id);
+    this.eventBus.emit({
+      type: 'session.screen-updated',
+      sessionId: currentSession.id,
+      projectSlug: currentSession.projectSlug,
+      provider: currentSession.provider,
+      conversationRef: currentSession.conversationRef,
+      screen,
+      timestamp: screen.capturedAt,
+    });
+    return true;
+  }
+
+  private async captureSessionScreen(session: BoundSession): Promise<SessionScreen> {
+    const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
+    return this.decorateScreenForSession(session, parseSessionScreenSnapshot(snapshot, nowIso()));
+  }
+
+  private async waitForScreenChange(
+    session: BoundSession,
+    previousHash: string | undefined,
+    timeoutMs: number,
+  ): Promise<SessionScreen | undefined> {
+    const deadline = previousHash ? Date.now() + timeoutMs : Date.now();
 
     while (true) {
-      const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
-      const screen = this.decorateScreenForSession(session, parseSessionScreenSnapshot(snapshot, nowIso()));
-      const nextHash = stableTextHash(
-        `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
-      );
-      if (previousHash !== nextHash) {
-        this.lastScreenHashes.set(session.id, nextHash);
-        this.eventBus.emit({
-          type: 'session.screen-updated',
-          sessionId: session.id,
-          projectSlug: session.projectSlug,
-          provider: session.provider,
-          conversationRef: session.conversationRef,
-          screen,
-          timestamp: screen.capturedAt,
-        });
-        return;
+      const screen = await this.captureSessionScreen(session);
+      if (previousHash !== hashScreen(screen)) {
+        return screen;
       }
-      if (!options.waitForChange || Date.now() >= deadline) {
-        return;
+      if (!previousHash || Date.now() >= deadline) {
+        return undefined;
       }
       await sleep(35);
     }
+  }
+
+  private async emitScreenUpdate(session: BoundSession, options: { waitForChange?: boolean } = {}): Promise<void> {
+    const previousHash = this.lastScreenHashes.get(session.id);
+    const screen = await this.waitForScreenChange(
+      session,
+      previousHash,
+      options.waitForChange ? 220 : 0,
+    );
+    if (screen) {
+      this.publishScreenUpdate(session, screen);
+    }
+  }
+
+  private syncSessionScreenState(session: BoundSession, screen: SessionScreen): void {
+    const screenShowsWorking = sessionScreenShowsWorking(screen);
+    const workingHeartbeatAt = latestTimestamp(
+      session.lastOutputAt,
+      screenShowsWorking ? session.lastActivityAt : undefined,
+    );
+    const nextIsWorking = screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, screen.capturedAt, WORKING_PULSE_GRACE_MS);
+    const nextIdleCompletion = latestTimestamp(
+      session.lastCompletedAt,
+      session.lastOutputAt,
+    ) ?? session.startedAt ?? screen.capturedAt;
+
+    if (nextIsWorking && workingHeartbeatAt) {
+      this.scheduleWorkingExpiry(session.id, workingHeartbeatAt);
+    } else {
+      this.clearWorkingExpiry(session.id);
+    }
+
+    const nextLastCompletedAt = nextIsWorking
+      ? session.lastCompletedAt
+      : session.isWorking
+        ? latestTimestamp(screen.capturedAt, session.lastOutputAt, session.lastCompletedAt) ?? screen.capturedAt
+        : nextIdleCompletion;
+
+    if (session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt) {
+      return;
+    }
+
+    const tracked: BoundSession = {
+      ...session,
+      updatedAt: screen.capturedAt,
+      isWorking: nextIsWorking,
+      lastCompletedAt: nextLastCompletedAt,
+    };
+    this.db.upsertBoundSession(tracked);
+    this.eventBus.emit({ type: 'session.updated', session: tracked });
   }
 
   private async waitForStartupOutput(session: BoundSession): Promise<void> {

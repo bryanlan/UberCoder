@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { PROVIDERS, type ConversationSummary, type ProviderId } from '@agent-console/shared';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
+import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
+import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
 import { uniqueBy } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
@@ -43,7 +45,6 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
-    await sessions.recoverSessions();
     const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
     const providerId = parseProvider(providerRaw);
     const project = await projectService.getProjectBySlug(projectSlug);
@@ -64,7 +65,9 @@ export async function registerConversationRoutes(
     let allMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
 
     if (!pendingSummary || adoptedConversationRef) {
-      const conversation = await provider.getConversation(project, resolvedConversationRef, providerSettings);
+      const cachedConversation = summary ? await loadProviderConversationFromSummary(summary) : null;
+      const conversation = cachedConversation
+        ?? await provider.getConversation(project, resolvedConversationRef, providerSettings);
       if (conversation) {
         summary = {
           ...conversation.summary,
@@ -102,6 +105,12 @@ export async function registerConversationRoutes(
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+    if (!summary) {
+      if (resolvedBoundSession) {
+        summary = buildSyntheticConversationFromSession(resolvedBoundSession);
+      }
+    }
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });

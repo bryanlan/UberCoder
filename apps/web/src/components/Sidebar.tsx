@@ -1,13 +1,32 @@
-import { Bot, Check, FolderTree, GripVertical, Menu, Pencil, Plus, RefreshCcw, Sparkles, X } from 'lucide-react';
+import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, Menu, Pencil, Plus, RefreshCcw, Sparkles, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useState, type DragEvent } from 'react';
 
+const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
+
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
     ? { label: 'Codex', icon: Sparkles }
     : { label: 'Claude', icon: Bot };
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (globalThis.navigator?.clipboard?.writeText) {
+    await globalThis.navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = globalThis.document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  globalThis.document.body.appendChild(textarea);
+  textarea.select();
+  globalThis.document.execCommand('copy');
+  globalThis.document.body.removeChild(textarea);
 }
 
 interface SidebarProps {
@@ -32,6 +51,18 @@ interface SidebarProps {
   updatingUiPreferences: boolean;
   onRefresh: () => void;
   refreshing: boolean;
+}
+
+type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
+type BoundSessionItem = NonNullable<TreeResponse['boundSessions']>[number];
+
+function getConversationRecencyTimestamp(
+  conversation: ConversationItem,
+  session?: BoundSessionItem,
+): string {
+  return session?.lastCompletedAt
+    ?? session?.startedAt
+    ?? conversation.updatedAt;
 }
 
 function getConversationFreshnessClass(
@@ -233,12 +264,9 @@ function fallbackProjectDisplayName(project: Pick<ProjectSummary, 'path' | 'dire
 
 function ProjectSection({
   project,
-  workMode,
   creatingConversationKey,
   creatingAnyConversation,
-  providerPickerOpen,
-  onToggleProviderPicker,
-  onSelectProvider,
+  onNewConversation,
   onRenameProject,
   renamingProject,
   onClose,
@@ -261,12 +289,9 @@ function ProjectSection({
       indicatorClassName: string;
     }>;
   };
-  workMode: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
-  providerPickerOpen: boolean;
-  onToggleProviderPicker: () => void;
-  onSelectProvider: (provider: ProviderId) => void;
+  onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
   onClose: () => void;
@@ -283,6 +308,7 @@ function ProjectSection({
 }) {
   const location = useLocation();
   const [editingProject, setEditingProject] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [draftName, setDraftName] = useState(project.displayName);
 
   useEffect(() => {
@@ -302,6 +328,12 @@ function ProjectSection({
     if (saved) {
       setEditingProject(false);
     }
+  }
+
+  async function handleCopyPortUrl(port: number): Promise<void> {
+    const url = `${globalThis.location.origin}/proxy/${encodeURIComponent(project.slug)}/${port}/`;
+    await copyTextToClipboard(url);
+    setMenuOpen(false);
   }
 
   return (
@@ -389,50 +421,79 @@ function ProjectSection({
                 ))}
               </div>
             )}
-            {workMode && (
+            <div className="relative">
               <button
                 type="button"
-                onClick={() => setEditingProject(true)}
-                disabled={renamingProject || creatingAnyConversation}
+                onClick={() => setMenuOpen((current) => !current)}
+                disabled={renamingProject}
                 className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                aria-label={`Rename ${project.displayName}`}
+                aria-label={`Project actions for ${project.displayName}`}
               >
-                <Pencil className="h-3.5 w-3.5" />
+                <Menu className="h-3.5 w-3.5" />
               </button>
-            )}
-            <button
-              type="button"
-              onClick={onToggleProviderPicker}
-              disabled={creatingAnyConversation}
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-60"
-              aria-label={`New conversation in ${project.displayName}`}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              {creatingConversationKey?.startsWith(`${project.slug}:`) ? 'Starting…' : 'New'}
-            </button>
+              {menuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-1 min-w-[14rem] rounded-xl border border-slate-800 bg-slate-950/95 p-1 shadow-panel">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      setEditingProject(true);
+                    }}
+                    disabled={renamingProject || creatingAnyConversation}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Pencil className="h-3.5 w-3.5 text-slate-400" />
+                    Rename project
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onClose();
+                      onNewConversation(project.slug, 'codex');
+                    }}
+                    disabled={creatingAnyConversation}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Sparkles className="h-3.5 w-3.5 text-sky-300" />
+                    {creatingConversationKey === `${project.slug}:codex` ? 'Starting Codex…' : 'New Codex conversation'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onClose();
+                      onNewConversation(project.slug, 'claude');
+                    }}
+                    disabled={creatingAnyConversation}
+                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Bot className="h-3.5 w-3.5 text-sky-300" />
+                    {creatingConversationKey === `${project.slug}:claude` ? 'Starting Claude…' : 'New Claude conversation'}
+                  </button>
+                  {project.allowedLocalhostPorts.length > 0 && (
+                    <div className="mt-1 border-t border-slate-800 pt-1">
+                      {project.allowedLocalhostPorts.map((port) => (
+                        <button
+                          key={port}
+                          type="button"
+                          onClick={() => {
+                            void handleCopyPortUrl(port);
+                          }}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+                        >
+                          <LinkIcon className="h-3.5 w-3.5 text-slate-400" />
+                          {`Copy URL :${port}`}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         ) : null}
       </div>
-      {providerPickerOpen && (
-        <div className="ml-7 mt-2 flex flex-wrap gap-2">
-          {(['codex', 'claude'] as const).map((provider) => {
-            const meta = providerMeta(provider);
-            const Icon = meta.icon;
-            return (
-              <button
-                key={provider}
-                type="button"
-                onClick={() => onSelectProvider(provider)}
-                disabled={creatingAnyConversation}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 py-1.5 text-xs text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <Icon className="h-3.5 w-3.5 text-sky-300" />
-                {meta.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
@@ -487,7 +548,6 @@ export function Sidebar({
   refreshing,
 }: SidebarProps) {
   const creatingAnyConversation = Boolean(creatingConversationKey);
-  const [providerPickerProjectSlug, setProviderPickerProjectSlug] = useState<string>();
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -507,8 +567,8 @@ export function Sidebar({
           .sort((a, b) => {
             const aSession = boundSessionMap.get(`${project.slug}:${provider}:${a.ref}`);
             const bSession = boundSessionMap.get(`${project.slug}:${provider}:${b.ref}`);
-            const aTimestamp = aSession?.lastOutputAt ?? aSession?.lastActivityAt ?? aSession?.startedAt ?? aSession?.updatedAt ?? a.updatedAt;
-            const bTimestamp = bSession?.lastOutputAt ?? bSession?.lastActivityAt ?? bSession?.startedAt ?? bSession?.updatedAt ?? b.updatedAt;
+            const aTimestamp = getConversationRecencyTimestamp(a, aSession);
+            const bTimestamp = getConversationRecencyTimestamp(b, bSession);
             return bTimestamp.localeCompare(aTimestamp);
           });
         return [provider, { ...project.providers[provider], conversations }] as const;
@@ -516,7 +576,7 @@ export function Sidebar({
       const combinedConversations = (['codex', 'claude'] as const)
         .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
           const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
-          const freshnessTimestamp = session?.lastOutputAt ?? session?.lastActivityAt ?? session?.startedAt ?? session?.updatedAt ?? conversation.updatedAt;
+          const freshnessTimestamp = getConversationRecencyTimestamp(conversation, session);
           return {
             provider,
             conversation,
@@ -594,7 +654,7 @@ export function Sidebar({
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition',
                 workMode
-                  ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200'
+                  ? enabledToggleClassName
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
@@ -607,7 +667,7 @@ export function Sidebar({
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
                 recentActivitySortEnabled
-                  ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
+                  ? enabledToggleClassName
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
@@ -619,15 +679,9 @@ export function Sidebar({
               <ProjectSection
                 key={project.slug}
                 project={project}
-                workMode={workMode}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
-                providerPickerOpen={providerPickerProjectSlug === project.slug}
-                onToggleProviderPicker={() => setProviderPickerProjectSlug((current) => current === project.slug ? undefined : project.slug)}
-                onSelectProvider={(provider) => {
-                  setProviderPickerProjectSlug(undefined);
-                  onNewConversation(project.slug, provider);
-                }}
+                onNewConversation={onNewConversation}
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}
                 onClose={onClose}

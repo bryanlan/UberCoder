@@ -20,6 +20,63 @@ function ensureProviderFlag(argv: string[], flag: string): string[] {
 export class CodexProvider implements ProviderAdapter {
   readonly id = 'codex' as const;
 
+  async listConversationsForProjects(
+    projects: ActiveProject[],
+    settings: MergedProviderSettings,
+  ): Promise<Map<string, ConversationSummary[]>> {
+    const results = new Map(projects.map((project) => [project.slug, [] as ConversationSummary[]]));
+    if (projects.length === 0) {
+      return results;
+    }
+
+    const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
+    if (!(await pathExists(sessionsRoot))) {
+      return results;
+    }
+
+    const files = await listFilesRecursive(sessionsRoot, (candidate) => candidate.endsWith('.jsonl'));
+    const fallbackProject = projects[0]!;
+
+    for (const filePath of files) {
+      const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
+      const candidateProjects = authoritativeProjectPaths.size > 0
+        ? projects.filter((project) => conversationBelongsToProject(project.matchPaths, authoritativeProjectPaths))
+        : projects;
+      if (candidateProjects.length === 0) {
+        continue;
+      }
+
+      const conversationRef = deriveConversationRef(filePath);
+      const parsed = await parseCodexConversationFile({
+        filePath,
+        provider: this.id,
+        projectSlug: candidateProjects[0]?.slug ?? fallbackProject.slug,
+        conversationRef,
+      });
+      const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
+      if (projectPaths.size === 0) {
+        continue;
+      }
+
+      for (const project of candidateProjects) {
+        if (!conversationBelongsToProject(project.matchPaths, projectPaths)) {
+          continue;
+        }
+        results.get(project.slug)?.push({
+          ...parsed.summary,
+          projectSlug: project.slug,
+          degraded: parsed.summary.degraded || parsed.authoritativeProjectPaths.size === 0,
+        });
+      }
+    }
+
+    for (const [projectSlug, conversations] of results) {
+      results.set(projectSlug, conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+    }
+
+    return results;
+  }
+
   async discoverLocalState(_project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>> {
     const codexHome = settings.discoveryRoot;
     const sessionsRoot = path.join(codexHome, 'sessions');
@@ -34,31 +91,7 @@ export class CodexProvider implements ProviderAdapter {
   }
 
   async listConversations(project: ActiveProject, settings: MergedProviderSettings): Promise<ConversationSummary[]> {
-    const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
-    if (!(await pathExists(sessionsRoot))) return [];
-    const files = await listFilesRecursive(sessionsRoot, (candidate) => candidate.endsWith('.jsonl'));
-    const conversations: ConversationSummary[] = [];
-    for (const filePath of files) {
-      const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
-      if (authoritativeProjectPaths.size > 0 && !conversationBelongsToProject(project.matchPaths, authoritativeProjectPaths)) {
-        continue;
-      }
-      const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseCodexConversationFile({
-        filePath,
-        provider: this.id,
-        projectSlug: project.slug,
-        conversationRef,
-      });
-      const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
-      const belongs = conversationBelongsToProject(project.matchPaths, projectPaths);
-      if (!belongs || projectPaths.size === 0) continue;
-      conversations.push({
-        ...parsed.summary,
-        degraded: parsed.summary.degraded || parsed.authoritativeProjectPaths.size === 0,
-      });
-    }
-    return conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return (await this.listConversationsForProjects([project], settings)).get(project.slug) ?? [];
   }
 
   async getConversation(project: ActiveProject, conversationRef: string, settings: MergedProviderSettings): Promise<ProviderConversation | null> {

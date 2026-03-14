@@ -1,19 +1,45 @@
+import path from 'node:path';
 import chokidar, { type FSWatcher } from 'chokidar';
 import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
 import { PROVIDERS } from '@agent-console/shared';
-import type { ConfigService } from '../config/service.js';
+import type { ConfigService, MergedProviderSettings } from '../config/service.js';
 import { AppDatabase } from '../db/database.js';
+import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
 import { nowIso } from '../lib/time.js';
-import { ProjectService } from '../projects/project-service.js';
+import { ProjectService, type ActiveProject } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
+import { CodexProvider } from '../providers/codex-provider.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
+
+const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
+const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
+
+function getProviderRootRefreshDelay(eventName: string, changedPath: string): number | undefined {
+  if (eventName === 'add' || eventName === 'unlink' || eventName === 'addDir' || eventName === 'unlinkDir') {
+    return PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS;
+  }
+
+  if (eventName !== 'change') {
+    return undefined;
+  }
+
+  const baseName = path.basename(changedPath);
+  if (baseName === 'history.jsonl' || changedPath.endsWith('.jsonl')) {
+    return PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS;
+  }
+
+  return undefined;
+}
 
 export class IndexingService {
   private watchers: FSWatcher[] = [];
   private refreshTimer?: NodeJS.Timeout;
+  private refreshDueAt?: number;
   private projectCache: Awaited<ReturnType<ProjectService['listActiveProjects']>> = [];
   private watchConfigSignature?: string;
+  private refreshPromise?: Promise<void>;
+  private refreshQueued = false;
 
   constructor(
     private readonly configService: ConfigService,
@@ -29,31 +55,72 @@ export class IndexingService {
 
   async stop(): Promise<void> {
     clearTimeout(this.refreshTimer);
+    this.refreshTimer = undefined;
+    this.refreshDueAt = undefined;
     await Promise.all(this.watchers.map((watcher) => watcher.close()));
     this.watchers = [];
   }
 
   scheduleRefresh(delayMs = 750): void {
+    const dueAt = Date.now() + delayMs;
+    if (this.refreshTimer && this.refreshDueAt !== undefined && this.refreshDueAt <= dueAt) {
+      return;
+    }
+
     clearTimeout(this.refreshTimer);
+    this.refreshDueAt = dueAt;
     this.refreshTimer = setTimeout(() => {
-      void this.refreshAll();
-    }, delayMs);
+      this.refreshTimer = undefined;
+      this.refreshDueAt = undefined;
+      void this.requestRefresh(true);
+    }, Math.max(0, dueAt - Date.now()));
   }
 
   async refreshAll(): Promise<void> {
+    await this.requestRefresh(false);
+  }
+
+  private async requestRefresh(queueIfRunning: boolean): Promise<void> {
+    if (this.refreshPromise) {
+      if (queueIfRunning) {
+        this.refreshQueued = true;
+      }
+      await this.refreshPromise;
+      return;
+    }
+
+    this.refreshPromise = this.runRefreshLoop()
+      .finally(() => {
+        this.refreshPromise = undefined;
+      });
+    await this.refreshPromise;
+  }
+
+  private async runRefreshLoop(): Promise<void> {
+    do {
+      this.refreshQueued = false;
+      await this.performRefreshAll();
+    } while (this.refreshQueued);
+  }
+
+  private async performRefreshAll(): Promise<void> {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
-    this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
     const pendingConversations = this.db.listPendingConversations();
-    for (const project of projects) {
-      for (const providerId of PROVIDERS) {
+    for (const providerId of PROVIDERS) {
+      const provider = this.providerRegistry.get(providerId);
+      if (providerId === 'codex' && provider instanceof CodexProvider) {
+        await this.refreshCodexProjects(projects, pendingConversations, provider);
+        continue;
+      }
+
+      for (const project of projects) {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         if (!settings.enabled) {
           this.db.replaceConversationIndex(project.slug, providerId, []);
           continue;
         }
-        const provider = this.providerRegistry.get(providerId);
         const conversations = await provider.listConversations(project, settings);
         this.reconcilePendingConversations(
           project.slug,
@@ -102,10 +169,17 @@ export class IndexingService {
     for (const session of activeSessions) {
       const project = projectMap.get(session.projectSlug);
       if (!project) continue;
-      project.providers[session.provider].conversations = project.providers[session.provider].conversations
-        .map((conversation) => conversation.ref === session.conversationRef
-          ? { ...conversation, isBound: true, boundSessionId: session.id }
-          : conversation);
+      const conversations = project.providers[session.provider].conversations;
+      const existingIndex = conversations.findIndex((conversation) => conversation.ref === session.conversationRef);
+      if (existingIndex === -1) {
+        conversations.unshift(buildSyntheticConversationFromSession(session));
+        continue;
+      }
+      conversations[existingIndex] = {
+        ...conversations[existingIndex]!,
+        isBound: true,
+        boundSessionId: session.id,
+      };
     }
 
     const projects = [...projectMap.values()]
@@ -197,8 +271,11 @@ export class IndexingService {
     this.watchers[1]?.on('all', () => {
       this.scheduleRefresh(200);
     });
-    this.watchers[2]?.on('all', () => {
-      this.scheduleRefresh();
+    this.watchers[2]?.on('all', (eventName, changedPath) => {
+      const delayMs = getProviderRootRefreshDelay(eventName, changedPath);
+      if (delayMs !== undefined) {
+        this.scheduleRefresh(delayMs);
+      }
     });
 
     for (const watcher of this.watchers) {
@@ -308,6 +385,47 @@ export class IndexingService {
         notes: project.notes,
         allowedLocalhostPorts: project.allowedLocalhostPorts,
       }));
+    }
+  }
+
+  private async refreshCodexProjects(
+    projects: ActiveProject[],
+    pendingConversations: ConversationSummary[],
+    provider: CodexProvider,
+  ): Promise<void> {
+    const groups = new Map<string, {
+      settings: MergedProviderSettings;
+      projects: ActiveProject[];
+    }>();
+
+    for (const project of projects) {
+      const settings = this.projectService.getMergedProviderSettings(project, 'codex');
+      if (!settings.enabled) {
+        this.db.replaceConversationIndex(project.slug, 'codex', []);
+        continue;
+      }
+
+      const key = settings.discoveryRoot;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.projects.push(project);
+        continue;
+      }
+      groups.set(key, { settings, projects: [project] });
+    }
+
+    for (const group of groups.values()) {
+      const conversationsByProject = await provider.listConversationsForProjects(group.projects, group.settings);
+      for (const project of group.projects) {
+        const conversations = conversationsByProject.get(project.slug) ?? [];
+        this.reconcilePendingConversations(
+          project.slug,
+          'codex',
+          conversations,
+          pendingConversations,
+        );
+        this.db.replaceConversationIndex(project.slug, 'codex', conversations);
+      }
     }
   }
 }

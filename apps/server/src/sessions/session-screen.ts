@@ -7,6 +7,8 @@ interface ScreenLine {
   plain: string;
 }
 
+const WORKING_STATUS_LINE_RE = /^working(?:(?:\s*(?:[.…]|\.{3}))|(?:\s*\([^)]*\)))*$/i;
+
 function trimRightPreservingIndentation(line: string): string {
   return line.replace(/\s+$/g, '');
 }
@@ -21,13 +23,26 @@ function isLeadingTerminalChrome(line: string): boolean {
     || /^(?:Use medium effort|with medium effort|We recommend .+ effort|Effort determines|recommend .+ effort for most tasks|and maximize rate limits|Use ultrathink)/i.test(line);
 }
 
+export function isWorkingStatusLine(line: string): boolean {
+  const normalized = normalizeWhitespace(stripAnsiAndControl(line)).replace(/^[•●·◦▪]\s*/u, '');
+  if (!normalized) {
+    return false;
+  }
+
+  return WORKING_STATUS_LINE_RE.test(normalized);
+}
+
 function isLikelyFooterStatus(line: string): boolean {
   if (!line.trim()) {
     return false;
   }
 
   const normalized = normalizeWhitespace(line);
-  if (!normalized || normalized.startsWith('/')) {
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized.startsWith('/')) {
     return false;
   }
 

@@ -9,13 +9,42 @@ export async function registerProjectRoutes(
   indexing: IndexingService,
   sessions: SessionManager,
 ): Promise<void> {
+  const TREE_RECOVERY_INTERVAL_MS = 5_000;
+  let lastTreeRecoveryCompletedAt = 0;
+  let treeRecoveryPromise: Promise<void> | undefined;
+
+  async function maybeRecoverSessionsForTree(): Promise<void> {
+    if (treeRecoveryPromise) {
+      await treeRecoveryPromise;
+      return;
+    }
+
+    if (Date.now() - lastTreeRecoveryCompletedAt < TREE_RECOVERY_INTERVAL_MS) {
+      return;
+    }
+
+    let currentRecovery: Promise<void>;
+    currentRecovery = (async () => {
+      await sessions.recoverSessions();
+      lastTreeRecoveryCompletedAt = Date.now();
+    })();
+    treeRecoveryPromise = currentRecovery;
+    try {
+      await currentRecovery;
+    } finally {
+      if (treeRecoveryPromise === currentRecovery) {
+        treeRecoveryPromise = undefined;
+      }
+    }
+  }
+
   app.get('/api/projects/tree', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply, false);
     } catch {
       return;
     }
-    await sessions.recoverSessions();
+    await maybeRecoverSessionsForTree();
     return indexing.getTree();
   });
 

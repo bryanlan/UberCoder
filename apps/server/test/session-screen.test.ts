@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
+import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 
 describe('parseSessionScreenSnapshot', () => {
   it('keeps wrapped composer text in inputText and leaves the footer status intact', () => {
@@ -64,6 +64,30 @@ describe('parseSessionScreenSnapshot', () => {
 
     expect(screen.inputText).toBe('hi');
     expect(screen.status).toContain('98% left');
+  });
+
+  it('keeps timed Working lines in the main content when the composer is visible', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '',
+      'Investigating recency updates…',
+      '',
+      '• Working (2m 46s • esc to interrupt)',
+      '',
+      '› Run /review on my current changes',
+      'gpt-5.4 xhigh · 93% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('Run /review on my current changes');
+    expect(screen.content).toContain('Investigating recency updates…');
+    expect(screen.content).toContain('Working (2m 46s • esc to interrupt)');
+    expect(screen.status).not.toContain('Working (2m 46s • esc to interrupt)');
+    expect(screen.status).toContain('93% left');
+  });
+
+  it('recognizes working status lines with alternate bullet glyphs', () => {
+    expect(isWorkingStatusLine('◦ Working (12s • esc to interrupt)')).toBe(true);
+    expect(isWorkingStatusLine('▪ Working...')).toBe(true);
   });
 
   it('keeps a trailing numbered plan in the main content instead of treating it like a picker', () => {

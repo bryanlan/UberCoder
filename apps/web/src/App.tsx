@@ -3,11 +3,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
+  BoundSession,
   ConversationTimeline,
   ProjectSummary,
   ProviderId,
   SessionEvent,
   SessionKeystrokeRequest,
+  TreeResponse,
   UiPreferences,
   UpdateUiPreferencesRequest,
 } from '@agent-console/shared';
@@ -45,6 +47,191 @@ const defaultUiPreferences: UiPreferences = {
     redMinutes: 20,
   },
 };
+
+function isActiveSessionStatus(status: BoundSession['status']): boolean {
+  return status === 'starting' || status === 'bound' || status === 'releasing';
+}
+
+function getConversationUpdatedAtFromSession(session: BoundSession): string {
+  return session.lastCompletedAt ?? session.updatedAt;
+}
+
+function buildSyntheticConversationFromSession(session: BoundSession): ProjectSummary['providers'][ProviderId]['conversations'][number] {
+  return {
+    ref: session.conversationRef,
+    kind: session.conversationRef.startsWith('pending:') ? 'pending' : 'history',
+    projectSlug: session.projectSlug,
+    provider: session.provider,
+    title: session.title ?? 'Live session',
+    createdAt: session.startedAt,
+    updatedAt: getConversationUpdatedAtFromSession(session),
+    isBound: true,
+    boundSessionId: session.id,
+    degraded: false,
+    rawMetadata: {
+      syntheticSessionPlaceholder: true,
+    },
+  };
+}
+
+function isSyntheticSessionPlaceholder(
+  conversation: ProjectSummary['providers'][ProviderId]['conversations'][number],
+): boolean {
+  return conversation.rawMetadata?.syntheticSessionPlaceholder === true;
+}
+
+function applySessionUpdateToTree(current: TreeResponse | undefined, session: BoundSession): TreeResponse | undefined {
+  if (!current) {
+    return current;
+  }
+
+  const active = isActiveSessionStatus(session.status);
+  const nextBoundSessions = current.boundSessions.filter((item) => item.id !== session.id);
+  if (active) {
+    nextBoundSessions.unshift(session);
+    nextBoundSessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  return {
+    ...current,
+    boundSessions: nextBoundSessions,
+    projects: current.projects.map((project) => {
+      if (project.slug !== session.projectSlug) {
+        return project;
+      }
+
+      return {
+        ...project,
+        providers: {
+          ...project.providers,
+          [session.provider]: {
+            ...project.providers[session.provider],
+            conversations: (() => {
+              let foundTarget = false;
+              const nextConversations = project.providers[session.provider].conversations.flatMap((conversation) => {
+                if (conversation.ref === session.conversationRef) {
+                  foundTarget = true;
+                  if (!active && isSyntheticSessionPlaceholder(conversation)) {
+                    return [];
+                  }
+                  return [{
+                    ...conversation,
+                    title: session.title ?? conversation.title,
+                    updatedAt: getConversationUpdatedAtFromSession(session),
+                    isBound: active,
+                    boundSessionId: active ? session.id : undefined,
+                  }];
+                }
+                if (conversation.boundSessionId === session.id) {
+                  if (isSyntheticSessionPlaceholder(conversation)) {
+                    return [];
+                  }
+                  return [{
+                    ...conversation,
+                    isBound: false,
+                    boundSessionId: undefined,
+                  }];
+                }
+                return [conversation];
+              });
+
+              if (active && !foundTarget) {
+                nextConversations.unshift(buildSyntheticConversationFromSession(session));
+              }
+              return nextConversations;
+            })(),
+          },
+        },
+      };
+    }),
+  };
+}
+
+function applySessionActivityToTree(
+  current: TreeResponse | undefined,
+  input: { sessionId: string; timestamp: string },
+): TreeResponse | undefined {
+  if (!current) {
+    return current;
+  }
+
+  return {
+    ...current,
+    boundSessions: current.boundSessions.map((session) => (
+      session.id !== input.sessionId
+        ? session
+        : {
+            ...session,
+            updatedAt: input.timestamp,
+            lastActivityAt: input.timestamp,
+            lastOutputAt: input.timestamp,
+          }
+    )),
+  };
+}
+
+function applySessionUpdateToTimeline(
+  current: ConversationTimeline | undefined,
+  session: BoundSession,
+): ConversationTimeline | undefined {
+  if (!current) {
+    return current;
+  }
+
+  const matchesCurrent =
+    current.boundSession?.id === session.id
+    || (
+      current.conversation.projectSlug === session.projectSlug
+      && current.conversation.provider === session.provider
+      && current.conversation.ref === session.conversationRef
+    );
+  if (!matchesCurrent) {
+    return current;
+  }
+
+  const active = isActiveSessionStatus(session.status);
+  const nextRef = current.boundSession?.id === session.id
+    ? session.conversationRef
+    : current.conversation.ref;
+  const refChanged = nextRef !== current.conversation.ref;
+  return {
+    ...current,
+      conversation: {
+        ...current.conversation,
+        ref: nextRef,
+        kind: refChanged ? (session.conversationRef.startsWith('pending:') ? 'pending' : 'history') : current.conversation.kind,
+        title: session.title ?? current.conversation.title,
+        updatedAt: getConversationUpdatedAtFromSession(session),
+        isBound: active,
+        boundSessionId: active ? session.id : undefined,
+      },
+    boundSession: active
+      ? {
+          ...(current.boundSession ?? session),
+          ...session,
+        }
+      : undefined,
+  };
+}
+
+function applySessionActivityToTimeline(
+  current: ConversationTimeline | undefined,
+  input: { sessionId: string; timestamp: string },
+): ConversationTimeline | undefined {
+  if (!current || current.boundSession?.id !== input.sessionId) {
+    return current;
+  }
+
+  return {
+    ...current,
+    boundSession: {
+      ...current.boundSession,
+      updatedAt: input.timestamp,
+      lastActivityAt: input.timestamp,
+      lastOutputAt: input.timestamp,
+    },
+  };
+}
 
 function AppShell() {
   const queryClient = useQueryClient();
@@ -151,39 +338,72 @@ function AppShell() {
           return;
         }
         if (parsed.type === 'session.raw-output') {
-          queryClient.setQueryData(['tree'], (current: typeof treeQuery.data | undefined) => current ? {
-            ...current,
-            boundSessions: current.boundSessions.map((session) => (
-              session.id === parsed.sessionId
-                ? {
-                    ...session,
-                    updatedAt: parsed.timestamp,
-                    lastActivityAt: parsed.timestamp,
-                    lastOutputAt: parsed.timestamp,
-                  }
-                : session
-            )),
-          } : current);
+          queryClient.setQueryData<TreeResponse | undefined>(
+            ['tree'],
+            (current) => applySessionActivityToTree(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
+          );
           queryClient.setQueryData<ConversationTimeline | undefined>(
             ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
-            (current) => current?.boundSession?.id === parsed.sessionId
-              ? {
-                  ...current,
-                  boundSession: {
-                    ...current.boundSession,
-                    updatedAt: parsed.timestamp,
-                    lastActivityAt: parsed.timestamp,
-                    lastOutputAt: parsed.timestamp,
-                  },
-                }
-              : current,
+            (current) => applySessionActivityToTimeline(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
           );
           if (parsed.sessionId === timelineQuery.data?.boundSession?.id && debugOpen) {
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
           }
           return;
         }
-        queryClient.invalidateQueries({ queryKey: ['tree'] });
+        if (parsed.type === 'session.updated') {
+          queryClient.setQueryData<TreeResponse | undefined>(
+            ['tree'],
+            (current) => applySessionUpdateToTree(current, parsed.session),
+          );
+          queryClient.setQueryData<ConversationTimeline | undefined>(
+            ['timeline', parsed.session.projectSlug, parsed.session.provider, parsed.session.conversationRef],
+            (current) => applySessionUpdateToTimeline(current, parsed.session),
+          );
+          if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
+            queryClient.setQueryData<ConversationTimeline | undefined>(
+              ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+              (current) => applySessionUpdateToTimeline(current, parsed.session),
+            );
+          }
+          return;
+        }
+        if (parsed.type === 'session.released') {
+          queryClient.invalidateQueries({ queryKey: ['tree'] });
+          if (
+            selectedProjectSlug
+            && selectedProvider
+            && selectedConversationRef
+            && (
+              parsed.sessionId === timelineQuery.data?.boundSession?.id
+              || (
+                parsed.projectSlug === selectedProjectSlug
+                && parsed.provider === selectedProvider
+                && parsed.conversationRef === selectedConversationRef
+              )
+            )
+          ) {
+            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+          }
+          return;
+        }
+        if (parsed.type === 'conversation.index-updated') {
+          queryClient.invalidateQueries({ queryKey: ['tree'] });
+          const eventTargetsSelection = Boolean(
+            parsed.projectSlug
+            && parsed.provider
+            && parsed.conversationRef
+            && (
+              parsed.projectSlug === selectedProjectSlug
+              && parsed.provider === selectedProvider
+              && parsed.conversationRef === selectedConversationRef
+            ),
+          );
+          if (conversationSelection?.params.conversationRef && eventTargetsSelection) {
+            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+          }
+          return;
+        }
         if (conversationSelection?.params.conversationRef) {
           queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
         }
@@ -433,7 +653,25 @@ function AppShell() {
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
     setActionError(undefined);
     try {
-      await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
+        queryClient.setQueryData<ConversationTimeline | undefined>(
+          ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+          (current) => current?.boundSession?.id === sessionId
+            ? {
+                ...current,
+                boundSession: {
+                  ...current.boundSession,
+                  ...updatedSession,
+                },
+              }
+            : current,
+        );
+        void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+      }
+      if (sessionId === timelineQuery.data?.boundSession?.id) {
+        void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
+      }
       return true;
     } catch (error) {
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
@@ -546,7 +784,7 @@ function AppShell() {
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-950">
+    <div className="fixed inset-0 flex h-[100dvh] overflow-hidden bg-slate-950">
       <Sidebar
         tree={treeQuery.data}
         open={navOpen}
@@ -570,8 +808,8 @@ function AppShell() {
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />
-      <div className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3 backdrop-blur lg:px-6">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="sticky top-0 z-20 flex shrink-0 items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3 backdrop-blur lg:px-6">
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -612,13 +850,13 @@ function AppShell() {
           </div>
         </header>
 
-        {!workMode && eventError && (
+        {eventError && (
           <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6">
             <AlertTriangle className="h-4 w-4" />
             {eventError}
           </div>
         )}
-        {!workMode && actionError && (
+        {actionError && (
           <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 lg:mx-6">
             <AlertTriangle className="h-4 w-4" />
             {actionError}

@@ -84,6 +84,8 @@ export interface BoundSession {
   updatedAt: string;
   lastActivityAt?: string;
   lastOutputAt?: string;
+  lastCompletedAt?: string;
+  isWorking?: boolean;
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;

@@ -92,6 +92,8 @@ export class AppDatabase {
         updated_at text not null,
         last_activity_at text,
         last_output_at text,
+        last_completed_at text,
+        is_working integer not null default 0,
         pid integer,
         raw_log_path text,
         event_log_path text
@@ -130,6 +132,12 @@ export class AppDatabase {
     const boundSessionColumns = this.sqlite.prepare(`pragma table_info(bound_sessions)`).all() as Array<{ name: string }>;
     if (!boundSessionColumns.some((column) => column.name === 'last_output_at')) {
       this.sqlite.exec(`alter table bound_sessions add column last_output_at text`);
+    }
+    if (!boundSessionColumns.some((column) => column.name === 'last_completed_at')) {
+      this.sqlite.exec(`alter table bound_sessions add column last_completed_at text`);
+    }
+    if (!boundSessionColumns.some((column) => column.name === 'is_working')) {
+      this.sqlite.exec(`alter table bound_sessions add column is_working integer not null default 0`);
     }
   }
 
@@ -360,10 +368,10 @@ export class AppDatabase {
     this.sqlite.prepare(`
       insert into bound_sessions (
         id, provider, project_slug, conversation_ref, tmux_session_name, status, title,
-        started_at, updated_at, last_activity_at, last_output_at, pid, raw_log_path, event_log_path
+        started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, pid, raw_log_path, event_log_path
       ) values (
         @id, @provider, @project_slug, @conversation_ref, @tmux_session_name, @status, @title,
-        @started_at, @updated_at, @last_activity_at, @last_output_at, @pid, @raw_log_path, @event_log_path
+        @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @pid, @raw_log_path, @event_log_path
       )
       on conflict(id) do update set
         status = excluded.status,
@@ -371,6 +379,8 @@ export class AppDatabase {
         updated_at = excluded.updated_at,
         last_activity_at = excluded.last_activity_at,
         last_output_at = excluded.last_output_at,
+        last_completed_at = excluded.last_completed_at,
+        is_working = excluded.is_working,
         pid = excluded.pid,
         raw_log_path = excluded.raw_log_path,
         event_log_path = excluded.event_log_path,
@@ -388,6 +398,8 @@ export class AppDatabase {
       updated_at: session.updatedAt,
       last_activity_at: session.lastActivityAt ?? null,
       last_output_at: session.lastOutputAt ?? null,
+      last_completed_at: session.lastCompletedAt ?? null,
+      is_working: boolAsInt(Boolean(session.isWorking)),
       pid: session.pid ?? null,
       raw_log_path: session.rawLogPath ?? null,
       event_log_path: session.eventLogPath ?? null,
@@ -506,6 +518,8 @@ export class AppDatabase {
     updatedAt: String(row.updated_at),
     lastActivityAt: row.last_activity_at ? String(row.last_activity_at) : undefined,
     lastOutputAt: row.last_output_at ? String(row.last_output_at) : undefined,
+    lastCompletedAt: row.last_completed_at ? String(row.last_completed_at) : undefined,
+    isWorking: Boolean(row.is_working),
     pid: typeof row.pid === 'number' ? row.pid : row.pid ? Number(row.pid) : undefined,
     rawLogPath: row.raw_log_path ? String(row.raw_log_path) : undefined,
     eventLogPath: row.event_log_path ? String(row.event_log_path) : undefined,

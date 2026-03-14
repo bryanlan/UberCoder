@@ -290,6 +290,202 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('tracks completion recency only after the screen leaves Working', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Reviewing repository state…',
+      '• Working (20s • esc to interrupt)',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    const workingStates: Array<{ isWorking?: boolean; lastCompletedAt?: string }> = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.updated') {
+        workingStates.push({
+          isWorking: event.session.isWorking,
+          lastCompletedAt: event.session.lastCompletedAt,
+        });
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-working-recency',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
+    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBeUndefined();
+
+    tmux.captureSequence = [[
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n')];
+
+    await manager.sendInput(session.id, 'continue');
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.isWorking).toBe(false);
+    expect(updated?.lastCompletedAt).toBeTruthy();
+    expect(workingStates.some((state) => state.isWorking === true && !state.lastCompletedAt)).toBe(true);
+    expect(workingStates.some((state) => state.isWorking === false && Boolean(state.lastCompletedAt))).toBe(true);
+    unsubscribe();
+    db.close();
+  });
+
+  it('repairs idle completion recency when newer output exists than the stored completion timestamp', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-recency-repair',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const staleCompletion = new Date(Date.now() - 10 * 60_000).toISOString();
+    const newerOutput = new Date(Date.now() - 30_000).toISOString();
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastCompletedAt: staleCompletion,
+      lastOutputAt: newerOutput,
+    });
+
+    await manager.getSessionScreen(session.id);
+
+    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBe(newerOutput);
+    db.close();
+  });
+
+  it('backfills completion recency for already-idle sessions on first screen capture', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-backfill',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.isWorking).toBe(false);
+    expect(updated?.lastCompletedAt).toBeTruthy();
+    db.close();
+  });
+
+  it('does not reactivate a stale Working screen when the output heartbeat is old', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-stale-working-screen',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const staleTimestamp = new Date(Date.now() - 10 * 60_000).toISOString();
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastOutputAt: staleTimestamp,
+      lastCompletedAt: staleTimestamp,
+      lastActivityAt: staleTimestamp,
+    });
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Investigating recency updates…',
+      '• Working (9m 42s • esc to interrupt)',
+      '',
+      '› review current changes',
+      'gpt-5.4 xhigh · 92% left · ~/demo',
+    ].join('\n');
+
+    await manager.getSessionScreen(session.id);
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.isWorking).toBe(false);
+    expect(updated?.lastCompletedAt).toBe(staleTimestamp);
+    db.close();
+  });
+
+  it('expires working sessions after the heartbeat goes cold even if the pane still shows Working', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Investigating recency updates…',
+      '• Working (5s • esc to interrupt)',
+      '',
+      '› review current changes',
+      'gpt-5.4 xhigh · 92% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-working-expiry',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 4_500));
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.isWorking).toBe(false);
+    expect(updated?.lastCompletedAt).toBeTruthy();
+    db.close();
+  }, 10_000);
+
   it('sends raw keystrokes directly to the tmux session without synthesizing chat input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -315,6 +511,201 @@ describe('SessionManager', () => {
 
     expect(tmux.sent).toEqual(['3']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
+    db.close();
+  });
+
+  it('waits for pasted text to settle before sending Enter on combined submit keystrokes', async () => {
+    class PasteAwareTmux extends FakeTmux {
+      private pasteVisible = false;
+      private submitted = false;
+      private capturesSincePaste = 0;
+      private readonly promptPrefix = [
+        'Claude Code',
+        '',
+        'How is Claude doing this session? (optional)',
+        '1: Bad    2: Fine   3: Good   0: Dismiss',
+        '',
+      ];
+
+      constructor() {
+        super();
+        this.paneText = this.renderComposer('did yo');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.pasteVisible = false;
+        this.capturesSincePaste = 0;
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        if (this.pasteVisible) {
+          this.submitted = true;
+          this.paneText = [
+            ...this.promptPrefix,
+            'Working through the request…',
+            '• Working (1s • esc to interrupt)',
+            '',
+            '❯ ',
+            '⏵⏵ bypass permissions on (shift+tab to cycle)',
+          ].join('\n');
+        }
+      }
+
+      override async capturePane(): Promise<string> {
+        if (!this.submitted && this.sent.length > 0 && !this.pasteVisible) {
+          this.capturesSincePaste += 1;
+          if (this.capturesSincePaste >= 2) {
+            this.pasteVisible = true;
+            this.paneText = this.renderComposer('did yo[Pasted text #1 +58 lines]');
+          }
+        }
+        return this.paneText;
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          ...this.promptPrefix,
+          `❯ ${input}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new PasteAwareTmux();
+    const eventBus = new RealtimeEventBus();
+    const screens: Array<{ inputText: string; content: string }> = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screens.push({ inputText: event.screen.inputText, content: event.screen.content });
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-paste-submit',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    screens.length = 0;
+    await manager.sendKeystrokes(session.id, {
+      text: 'run this review request',
+      keys: ['Enter'],
+    });
+
+    expect(tmux.sent).toEqual(['run this review request']);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    expect(screens.some((screen) => screen.inputText === 'did yo[Pasted text #1 +58 lines]')).toBe(true);
+    expect(screens.at(-1)?.inputText).toBe('');
+    expect(`${screens.at(-1)?.content ?? ''}`).toContain('Working through the request…');
+    unsubscribe();
+    db.close();
+  });
+
+  it('waits long enough for slower pasted text repaints before sending Enter', async () => {
+    class SlowPasteAwareTmux extends FakeTmux {
+      private pasteVisible = false;
+      private submitted = false;
+      private capturesSincePaste = 0;
+      private readonly promptPrefix = [
+        'Claude Code',
+        '',
+        'How is Claude doing this session? (optional)',
+        '1: Bad    2: Fine   3: Good   0: Dismiss',
+        '',
+      ];
+
+      constructor() {
+        super();
+        this.paneText = this.renderComposer('draft');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.pasteVisible = false;
+        this.capturesSincePaste = 0;
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        if (this.pasteVisible) {
+          this.submitted = true;
+          this.paneText = [
+            ...this.promptPrefix,
+            'Running the slower paste submit…',
+            '• Working (1s • esc to interrupt)',
+            '',
+            '❯ ',
+            '⏵⏵ bypass permissions on (shift+tab to cycle)',
+          ].join('\n');
+        }
+      }
+
+      override async capturePane(): Promise<string> {
+        if (!this.submitted && this.sent.length > 0 && !this.pasteVisible) {
+          this.capturesSincePaste += 1;
+          if (this.capturesSincePaste >= 19) {
+            this.pasteVisible = true;
+            this.paneText = this.renderComposer('draft[Pasted text #1 +58 lines]');
+          }
+        }
+        return this.paneText;
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          ...this.promptPrefix,
+          `❯ ${input}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new SlowPasteAwareTmux();
+    const eventBus = new RealtimeEventBus();
+    const screens: Array<{ inputText: string; content: string }> = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screens.push({ inputText: event.screen.inputText, content: event.screen.content });
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-slow-paste-submit',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    screens.length = 0;
+    await manager.sendKeystrokes(session.id, {
+      text: 'large pasted request content that takes longer than the initial repaint budget to appear in the composer',
+      keys: ['Enter'],
+    });
+
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    expect(screens.some((screen) => screen.inputText === 'draft[Pasted text #1 +58 lines]')).toBe(true);
+    expect(screens.at(-1)?.inputText).toBe('');
+    expect(`${screens.at(-1)?.content ?? ''}`).toContain('Running the slower paste submit…');
+    unsubscribe();
     db.close();
   });
 
@@ -367,6 +758,64 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('publishes the settled post-keystroke screen even when the immediate wait window misses the repaint', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const initialScreen = [
+      'Claude Code',
+      '',
+      'Draft prompt still in composer',
+      '› summarize the timing bug',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    const settledScreen = [
+      'Claude Code',
+      '',
+      'Working through the timing bug…',
+      '• Working (2s • esc to interrupt)',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    tmux.paneText = initialScreen;
+    const eventBus = new RealtimeEventBus();
+    const screens: Array<{ inputText: string; content: string }> = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screens.push({ inputText: event.screen.inputText, content: event.screen.content });
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-key-settled-screen',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    screens.length = 0;
+    tmux.captureSequence = [
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      initialScreen,
+      settledScreen,
+    ];
+
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'] });
+
+    expect(screens.at(-1)?.inputText).toBe('');
+    expect(`${screens.at(-1)?.content ?? ''}`).toContain('Working through the timing bug…');
+    unsubscribe();
+    db.close();
+  });
+
   it('launches pending sessions with an initial prompt argument when requested', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -412,7 +861,7 @@ describe('SessionManager', () => {
       providerSettings,
       conversationRef: 'conv-color',
       title: 'Color session',
-      kind: 'conversation',
+      kind: 'history',
     });
 
     expect(tmux.createdCommands[0]).toContain('unset CLAUDECODE NO_COLOR');
