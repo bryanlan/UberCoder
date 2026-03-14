@@ -3,8 +3,10 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type {
   EditableProjectSettings,
   SettingsSummary,
+  UiPreferences,
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
+  UpdateUiPreferencesRequest,
 } from '@agent-console/shared';
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../lib/api';
@@ -25,6 +27,12 @@ interface ProjectDraft {
   allowedLocalhostPorts: string;
   tags: string;
   notes: string;
+}
+
+interface FreshnessDraft {
+  yellowMinutes: string;
+  orangeMinutes: string;
+  redMinutes: string;
 }
 
 function toGlobalDraft(settings: SettingsSummary): GlobalDraft {
@@ -85,12 +93,46 @@ function normalizeProjectDraft(draft: ProjectDraft): UpdateProjectSettingsReques
   };
 }
 
+function toFreshnessDraft(uiPreferences: UiPreferences): FreshnessDraft {
+  return {
+    yellowMinutes: String(uiPreferences.sessionFreshnessThresholds.yellowMinutes),
+    orangeMinutes: String(uiPreferences.sessionFreshnessThresholds.orangeMinutes),
+    redMinutes: String(uiPreferences.sessionFreshnessThresholds.redMinutes),
+  };
+}
+
+function normalizeFreshnessDraft(draft: FreshnessDraft): UpdateUiPreferencesRequest {
+  const yellowMinutes = Number.parseInt(draft.yellowMinutes, 10);
+  const orangeMinutes = Number.parseInt(draft.orangeMinutes, 10);
+  const redMinutes = Number.parseInt(draft.redMinutes, 10);
+
+  if ([yellowMinutes, orangeMinutes, redMinutes].some((value) => Number.isNaN(value) || value < 1 || value > 24 * 60)) {
+    throw new Error('Freshness thresholds must be whole numbers between 1 and 1440 minutes.');
+  }
+
+  if (!(yellowMinutes < orangeMinutes && orangeMinutes < redMinutes)) {
+    throw new Error('Freshness thresholds must increase from yellow to orange to red.');
+  }
+
+  return {
+    sessionFreshnessThresholds: {
+      yellowMinutes,
+      orangeMinutes,
+      redMinutes,
+    },
+  };
+}
+
 function sameGlobalDraft(settings: SettingsSummary, draft: GlobalDraft): boolean {
   return JSON.stringify(toGlobalDraft(settings)) === JSON.stringify(draft);
 }
 
 function sameProjectDraft(project: EditableProjectSettings, draft: ProjectDraft): boolean {
   return JSON.stringify(toProjectDraft(project)) === JSON.stringify(draft);
+}
+
+function sameFreshnessDraft(uiPreferences: UiPreferences, draft: FreshnessDraft): boolean {
+  return JSON.stringify(toFreshnessDraft(uiPreferences)) === JSON.stringify(draft);
 }
 
 function sortProjects(a: EditableProjectSettings, b: EditableProjectSettings): number {
@@ -113,12 +155,28 @@ function getRestartUrl(current: SettingsSummary, next: UpdateGlobalSettingsReque
   return nextUrl.toString();
 }
 
-export function SettingsPage({ settings, csrfToken, backHref }: { settings?: SettingsSummary; csrfToken?: string; backHref: string }) {
+export function SettingsPage({
+  settings,
+  uiPreferences,
+  onUpdateUiPreferences,
+  updatingUiPreferences,
+  csrfToken,
+  backHref,
+}: {
+  settings?: SettingsSummary;
+  uiPreferences: UiPreferences;
+  onUpdateUiPreferences: (body: UpdateUiPreferencesRequest) => Promise<boolean>;
+  updatingUiPreferences: boolean;
+  csrfToken?: string;
+  backHref: string;
+}) {
   const queryClient = useQueryClient();
   const [globalDraft, setGlobalDraft] = useState<GlobalDraft>();
   const [globalMessage, setGlobalMessage] = useState<string>();
   const [projectDrafts, setProjectDrafts] = useState<Record<string, ProjectDraft>>({});
   const [projectMessages, setProjectMessages] = useState<Record<string, string | undefined>>({});
+  const [freshnessDraft, setFreshnessDraft] = useState<FreshnessDraft>(() => toFreshnessDraft(uiPreferences));
+  const [freshnessMessage, setFreshnessMessage] = useState<string>();
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
 
@@ -129,6 +187,11 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
     setGlobalMessage(undefined);
     setProjectMessages({});
   }, [settings]);
+
+  useEffect(() => {
+    setFreshnessDraft(toFreshnessDraft(uiPreferences));
+    setFreshnessMessage(undefined);
+  }, [uiPreferences]);
 
   async function refreshProjectTree(): Promise<void> {
     await queryClient.fetchQuery({
@@ -236,6 +299,7 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
   const savingProjectDirectory = projectMutation.variables?.directoryName;
   const deletingProjectDirectory = deleteProjectMutation.variables?.directoryName;
   const globalUnchanged = sameGlobalDraft(settings, globalDraft);
+  const freshnessUnchanged = sameFreshnessDraft(uiPreferences, freshnessDraft);
 
   function renderProjectCard(project: EditableProjectSettings) {
     const draft = projectDrafts[project.directoryName] ?? toProjectDraft(project);
@@ -555,6 +619,79 @@ export function SettingsPage({ settings, csrfToken, backHref }: { settings?: Set
                 className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
               >
                 {globalMutation.isPending || restartMutation.isPending ? 'Saving…' : globalUnchanged ? 'Saved' : 'Save global settings'}
+              </button>
+            </div>
+          </section>
+
+          <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-panel">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-100">Bound session freshness</h2>
+              <p className="mt-1 text-sm text-slate-400">These thresholds control the work-mode activity dot for bound Codex and Claude sessions. They save immediately and roam across browsers.</p>
+            </div>
+
+            <div className="mt-4 grid gap-4 md:grid-cols-3">
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Yellow after minutes</span>
+                <input
+                  type="text"
+                  value={freshnessDraft.yellowMinutes}
+                  onChange={(event) => {
+                    setFreshnessDraft((current) => ({ ...current, yellowMinutes: event.target.value }));
+                    setFreshnessMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Orange after minutes</span>
+                <input
+                  type="text"
+                  value={freshnessDraft.orangeMinutes}
+                  onChange={(event) => {
+                    setFreshnessDraft((current) => ({ ...current, orangeMinutes: event.target.value }));
+                    setFreshnessMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+
+              <label className="space-y-2">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Red after minutes</span>
+                <input
+                  type="text"
+                  value={freshnessDraft.redMinutes}
+                  onChange={(event) => {
+                    setFreshnessDraft((current) => ({ ...current, redMinutes: event.target.value }));
+                    setFreshnessMessage(undefined);
+                  }}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+              <p className={`text-sm ${freshnessMessage === 'Saved.' ? 'text-emerald-300' : 'text-rose-300'}`}>
+                {freshnessMessage ?? ' '}
+              </p>
+              <button
+                type="button"
+                disabled={updatingUiPreferences || freshnessUnchanged}
+                onClick={async () => {
+                  try {
+                    const body = normalizeFreshnessDraft(freshnessDraft);
+                    setFreshnessMessage(undefined);
+                    const saved = await onUpdateUiPreferences(body);
+                    if (saved) {
+                      setFreshnessMessage('Saved.');
+                    }
+                  } catch (error) {
+                    setFreshnessMessage(error instanceof Error ? error.message : 'Unable to save freshness thresholds.');
+                  }
+                }}
+                className="rounded-2xl bg-cyan-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              >
+                {updatingUiPreferences ? 'Saving…' : freshnessUnchanged ? 'Saved' : 'Save freshness thresholds'}
               </button>
             </div>
           </section>

@@ -6,10 +6,12 @@ import type { FastifyInstance } from 'fastify';
 import { AuthService } from '../security/auth-service.js';
 import { ConfigService } from '../config/service.js';
 import { IndexingService } from '../indexing/indexing-service.js';
+import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { RestartService } from '../runtime/restart-service.js';
 import { getAgentConsolePath } from '../lib/agent-console-path.js';
 import { normalizeFsPath } from '../lib/path-utils.js';
+import type { UiPreferences } from '@agent-console/shared';
 
 const paramsSchema = z.object({
   directoryName: z.string().min(1).refine((value) => !value.includes('/') && !value.includes('\\'), 'Invalid project directory name.'),
@@ -36,11 +38,35 @@ const updateGlobalSettingsBodySchema = z.object({
   trustTailscaleHeaders: z.boolean(),
 });
 
+const updateUiPreferencesBodySchema = z.object({
+  recentActivitySortEnabled: z.boolean().optional(),
+  manualProjectOrder: z.array(z.string().trim().min(1)).optional(),
+  sessionFreshnessThresholds: z.object({
+    yellowMinutes: z.number().int().min(1).max(24 * 60),
+    orangeMinutes: z.number().int().min(1).max(24 * 60),
+    redMinutes: z.number().int().min(1).max(24 * 60),
+  }).refine((value) => value.yellowMinutes < value.orangeMinutes && value.orangeMinutes < value.redMinutes, {
+    message: 'Freshness thresholds must increase from yellow to orange to red.',
+  }).optional(),
+}).refine((value) => (
+  value.recentActivitySortEnabled !== undefined
+  || value.manualProjectOrder !== undefined
+  || value.sessionFreshnessThresholds !== undefined
+), {
+  message: 'Expected at least one UI preference field.',
+});
+
 const browseDirectoriesQuerySchema = z.object({
   path: z.string().optional(),
 });
 
 const PROJECT_MARKER_FILES = ['AGENTS.md', 'agents.md', 'CLAUDE.md', 'claude.md'];
+const SIDEBAR_UI_PREFERENCES_KEY = 'sidebar';
+const DEFAULT_SESSION_FRESHNESS_THRESHOLDS = {
+  yellowMinutes: 3,
+  orangeMinutes: 7,
+  redMinutes: 20,
+} as const;
 
 function normalizeOptionalText(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -65,10 +91,47 @@ async function hasProjectMarkerFile(projectPath: string): Promise<boolean> {
   return false;
 }
 
+function normalizeUiPreferences(input: Partial<UiPreferences> | undefined, availableProjectSlugs: string[]): UiPreferences {
+  const dedupedOrder: string[] = [];
+  const seen = new Set<string>();
+
+  for (const slug of input?.manualProjectOrder ?? []) {
+    if (!availableProjectSlugs.includes(slug) || seen.has(slug)) {
+      continue;
+    }
+    seen.add(slug);
+    dedupedOrder.push(slug);
+  }
+
+  for (const slug of availableProjectSlugs) {
+    if (!seen.has(slug)) {
+      dedupedOrder.push(slug);
+    }
+  }
+
+  return {
+    recentActivitySortEnabled: input?.recentActivitySortEnabled ?? true,
+    manualProjectOrder: dedupedOrder,
+    sessionFreshnessThresholds: (() => {
+      const thresholds = input?.sessionFreshnessThresholds;
+      if (
+        thresholds
+        && thresholds.yellowMinutes > 0
+        && thresholds.yellowMinutes < thresholds.orangeMinutes
+        && thresholds.orangeMinutes < thresholds.redMinutes
+      ) {
+        return thresholds;
+      }
+      return DEFAULT_SESSION_FRESHNESS_THRESHOLDS;
+    })(),
+  };
+}
+
 export async function registerSettingsRoutes(
   app: FastifyInstance,
   authService: AuthService,
   configService: ConfigService,
+  db: AppDatabase,
   indexing: IndexingService,
   projectService: ProjectService,
   restartService: RestartService,
@@ -155,6 +218,49 @@ export async function registerSettingsRoutes(
       },
       projects: await projectService.listProjectSettings(),
     };
+  });
+
+  app.get('/api/settings/ui-preferences', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply, false);
+    } catch {
+      return;
+    }
+
+    const availableProjectSlugs = (await projectService.listActiveProjects()).map((project) => project.slug);
+    return normalizeUiPreferences(
+      db.getUiPreference<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
+      availableProjectSlugs,
+    );
+  });
+
+  app.put('/api/settings/ui-preferences', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+
+    const parsedBody = updateUiPreferencesBodySchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid UI preferences.', details: parsedBody.error.flatten() });
+      return;
+    }
+
+    const availableProjectSlugs = (await projectService.listActiveProjects()).map((project) => project.slug);
+    const current = normalizeUiPreferences(
+      db.getUiPreference<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
+      availableProjectSlugs,
+    );
+    const next = normalizeUiPreferences(
+      {
+        ...current,
+        ...parsedBody.data,
+      },
+      availableProjectSlugs,
+    );
+    db.setUiPreference(SIDEBAR_UI_PREFERENCES_KEY, next);
+    return { preferences: next };
   });
 
   app.put('/api/settings/global', async (request, reply) => {

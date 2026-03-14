@@ -91,6 +91,7 @@ export class SessionManager {
       startedAt: now,
       updatedAt: now,
       lastActivityAt: now,
+      lastOutputAt: undefined,
       rawLogPath,
       eventLogPath,
     };
@@ -316,7 +317,7 @@ export class SessionManager {
     const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
     return {
       session: liveSession,
-      screen: parseSessionScreenSnapshot(snapshot, nowIso()),
+      screen: this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso())),
     };
   }
 
@@ -488,7 +489,7 @@ export class SessionManager {
     if (!chunk.trim()) return;
     const now = nowIso();
     try {
-      const updated = { ...this.mustGetSession(sessionId), updatedAt: now, lastActivityAt: now };
+      const updated = { ...this.mustGetSession(sessionId), updatedAt: now, lastActivityAt: now, lastOutputAt: now };
       this.db.upsertBoundSession(updated);
       this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       void this.emitScreenUpdate(updated);
@@ -503,7 +504,7 @@ export class SessionManager {
 
     while (true) {
       const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
-      const screen = parseSessionScreenSnapshot(snapshot, nowIso());
+      const screen = this.decorateScreenForSession(session, parseSessionScreenSnapshot(snapshot, nowIso()));
       const nextHash = stableTextHash(
         `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
       );
@@ -553,5 +554,26 @@ export class SessionManager {
       }
       await sleep(100);
     }
+  }
+
+  private decorateScreenForSession(session: BoundSession, screen: SessionScreen): SessionScreen {
+    if (session.provider !== 'claude') {
+      return screen;
+    }
+
+    const badge = 'bypass permissions on';
+    if (screen.status.toLowerCase().includes(badge)) {
+      return screen;
+    }
+
+    const nextStatus = screen.status === 'Session active'
+      ? badge
+      : `${badge} · ${screen.status}`;
+
+    return {
+      ...screen,
+      status: nextStatus,
+      statusAnsi: nextStatus,
+    };
   }
 }

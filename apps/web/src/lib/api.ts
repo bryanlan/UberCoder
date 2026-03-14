@@ -7,10 +7,12 @@ import type {
   EditableProjectSettings,
   RenameConversationRequest,
   SettingsSummary,
+  UiPreferences,
   SessionKeystrokeRequest,
   TreeResponse,
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
+  UpdateUiPreferencesRequest,
 } from '@agent-console/shared';
 
 export class ApiError extends Error {
@@ -68,6 +70,7 @@ export const api = {
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
+  uiPreferences: () => request<UiPreferences>('/api/settings/ui-preferences'),
   browseDirectories: (directoryPath?: string) =>
     request<DirectoryBrowserResponse>(directoryPath ? `/api/settings/directories?path=${encodeURIComponent(directoryPath)}` : '/api/settings/directories'),
   updateGlobalSettings: (body: UpdateGlobalSettingsRequest, csrfToken?: string) =>
@@ -76,6 +79,8 @@ export const api = {
     request<{ project: EditableProjectSettings }>('/api/settings/projects', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   updateProjectSettings: (directoryName: string, body: UpdateProjectSettingsRequest, csrfToken?: string) =>
     request<{ project: EditableProjectSettings }>(`/api/settings/projects/${encodeURIComponent(directoryName)}`, { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
+  updateUiPreferences: (body: UpdateUiPreferencesRequest, csrfToken?: string) =>
+    request<{ preferences: UiPreferences }>('/api/settings/ui-preferences', { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
   deleteProject: (directoryName: string, csrfToken?: string) =>
     request<void>(`/api/settings/projects/${encodeURIComponent(directoryName)}`, { method: 'DELETE' }, csrfToken),
   restartServer: (csrfToken?: string) => request<{ restarting: boolean }>('/api/settings/restart', { method: 'POST', body: '{}' }, csrfToken),

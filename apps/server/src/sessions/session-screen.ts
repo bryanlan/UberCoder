@@ -31,10 +31,12 @@ function isLikelyFooterStatus(line: string): boolean {
     return false;
   }
 
+  if (/bypass permissions on/i.test(normalized)) {
+    return true;
+  }
+
   return /\b\d{1,3}% left\b/i.test(normalized)
-    || (/·/.test(normalized) && /~[/\\]|\/home\/|\/Users\//.test(normalized))
-    || /\b(?:Enter|Esc|Escape|Tab|Ctrl|Shift|Alt|Cmd|Command)\b/i.test(normalized)
-    || /[←→↑↓]/u.test(normalized);
+    || (/·/.test(normalized) && /~[/\\]|\/home\/|\/Users\//.test(normalized));
 }
 
 function parsePromptInput(line: string): string | undefined {
@@ -56,40 +58,6 @@ function looksLikeMenuChoice(line: string): boolean {
   const normalized = normalizeWhitespace(line.replace(/^[❯›>]\s*/u, ''));
   return /^\/[\w-]/.test(normalized)
     || /^\d+\.\s/.test(normalized);
-}
-
-function looksLikeInteractiveChoiceLine(line: string): boolean {
-  if (looksLikeMenuChoice(line)) {
-    return true;
-  }
-
-  const normalized = normalizeWhitespace(line.replace(/^[❯›>]\s*/u, ''));
-  if (!normalized) {
-    return false;
-  }
-
-  if (!/^\s*[❯›>]/u.test(line) && !/^\s{2,}\S/.test(line)) {
-    return false;
-  }
-
-  if (normalized.length > 80) {
-    return false;
-  }
-
-  if (/[.!?]$/.test(normalized) || /[:;]$/.test(normalized)) {
-    return false;
-  }
-
-  return true;
-}
-
-function looksLikeInteractiveMenuHeader(line: string): boolean {
-  const normalized = normalizeWhitespace(line);
-  if (!normalized || normalized.length > 80) {
-    return false;
-  }
-
-  return /^(?:Select|Choose|Pick|Confirm|Approval|Approve|Mode|Model|Permission|Action|Continue)\b/i.test(normalized);
 }
 
 function isComposerBoundary(line: string): boolean {
@@ -148,11 +116,7 @@ function joinAnsi(lines: ScreenLine[]): string {
 }
 
 function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
-  return lines.filter((line) => (
-    isLikelyFooterStatus(line.plain)
-    || looksLikeInteractiveChoiceLine(line.plain)
-    || looksLikeInteractiveMenuHeader(line.plain)
-  ));
+  return lines.filter((line) => isLikelyFooterStatus(line.plain));
 }
 
 function toScreenLines(snapshot: string): ScreenLine[] {
@@ -221,53 +185,6 @@ function extractActiveInput(contentLines: ScreenLine[]): {
   };
 }
 
-function extractTrailingInteractivePanel(contentLines: ScreenLine[]): {
-  contentLines: ScreenLine[];
-  footerLines: ScreenLine[];
-} | undefined {
-  let panelStart = contentLines.length;
-  let sawChoice = false;
-
-  for (let index = contentLines.length - 1; index >= Math.max(0, contentLines.length - 8); index -= 1) {
-    const candidate = contentLines[index]!;
-    if (!candidate.plain.trim()) {
-      if (panelStart < contentLines.length) {
-        panelStart = index;
-      }
-      continue;
-    }
-
-    if (looksLikeInteractiveChoiceLine(candidate.plain)) {
-      sawChoice = true;
-      panelStart = index;
-      continue;
-    }
-
-    if (sawChoice && looksLikeInteractiveMenuHeader(candidate.plain)) {
-      panelStart = index;
-      continue;
-    }
-
-    break;
-  }
-
-  if (!sawChoice) {
-    return undefined;
-  }
-
-  const footerLines = collapseBlankRuns(trimBlankEdges(contentLines.slice(panelStart)));
-  const choiceCount = footerLines.filter((line) => looksLikeInteractiveChoiceLine(line.plain)).length;
-  const hasHeader = footerLines.some((line) => looksLikeInteractiveMenuHeader(line.plain));
-  if (choiceCount < 2 && !(choiceCount >= 1 && hasHeader)) {
-    return undefined;
-  }
-
-  return {
-    contentLines: trimBlankEdges(contentLines.slice(0, panelStart)),
-    footerLines,
-  };
-}
-
 export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso()): SessionScreen {
   const lines = toScreenLines(snapshot);
 
@@ -312,22 +229,13 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     return true;
   });
 
-  const trailingInteractivePanel = extractTrailingInteractivePanel(baseContentLines);
-  const {
-    contentLines,
-    inputText,
-    footerLines,
-  } = trailingInteractivePanel
-    ? {
-        contentLines: trailingInteractivePanel.contentLines,
-        inputText: '',
-        footerLines: trailingInteractivePanel.footerLines,
-      }
-    : extractActiveInput(baseContentLines);
-  const content = joinPlain(contentLines) || 'Waiting for session output…';
-  const contentAnsi = joinAnsi(contentLines) || content;
+  const { contentLines, inputText, footerLines } = extractActiveInput(baseContentLines);
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
+  const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
+  const visibleContentLines = trimBlankEdges(collapseBlankRuns([...contentLines, ...nonStatusFooterLines]));
+  const content = joinPlain(visibleContentLines) || 'Waiting for session output…';
+  const contentAnsi = joinAnsi(visibleContentLines) || content;
   const footerText = joinPlain(footerStatusLines);
   const footerAnsi = joinAnsi(footerStatusLines);
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { parseProxyPath, assertPortAllowed } from '../src/proxy/localhost-proxy.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
@@ -28,11 +29,23 @@ const settings = {
   },
 } satisfies MergedProviderSettings;
 
+const claudeSettings = {
+  id: 'claude',
+  enabled: true,
+  discoveryRoot: '/home/user/.claude',
+  commands: {
+    newCommand: ['claude'],
+    resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+    continueCommand: ['claude', '--continue'],
+    env: { CLAUDE_CONFIG_DIR: '/home/user/.claude' },
+  },
+} satisfies MergedProviderSettings;
+
 describe('command construction and proxy allowlisting', () => {
   it('builds the provider resume command from templates', () => {
     const command = new CodexProvider().getLaunchCommand(project, 'session-123', settings);
     expect(command.cwd).toBe('/srv/demo');
-    expect(command.argv).toEqual(['codex', 'resume', 'session-123']);
+    expect(command.argv).toEqual(['codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123']);
     expect(command.env).toEqual({ CODEX_HOME: '/home/user/.codex' });
   });
 
@@ -40,7 +53,13 @@ describe('command construction and proxy allowlisting', () => {
     const command = new CodexProvider().getLaunchCommand(project, null, settings, {
       initialPrompt: 'Reply with exactly: smoke-token',
     });
-    expect(command.argv).toEqual(['codex', 'Reply with exactly: smoke-token']);
+    expect(command.argv).toEqual(['codex', '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token']);
+  });
+
+  it('forces Claude launch commands to skip permissions prompts', () => {
+    const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings);
+    expect(command.argv).toEqual(['claude', '--dangerously-skip-permissions', '--resume', 'session-123']);
+    expect(command.env).toEqual({ CLAUDE_CONFIG_DIR: '/home/user/.claude' });
   });
 
   it('parses proxy URLs and enforces project port allowlists', () => {

@@ -83,6 +83,7 @@ export interface BoundSession {
   startedAt: string;
   updatedAt: string;
   lastActivityAt?: string;
+  lastOutputAt?: string;
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;
@@ -127,6 +128,18 @@ export interface TreeResponse {
   projects: ProjectSummary[];
   boundSessions: BoundSession[];
   lastIndexedAt?: string;
+}
+
+export interface SessionFreshnessThresholds {
+  yellowMinutes: number;
+  orangeMinutes: number;
+  redMinutes: number;
+}
+
+export interface UiPreferences {
+  recentActivitySortEnabled: boolean;
+  manualProjectOrder: string[];
+  sessionFreshnessThresholds: SessionFreshnessThresholds;
 }
 
 export interface SettingsSummary {
@@ -176,6 +189,12 @@ export interface UpdateProjectSettingsRequest {
 
 export interface CreateProjectSettingsRequest {
   path: string;
+}
+
+export interface UpdateUiPreferencesRequest {
+  recentActivitySortEnabled?: boolean;
+  manualProjectOrder?: string[];
+  sessionFreshnessThresholds?: SessionFreshnessThresholds;
 }
 
 export interface RenameConversationRequest {

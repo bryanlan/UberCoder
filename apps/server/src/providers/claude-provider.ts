@@ -10,6 +10,15 @@ import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './typ
 import { conversationBelongsToProject, deriveConversationRef } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
 
+function ensureProviderFlag(argv: string[], flag: string): string[] {
+  if (argv.length === 0 || argv.includes(flag)) {
+    return argv;
+  }
+  const command = argv[0]!;
+  const rest = argv.slice(1);
+  return [command, flag, ...rest];
+}
+
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
 }
@@ -135,14 +144,18 @@ export class ClaudeProvider implements ProviderAdapter {
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
     const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
+    const baseArgv = ensureProviderFlag(
+      renderTemplateTokens(template, {
+        conversationId: conversationRef ?? '',
+        projectPath: project.path,
+        projectSlug: project.slug,
+      }),
+      '--dangerously-skip-permissions',
+    );
     return {
       cwd: project.path,
       argv: [
-        ...renderTemplateTokens(template, {
-          conversationId: conversationRef ?? '',
-          projectPath: project.path,
-          projectSlug: project.slug,
-        }),
+        ...baseArgv,
         ...(initialPrompt ? [initialPrompt] : []),
       ],
       env: settings.commands.env,

@@ -33,7 +33,7 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).not.toContain('wrapped prompt text');
   });
 
-  it('routes trailing interactive picker options into the status area instead of the input bridge', () => {
+  it('keeps trailing interactive picker output in the main content and reserves status for footer metadata only', () => {
     const screen = parseSessionScreenSnapshot([
       'Claude Code',
       '',
@@ -46,11 +46,11 @@ describe('parseSessionScreenSnapshot', () => {
 
     expect(screen.inputText).toBe('');
     expect(screen.content).toContain('Working tree clean.');
-    expect(screen.content).not.toContain('Continue with current branch');
-    expect(screen.status).toContain('Choose how to continue');
-    expect(screen.status).toContain('Continue with current branch');
-    expect(screen.status).toContain('Create a new branch');
-    expect(screen.status).toContain('Enter to confirm');
+    expect(screen.content).toContain('Choose how to continue');
+    expect(screen.content).toContain('Continue with current branch');
+    expect(screen.content).toContain('Create a new branch');
+    expect(screen.content).toContain('Enter to confirm');
+    expect(screen.status).toBe('Session active');
   });
 
   it('keeps a short real prompt in inputText even when a footer status is present', () => {
@@ -64,5 +64,24 @@ describe('parseSessionScreenSnapshot', () => {
 
     expect(screen.inputText).toBe('hi');
     expect(screen.status).toContain('98% left');
+  });
+
+  it('keeps a trailing numbered plan in the main content instead of treating it like a picker', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '',
+      'Here is the plan:',
+      '1. restore the toggle',
+      '2. add persistent manual project order',
+      '3. add drag-and-drop for project rows when the toggle is off',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('1. restore the toggle');
+    expect(screen.content).toContain('2. add persistent manual project order');
+    expect(screen.content).toContain('3. add drag-and-drop for project rows when the toggle is off');
+    expect(screen.status).toContain('98% left');
+    expect(screen.status).not.toContain('restore the toggle');
   });
 });

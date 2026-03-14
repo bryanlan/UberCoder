@@ -91,6 +91,7 @@ export class AppDatabase {
         started_at text not null,
         updated_at text not null,
         last_activity_at text,
+        last_output_at text,
         pid integer,
         raw_log_path text,
         event_log_path text
@@ -125,6 +126,11 @@ export class AppDatabase {
         value text not null
       );
     `);
+
+    const boundSessionColumns = this.sqlite.prepare(`pragma table_info(bound_sessions)`).all() as Array<{ name: string }>;
+    if (!boundSessionColumns.some((column) => column.name === 'last_output_at')) {
+      this.sqlite.exec(`alter table bound_sessions add column last_output_at text`);
+    }
   }
 
   setMeta(key: string, value: string): void {
@@ -354,16 +360,17 @@ export class AppDatabase {
     this.sqlite.prepare(`
       insert into bound_sessions (
         id, provider, project_slug, conversation_ref, tmux_session_name, status, title,
-        started_at, updated_at, last_activity_at, pid, raw_log_path, event_log_path
+        started_at, updated_at, last_activity_at, last_output_at, pid, raw_log_path, event_log_path
       ) values (
         @id, @provider, @project_slug, @conversation_ref, @tmux_session_name, @status, @title,
-        @started_at, @updated_at, @last_activity_at, @pid, @raw_log_path, @event_log_path
+        @started_at, @updated_at, @last_activity_at, @last_output_at, @pid, @raw_log_path, @event_log_path
       )
       on conflict(id) do update set
         status = excluded.status,
         title = excluded.title,
         updated_at = excluded.updated_at,
         last_activity_at = excluded.last_activity_at,
+        last_output_at = excluded.last_output_at,
         pid = excluded.pid,
         raw_log_path = excluded.raw_log_path,
         event_log_path = excluded.event_log_path,
@@ -380,6 +387,7 @@ export class AppDatabase {
       started_at: session.startedAt,
       updated_at: session.updatedAt,
       last_activity_at: session.lastActivityAt ?? null,
+      last_output_at: session.lastOutputAt ?? null,
       pid: session.pid ?? null,
       raw_log_path: session.rawLogPath ?? null,
       event_log_path: session.eventLogPath ?? null,
@@ -474,6 +482,18 @@ export class AppDatabase {
     this.sqlite.prepare(`delete from auth_sessions where expires_at <= ?`).run(nowIso);
   }
 
+  getUiPreference<T>(key: string): T | undefined {
+    const row = this.sqlite.prepare(`select value from ui_preferences where key = ?`).get(key) as { value: string } | undefined;
+    return row ? parseJson<T>(row.value) : undefined;
+  }
+
+  setUiPreference(key: string, value: unknown): void {
+    this.sqlite.prepare(`
+      insert into ui_preferences (key, value) values (?, ?)
+      on conflict(key) do update set value = excluded.value
+    `).run(key, JSON.stringify(value));
+  }
+
   private mapBoundSessionRow = (row: Record<string, unknown>): BoundSession => ({
     id: String(row.id),
     provider: String(row.provider) as BoundSession['provider'],
@@ -485,6 +505,7 @@ export class AppDatabase {
     startedAt: String(row.started_at),
     updatedAt: String(row.updated_at),
     lastActivityAt: row.last_activity_at ? String(row.last_activity_at) : undefined,
+    lastOutputAt: row.last_output_at ? String(row.last_output_at) : undefined,
     pid: typeof row.pid === 'number' ? row.pid : row.pid ? Number(row.pid) : undefined,
     rawLogPath: row.raw_log_path ? String(row.raw_log_path) : undefined,
     eventLogPath: row.event_log_path ? String(row.event_log_path) : undefined,

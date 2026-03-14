@@ -1,19 +1,8 @@
-import { Bot, Check, FolderTree, Pencil, Plus, RefreshCcw, Sparkles, X } from 'lucide-react';
+import { Bot, Check, FolderTree, GripVertical, Menu, Pencil, Plus, RefreshCcw, Sparkles, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useEffect, useState } from 'react';
-
-function useLocalStorageBoolean(key: string, fallback: boolean) {
-  const [value, setValue] = useState<boolean>(() => {
-    const stored = globalThis.localStorage?.getItem(key);
-    return stored ? stored === 'true' : fallback;
-  });
-  useEffect(() => {
-    globalThis.localStorage?.setItem(key, String(value));
-  }, [key, value]);
-  return [value, setValue] as const;
-}
+import { useEffect, useState, type DragEvent } from 'react';
 
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
@@ -27,14 +16,50 @@ interface SidebarProps {
   onClose: () => void;
   workMode: boolean;
   onToggleWorkMode: () => void;
+  recentActivitySortEnabled: boolean;
+  manualProjectOrder: string[];
+  sessionFreshnessThresholds: SessionFreshnessThresholds;
+  onToggleRecentActivity: () => Promise<void>;
+  onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
+  onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
   creatingConversationKey?: string;
   renamingProjectKey?: string;
+  rebindingConversationKey?: string;
   renamingConversationKey?: string;
+  updatingUiPreferences: boolean;
   onRefresh: () => void;
   refreshing: boolean;
+}
+
+function getConversationFreshnessClass(
+  isBound: boolean,
+  freshnessTimestamp: string | undefined,
+  thresholds: SessionFreshnessThresholds,
+  nowMs: number,
+): string {
+  if (!isBound) {
+    return 'border border-slate-700 bg-transparent';
+  }
+
+  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
+  if (!Number.isFinite(parsedTime)) {
+    return 'bg-emerald-400';
+  }
+
+  const ageMinutes = Math.max(0, nowMs - parsedTime) / 60_000;
+  if (ageMinutes >= thresholds.redMinutes) {
+    return 'bg-rose-500';
+  }
+  if (ageMinutes >= thresholds.orangeMinutes) {
+    return 'bg-orange-400';
+  }
+  if (ageMinutes >= thresholds.yellowMinutes) {
+    return 'bg-amber-400';
+  }
+  return 'bg-emerald-400';
 }
 
 function ConversationLink({
@@ -44,8 +69,12 @@ function ConversationLink({
   title,
   prefixLabel,
   isBound,
+  indicatorClassName,
+  canRebind,
   onClose,
+  onRebindConversation,
   onRenameConversation,
+  rebinding,
   renaming,
 }: {
   project: ProjectSummary;
@@ -54,12 +83,17 @@ function ConversationLink({
   title: string;
   prefixLabel?: string;
   isBound: boolean;
+  indicatorClassName: string;
+  canRebind: boolean;
   onClose: () => void;
+  onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
+  rebinding: boolean;
   renaming: boolean;
 }) {
   const location = useLocation();
   const [editing, setEditing] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
@@ -144,20 +178,49 @@ function ConversationLink({
           active ? 'bg-sky-500/15 text-sky-100' : 'text-slate-300 hover:bg-slate-800/70 hover:text-white',
         )}
       >
-        <span className={clsx('h-2.5 w-2.5 rounded-full', isBound ? 'bg-emerald-400' : 'bg-transparent border border-slate-700')} />
+        <span className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)} />
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
         <span className="line-clamp-1 min-w-0">{title}</span>
       </Link>
-      <button
-        type="button"
-        onClick={() => setEditing(true)}
-        className="rounded-lg border border-transparent p-2 text-slate-500 opacity-0 transition hover:border-slate-700 hover:bg-slate-800 hover:text-slate-200 group-hover:opacity-100 group-focus-within:opacity-100"
-        aria-label={`Rename ${title}`}
-      >
-        <Pencil className="h-3.5 w-3.5" />
-      </button>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setMenuOpen((current) => !current)}
+          className="rounded-lg border border-transparent p-2 text-slate-500 opacity-0 transition hover:border-slate-700 hover:bg-slate-800 hover:text-slate-200 group-hover:opacity-100 group-focus-within:opacity-100"
+          aria-label={`Conversation actions for ${title}`}
+        >
+          <Menu className="h-3.5 w-3.5" />
+        </button>
+        {menuOpen && (
+          <div className="absolute right-0 top-full z-20 mt-1 min-w-[9rem] rounded-xl border border-slate-800 bg-slate-950/95 p-1 shadow-panel">
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                setEditing(true);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+            >
+              <Pencil className="h-3.5 w-3.5 text-slate-400" />
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                void onRebindConversation(project.slug, provider, conversationRef);
+              }}
+              disabled={!canRebind || rebinding}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus className="h-3.5 w-3.5 text-slate-400" />
+              {rebinding ? 'Rebinding…' : 'Rebind'}
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -179,10 +242,25 @@ function ProjectSection({
   onRenameProject,
   renamingProject,
   onClose,
+  manualOrderingEnabled,
+  isDragTarget,
+  onDragStartProject,
+  onDragOverProject,
+  onDropProject,
+  onEndProjectDrag,
+  onRebindConversation,
   onRenameConversation,
+  rebindingConversationKey,
   renamingConversationKey,
 }: {
-  project: ProjectSummary & { combinedConversations: Array<{ provider: ProviderId; conversation: ProjectSummary['providers'][ProviderId]['conversations'][number] }> };
+  project: ProjectSummary & {
+    combinedConversations: Array<{
+      provider: ProviderId;
+      conversation: ProjectSummary['providers'][ProviderId]['conversations'][number];
+      freshnessTimestamp: string;
+      indicatorClassName: string;
+    }>;
+  };
   workMode: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
@@ -192,7 +270,15 @@ function ProjectSection({
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
   onClose: () => void;
+  manualOrderingEnabled: boolean;
+  isDragTarget: boolean;
+  onDragStartProject: (projectSlug: string) => void;
+  onDragOverProject: (event: DragEvent<HTMLElement>, projectSlug: string) => void;
+  onDropProject: (projectSlug: string) => void;
+  onEndProjectDrag: () => void;
+  onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
+  rebindingConversationKey?: string;
   renamingConversationKey?: string;
 }) {
   const location = useLocation();
@@ -219,7 +305,14 @@ function ProjectSection({
   }
 
   return (
-    <section className="mb-4">
+    <section
+      className={clsx('mb-4 rounded-2xl transition', isDragTarget && 'bg-slate-900/40 ring-1 ring-sky-400/40')}
+      draggable={manualOrderingEnabled && !editingProject}
+      onDragStart={() => onDragStartProject(project.slug)}
+      onDragOver={(event) => onDragOverProject(event, project.slug)}
+      onDrop={() => onDropProject(project.slug)}
+      onDragEnd={onEndProjectDrag}
+    >
       <div className="flex items-start justify-between gap-3">
         {editingProject ? (
           <div className="flex min-w-0 flex-1 items-start gap-2 rounded-xl border border-slate-800 bg-slate-950/70 px-2 py-2">
@@ -280,6 +373,9 @@ function ProjectSection({
                 : 'text-slate-100 hover:bg-slate-800/60',
             )}
           >
+            {manualOrderingEnabled && (
+              <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-slate-500" />
+            )}
             <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
             <div className="min-w-0 flex-1 truncate font-medium">{project.displayName}</div>
           </Link>
@@ -340,7 +436,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {project.combinedConversations.map(({ provider, conversation }) => (
+            {project.combinedConversations.map(({ provider, conversation, indicatorClassName }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -349,8 +445,12 @@ function ProjectSection({
                 title={conversation.title}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
+                indicatorClassName={indicatorClassName}
+                canRebind={conversation.kind === 'history'}
                 onClose={onClose}
+                onRebindConversation={onRebindConversation}
                 onRenameConversation={onRenameConversation}
+                rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
               />
             ))}
@@ -369,59 +469,100 @@ export function Sidebar({
   onClose,
   workMode,
   onToggleWorkMode,
+  recentActivitySortEnabled,
+  manualProjectOrder,
+  sessionFreshnessThresholds,
+  onToggleRecentActivity,
+  onReorderProjects,
   onNewConversation,
   onRenameProject,
+  onRebindConversation,
   onRenameConversation,
   creatingConversationKey,
   renamingProjectKey,
+  rebindingConversationKey,
   renamingConversationKey,
+  updatingUiPreferences,
   onRefresh,
   refreshing,
 }: SidebarProps) {
   const creatingAnyConversation = Boolean(creatingConversationKey);
-  const [sortByRecency, setSortByRecency] = useLocalStorageBoolean('agent-console:sidebar-recency-sort', false);
   const [providerPickerProjectSlug, setProviderPickerProjectSlug] = useState<string>();
-  const autoSortByRecency = workMode || sortByRecency;
+  const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
+  const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
+  const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
   const visibleProjects = (tree?.projects ?? [])
     .map((project) => {
       const providerEntries = (['codex', 'claude'] as const).map((provider) => {
         const conversations = project.providers[provider].conversations
           .filter((conversation) => !workMode || conversation.isBound)
           .sort((a, b) => {
-            if (!autoSortByRecency) {
-              return b.updatedAt.localeCompare(a.updatedAt);
-            }
             const aSession = boundSessionMap.get(`${project.slug}:${provider}:${a.ref}`);
             const bSession = boundSessionMap.get(`${project.slug}:${provider}:${b.ref}`);
-            const aTimestamp = aSession?.lastActivityAt ?? aSession?.updatedAt ?? a.updatedAt;
-            const bTimestamp = bSession?.lastActivityAt ?? bSession?.updatedAt ?? b.updatedAt;
+            const aTimestamp = aSession?.lastOutputAt ?? aSession?.lastActivityAt ?? aSession?.startedAt ?? aSession?.updatedAt ?? a.updatedAt;
+            const bTimestamp = bSession?.lastOutputAt ?? bSession?.lastActivityAt ?? bSession?.startedAt ?? bSession?.updatedAt ?? b.updatedAt;
             return bTimestamp.localeCompare(aTimestamp);
           });
         return [provider, { ...project.providers[provider], conversations }] as const;
       });
       const combinedConversations = (['codex', 'claude'] as const)
-        .flatMap((provider) => project.providers[provider].conversations.map((conversation) => ({ provider, conversation })))
+        .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
+          const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
+          const freshnessTimestamp = session?.lastOutputAt ?? session?.lastActivityAt ?? session?.startedAt ?? session?.updatedAt ?? conversation.updatedAt;
+          return {
+            provider,
+            conversation,
+            freshnessTimestamp,
+            indicatorClassName: getConversationFreshnessClass(
+              conversation.isBound,
+              freshnessTimestamp,
+              sessionFreshnessThresholds,
+              nowMs,
+            ),
+          };
+        }))
         .filter(({ conversation }) => !workMode || conversation.isBound)
-        .sort((a, b) => {
-          const aSession = boundSessionMap.get(`${project.slug}:${a.provider}:${a.conversation.ref}`);
-          const bSession = boundSessionMap.get(`${project.slug}:${b.provider}:${b.conversation.ref}`);
-          const aTimestamp = autoSortByRecency
-            ? (aSession?.lastActivityAt ?? aSession?.updatedAt ?? a.conversation.updatedAt)
-            : a.conversation.updatedAt;
-          const bTimestamp = autoSortByRecency
-            ? (bSession?.lastActivityAt ?? bSession?.updatedAt ?? b.conversation.updatedAt)
-            : b.conversation.updatedAt;
-          return bTimestamp.localeCompare(aTimestamp);
-        });
+        .sort((a, b) => b.freshnessTimestamp.localeCompare(a.freshnessTimestamp));
       return {
         ...project,
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
         combinedConversations,
+        latestActivityAt: combinedConversations[0]
+          ? combinedConversations[0].freshnessTimestamp
+          : '',
       };
     })
-    .filter((project) => !workMode || project.combinedConversations.length > 0);
+    .filter((project) => !workMode || project.combinedConversations.length > 0)
+    .sort((a, b) => {
+      if (recentActivitySortEnabled) {
+        return (b.latestActivityAt || '').localeCompare(a.latestActivityAt || '');
+      }
+      const aIndex = manualOrderIndex.get(a.slug) ?? Number.MAX_SAFE_INTEGER;
+      const bIndex = manualOrderIndex.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
+      if (aIndex !== bIndex) {
+        return aIndex - bIndex;
+      }
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+  function handleProjectDrop(targetSlug: string): void {
+    if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
+      setDraggingProjectSlug(undefined);
+      setDragOverProjectSlug(undefined);
+      return;
+    }
+    void onReorderProjects(draggingProjectSlug, targetSlug);
+    setDraggingProjectSlug(undefined);
+    setDragOverProjectSlug(undefined);
+  }
   return (
     <>
       <div className={clsx('fixed inset-0 z-20 bg-slate-950/70 lg:hidden', open ? 'block' : 'hidden')} onClick={onClose} />
@@ -459,20 +600,19 @@ export function Sidebar({
             >
               Work mode
             </button>
-            {!workMode && (
-              <button
-                type="button"
-                onClick={() => setSortByRecency((current) => !current)}
-                className={clsx(
-                  'rounded-full border px-3 py-1.5 text-xs font-medium transition',
-                  sortByRecency
-                    ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
-                    : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-                )}
-              >
-                Auto sort by recency
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => void onToggleRecentActivity()}
+              disabled={updatingUiPreferences}
+              className={clsx(
+                'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
+                recentActivitySortEnabled
+                  ? 'border-sky-400/40 bg-sky-500/10 text-sky-100'
+                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+              )}
+            >
+              Recent activity
+            </button>
           </div>
           <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
             {visibleProjects.length ? visibleProjects.map((project) => (
@@ -491,7 +631,24 @@ export function Sidebar({
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}
                 onClose={onClose}
+                manualOrderingEnabled={!recentActivitySortEnabled}
+                isDragTarget={dragOverProjectSlug === project.slug}
+                onDragStartProject={setDraggingProjectSlug}
+                onDragOverProject={(event, projectSlug) => {
+                  if (recentActivitySortEnabled || draggingProjectSlug === projectSlug) {
+                    return;
+                  }
+                  event.preventDefault();
+                  setDragOverProjectSlug(projectSlug);
+                }}
+                onDropProject={handleProjectDrop}
+                onEndProjectDrag={() => {
+                  setDraggingProjectSlug(undefined);
+                  setDragOverProjectSlug(undefined);
+                }}
+                onRebindConversation={onRebindConversation}
                 onRenameConversation={onRenameConversation}
+                rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
               />
             )) : (

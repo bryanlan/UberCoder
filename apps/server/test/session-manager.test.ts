@@ -81,6 +81,11 @@ const provider: ProviderAdapter = {
   },
 };
 
+const claudeProvider: ProviderAdapter = {
+  ...provider,
+  id: 'claude',
+};
+
 const providerSettings = {
   id: 'codex',
   enabled: true,
@@ -216,6 +221,33 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('adds the Claude bypass-permissions badge to live status', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Reviewing repository state…',
+      '96% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'claude-screen',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const liveScreen = await manager.getSessionScreen(session.id);
+    expect(liveScreen?.screen.status).toContain('bypass permissions on');
+    expect(liveScreen?.screen.status).toContain('96% left');
+    db.close();
+  });
+
   it('emits visible screen updates when bound session output changes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -298,10 +330,10 @@ describe('SessionManager', () => {
       'Enter to confirm · Esc to exit',
     ].join('\n');
     const eventBus = new RealtimeEventBus();
-    const screens: string[] = [];
+    const screens: Array<{ content: string; status: string }> = [];
     const unsubscribe = eventBus.subscribe((event) => {
       if (event.type === 'session.screen-updated') {
-        screens.push(event.screen.content);
+        screens.push({ content: event.screen.content, status: event.screen.status });
       }
     });
     const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
@@ -330,7 +362,7 @@ describe('SessionManager', () => {
     await manager.sendKeystrokes(session.id, { keys: ['Down'] });
 
     expect(tmux.sentKeys).toContainEqual(['Down']);
-    expect(screens.at(-1)).toContain('❯ 3. Haiku');
+    expect(`${screens.at(-1)?.content ?? ''}\n${screens.at(-1)?.status ?? ''}`).toContain('❯ 3. Haiku');
     unsubscribe();
     db.close();
   });

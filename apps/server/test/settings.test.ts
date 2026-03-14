@@ -103,6 +103,22 @@ describe('settings routes', () => {
         }),
       ]));
 
+      const initialUiPreferences = await app.inject({
+        method: 'GET',
+        url: '/api/settings/ui-preferences',
+        headers: { cookie },
+      });
+      expect(initialUiPreferences.statusCode).toBe(200);
+      expect(initialUiPreferences.json()).toEqual({
+        recentActivitySortEnabled: true,
+        manualProjectOrder: ['demo'],
+        sessionFreshnessThresholds: {
+          yellowMinutes: 3,
+          orangeMinutes: 7,
+          redMinutes: 20,
+        },
+      });
+
       const directories = await app.inject({
         method: 'GET',
         url: `/api/settings/directories?path=${encodeURIComponent(root)}`,
@@ -133,6 +149,36 @@ describe('settings routes', () => {
         directoryName: 'alpha--service',
         active: true,
         path: path.join(root, 'alpha', 'service'),
+      });
+
+      const updateUiPreferences = await app.inject({
+        method: 'PUT',
+        url: '/api/settings/ui-preferences',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+        payload: {
+          recentActivitySortEnabled: false,
+          manualProjectOrder: ['alpha--service', 'demo'],
+          sessionFreshnessThresholds: {
+            yellowMinutes: 2,
+            orangeMinutes: 6,
+            redMinutes: 11,
+          },
+        },
+      });
+      expect(updateUiPreferences.statusCode).toBe(200);
+      expect(updateUiPreferences.json()).toEqual({
+        preferences: {
+          recentActivitySortEnabled: false,
+          manualProjectOrder: ['alpha--service', 'demo'],
+          sessionFreshnessThresholds: {
+            yellowMinutes: 2,
+            orangeMinutes: 6,
+            redMinutes: 11,
+          },
+        },
       });
 
       const update = await app.inject({

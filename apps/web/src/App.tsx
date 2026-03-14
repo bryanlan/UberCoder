@@ -2,7 +2,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
-import type { ConversationTimeline, ProjectSummary, ProviderId, SessionEvent, SessionKeystrokeRequest } from '@agent-console/shared';
+import type {
+  ConversationTimeline,
+  ProjectSummary,
+  ProviderId,
+  SessionEvent,
+  SessionKeystrokeRequest,
+  UiPreferences,
+  UpdateUiPreferencesRequest,
+} from '@agent-console/shared';
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
@@ -28,6 +36,16 @@ function useLocalStorageString(key: string, fallback: string) {
   return [value, setValue] as const;
 }
 
+const defaultUiPreferences: UiPreferences = {
+  recentActivitySortEnabled: true,
+  manualProjectOrder: [],
+  sessionFreshnessThresholds: {
+    yellowMinutes: 3,
+    orangeMinutes: 7,
+    redMinutes: 20,
+  },
+};
+
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -40,6 +58,7 @@ function AppShell() {
   const [actionError, setActionError] = useState<string>();
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
   const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
+  const [rebindingConversationKey, setRebindingConversationKey] = useState<string>();
   const [renamingConversationKey, setRenamingConversationKey] = useState<string>();
   const realtimeDegraded = Boolean(eventError);
 
@@ -49,6 +68,11 @@ function AppShell() {
     queryFn: api.tree,
     enabled: authQuery.data?.authenticated,
     refetchInterval: authQuery.data?.authenticated && realtimeDegraded ? 5000 : false,
+  });
+  const uiPreferencesQuery = useQuery({
+    queryKey: ['ui-preferences'],
+    queryFn: api.uiPreferences,
+    enabled: authQuery.data?.authenticated,
   });
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: authQuery.data?.authenticated && location.pathname === '/settings' });
   const inSettings = location.pathname === '/settings';
@@ -127,6 +151,33 @@ function AppShell() {
           return;
         }
         if (parsed.type === 'session.raw-output') {
+          queryClient.setQueryData(['tree'], (current: typeof treeQuery.data | undefined) => current ? {
+            ...current,
+            boundSessions: current.boundSessions.map((session) => (
+              session.id === parsed.sessionId
+                ? {
+                    ...session,
+                    updatedAt: parsed.timestamp,
+                    lastActivityAt: parsed.timestamp,
+                    lastOutputAt: parsed.timestamp,
+                  }
+                : session
+            )),
+          } : current);
+          queryClient.setQueryData<ConversationTimeline | undefined>(
+            ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
+            (current) => current?.boundSession?.id === parsed.sessionId
+              ? {
+                  ...current,
+                  boundSession: {
+                    ...current.boundSession,
+                    updatedAt: parsed.timestamp,
+                    lastActivityAt: parsed.timestamp,
+                    lastOutputAt: parsed.timestamp,
+                  },
+                }
+              : current,
+          );
           if (parsed.sessionId === timelineQuery.data?.boundSession?.id && debugOpen) {
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
           }
@@ -173,6 +224,21 @@ function AppShell() {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+    },
+  });
+
+  const rebindConversationMutation = useMutation({
+    mutationFn: ({ projectSlug, provider, conversationRef }: { projectSlug: string; provider: ProviderId; conversationRef: string }) =>
+      api.bindConversation(projectSlug, provider, conversationRef, authQuery.data?.csrfToken),
+    onSuccess: (_result, variables) => {
+      setActionError(undefined);
+      queryClient.invalidateQueries({ queryKey: ['tree'] });
+      queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
+      navigate(`/projects/${encodeURIComponent(variables.projectSlug)}/${variables.provider}/${encodeURIComponent(variables.conversationRef)}`);
+      closeSidebarIfMobile();
+    },
+    onSettled: () => {
+      setRebindingConversationKey(undefined);
     },
   });
 
@@ -271,6 +337,15 @@ function AppShell() {
     },
   });
 
+  const updateUiPreferencesMutation = useMutation({
+    mutationFn: (body: UpdateUiPreferencesRequest) =>
+      api.updateUiPreferences(body, authQuery.data?.csrfToken),
+    onSuccess: ({ preferences }) => {
+      setActionError(undefined);
+      queryClient.setQueryData(['ui-preferences'], preferences);
+    },
+  });
+
   const releaseMutation = useMutation({
     mutationFn: (sessionId: string) => api.releaseSession(sessionId, authQuery.data?.csrfToken),
     onSuccess: () => {
@@ -300,6 +375,7 @@ function AppShell() {
   });
 
   const project = useMemo(() => treeQuery.data?.projects.find((item) => item.slug === selectedProjectSlug), [selectedProjectSlug, treeQuery.data?.projects]);
+  const uiPreferences = uiPreferencesQuery.data ?? defaultUiPreferences;
 
   async function handleRefresh(): Promise<void> {
     setActionError(undefined);
@@ -377,6 +453,18 @@ function AppShell() {
     }
   }
 
+  async function handleRebindConversation(projectSlug: string, provider: ProviderId, conversationRef: string): Promise<boolean> {
+    setActionError(undefined);
+    setRebindingConversationKey(`${projectSlug}:${provider}:${conversationRef}`);
+    try {
+      await rebindConversationMutation.mutateAsync({ projectSlug, provider, conversationRef });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to rebind this conversation.'));
+      return false;
+    }
+  }
+
   async function handleRenameProject(project: ProjectSummary, displayName?: string): Promise<boolean> {
     setActionError(undefined);
     setRenamingProjectKey(project.slug);
@@ -385,6 +473,55 @@ function AppShell() {
       return true;
     } catch (error) {
       setActionError(describeError(error, 'Unable to rename this project.'));
+      return false;
+    }
+  }
+
+  async function handleToggleRecentActivity(): Promise<void> {
+    await handleUpdateUiPreferences(
+      { recentActivitySortEnabled: !uiPreferences.recentActivitySortEnabled },
+      'Unable to update sidebar sorting.',
+    );
+  }
+
+  async function handleReorderProjects(sourceSlug: string, targetSlug: string): Promise<void> {
+    if (sourceSlug === targetSlug) {
+      return;
+    }
+    const currentOrder = [...uiPreferences.manualProjectOrder];
+    const orderSet = new Set(currentOrder);
+    if (!orderSet.has(sourceSlug)) {
+      currentOrder.push(sourceSlug);
+    }
+    if (!orderSet.has(targetSlug)) {
+      currentOrder.push(targetSlug);
+    }
+    const nextOrder = currentOrder.filter((slug) => slug !== sourceSlug);
+    const targetIndex = nextOrder.indexOf(targetSlug);
+    if (targetIndex === -1) {
+      nextOrder.push(sourceSlug);
+    } else {
+      nextOrder.splice(targetIndex, 0, sourceSlug);
+    }
+
+    setActionError(undefined);
+    try {
+      await updateUiPreferencesMutation.mutateAsync({
+        recentActivitySortEnabled: false,
+        manualProjectOrder: nextOrder,
+      });
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to reorder projects.'));
+    }
+  }
+
+  async function handleUpdateUiPreferences(body: UpdateUiPreferencesRequest, fallback = 'Unable to save UI preferences.'): Promise<boolean> {
+    setActionError(undefined);
+    try {
+      await updateUiPreferencesMutation.mutateAsync(body);
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, fallback));
       return false;
     }
   }
@@ -416,12 +553,20 @@ function AppShell() {
         onClose={closeSidebarIfMobile}
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
+        recentActivitySortEnabled={uiPreferences.recentActivitySortEnabled}
+        manualProjectOrder={uiPreferences.manualProjectOrder}
+        sessionFreshnessThresholds={uiPreferences.sessionFreshnessThresholds}
+        onToggleRecentActivity={handleToggleRecentActivity}
+        onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
         onRenameProject={handleRenameProject}
+        onRebindConversation={handleRebindConversation}
         onRenameConversation={handleRenameConversation}
         creatingConversationKey={creatingConversationKey}
         renamingProjectKey={renamingProjectKey}
+        rebindingConversationKey={rebindingConversationKey}
         renamingConversationKey={renamingConversationKey}
+        updatingUiPreferences={updateUiPreferencesMutation.isPending}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />
@@ -482,7 +627,14 @@ function AppShell() {
 
         <main className="min-h-0 flex-1 overflow-hidden">
           {location.pathname === '/settings' ? (
-            <SettingsPage settings={settingsQuery.data} csrfToken={authQuery.data?.csrfToken} backHref={lastConsolePath} />
+            <SettingsPage
+              settings={settingsQuery.data}
+              uiPreferences={uiPreferences}
+              onUpdateUiPreferences={handleUpdateUiPreferences}
+              updatingUiPreferences={updateUiPreferencesMutation.isPending}
+              csrfToken={authQuery.data?.csrfToken}
+              backHref={lastConsolePath}
+            />
           ) : (
             <ConversationPane
               projects={treeQuery.data?.projects}
