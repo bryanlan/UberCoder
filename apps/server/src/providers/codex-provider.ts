@@ -120,7 +120,7 @@ export class CodexProvider implements ProviderAdapter {
     options?: { initialPrompt?: string },
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
-    const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
+    const initialPrompt = options?.initialPrompt?.trim();
     const baseArgv = ensureProviderFlag(
       renderTemplateTokens(template, {
         conversationId: conversationRef ?? '',

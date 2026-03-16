@@ -8,7 +8,7 @@ import { truncate, normalizeComparableText, stableTextHash } from '../lib/text.j
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
-import { SessionManager } from '../sessions/session-manager.js';
+import { SessionKeystrokeRejectedError, SessionManager } from '../sessions/session-manager.js';
 
 const inputBodySchema = z.object({
   text: z.string().min(1),
@@ -137,6 +137,14 @@ export async function registerSessionRoutes(
       return;
     }
     const sessionId = (request.params as { sessionId: string }).sessionId;
-    return await sessions.sendKeystrokes(sessionId, parsed.data);
+    try {
+      return await sessions.sendKeystrokes(sessionId, parsed.data);
+    } catch (error) {
+      if (error instanceof SessionKeystrokeRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 }

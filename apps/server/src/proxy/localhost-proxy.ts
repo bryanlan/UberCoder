@@ -54,14 +54,7 @@ export class LocalhostProxyService {
   ) {}
 
   register(app: FastifyInstance): void {
-    this.proxy.on('error', (_error, _req, res) => {
-      if (res && 'writeHead' in res) {
-        res.writeHead(502, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Proxy target unavailable.' }));
-      }
-    });
-
-    app.all('/proxy/:projectSlug/:port/*', async (request, reply) => {
+    const handleProxyRequest = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
       await this.authService.ensureAuthenticated(request, reply, false);
       const parsed = parseProxyPath(request.raw.url);
       if (!parsed) {
@@ -84,7 +77,18 @@ export class LocalhostProxyService {
       this.proxy.web(request.raw, reply.raw, {
         target: `http://127.0.0.1:${parsed.port}`,
       });
+    };
+
+    this.proxy.on('error', (_error, _req, res) => {
+      if (res && 'writeHead' in res) {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Proxy target unavailable.' }));
+      }
     });
+
+    app.all('/proxy/:projectSlug/:port', handleProxyRequest);
+    app.all('/proxy/:projectSlug/:port/', handleProxyRequest);
+    app.all('/proxy/:projectSlug/:port/*', handleProxyRequest);
 
     app.server.on('upgrade', async (req: IncomingMessage, socket: Socket, head: Buffer) => {
       const parsed = parseProxyPath(req.url);

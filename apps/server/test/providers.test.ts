@@ -20,6 +20,28 @@ const project: ActiveProject = {
 };
 
 describe('provider history discovery', () => {
+  it('passes an initial prompt through Codex resume launches', async () => {
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: path.resolve('test/fixtures/codex'),
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const launch = provider.getLaunchCommand(project, 'history-ref', settings, {
+      initialPrompt: 'resume with this prompt',
+    });
+
+    expect(launch.argv).toEqual([
+      'codex',
+      '--dangerously-bypass-approvals-and-sandbox',
+      'resume',
+      'history-ref',
+      'resume with this prompt',
+    ]);
+  });
+
   it('discovers Codex transcripts for the selected project', async () => {
     const provider = new CodexProvider();
     const settings = {

@@ -16,6 +16,10 @@ import { SessionManager } from '../sessions/session-manager.js';
 import { nowIso } from '../lib/time.js';
 
 const providerSchema = z.enum(PROVIDERS);
+const bindConversationBodySchema = z.object({
+  force: z.boolean().optional(),
+  initialPrompt: z.string().trim().min(1).optional(),
+});
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
@@ -193,6 +197,11 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
+    const parsedBody = bindConversationBodySchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid bind payload.', details: parsedBody.error.flatten() });
+      return;
+    }
     const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
     const providerId = parseProvider(providerRaw);
     const project = await projectService.getProjectBySlug(projectSlug);
@@ -211,6 +220,12 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Conversation not indexed.' });
       return;
     }
+    if (parsedBody.data.force) {
+      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
+      if (existingSession) {
+        await sessions.releaseSession(existingSession.id);
+      }
+    }
     const session = await sessions.bindConversation({
       project,
       provider,
@@ -218,6 +233,7 @@ export async function registerConversationRoutes(
       conversationRef,
       title: cached.title,
       kind: 'history',
+      initialPrompt: parsedBody.data.initialPrompt,
     });
     return { session };
   });

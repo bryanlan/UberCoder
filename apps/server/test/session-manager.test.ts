@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
-import { SessionManager } from '../src/sessions/session-manager.js';
+import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
 import type { TmuxClient } from '../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
@@ -486,6 +486,107 @@ describe('SessionManager', () => {
     db.close();
   }, 10_000);
 
+  it('does not treat idle housekeeping output as fresh completion activity', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Review complete.',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'session-housekeeping-ignore',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const previousTimestamp = '2026-03-14T21:00:00.000Z';
+    const tracked = db.getBoundSessionById(session.id)!;
+    db.upsertBoundSession({
+      ...tracked,
+      updatedAt: previousTimestamp,
+      lastActivityAt: previousTimestamp,
+      lastOutputAt: undefined,
+      lastCompletedAt: previousTimestamp,
+      isWorking: false,
+    });
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Checking for updates',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+
+    await fs.appendFile(tracked.rawLogPath!, 'Checking for updates\n');
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.lastOutputAt).toBeUndefined();
+    expect(updated?.lastCompletedAt).toBe(previousTimestamp);
+    db.close();
+  });
+
+  it('repairs stale idle completion timestamps that were last advanced only by housekeeping output', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Review complete.',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'session-housekeeping-repair',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const meaningfulTimestamp = '2026-03-14T21:37:41.960Z';
+    const housekeepingTimestamp = '2026-03-14T21:59:15.684Z';
+    const tracked = db.getBoundSessionById(session.id)!;
+    await fs.appendFile(tracked.eventLogPath!, `${JSON.stringify({
+      type: 'raw-output',
+      text: 'Real assistant output',
+      timestamp: meaningfulTimestamp,
+    })}\n`);
+    await fs.appendFile(tracked.eventLogPath!, `${JSON.stringify({
+      type: 'raw-output',
+      text: 'Checking for updates',
+      timestamp: housekeepingTimestamp,
+    })}\n`);
+    db.upsertBoundSession({
+      ...tracked,
+      updatedAt: housekeepingTimestamp,
+      lastActivityAt: housekeepingTimestamp,
+      lastOutputAt: housekeepingTimestamp,
+      lastCompletedAt: housekeepingTimestamp,
+      isWorking: false,
+    });
+
+    await manager.getSessionScreen(session.id);
+
+    const repaired = db.getBoundSessionById(session.id);
+    expect(repaired?.lastOutputAt).toBe(meaningfulTimestamp);
+    expect(repaired?.lastCompletedAt).toBe(meaningfulTimestamp);
+    db.close();
+  });
+
   it('sends raw keystrokes directly to the tmux session without synthesizing chat input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -706,6 +807,183 @@ describe('SessionManager', () => {
     expect(screens.at(-1)?.inputText).toBe('');
     expect(`${screens.at(-1)?.content ?? ''}`).toContain('Running the slower paste submit…');
     unsubscribe();
+    db.close();
+  });
+
+  it('waits for Codex queue-message mode and opens the composer before typing into a fresh session', async () => {
+    class QueueMessageCodexTmux extends FakeTmux {
+      private captureCount = 0;
+      private stage: 'starting' | 'queue' | 'composer' | 'typed' | 'submitted' = 'starting';
+
+      constructor() {
+        super();
+        this.paneText = this.renderStarting();
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        expect(this.stage).toBe('composer');
+        this.stage = 'typed';
+        this.paneText = this.renderComposer(text);
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (keys.includes('Tab')) {
+          expect(this.stage).toBe('queue');
+          this.stage = 'composer';
+          this.paneText = this.renderComposer('');
+          return;
+        }
+        if (keys.includes('Enter')) {
+          expect(this.stage).toBe('typed');
+          this.stage = 'submitted';
+          this.paneText = [
+            'OpenAI Codex',
+            '',
+            'Working through the queued follow-up…',
+            '• Working (1s • esc to interrupt)',
+            'gpt-5.4 xhigh · 37% left · ~/demo',
+          ].join('\n');
+        }
+      }
+
+      override async capturePane(): Promise<string> {
+        this.captureCount += 1;
+        if (this.stage === 'starting' && this.captureCount >= 3) {
+          this.stage = 'queue';
+          this.paneText = this.renderQueue();
+        }
+        return this.paneText;
+      }
+
+      private renderStarting(): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Starting MCP servers (0/3): chrome-devtools, codex_apps, playwright',
+        ].join('\n');
+      }
+
+      private renderQueue(): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Resumed conversation.',
+          '',
+          'tab to queue message                                        37% context left',
+        ].join('\n');
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Resumed conversation.',
+          '',
+          `› ${input}`,
+          'gpt-5.4 xhigh · 37% left · ~/demo',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new QueueMessageCodexTmux();
+    const eventBus = new RealtimeEventBus();
+    const screens: Array<{ inputText: string; status: string }> = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screens.push({ inputText: event.screen.inputText, status: event.screen.status });
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-queue-message',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    screens.length = 0;
+    await manager.sendKeystrokes(session.id, {
+      text: 'follow up on the failed Vite restart',
+      keys: ['Enter'],
+    });
+
+    expect(tmux.sent).toEqual(['follow up on the failed Vite restart']);
+    expect(tmux.sentKeys).toContainEqual(['Tab']);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    expect(screens.some((screen) => screen.inputText === 'follow up on the failed Vite restart')).toBe(true);
+    expect(screens.at(-1)?.status).toContain('37% left');
+    unsubscribe();
+    db.close();
+  });
+
+  it('rejects combined submit keystrokes when typed text never lands in the live input buffer', async () => {
+    class InputRejectingTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          '1. review the issue',
+          '2. patch the behavior',
+          '3. rerun the targeted tests',
+          '',
+          'Message: fix live session reliability and sidebar state',
+          '',
+          'I left the unrelated local edits in localhost-proxy.ts and vite.config.ts',
+          'unstaged and out of this commit.',
+          '',
+          '› Run /review on my current changes',
+          '',
+          '  Message: fix live session reliability and sidebar state',
+          '',
+          '  I left the unrelated local edits in localhost-proxy.ts and vite.config.ts',
+          '  unstaged and out of this commit.',
+          'gpt-5.4 xhigh · 65% left · ~/demo',
+        ].join('\n');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Message: fix live session reliability and sidebar state',
+          '',
+          'I left the unrelated local edits in localhost-proxy.ts and vite.config.ts',
+          'unstaged and out of this commit.',
+          '',
+          text,
+          'gpt-5.4 xhigh · 65% left · ~/demo',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new InputRejectingTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-input-rejected',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await expect(manager.sendKeystrokes(session.id, {
+      text: 'this should stay local until the session accepts input',
+      keys: ['Enter'],
+    })).rejects.toThrow(SessionKeystrokeRejectedError);
+    expect(tmux.sentKeys).toEqual([]);
     db.close();
   });
 

@@ -449,7 +449,7 @@ function AppShell() {
 
   const rebindConversationMutation = useMutation({
     mutationFn: ({ projectSlug, provider, conversationRef }: { projectSlug: string; provider: ProviderId; conversationRef: string }) =>
-      api.bindConversation(projectSlug, provider, conversationRef, authQuery.data?.csrfToken),
+      api.bindConversation(projectSlug, provider, conversationRef, authQuery.data?.csrfToken, { force: true }),
     onSuccess: (_result, variables) => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
@@ -650,30 +650,101 @@ function AppShell() {
     }
   }
 
+  function applyUpdatedSessionToSelection(sessionId: string, updatedSession: BoundSession): void {
+    if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
+      queryClient.setQueryData<ConversationTimeline | undefined>(
+        ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+        (current) => current?.boundSession?.id === sessionId
+          ? {
+              ...current,
+              boundSession: {
+                ...current.boundSession,
+                ...updatedSession,
+              },
+            }
+          : current,
+      );
+      void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+    }
+    if (sessionId === timelineQuery.data?.boundSession?.id) {
+      void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
+    }
+  }
+
+  async function forceRebindSelectedConversation(initialPrompt?: string): Promise<BoundSession | undefined> {
+    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
+      return undefined;
+    }
+    if (timelineQuery.data?.conversation.kind !== 'history') {
+      return undefined;
+    }
+
+    const { session } = await api.bindConversation(
+      selectedProjectSlug,
+      selectedProvider,
+      selectedConversationRef,
+      authQuery.data?.csrfToken,
+      { force: true, initialPrompt },
+    );
+
+    queryClient.setQueryData(['tree'], (current: TreeResponse | undefined) => applySessionUpdateToTree(current, session));
+    queryClient.setQueryData<ConversationTimeline | undefined>(
+      ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+      (current) => current
+        ? {
+            ...current,
+            conversation: {
+              ...current.conversation,
+              isBound: true,
+              boundSessionId: session.id,
+            },
+            boundSession: session,
+          }
+        : current,
+    );
+    void queryClient.invalidateQueries({ queryKey: ['tree'] });
+    void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+    return session;
+  }
+
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
     setActionError(undefined);
     try {
       const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
-      if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
-        queryClient.setQueryData<ConversationTimeline | undefined>(
-          ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-          (current) => current?.boundSession?.id === sessionId
-            ? {
-                ...current,
-                boundSession: {
-                  ...current.boundSession,
-                  ...updatedSession,
-                },
-              }
-            : current,
-        );
-        void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-      }
-      if (sessionId === timelineQuery.data?.boundSession?.id) {
-        void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
-      }
+      applyUpdatedSessionToSelection(sessionId, updatedSession);
       return true;
     } catch (error) {
+      if (
+        error instanceof ApiError
+        && error.status === 409
+        && error.message.includes('did not accept the typed text into its input buffer')
+        && timelineQuery.data?.boundSession?.id === sessionId
+      ) {
+        try {
+          const usePromptedCodexRebind = selectedProvider === 'codex'
+            && typeof body.text === 'string'
+            && body.text.trim().length > 0
+            && Array.isArray(body.keys)
+            && body.keys.includes('Enter');
+          const reboundSession = await forceRebindSelectedConversation(
+            usePromptedCodexRebind ? body.text : undefined,
+          );
+          if (reboundSession) {
+            if (usePromptedCodexRebind) {
+              applyUpdatedSessionToSelection(reboundSession.id, reboundSession);
+              setActionError(undefined);
+              return true;
+            }
+            const retriedSession = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
+            applyUpdatedSessionToSelection(reboundSession.id, retriedSession);
+            setActionError(undefined);
+            return true;
+          }
+        } catch (recoveryError) {
+          setActionError(describeError(recoveryError, 'Live session input recovery failed.'));
+          return false;
+        }
+      }
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
       return false;
     }

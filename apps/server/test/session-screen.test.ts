@@ -85,6 +85,29 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('93% left');
   });
 
+  it('does not treat previously submitted prompt lines as the active composer after assistant output follows', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '',
+      'Message: fix live session reliability and sidebar state',
+      '',
+      'I left the unrelated local edits in localhost-proxy.ts and vite.config.ts',
+      'unstaged and out of this commit.',
+      '',
+      '› Run /review on my current changes',
+      '',
+      '  Message: fix live session reliability and sidebar state',
+      '',
+      '  I left the unrelated local edits in localhost-proxy.ts and vite.config.ts',
+      '  unstaged and out of this commit.',
+      'gpt-5.4 xhigh · 65% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('Run /review on my current changes');
+    expect(screen.status).toContain('65% left');
+  });
+
   it('recognizes working status lines with alternate bullet glyphs', () => {
     expect(isWorkingStatusLine('◦ Working (12s • esc to interrupt)')).toBe(true);
     expect(isWorkingStatusLine('▪ Working...')).toBe(true);

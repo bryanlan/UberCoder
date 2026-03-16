@@ -8,6 +8,9 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
+      workbox: {
+        navigateFallbackDenylist: [/^\/api\//, /^\/proxy\//],
+      },
       manifest: {
         name: 'Agent Console',
         short_name: 'Agent Console',

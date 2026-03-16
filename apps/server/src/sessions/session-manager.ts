@@ -13,6 +13,7 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
+import { normalizeRawOutputLines } from './live-output.js';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
 
 interface WatchState {
@@ -27,12 +28,69 @@ interface WatchState {
 const WORKING_PULSE_GRACE_MS = 4_000;
 const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
 const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
+const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
+const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
+
+export class SessionKeystrokeRejectedError extends Error {
+  readonly statusCode = 409;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionKeystrokeRejectedError';
+  }
+}
 
 function sessionScreenShowsWorking(screen: SessionScreen): boolean {
   return [screen.status, screen.statusAnsi ?? '', ...screen.content.split('\n').slice(-8)]
     .flatMap((block) => block.split('\n'))
     .map((line) => normalizeWhitespace(line))
     .some((line) => isWorkingStatusLine(line));
+}
+
+function screenInputChanged(previous: SessionScreen, next: SessionScreen): boolean {
+  return normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
+}
+
+function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {
+  return `${screen.content}\n${screen.status}\n${screen.statusAnsi ?? ''}`
+    .split('\n')
+    .map((line) => normalizeWhitespace(line))
+    .some((line) => /tab to queue message/i.test(line));
+}
+
+function screenIsStartingUp(screen: SessionScreen): boolean {
+  const normalizedStatus = normalizeWhitespace(screen.status);
+  const normalizedContent = normalizeWhitespace(screen.content);
+  return /^starting session/i.test(normalizedStatus)
+    || /^waiting for session output/i.test(normalizedContent)
+    || /starting mcp servers/i.test(`${normalizedContent}\n${normalizedStatus}`);
+}
+
+function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
+  if (!text || text.length > 8 || !/^[\w./:-]+$/u.test(text.trim())) {
+    return false;
+  }
+
+  const normalizedLines = `${screen.content}\n${screen.status}`
+    .split('\n')
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+  const trailingLines = normalizedLines.slice(-8);
+
+  if (trailingLines.some((line) => /Enter to confirm · Esc to exit/i.test(line))) {
+    return true;
+  }
+
+  if (trailingLines.some((line) => /Esc to cancel · Tab to amend/i.test(line))) {
+    return true;
+  }
+
+  if (trailingLines.some((line) => /(?:^|\s)\d:\s+\S/.test(line))) {
+    return true;
+  }
+
+  const numberedChoices = trailingLines.filter((line) => /^(?:[❯›>]\s*)?\d+\.\s/.test(line));
+  return numberedChoices.length >= 2;
 }
 
 function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
@@ -266,17 +324,33 @@ export class SessionManager {
     let latestObservedHash = hashScreen(beforeScreen);
 
     if (payload.text) {
+      if (payload.keys?.length && !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, payload.text)) {
+        latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
+        latestObservedHash = hashScreen(latestObservedScreen);
+      }
+      const textEntryScreen = latestObservedScreen;
       await this.tmuxClient.sendLiteralText(liveSession.tmuxSessionName, payload.text);
       if (payload.keys?.length) {
-        const textSettledScreen = await this.waitForScreenChange(
+        const textSettledScreen = await this.waitForInputTextChange(
           liveSession,
           latestObservedHash,
+          textEntryScreen,
           combinedTextKeySettleWaitMs(payload.text),
         );
         if (textSettledScreen) {
           latestObservedScreen = textSettledScreen;
           latestObservedHash = hashScreen(textSettledScreen);
           this.publishScreenUpdate(liveSession, textSettledScreen);
+        }
+        if (!screenInputChanged(textEntryScreen, latestObservedScreen) && !screenAllowsLiteralSelectionWithoutInput(textEntryScreen, payload.text)) {
+          this.appendDebugTrace(liveSession, {
+            action: 'send-keystrokes-rejected',
+            text: payload.text,
+            keys: payload.keys,
+            before: textEntryScreen,
+            after: latestObservedScreen,
+          });
+          throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
         }
       }
     }
@@ -381,6 +455,10 @@ export class SessionManager {
     return this.db.getBoundSessionById(sessionId);
   }
 
+  getSessionByConversation(projectSlug: string, provider: ProviderId, conversationRef: string): BoundSession | undefined {
+    return this.db.getBoundSessionByConversation(projectSlug, provider, conversationRef);
+  }
+
   async getSessionScreen(sessionId: string): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
@@ -446,10 +524,11 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     this.watchSessionOutput(refreshed);
-    if (!this.lastScreenHashes.has(refreshed.id)) {
-      await this.emitScreenUpdate(refreshed);
+    const repaired = this.repairIgnoredIdleOutput(refreshed);
+    if (!this.lastScreenHashes.has(repaired.id)) {
+      await this.emitScreenUpdate(repaired);
     }
-    return refreshed;
+    return repaired;
   }
 
   private appendEvent(session: BoundSession, event: { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string }): void {
@@ -633,20 +712,84 @@ export class SessionManager {
     const now = nowIso();
     try {
       const session = this.mustGetSession(sessionId);
-      const updated = {
-        ...session,
-        updatedAt: now,
-        lastActivityAt: now,
-        lastOutputAt: now,
-      };
-      this.db.upsertBoundSession(updated);
-      if (session.isWorking) {
-        this.scheduleWorkingExpiry(sessionId, now);
+      const hasMeaningfulOutput = normalizeRawOutputLines(chunk).length > 0;
+      const updated = hasMeaningfulOutput
+        ? {
+            ...session,
+            updatedAt: now,
+            lastActivityAt: now,
+            lastOutputAt: now,
+          }
+        : session;
+      if (hasMeaningfulOutput) {
+        this.db.upsertBoundSession(updated);
+        if (session.isWorking) {
+          this.scheduleWorkingExpiry(sessionId, now);
+        }
+        this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       }
-      this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       void this.emitScreenUpdate(updated);
     } catch {
       // Session may have ended while the debounce timer was pending.
+    }
+  }
+
+  private repairIgnoredIdleOutput(session: BoundSession): BoundSession {
+    if (
+      session.isWorking
+      || !session.lastOutputAt
+      || !session.lastCompletedAt
+      || session.lastCompletedAt !== session.lastOutputAt
+      || !session.eventLogPath
+      || !fs.existsSync(session.eventLogPath)
+    ) {
+      return session;
+    }
+
+    try {
+      const events = fs.readFileSync(session.eventLogPath, 'utf8')
+        .split(/\r?\n/)
+        .filter(Boolean);
+      let latestRawOutputAt: string | undefined;
+      let latestMeaningfulOutputAt: string | undefined;
+      let latestRawOutputWasIgnorable = false;
+
+      for (const line of events) {
+        const event = JSON.parse(line) as { type?: string; text?: string; timestamp?: string };
+        if (event.type !== 'raw-output' || typeof event.text !== 'string' || typeof event.timestamp !== 'string') {
+          continue;
+        }
+        latestRawOutputAt = event.timestamp;
+        latestRawOutputWasIgnorable = normalizeRawOutputLines(event.text).length === 0;
+        if (!latestRawOutputWasIgnorable) {
+          latestMeaningfulOutputAt = event.timestamp;
+        }
+      }
+
+      if (!latestRawOutputWasIgnorable || latestRawOutputAt !== session.lastOutputAt) {
+        return session;
+      }
+
+      const repairedLastCompletedAt = latestMeaningfulOutputAt ?? session.startedAt;
+      const repairedLastOutputAt = latestMeaningfulOutputAt;
+      if (
+        repairedLastCompletedAt === session.lastCompletedAt
+        && repairedLastOutputAt === session.lastOutputAt
+      ) {
+        return session;
+      }
+
+      const repaired: BoundSession = {
+        ...session,
+        updatedAt: nowIso(),
+        lastOutputAt: repairedLastOutputAt,
+        lastCompletedAt: repairedLastCompletedAt,
+      };
+      this.db.upsertBoundSession(repaired);
+      this.eventBus.emit({ type: 'session.updated', session: repaired });
+      return repaired;
+    } catch {
+      return session;
     }
   }
 
@@ -693,6 +836,95 @@ export class SessionManager {
       }
       await sleep(35);
     }
+  }
+
+  private async waitForInputTextChange(
+    session: BoundSession,
+    previousHash: string | undefined,
+    previousScreen: SessionScreen,
+    timeoutMs: number,
+  ): Promise<SessionScreen | undefined> {
+    const deadline = previousHash ? Date.now() + timeoutMs : Date.now();
+    let latestChangedScreen: SessionScreen | undefined;
+    let latestHash = previousHash;
+
+    while (true) {
+      const screen = await this.captureSessionScreen(session);
+      const nextHash = hashScreen(screen);
+      if (nextHash !== latestHash) {
+        latestChangedScreen = screen;
+        latestHash = nextHash;
+        if (screenInputChanged(previousScreen, screen)) {
+          return screen;
+        }
+      }
+      if (!previousHash || Date.now() >= deadline) {
+        return latestChangedScreen;
+      }
+      await sleep(35);
+    }
+  }
+
+  private async waitForScreenMatch(
+    session: BoundSession,
+    previousHash: string | undefined,
+    timeoutMs: number,
+    matcher: (screen: SessionScreen) => boolean,
+  ): Promise<SessionScreen | undefined> {
+    const deadline = previousHash ? Date.now() + timeoutMs : Date.now();
+    let latestChangedScreen: SessionScreen | undefined;
+    let latestHash = previousHash;
+
+    while (true) {
+      const screen = await this.captureSessionScreen(session);
+      const nextHash = hashScreen(screen);
+      if (nextHash !== latestHash) {
+        latestChangedScreen = screen;
+        latestHash = nextHash;
+        if (matcher(screen)) {
+          return screen;
+        }
+      }
+      if (!previousHash || Date.now() >= deadline) {
+        return latestChangedScreen;
+      }
+      await sleep(35);
+    }
+  }
+
+  private async prepareScreenForCombinedTextSubmit(
+    session: BoundSession,
+    initialScreen: SessionScreen,
+  ): Promise<SessionScreen> {
+    let screen = initialScreen;
+
+    if (screenIsStartingUp(screen)) {
+      const settledScreen = await this.waitForScreenMatch(
+        session,
+        hashScreen(screen),
+        TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS,
+        (candidate) => !screenIsStartingUp(candidate),
+      );
+      if (settledScreen) {
+        screen = settledScreen;
+        this.publishScreenUpdate(session, screen);
+      }
+    }
+
+    if (session.provider === 'codex' && screenShowsQueuedMessageHint(screen)) {
+      await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Tab']);
+      const composerScreen = await this.waitForScreenChange(
+        session,
+        hashScreen(screen),
+        QUEUED_MESSAGE_COMPOSER_WAIT_MS,
+      );
+      if (composerScreen) {
+        screen = composerScreen;
+        this.publishScreenUpdate(session, screen);
+      }
+    }
+
+    return screen;
   }
 
   private async emitScreenUpdate(session: BoundSession, options: { waitForChange?: boolean } = {}): Promise<void> {

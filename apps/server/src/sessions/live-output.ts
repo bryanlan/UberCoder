@@ -34,6 +34,12 @@ function looksLikeTerminalChrome(line: string): boolean {
     || /^(?:\d+\.\s+Use .+ effort|gpt-[\w.]+ .+ left .+|Opus .+ Claude Max)$/i.test(line);
 }
 
+function looksLikeIdleHousekeeping(line: string): boolean {
+  return /^(?:Checking for updates|How is Claude doing this session\? \(optional\)|Set model to .+)$/i.test(line)
+    || /^(?:\d+\s*:\s*Bad\s+\d+\s*:\s*Fine\s+\d+\s*:\s*Good\s+\d+\s*:\s*Dismiss)$/i.test(line)
+    || /^(?:Select model|Enter to confirm(?:\s*·\s*Esc to exit)?|Esc to exit)$/i.test(line);
+}
+
 function normalizeTerminalLine(text: string): string {
   return normalizeWhitespace(
     text
@@ -45,7 +51,7 @@ function normalizeTerminalLine(text: string): string {
   );
 }
 
-function normalizeRawOutputLines(text: string, lastUserInput?: string): string[] {
+export function normalizeRawOutputLines(text: string, lastUserInput?: string): string[] {
   const cleaned = stripAnsiAndControl(text);
   const candidateLines = cleaned
     .split(/\n+/)
@@ -59,7 +65,7 @@ function normalizeRawOutputLines(text: string, lastUserInput?: string): string[]
   const normalized: string[] = [];
 
   for (const line of candidateLines) {
-    if (!line || looksLikeNoise(line) || looksLikeTerminalChrome(line)) continue;
+    if (!line || looksLikeNoise(line) || looksLikeTerminalChrome(line) || looksLikeIdleHousekeeping(line)) continue;
     if (comparableUserInput) {
       const comparableLine = normalizeComparableText(line);
       const compactLine = comparableLine.replace(/\s+/g, '');

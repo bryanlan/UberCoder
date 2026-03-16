@@ -56,7 +56,23 @@ export const api = {
   tree: () => request<TreeResponse>('/api/projects/tree'),
   refreshTree: (csrfToken?: string) => request<TreeResponse>('/api/projects/refresh', { method: 'POST', body: '{}' }, csrfToken),
   timeline: (projectSlug: string, provider: string, conversationRef: string) => request<ConversationTimeline>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/messages`),
-  bindConversation: (projectSlug: string, provider: string, conversationRef: string, csrfToken?: string) => request<{ session: BoundSession }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`, { method: 'POST', body: '{}' }, csrfToken),
+  bindConversation: (
+    projectSlug: string,
+    provider: string,
+    conversationRef: string,
+    csrfToken?: string,
+    options: { force?: boolean; initialPrompt?: string } = {},
+  ) => request<{ session: BoundSession }>(
+    `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        force: options.force === true,
+        initialPrompt: options.initialPrompt,
+      }),
+    },
+    csrfToken,
+  ),
   bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string) => request<{ session: BoundSession; conversationRef: string }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`, { method: 'POST', body: '{}' }, csrfToken),
   renameConversation: (projectSlug: string, provider: string, conversationRef: string, body: RenameConversationRequest, csrfToken?: string) =>
     request<{ conversation: ConversationTimeline['conversation'] }>(

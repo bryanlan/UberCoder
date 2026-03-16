@@ -173,10 +173,12 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 
     const inputParts = [promptText];
     let nextSectionStart = index + 1;
+    let boundaryLine: ScreenLine | undefined;
     for (let lineIndex = index + 1; lineIndex < contentLines.length; lineIndex += 1) {
       const candidate = contentLines[lineIndex]!;
       if (isComposerBoundary(candidate.plain)) {
         nextSectionStart = lineIndex;
+        boundaryLine = candidate;
         break;
       }
       inputParts.push(candidate.plain.trim());
@@ -185,6 +187,10 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 
     const footerLines = collapseBlankRuns(trimBlankEdges(contentLines.slice(nextSectionStart)))
       .filter((line) => line.plain.trim().length > 0);
+    const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
+    if (boundaryLine?.plain.trim().length === 0 && nonStatusFooterLines.length > 1) {
+      continue;
+    }
 
     return {
       contentLines: trimBlankEdges(contentLines.slice(0, index)),
