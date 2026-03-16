@@ -86,6 +86,7 @@ export const api = {
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
+  networkInfo: () => request<{ tailscaleIpv4?: string }>('/api/settings/network'),
   uiPreferences: () => request<UiPreferences>('/api/settings/ui-preferences'),
   browseDirectories: (directoryPath?: string) =>
     request<DirectoryBrowserResponse>(directoryPath ? `/api/settings/directories?path=${encodeURIComponent(directoryPath)}` : '/api/settings/directories'),

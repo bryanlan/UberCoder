@@ -68,6 +68,30 @@ const DEFAULT_SESSION_FRESHNESS_THRESHOLDS = {
   redMinutes: 20,
 } as const;
 
+function isTailscaleIpv4Address(address: string): boolean {
+  const octets = address.split('.').map((part) => Number.parseInt(part, 10));
+  if (octets.length !== 4 || octets.some((value) => Number.isNaN(value) || value < 0 || value > 255)) {
+    return false;
+  }
+  const firstOctet = octets[0] ?? -1;
+  const secondOctet = octets[1] ?? -1;
+  return firstOctet === 100 && secondOctet >= 64 && secondOctet <= 127;
+}
+
+function getPrimaryTailscaleIpv4(): string | undefined {
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const entry of interfaces ?? []) {
+      if (entry.family !== 'IPv4' || entry.internal) {
+        continue;
+      }
+      if (isTailscaleIpv4Address(entry.address)) {
+        return entry.address;
+      }
+    }
+  }
+  return undefined;
+}
+
 function normalizeOptionalText(value: string | undefined): string | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
@@ -217,6 +241,18 @@ export async function registerSettingsRoutes(
         sessionTtlHours: config.security.sessionTtlHours,
       },
       projects: await projectService.listProjectSettings(),
+    };
+  });
+
+  app.get('/api/settings/network', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply, false);
+    } catch {
+      return;
+    }
+
+    return {
+      tailscaleIpv4: getPrimaryTailscaleIpv4(),
     };
   });
 

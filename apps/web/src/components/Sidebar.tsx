@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useState, type DragEvent } from 'react';
+import { api } from '../lib/api';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
@@ -280,6 +281,7 @@ function ProjectSection({
   onRenameConversation,
   rebindingConversationKey,
   renamingConversationKey,
+  tailscaleIpv4,
 }: {
   project: ProjectSummary & {
     combinedConversations: Array<{
@@ -305,6 +307,7 @@ function ProjectSection({
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
+  tailscaleIpv4?: string;
 }) {
   const location = useLocation();
   const [editingProject, setEditingProject] = useState(false);
@@ -332,6 +335,15 @@ function ProjectSection({
 
   async function handleCopyPortUrl(port: number): Promise<void> {
     const url = `${globalThis.location.origin}/proxy/${encodeURIComponent(project.slug)}/${port}/`;
+    await copyTextToClipboard(url);
+    setMenuOpen(false);
+  }
+
+  async function handleCopyTailscalePortUrl(port: number): Promise<void> {
+    if (!tailscaleIpv4) {
+      return;
+    }
+    const url = `http://${tailscaleIpv4}:${port}/`;
     await copyTextToClipboard(url);
     setMenuOpen(false);
   }
@@ -474,17 +486,30 @@ function ProjectSection({
                   {project.allowedLocalhostPorts.length > 0 && (
                     <div className="mt-1 border-t border-slate-800 pt-1">
                       {project.allowedLocalhostPorts.map((port) => (
-                        <button
-                          key={port}
-                          type="button"
-                          onClick={() => {
-                            void handleCopyPortUrl(port);
-                          }}
-                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
-                        >
-                          <LinkIcon className="h-3.5 w-3.5 text-slate-400" />
-                          {`Copy URL :${port}`}
-                        </button>
+                        <div key={port}>
+                          {tailscaleIpv4 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void handleCopyTailscalePortUrl(port);
+                              }}
+                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+                            >
+                              <LinkIcon className="h-3.5 w-3.5 text-slate-400" />
+                              {`Copy Tailscale URL :${port}`}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleCopyPortUrl(port);
+                            }}
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+                          >
+                            <LinkIcon className="h-3.5 w-3.5 text-slate-400" />
+                            {`Copy proxied URL :${port}`}
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -551,10 +576,29 @@ export function Sidebar({
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void api.networkInfo()
+      .then((network) => {
+        if (active) {
+          setTailscaleIpv4(network.tailscaleIpv4);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTailscaleIpv4(undefined);
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
@@ -704,6 +748,7 @@ export function Sidebar({
                 onRenameConversation={onRenameConversation}
                 rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
+                tailscaleIpv4={tailscaleIpv4}
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
