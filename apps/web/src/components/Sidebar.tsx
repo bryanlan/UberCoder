@@ -265,6 +265,7 @@ function fallbackProjectDisplayName(project: Pick<ProjectSummary, 'path' | 'dire
 
 function ProjectSection({
   project,
+  workMode,
   creatingConversationKey,
   creatingAnyConversation,
   onNewConversation,
@@ -291,6 +292,7 @@ function ProjectSection({
       indicatorClassName: string;
     }>;
   };
+  workMode: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
@@ -313,6 +315,13 @@ function ProjectSection({
   const [editingProject, setEditingProject] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftName, setDraftName] = useState(project.displayName);
+  const [showAllConversations, setShowAllConversations] = useState(false);
+
+  useEffect(() => {
+    if (workMode) {
+      setShowAllConversations(false);
+    }
+  }, [workMode]);
 
   useEffect(() => {
     if (!editingProject) {
@@ -347,6 +356,18 @@ function ProjectSection({
     await copyTextToClipboard(url);
     setMenuOpen(false);
   }
+
+  const collapsedConversations = (['codex', 'claude'] as const)
+    .flatMap((provider) => project.combinedConversations
+      .filter((conversation) => conversation.provider === provider)
+      .slice(0, 2))
+    .sort((a, b) => b.freshnessTimestamp.localeCompare(a.freshnessTimestamp));
+
+  const displayedConversations = workMode || showAllConversations
+    ? project.combinedConversations
+    : collapsedConversations;
+
+  const hasHiddenConversations = !workMode && project.combinedConversations.length > collapsedConversations.length;
 
   return (
     <section
@@ -522,7 +543,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {project.combinedConversations.map(({ provider, conversation, indicatorClassName }) => (
+            {displayedConversations.map(({ provider, conversation, indicatorClassName }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -540,6 +561,17 @@ function ProjectSection({
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
               />
             ))}
+            {hasHiddenConversations ? (
+              <button
+                type="button"
+                onClick={() => setShowAllConversations((current) => !current)}
+                className="ml-3 mt-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-400 transition hover:bg-slate-800 hover:text-slate-200"
+              >
+                {showAllConversations
+                  ? 'Show less'
+                  : `Show all (${project.combinedConversations.length})`}
+              </button>
+            ) : null}
           </div>
         ) : (
           <div className="px-3 py-2 text-sm text-slate-500">No conversations indexed yet.</div>
@@ -723,6 +755,7 @@ export function Sidebar({
               <ProjectSection
                 key={project.slug}
                 project={project}
+                workMode={workMode}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
                 onNewConversation={onNewConversation}
