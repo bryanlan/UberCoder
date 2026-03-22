@@ -4,6 +4,7 @@ import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeRespon
 import clsx from 'clsx';
 import { useEffect, useState, type DragEvent } from 'react';
 import { api } from '../lib/api';
+import { copyTextToClipboard } from '../lib/clipboard';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
@@ -11,23 +12,6 @@ function providerMeta(provider: ProviderId) {
   return provider === 'codex'
     ? { label: 'Codex', icon: Sparkles }
     : { label: 'Claude', icon: Bot };
-}
-
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (globalThis.navigator?.clipboard?.writeText) {
-    await globalThis.navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = globalThis.document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', 'true');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  globalThis.document.body.appendChild(textarea);
-  textarea.select();
-  globalThis.document.execCommand('copy');
-  globalThis.document.body.removeChild(textarea);
 }
 
 interface SidebarProps {

@@ -1,0 +1,605 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - generic [ref=e7]:
+          - generic [ref=e8]: Agent Console
+          - generic [ref=e9]: project → provider → conversation
+        - button "Refresh project tree" [ref=e10] [cursor=pointer]:
+          - img [ref=e11]
+      - generic [ref=e16]:
+        - button "Work mode" [ref=e17] [cursor=pointer]
+        - button "Recent activity" [ref=e18] [cursor=pointer]
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e21]:
+            - link "plaidbasic" [ref=e22] [cursor=pointer]:
+              - /url: /projects/plaidbasic
+              - img [ref=e23]
+              - generic [ref=e28]: plaidbasic
+            - button "Project actions for plaidbasic" [ref=e31] [cursor=pointer]:
+              - img [ref=e32]
+          - generic [ref=e35]:
+            - 'link "CLAUDE: New Claude conversation" [ref=e36] [cursor=pointer]':
+              - /url: /projects/plaidbasic/claude/pending%3A28e40b70-0466-4979-aac4-23d6609e2970
+              - generic [ref=e38]: "CLAUDE:"
+              - generic [ref=e39]: New Claude conversation
+            - button "Conversation actions for New Claude conversation" [ref=e41] [cursor=pointer]:
+              - img [ref=e42]
+        - generic [ref=e43]:
+          - generic [ref=e44]:
+            - link "waltiumweb" [ref=e45] [cursor=pointer]:
+              - /url: /projects/waltiumweb
+              - img [ref=e46]
+              - generic [ref=e51]: waltiumweb
+            - button "Project actions for waltiumweb" [ref=e54] [cursor=pointer]:
+              - img [ref=e55]
+          - generic [ref=e57]:
+            - generic [ref=e58]:
+              - 'link "CLAUDE: We investigated a Walt agent failure on this query: “When looking at my…" [ref=e59] [cursor=pointer]':
+                - /url: /projects/waltiumweb/claude/7ab16221-17c7-432c-8ab6-e052ab47444d
+                - generic [ref=e61]: "CLAUDE:"
+                - generic [ref=e62]: "We investigated a Walt agent failure on this query: “When looking at my…"
+              - 'button "Conversation actions for We investigated a Walt agent failure on this query: “When looking at my…" [ref=e64] [cursor=pointer]':
+                - img [ref=e65]
+            - generic [ref=e66]:
+              - 'link "CODEX: We investigated a Walt agent failure on this query: “When looking at my…" [ref=e67] [cursor=pointer]':
+                - /url: /projects/waltiumweb/codex/019d0c8a-02ab-78b3-9ca4-9db017305174
+                - generic [ref=e69]: "CODEX:"
+                - generic [ref=e70]: "We investigated a Walt agent failure on this query: “When looking at my…"
+              - 'button "Conversation actions for We investigated a Walt agent failure on this query: “When looking at my…" [ref=e72] [cursor=pointer]':
+                - img [ref=e73]
+        - generic [ref=e74]:
+          - generic [ref=e75]:
+            - link "agent-console" [ref=e76] [cursor=pointer]:
+              - /url: /projects/UberCoder--agent-console-mvp--agent-console
+              - img [ref=e77]
+              - generic [ref=e82]: agent-console
+            - button "Project actions for agent-console" [ref=e85] [cursor=pointer]:
+              - img [ref=e86]
+          - generic [ref=e88]:
+            - generic [ref=e89]:
+              - 'link "CODEX: can you make it where in settings if there is no git repo in the subfol…" [ref=e90] [cursor=pointer]':
+                - /url: /projects/UberCoder--agent-console-mvp--agent-console/codex/019cdae1-8f32-7d13-958d-2ec089a2a588
+                - generic [ref=e92]: "CODEX:"
+                - generic [ref=e93]: can you make it where in settings if there is no git repo in the subfol…
+              - button "Conversation actions for can you make it where in settings if there is no git repo in the subfol…" [ref=e95] [cursor=pointer]:
+                - img [ref=e96]
+            - generic [ref=e97]:
+              - 'link "CODEX: we need to fix it where we are not doing the \"most recent\" update until…" [ref=e98] [cursor=pointer]':
+                - /url: /projects/UberCoder--agent-console-mvp--agent-console/codex/019ced09-7981-73a3-b124-5f535135e421
+                - generic [ref=e100]: "CODEX:"
+                - generic [ref=e101]: we need to fix it where we are not doing the "most recent" update until…
+              - button "Conversation actions for we need to fix it where we are not doing the \"most recent\" update until…" [ref=e103] [cursor=pointer]:
+                - img [ref=e104]
+        - generic [ref=e105]:
+          - generic [ref=e106]:
+            - link "optimizerv2" [ref=e107] [cursor=pointer]:
+              - /url: /projects/optimizerv2
+              - img [ref=e108]
+              - generic [ref=e113]: optimizerv2
+            - button "Project actions for optimizerv2" [ref=e116] [cursor=pointer]:
+              - img [ref=e117]
+          - generic [ref=e120]:
+            - 'link "CODEX: lets look at the optimizer run via the optimization studio. what happen…" [ref=e121] [cursor=pointer]':
+              - /url: /projects/optimizerv2/codex/019cca53-f0fd-7de1-91f2-91e91cb57d1e
+              - generic [ref=e123]: "CODEX:"
+              - generic [ref=e124]: lets look at the optimizer run via the optimization studio. what happen…
+            - button "Conversation actions for lets look at the optimizer run via the optimization studio. what happen…" [ref=e126] [cursor=pointer]:
+              - img [ref=e127]
+        - generic [ref=e128]:
+          - generic [ref=e129]:
+            - link "CFP Agent" [ref=e130] [cursor=pointer]:
+              - /url: /projects/cfpagent--grounding
+              - img [ref=e131]
+              - generic [ref=e136]: CFP Agent
+            - button "Project actions for CFP Agent" [ref=e139] [cursor=pointer]:
+              - img [ref=e140]
+          - generic [ref=e143]:
+            - 'link "CODEX: I have a visit with a RIA state regulator coming up to do an inspection…" [ref=e144] [cursor=pointer]':
+              - /url: /projects/cfpagent--grounding/codex/019ce8a5-d46f-7661-a024-bde4feffe463
+              - generic [ref=e146]: "CODEX:"
+              - generic [ref=e147]: I have a visit with a RIA state regulator coming up to do an inspection…
+            - button "Conversation actions for I have a visit with a RIA state regulator coming up to do an inspection…" [ref=e149] [cursor=pointer]:
+              - img [ref=e150]
+        - generic [ref=e151]:
+          - generic [ref=e152]:
+            - link "waltium-calc-engine" [ref=e153] [cursor=pointer]:
+              - /url: /projects/waltium-calc-engine
+              - img [ref=e154]
+              - generic [ref=e159]: waltium-calc-engine
+            - button "Project actions for waltium-calc-engine" [ref=e162] [cursor=pointer]:
+              - img [ref=e163]
+          - generic [ref=e166]:
+            - 'link "CODEX: give me suggested schema chagne to WALTIUM_DB_CORE I should make and fr…" [ref=e167] [cursor=pointer]':
+              - /url: /projects/waltium-calc-engine/codex/019ca286-ad3f-7423-bad7-52789a62f742
+              - generic [ref=e169]: "CODEX:"
+              - generic [ref=e170]: give me suggested schema chagne to WALTIUM_DB_CORE I should make and fr…
+            - button "Conversation actions for give me suggested schema chagne to WALTIUM_DB_CORE I should make and fr…" [ref=e172] [cursor=pointer]:
+              - img [ref=e173]
+  - generic [ref=e174]:
+    - banner [ref=e175]:
+      - generic [ref=e176]:
+        - button "Toggle navigation" [ref=e177] [cursor=pointer]:
+          - img [ref=e178]
+        - generic [ref=e181]:
+          - generic [ref=e182]: Server-first remote session control
+          - generic [ref=e183]: Thin browser client · hidden tmux sessions · abstracted live session UI
+      - generic [ref=e184]:
+        - link "Back to Console" [ref=e185] [cursor=pointer]:
+          - /url: /
+          - img [ref=e186]
+          - text: Back to Console
+        - button "Sign out" [ref=e189] [cursor=pointer]
+    - main [ref=e190]:
+      - generic [ref=e192]:
+        - generic [ref=e193]:
+          - generic [ref=e194]:
+            - heading "Add project" [level=2] [ref=e195]
+            - paragraph [ref=e196]: Choose a folder under the current projects root. It must contain AGENTS.md or CLAUDE.md.
+          - button "Close" [ref=e197] [cursor=pointer]
+        - generic [ref=e198]:
+          - button "Root" [ref=e199] [cursor=pointer]
+          - button "Home" [ref=e200] [cursor=pointer]
+          - button "Up" [ref=e201] [cursor=pointer]
+          - generic [ref=e202]:
+            - generic [ref=e203]: Current folder
+            - generic [ref=e204]: /home/bryan/code
+        - generic [ref=e206]:
+          - button ".claude" [ref=e207] [cursor=pointer]:
+            - generic [ref=e208]: .claude
+          - button ".pytest_cache" [ref=e209] [cursor=pointer]:
+            - generic [ref=e210]: .pytest_cache
+          - button "2025taxwork" [ref=e211] [cursor=pointer]:
+            - generic [ref=e212]: 2025taxwork
+          - button "529planner" [ref=e213] [cursor=pointer]:
+            - generic [ref=e214]: 529planner
+          - button "ai-skills" [ref=e215] [cursor=pointer]:
+            - generic [ref=e216]: ai-skills
+          - button "cfpagent" [ref=e217] [cursor=pointer]:
+            - generic [ref=e218]: cfpagent
+          - button "cfplearner" [ref=e219] [cursor=pointer]:
+            - generic [ref=e220]: cfplearner
+          - button "CYOStoryMaker" [ref=e221] [cursor=pointer]:
+            - generic [ref=e222]: CYOStoryMaker
+          - button "dnacomplete" [ref=e223] [cursor=pointer]:
+            - generic [ref=e224]: dnacomplete
+          - button "Omnilearner" [ref=e225] [cursor=pointer]:
+            - generic [ref=e226]: Omnilearner
+          - button "omnilearner_extension" [ref=e227] [cursor=pointer]:
+            - generic [ref=e228]: omnilearner_extension
+          - button "optimizerv2" [ref=e229] [cursor=pointer]:
+            - generic [ref=e230]: optimizerv2
+          - button "plaidbasic" [ref=e231] [cursor=pointer]:
+            - generic [ref=e232]: plaidbasic
+          - button "portfolio_selector" [ref=e233] [cursor=pointer]:
+            - generic [ref=e234]: portfolio_selector
+          - button "project-trees" [ref=e235] [cursor=pointer]:
+            - generic [ref=e236]: project-trees
+          - button "rc_automate" [ref=e237] [cursor=pointer]:
+            - generic [ref=e238]: rc_automate
+          - button "stockvision" [ref=e239] [cursor=pointer]:
+            - generic [ref=e240]: stockvision
+          - button "stt" [ref=e241] [cursor=pointer]:
+            - generic [ref=e242]: stt
+          - button "trader" [ref=e243] [cursor=pointer]:
+            - generic [ref=e244]: trader
+          - button "UberCoder" [ref=e245] [cursor=pointer]:
+            - generic [ref=e246]: UberCoder
+          - button "waltium" [ref=e247] [cursor=pointer]:
+            - generic [ref=e248]: waltium
+          - button "waltium-calc-engine" [ref=e249] [cursor=pointer]:
+            - generic [ref=e250]: waltium-calc-engine
+          - button "WaltiumApp" [ref=e251] [cursor=pointer]:
+            - generic [ref=e252]: WaltiumApp
+          - button "waltiumweb" [ref=e253] [cursor=pointer]:
+            - generic [ref=e254]: waltiumweb
+          - button "webchathub" [ref=e255] [cursor=pointer]:
+            - generic [ref=e256]: webchathub
+          - button "wisecouncil" [ref=e257] [cursor=pointer]:
+            - generic [ref=e258]: wisecouncil
+          - button "word_quizzer" [ref=e259] [cursor=pointer]:
+            - generic [ref=e260]: word_quizzer
+          - button "workflow_optimizer" [ref=e261] [cursor=pointer]:
+            - generic [ref=e262]: workflow_optimizer
+          - button "xpress" [ref=e263] [cursor=pointer]:
+            - generic [ref=e264]: xpress
+        - generic [ref=e265]:
+          - paragraph [ref=e266]: The selected folder will be saved as an explicit project path.
+          - button "Add this project" [ref=e267] [cursor=pointer]
+      - generic [ref=e269]:
+        - generic [ref=e270]:
+          - link "Back to Console" [ref=e271] [cursor=pointer]:
+            - /url: /
+          - heading "Settings" [level=1] [ref=e272]
+          - paragraph [ref=e273]: Project settings save immediately. Global settings save to the config file and can optionally trigger a restart so runtime catches up.
+        - generic [ref=e274]:
+          - generic [ref=e276]:
+            - heading "Global settings" [level=2] [ref=e277]
+            - paragraph [ref=e278]: "Config file: /home/bryan/.config/agent-console/config.json"
+          - generic [ref=e279]:
+            - generic [ref=e280]:
+              - generic [ref=e281]: Agent Console path
+              - generic [ref=e282]: /home/bryan/code/UberCoder/agent-console-mvp/agent-console
+              - generic [ref=e283]: "This is where the app itself is currently running. It is separate from `projectsRoot`."
+            - generic [ref=e284]:
+              - generic [ref=e285]: Config file
+              - generic [ref=e286]: /home/bryan/.config/agent-console/config.json
+              - generic [ref=e287]: Global setting edits are written here and may require restart to take effect.
+          - generic [ref=e288]:
+            - generic [ref=e289]:
+              - generic [ref=e290]:
+                - generic [ref=e291]: Projects root
+                - button "Browse folders" [ref=e292] [cursor=pointer]
+              - textbox [ref=e293]: /home/bryan/code
+            - generic [ref=e294]:
+              - text: Server host
+              - textbox "Server host" [ref=e295]: 127.0.0.1
+            - generic [ref=e296]:
+              - text: Server port
+              - textbox "Server port" [ref=e297]: "4317"
+            - generic [ref=e298]:
+              - text: Session TTL hours
+              - textbox "Session TTL hours" [ref=e299]: "168"
+            - generic [ref=e300]:
+              - checkbox "Cookie secure" [checked] [ref=e301]
+              - text: Cookie secure
+            - generic [ref=e302]:
+              - checkbox "Trust Tailscale headers" [checked] [ref=e303]
+              - text: Trust Tailscale headers
+          - generic [ref=e304]:
+            - paragraph
+            - button "Saved" [disabled] [ref=e305]
+        - generic [ref=e306]:
+          - generic [ref=e307]:
+            - heading "Bound session freshness" [level=2] [ref=e308]
+            - paragraph [ref=e309]: These thresholds control the work-mode activity dot for bound Codex and Claude sessions. They save immediately and roam across browsers.
+          - generic [ref=e310]:
+            - generic [ref=e311]:
+              - text: Yellow after minutes
+              - textbox "Yellow after minutes" [ref=e312]: "3"
+            - generic [ref=e313]:
+              - text: Orange after minutes
+              - textbox "Orange after minutes" [ref=e314]: "7"
+            - generic [ref=e315]:
+              - text: Red after minutes
+              - textbox "Red after minutes" [ref=e316]: "20"
+          - generic [ref=e317]:
+            - paragraph
+            - button "Saved" [disabled] [ref=e318]
+        - generic [ref=e319]:
+          - generic [ref=e320]:
+            - generic [ref=e321]:
+              - heading "Saved projects" [level=2] [ref=e322]
+              - paragraph [ref=e323]: "Projects are explicit folders under `projectsRoot`. Add only folders that contain AGENTS.md or CLAUDE.md."
+            - button "Add project" [active] [ref=e324] [cursor=pointer]
+          - paragraph
+          - generic [ref=e325]:
+            - generic [ref=e326]:
+              - generic [ref=e327]:
+                - heading "529planner" [level=2] [ref=e328]
+                - paragraph [ref=e329]: /home/bryan/code/529planner
+                - paragraph [ref=e330]: "Config key: 529planner"
+              - generic [ref=e331]:
+                - checkbox "Active" [checked] [ref=e332]
+                - text: Active
+            - generic [ref=e333]:
+              - generic [ref=e334]:
+                - text: Display name
+                - textbox "Display name" [ref=e335]:
+                  - /placeholder: 529planner
+                  - text: 529planner
+              - generic [ref=e336]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e337]:
+                  - /placeholder: 3000, 5173
+                  - text: "5176"
+              - generic [ref=e338]:
+                - text: Tags
+                - textbox "Tags" [ref=e339]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e340]:
+                - text: Notes
+                - textbox "Notes" [ref=e341]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e342]:
+              - paragraph
+              - generic [ref=e343]:
+                - button "Remove project" [ref=e344] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e345]
+          - generic [ref=e346]:
+            - generic [ref=e347]:
+              - generic [ref=e348]:
+                - heading "agent-console" [level=2] [ref=e349]
+                - paragraph [ref=e350]: /home/bryan/code/UberCoder/agent-console-mvp/agent-console
+                - paragraph [ref=e351]: "Config key: UberCoder--agent-console-mvp--agent-console"
+              - generic [ref=e352]:
+                - checkbox "Active" [checked] [ref=e353]
+                - text: Active
+            - generic [ref=e354]:
+              - generic [ref=e355]:
+                - text: Display name
+                - textbox "Display name" [ref=e356]:
+                  - /placeholder: UberCoder--agent-console-mvp--agent-console
+                  - text: agent-console
+              - generic [ref=e357]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e358]:
+                  - /placeholder: 3000, 5173
+              - generic [ref=e359]:
+                - text: Tags
+                - textbox "Tags" [ref=e360]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e361]:
+                - text: Notes
+                - textbox "Notes" [ref=e362]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e363]:
+              - paragraph
+              - generic [ref=e364]:
+                - button "Remove project" [ref=e365] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e366]
+          - generic [ref=e367]:
+            - generic [ref=e368]:
+              - generic [ref=e369]:
+                - heading "CFP Agent" [level=2] [ref=e370]
+                - paragraph [ref=e371]: /home/bryan/code/cfpagent/grounding
+                - paragraph [ref=e372]: "Config key: cfpagent--grounding"
+              - generic [ref=e373]:
+                - checkbox "Active" [checked] [ref=e374]
+                - text: Active
+            - generic [ref=e375]:
+              - generic [ref=e376]:
+                - text: Display name
+                - textbox "Display name" [ref=e377]:
+                  - /placeholder: cfpagent--grounding
+                  - text: CFP Agent
+              - generic [ref=e378]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e379]:
+                  - /placeholder: 3000, 5173
+              - generic [ref=e380]:
+                - text: Tags
+                - textbox "Tags" [ref=e381]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e382]:
+                - text: Notes
+                - textbox "Notes" [ref=e383]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e384]:
+              - paragraph
+              - generic [ref=e385]:
+                - button "Remove project" [ref=e386] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e387]
+          - generic [ref=e388]:
+            - generic [ref=e389]:
+              - generic [ref=e390]:
+                - heading "Omnilearner" [level=2] [ref=e391]
+                - paragraph [ref=e392]: /home/bryan/code/Omnilearner
+                - paragraph [ref=e393]: "Config key: Omnilearner"
+              - generic [ref=e394]:
+                - checkbox "Active" [checked] [ref=e395]
+                - text: Active
+            - generic [ref=e396]:
+              - generic [ref=e397]:
+                - text: Display name
+                - textbox "Display name" [ref=e398]:
+                  - /placeholder: Omnilearner
+                  - text: Omnilearner
+              - generic [ref=e399]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e400]:
+                  - /placeholder: 3000, 5173
+              - generic [ref=e401]:
+                - text: Tags
+                - textbox "Tags" [ref=e402]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e403]:
+                - text: Notes
+                - textbox "Notes" [ref=e404]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e405]:
+              - paragraph
+              - generic [ref=e406]:
+                - button "Remove project" [ref=e407] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e408]
+          - generic [ref=e409]:
+            - generic [ref=e410]:
+              - generic [ref=e411]:
+                - heading "optimizerv2" [level=2] [ref=e412]
+                - paragraph [ref=e413]: /home/bryan/code/optimizerv2
+                - paragraph [ref=e414]: "Config key: optimizerv2"
+              - generic [ref=e415]:
+                - checkbox "Active" [checked] [ref=e416]
+                - text: Active
+            - generic [ref=e417]:
+              - generic [ref=e418]:
+                - text: Display name
+                - textbox "Display name" [ref=e419]:
+                  - /placeholder: optimizerv2
+                  - text: optimizerv2
+              - generic [ref=e420]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e421]:
+                  - /placeholder: 3000, 5173
+                  - text: 5173, 8080
+              - generic [ref=e422]:
+                - text: Tags
+                - textbox "Tags" [ref=e423]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e424]:
+                - text: Notes
+                - textbox "Notes" [ref=e425]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e426]:
+              - paragraph
+              - generic [ref=e427]:
+                - button "Remove project" [ref=e428] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e429]
+          - generic [ref=e430]:
+            - generic [ref=e431]:
+              - generic [ref=e432]:
+                - heading "plaidbasic" [level=2] [ref=e433]
+                - paragraph [ref=e434]: /home/bryan/code/plaidbasic
+                - paragraph [ref=e435]: "Config key: plaidbasic"
+              - generic [ref=e436]:
+                - checkbox "Active" [checked] [ref=e437]
+                - text: Active
+            - generic [ref=e438]:
+              - generic [ref=e439]:
+                - text: Display name
+                - textbox "Display name" [ref=e440]:
+                  - /placeholder: plaidbasic
+                  - text: plaidbasic
+              - generic [ref=e441]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e442]:
+                  - /placeholder: 3000, 5173
+                  - text: "5511"
+              - generic [ref=e443]:
+                - text: Tags
+                - textbox "Tags" [ref=e444]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e445]:
+                - text: Notes
+                - textbox "Notes" [ref=e446]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e447]:
+              - paragraph
+              - generic [ref=e448]:
+                - button "Remove project" [ref=e449] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e450]
+          - generic [ref=e451]:
+            - generic [ref=e452]:
+              - generic [ref=e453]:
+                - heading "waltium-calc-engine" [level=2] [ref=e454]
+                - paragraph [ref=e455]: /home/bryan/code/waltium-calc-engine
+                - paragraph [ref=e456]: "Config key: waltium-calc-engine"
+              - generic [ref=e457]:
+                - checkbox "Active" [checked] [ref=e458]
+                - text: Active
+            - generic [ref=e459]:
+              - generic [ref=e460]:
+                - text: Display name
+                - textbox "Display name" [ref=e461]:
+                  - /placeholder: waltium-calc-engine
+                  - text: waltium-calc-engine
+              - generic [ref=e462]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e463]:
+                  - /placeholder: 3000, 5173
+                  - text: "8020"
+              - generic [ref=e464]:
+                - text: Tags
+                - textbox "Tags" [ref=e465]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e466]:
+                - text: Notes
+                - textbox "Notes" [ref=e467]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e468]:
+              - paragraph
+              - generic [ref=e469]:
+                - button "Remove project" [ref=e470] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e471]
+          - generic [ref=e472]:
+            - generic [ref=e473]:
+              - generic [ref=e474]:
+                - heading "waltiumweb" [level=2] [ref=e475]
+                - paragraph [ref=e476]: /home/bryan/code/waltiumweb
+                - paragraph [ref=e477]: "Config key: waltiumweb"
+              - generic [ref=e478]:
+                - checkbox "Active" [checked] [ref=e479]
+                - text: Active
+            - generic [ref=e480]:
+              - generic [ref=e481]:
+                - text: Display name
+                - textbox "Display name" [ref=e482]:
+                  - /placeholder: waltiumweb
+                  - text: waltiumweb
+              - generic [ref=e483]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e484]:
+                  - /placeholder: 3000, 5173
+                  - text: "3000"
+              - generic [ref=e485]:
+                - text: Tags
+                - textbox "Tags" [ref=e486]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e487]:
+                - text: Notes
+                - textbox "Notes" [ref=e488]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e489]:
+              - paragraph
+              - generic [ref=e490]:
+                - button "Remove project" [ref=e491] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e492]
+          - generic [ref=e493]:
+            - generic [ref=e494]:
+              - generic [ref=e495]:
+                - heading "word_quizzer" [level=2] [ref=e496]
+                - paragraph [ref=e497]: /home/bryan/code/word_quizzer
+                - paragraph [ref=e498]: "Config key: word_quizzer"
+              - generic [ref=e499]:
+                - checkbox "Active" [checked] [ref=e500]
+                - text: Active
+            - generic [ref=e501]:
+              - generic [ref=e502]:
+                - text: Display name
+                - textbox "Display name" [ref=e503]:
+                  - /placeholder: word_quizzer
+                  - text: word_quizzer
+              - generic [ref=e504]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e505]:
+                  - /placeholder: 3000, 5173
+              - generic [ref=e506]:
+                - text: Tags
+                - textbox "Tags" [ref=e507]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e508]:
+                - text: Notes
+                - textbox "Notes" [ref=e509]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e510]:
+              - paragraph
+              - generic [ref=e511]:
+                - button "Remove project" [ref=e512] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e513]
+          - generic [ref=e514]:
+            - generic [ref=e515]:
+              - generic [ref=e516]:
+                - heading "workflow_optimizer" [level=2] [ref=e517]
+                - paragraph [ref=e518]: /home/bryan/code/workflow_optimizer
+                - paragraph [ref=e519]: "Config key: workflow_optimizer"
+              - generic [ref=e520]:
+                - checkbox "Active" [checked] [ref=e521]
+                - text: Active
+            - generic [ref=e522]:
+              - generic [ref=e523]:
+                - text: Display name
+                - textbox "Display name" [ref=e524]:
+                  - /placeholder: workflow_optimizer
+                  - text: workflow_optimizer
+              - generic [ref=e525]:
+                - text: Allowed localhost ports
+                - textbox "Allowed localhost ports" [ref=e526]:
+                  - /placeholder: 3000, 5173
+              - generic [ref=e527]:
+                - text: Tags
+                - textbox "Tags" [ref=e528]:
+                  - /placeholder: frontend, primary
+              - generic [ref=e529]:
+                - text: Notes
+                - textbox "Notes" [ref=e530]:
+                  - /placeholder: Optional project notes
+            - generic [ref=e531]:
+              - paragraph
+              - generic [ref=e532]:
+                - button "Remove project" [ref=e533] [cursor=pointer]
+                - button "Saved" [disabled] [ref=e534]
+```
