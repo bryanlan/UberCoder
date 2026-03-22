@@ -1,0 +1,32 @@
+{
+  "docs_current_through": {
+    "commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+    "date": "2026-03-18T08:41:07-07:00"
+  },
+  "docs_last_synced_at": "2026-03-22T02:25:48+00:00",
+  "docs_root": "docs",
+  "last_dossier": {
+    "commit_count": 0,
+    "from_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+    "generated_at": "2026-03-22T02:12:37+00:00",
+    "json_path": "docs/agent_docs/commit_dossier.json",
+    "markdown_path": "docs/agent_docs/commit_dossier.md",
+    "to_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab"
+  },
+  "managed_by": "sync-repo-docs",
+  "managed_docs": [
+    {
+      "doc_type": "architecture",
+      "path": "docs/architecture.md"
+    },
+    {
+      "doc_type": "fileindex",
+      "path": "docs/fileindex.md"
+    },
+    {
+      "doc_type": "running_tests",
+      "path": "docs/agent_docs/running_tests.md"
+    }
+  ],
+  "schema_version": 1
+}

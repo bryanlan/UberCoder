@@ -1,180 +1,90 @@
-# Agent Console architecture
+---
+doc_type: architecture
+managed_by: sync-repo-docs
+current_through_commit: 1c87c2d00464940608ec9e83b2d1b13be560f9ab
+current_through_date: 2026-03-18T08:41:07-07:00
+---
 
-## Product shape
+# Architecture
 
-Agent Console is a server-first control plane for a **single user** running on an Ubuntu/Linux host. The browser/PWA is intentionally thin. It does not own state and it never drives terminal windows directly. The backend is the source of truth for:
+## System Overview
 
-- active projects
-- parsed Codex / Claude conversation history
-- bound session metadata
-- authenticated access
-- per-project localhost proxy allowlists
+Agent Console is a server-first, single-user control plane for managing local Codex CLI and Claude Code sessions on a Linux host. The backend is authoritative: the React/PWA frontend renders project, conversation, and live-session state that the server derives from explicit project config, vendor history files, SQLite metadata, and hidden tmux sessions.
 
-The primary navigation model is fixed to:
+The product model is intentionally narrow:
 
-`project -> provider -> conversation history`
+- explicit saved projects under one configured `projectsRoot`
+- provider-specific conversation indexing for Codex and Claude
+- binding a selected conversation to one hidden detached tmux session
+- secure per-project localhost proxying for local web apps
 
-No issue queue, worktree orchestration, or general shell multiplexing abstraction is baked into the product model.
+It is not a generic terminal multiplexer or worktree/task orchestration platform.
 
-## System topology
+## Main Components
 
-```text
-Browser / PWA
-   |
-   | HTTPS / HTTP + SSE
-   v
-Fastify backend
-   |-- AuthService (single-user cookie auth, optional Tailscale bootstrap)
-   |-- ProjectService (immediate child folder discovery)
-   |-- IndexingService (background history discovery + cache)
-   |-- ProviderRegistry
-   |     |-- CodexProvider
-   |     `-- ClaudeProvider
-   |-- SessionManager
-   |     `-- tmux hidden detached sessions
-   |-- LocalhostProxyService (/proxy/:projectSlug/:port/*)
-   `-- SQLite (metadata/cache/session state)
+- `apps/server/` is the Fastify backend and contains config loading, SQLite persistence, explicit project management, provider adapters, routes, auth/security, proxying, indexing, restart handling, and tmux-backed session management.
+- `apps/web/` is the React/Vite PWA that renders the project sidebar, conversation history, live session pane, settings, and login flows.
+- `packages/shared/` holds shared types and contracts used by both the backend and frontend.
+- `config/agent-console.example.json` is the canonical runtime config template that defines projects, proxy allowlists, auth settings, and provider-specific overrides.
+- `scripts/` holds host-level helpers such as password-hash generation and the Codex adoption smoke test.
+- `docs/` contains the managed architecture/file index/test docs and repo design notes.
 
-Local vendor state on disk
-   |-- ~/.codex/sessions/...
-   |-- ~/.codex/history.jsonl
-   |-- ~/.claude/projects/<encoded-path>/...
-   `-- ~/.claude/history.jsonl (best effort)
-```
+## Data Flow
 
-## Why this shape
+The common read path is:
 
-### Backend owns truth
+1. `ConfigService` loads `~/.config/agent-console/config.json`, normalizes paths, and merges provider defaults plus per-project overrides.
+2. `ProjectService` enumerates only configured `projects` entries marked active and resolves their concrete paths under or alongside `projectsRoot`.
+3. Provider adapters inspect local vendor state on disk under Codex/Claude roots.
+4. `IndexingService` normalizes conversations into a SQLite-backed cache and emits SSE invalidation events to the frontend.
+5. The browser requests conversations, settings, project state, or live session updates through HTTP/SSE routes.
 
-The frontend only renders backend-owned state and submits intent. For bound sessions, that means a parsed live screen model (`output + status`) rather than direct terminal control. This keeps phone, laptop, refreshes, and reconnects consistent.
+The settings/project-management path is:
 
-### tmux is a runtime primitive, not a UI primitive
+1. The settings UI reads stored config and current UI preferences through `/api/settings` and `/api/settings/ui-preferences`.
+2. The directory picker browses the filesystem under `projectsRoot`.
+3. New explicit projects are only addable when the selected directory contains `AGENTS.md`, `agents.md`, `CLAUDE.md`, or `claude.md`.
+4. Project edits persist immediately back into the config file, then trigger tree refreshes and, when needed, a controlled backend restart.
 
-Each bound live conversation maps to exactly one hidden tmux session. The user never manipulates terminal windows as part of the product interaction loop.
+The live-session path is:
 
-### History-first, live-second transcript strategy
+1. A user selects or creates a conversation under a provider.
+2. `SessionManager` launches or resumes exactly one detached tmux session in the project directory.
+3. Provider-specific launch commands resume Codex/Claude with merged environment overrides.
+4. tmux pane output is captured to runtime logs, simplified into a backend-owned `content + input + status` model, and replayed to the UI.
+5. User input is sent back through the backend into tmux rather than exposing a raw terminal surface to the browser.
+6. The live screen parser and event log let the UI survive refreshes or reconnects without becoming a raw terminal emulator.
 
-1. **Primary history / replay source:** provider transcript/session files on disk.
-2. **Secondary live source:** tmux raw output capture.
+The proxy path is:
 
-This avoids modeling the product around ANSI-frame scraping while still keeping live sessions responsive.
+1. The client requests the per-project proxy route exposed by the backend.
+2. The backend authenticates the request and checks the configured allowlist for that project.
+3. Only approved localhost ports are proxied, including websocket upgrades.
 
-## Core components
+## External Integrations
 
-### ConfigService
+- Codex CLI local state under the configured Codex home directory
+- Claude Code local state under the configured Claude home directory
+- tmux for hidden detached session runtime
+- SQLite via `better-sqlite3` for app-owned metadata/cache state
+- chokidar for filesystem watching and refresh scheduling
+- Tailscale identity headers/bootstrap for secure remote access, when configured
 
-Loads one JSON config file, validates it with zod, expands home-directory paths, and deep-merges provider overrides predictably.
+## Key Decisions
 
-### ProjectService
+- The backend owns truth; the frontend is intentionally thin and never controls a raw terminal directly.
+- Projects are explicit saved config entries rather than implicit immediate-child folders. This avoids accidental repo sprawl in the UI and makes nested repos first-class.
+- Each bound conversation maps to one hidden detached tmux session, keeping mobile/desktop refresh behavior consistent without exposing host terminals.
+- Provider transcript parsing is isolated behind adapter interfaces so Codex and Claude history schema changes degrade locally instead of breaking the whole app.
+- History replay is preferred over terminal mirroring; tmux output is a live source, but the product surface is a simplified session model rather than a raw shell.
+- The localhost proxy is explicitly allowlisted per project/port so remote debugging does not turn into arbitrary shell or network access.
+- Global config writes can schedule a controlled self-restart through `RestartService` instead of requiring a separate supervisor flow.
 
-Scans exactly one configured parent directory and only treats immediate children as projects. Only directories marked `active: true` in config are surfaced.
+## Operational Notes
 
-### Provider adapters
-
-Provider-specific parsing stays isolated behind a uniform interface:
-
-- `discoverLocalState()`
-- `listConversations()`
-- `getConversation()`
-- `getLaunchCommand()`
-
-The adapters are intentionally defensive. If a vendor transcript schema shifts, the UI degrades to partial summaries rather than hard-failing the entire app.
-
-### IndexingService
-
-Builds and refreshes the cached conversation index in SQLite. It watches configured roots with chokidar and emits SSE invalidation events for the thin client.
-
-### SessionManager
-
-Responsible for the runtime lifecycle of bound sessions:
-
-- deterministic tmux session naming
-- create detached tmux session in project cwd
-- pipe pane output to a runtime log
-- capture the current tmux screen and project it into a simplified live session surface
-- append live event JSONL for UI replay after refresh
-- send input to tmux
-- terminate cleanly on release
-
-### LocalhostProxyService
-
-Implements the remote debugging tunnel for project-local web apps.
-
-Only ports explicitly listed in the project config are proxied. The backend never exposes arbitrary localhost or general shell access.
-
-## Persistence model
-
-SQLite stores app-owned metadata only:
-
-- cached conversation index
-- bound session metadata
-- auth sessions
-- pending new-conversation placeholders
-- future UI prefs / title overrides
-
-Full provider transcripts remain on disk under vendor-owned locations.
-
-## Security model
-
-### Defaults
-
-- listen on localhost or a Tailscale-served endpoint by default
-- single-user cookie auth
-- rate-limited password login
-- httpOnly cookie session
-- SameSite=Strict cookies
-- CSRF header for mutating API routes
-- optional Tailscale identity bootstrap into a normal cookie session
-
-### Non-goals
-
-- no multi-user RBAC
-- no arbitrary shell exposure
-- no public unauthenticated internet mode
-
-## Request flows
-
-### Existing conversation bind
-
-1. User selects project/provider/conversation.
-2. Backend resolves merged provider command template.
-3. SessionManager starts hidden tmux session in the project directory.
-4. Provider CLI resumes by conversation ID.
-5. UI shows bound state + green dot.
-6. Timeline merges disk history and live event output.
-
-### New conversation bind
-
-1. User clicks **New conversation** under a provider.
-2. Backend creates a pending conversation placeholder.
-3. SessionManager launches a new hidden tmux session with the provider’s new command.
-4. UI navigates to the pending node immediately.
-5. When the vendor writes history to disk, it appears in the provider tree on refresh/background reindex.
-
-### Remote localhost debugging
-
-1. UI renders per-project proxy badges from config.
-2. User opens `/proxy/:projectSlug/:port/`.
-3. Backend authenticates the request.
-4. Backend verifies the requested port is allowlisted for that project.
-5. Request is proxied to `127.0.0.1:<port>` with websocket upgrades supported.
-
-## Degraded-mode behavior
-
-The vendor adapters intentionally accept that on-disk schemas can move.
-
-When parsing becomes ambiguous:
-
-- the conversation still appears if enough metadata is available
-- titles fall back to the first user prompt or filename
-- transcript messages may be partial
-- the UI marks the conversation as degraded rather than failing globally
-
-## Deliberate v1 exclusions
-
-- exact terminal/TUI mirroring
-- issue/worktree/task-centered abstractions
-- full text search across all conversations
-- multi-user collaboration
-- arbitrary terminal multiplexing unrelated to Codex/Claude
-- cloud-hosted backend
+- The intended host is Ubuntu/Linux with Node.js, npm, tmux, Codex CLI, and Claude Code installed.
+- Runtime config lives outside the repo in the user's config directory, based on the example in `config/agent-console.example.json`.
+- The root build/test scripts depend on building `packages/shared/` before server/web tasks.
+- `npm run build` and `npm run typecheck` currently pass in the live tree.
+- The highest-value host integration check is `scripts/smoke-codex-adoption.mjs`, which exercises real Codex session adoption, persistence, and tmux teardown behavior against a running backend.
+- The current worktree is dirty: local web changes are in `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/ConversationPane.tsx`, and `apps/web/src/lib/clipboard.ts`, and those changes are part of the live tree these docs describe.

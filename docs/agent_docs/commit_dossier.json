@@ -1,0 +1,20 @@
+{
+  "changed_paths": [],
+  "commits": [],
+  "docs_current_through": {
+    "commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+    "date": "2026-03-18T08:41:07-07:00"
+  },
+  "from_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+  "generated_at": "2026-03-22T02:12:37+00:00",
+  "head": {
+    "commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+    "date": "2026-03-18T08:41:07-07:00",
+    "short_commit": "1c87c2d"
+  },
+  "mode": "delta",
+  "recent_commits": [],
+  "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
+  "to_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+  "worktree_dirty": true
+}
