@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
+import { AlertTriangle, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
   BoundSession,
@@ -240,6 +240,8 @@ function AppShell() {
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
+  const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden', false);
+  const [mobileControlsHidden, setMobileControlsHidden] = useState(false);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -305,6 +307,17 @@ function AppShell() {
       setLastConsolePath(location.pathname);
     }
   }, [location.pathname, setLastConsolePath]);
+
+  useEffect(() => {
+    if (location.pathname === '/settings' || !timelineQuery.data?.boundSession) {
+      setMobileChromeHidden(false);
+      setMobileControlsHidden(false);
+    }
+  }, [location.pathname, setMobileChromeHidden, timelineQuery.data?.boundSession]);
+
+  useEffect(() => {
+    setMobileControlsHidden(false);
+  }, [selectedConversationRef, selectedProjectSlug, selectedProvider]);
 
   function closeSidebarIfMobile(): void {
     if (globalThis.matchMedia?.('(max-width: 1023px)').matches) {
@@ -880,44 +893,72 @@ function AppShell() {
         refreshing={refreshMutation.isPending}
       />
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="sticky top-0 z-20 flex shrink-0 items-center justify-between border-b border-slate-800 bg-slate-950/90 px-4 py-3 backdrop-blur lg:px-6">
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setNavOpen((current) => !current)}
-              className="rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 lg:hidden"
-              aria-label="Toggle navigation"
-            >
-              {navOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-            </button>
-            <button
-              type="button"
-              onClick={() => setNavOpen((current) => !current)}
-              className="hidden rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 lg:inline-flex"
-              aria-label="Toggle navigation"
-            >
-              <PanelLeftClose className="h-5 w-5" />
-            </button>
-            <div>
-              <div className="text-sm font-medium text-slate-100">Server-first remote session control</div>
-              <div className="text-xs text-slate-500">Thin browser client · hidden tmux sessions · abstracted live session UI</div>
+        <header className={`sticky top-0 z-20 shrink-0 border-b border-slate-800 bg-slate-950/90 backdrop-blur ${mobileChromeHidden ? 'hidden lg:block' : ''}`}>
+          <div className="flex items-center justify-between px-4 py-3 lg:hidden">
+            <div className="flex min-w-0 items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setNavOpen((current) => !current)}
+                className="rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+                aria-label="Toggle navigation"
+              >
+                {navOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+              </button>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-slate-100">Agent Console</div>
+                <div className="truncate text-xs text-slate-500">Server-first remote session control</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link
+                to={inSettings ? lastConsolePath : '/settings'}
+                className="inline-flex rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+                aria-label={inSettings ? 'Back to console' : 'Settings'}
+              >
+                <Settings className="h-4 w-4" />
+              </Link>
+              <button
+                type="button"
+                onClick={() => logoutMutation.mutate()}
+                className="rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+                aria-label="Sign out"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Link
-              to={inSettings ? lastConsolePath : '/settings'}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-            >
-              <Settings className="h-4 w-4" />
-              {inSettings ? 'Back to Console' : 'Settings'}
-            </Link>
-            <button
-              type="button"
-              onClick={() => logoutMutation.mutate()}
-              className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-            >
-              Sign out
-            </button>
+
+          <div className="hidden items-center justify-between px-4 py-3 lg:flex lg:px-6">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setNavOpen((current) => !current)}
+                className="hidden rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 lg:inline-flex"
+                aria-label="Toggle navigation"
+              >
+                <PanelLeftClose className="h-5 w-5" />
+              </button>
+              <div>
+                <div className="text-sm font-medium text-slate-100">Server-first remote session control</div>
+                <div className="text-xs text-slate-500">Thin browser client · hidden tmux sessions · abstracted live session UI</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link
+                to={inSettings ? lastConsolePath : '/settings'}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+              >
+                <Settings className="h-4 w-4" />
+                {inSettings ? 'Back to Console' : 'Settings'}
+              </Link>
+              <button
+                type="button"
+                onClick={() => logoutMutation.mutate()}
+                className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+              >
+                Sign out
+              </button>
+            </div>
           </div>
         </header>
 
@@ -952,6 +993,10 @@ function AppShell() {
               timeline={timelineQuery.data}
               loading={timelineQuery.isLoading}
               workMode={workMode}
+              mobileChromeHidden={mobileChromeHidden}
+              onToggleMobileChrome={() => setMobileChromeHidden((current) => !current)}
+              mobileControlsHidden={mobileControlsHidden}
+              onToggleMobileControls={() => setMobileControlsHidden((current) => !current)}
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSendText={handleSendText}

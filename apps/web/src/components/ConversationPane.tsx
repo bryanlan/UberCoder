@@ -97,38 +97,19 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-function MobileSectionShell({
+function MobileSummaryStrip({
   title,
   summary,
-  open,
-  onToggle,
   className,
-  contentClassName,
-  children,
 }: {
   title: string;
   summary?: string;
-  open: boolean;
-  onToggle: () => void;
   className: string;
-  contentClassName?: string;
-  children: ReactNode;
 }) {
   return (
-    <div className={className}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-800/40"
-      >
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
-          {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
-        </div>
-        <ChevronDown className={clsx('h-4 w-4 shrink-0 text-slate-400 transition-transform', open && 'rotate-180')} />
-      </button>
-      {open ? <div className={contentClassName ?? 'px-4 pb-4'}>{children}</div> : null}
+    <div className={clsx('px-4 py-3', className)}>
+      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
+      {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
     </div>
   );
 }
@@ -200,37 +181,24 @@ function LiveSessionOutputBlock({
 function LiveSessionStatus({
   status,
   statusAnsi,
-  mobileCollapsible,
-  open,
-  onToggle,
+  mobileCompact,
 }: {
   status: string;
   statusAnsi?: string;
-  mobileCollapsible: boolean;
-  open: boolean;
-  onToggle: () => void;
+  mobileCompact: boolean;
 }) {
   const statusSummary = status
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find(Boolean) ?? 'Session active';
 
-  if (mobileCollapsible) {
+  if (mobileCompact) {
     return (
-      <MobileSectionShell
+      <MobileSummaryStrip
         title="Status"
         summary={statusSummary}
-        open={open}
-        onToggle={onToggle}
         className="border-t border-slate-800 bg-slate-900/90"
-        contentClassName="px-4 pb-3"
-      >
-        <LiveAnsiBlock
-          text={status || 'Session active'}
-          ansiText={statusAnsi}
-          className="scrollbar-thin max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-300"
-        />
-      </MobileSectionShell>
+      />
     );
   }
 
@@ -464,6 +432,10 @@ function LiveSessionInputBridge({
   mobileCollapsible,
   bridgeOpen,
   onToggleBridge,
+  mobileControlsHidden,
+  onToggleMobileControls,
+  mobileChromeHidden,
+  onToggleMobileChrome,
   latestAssistantMessage,
 }: {
   sessionId: string;
@@ -481,6 +453,10 @@ function LiveSessionInputBridge({
   mobileCollapsible: boolean;
   bridgeOpen: boolean;
   onToggleBridge: () => void;
+  mobileControlsHidden: boolean;
+  onToggleMobileControls: () => void;
+  mobileChromeHidden: boolean;
+  onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
 }) {
   const [firstPrompt, setFirstPrompt] = useState('');
@@ -827,26 +803,42 @@ function LiveSessionInputBridge({
     onToggleBridge();
   }
 
-  function renderBridgeHeader(title: string, summary?: string): ReactNode {
+  function renderBridgeHeader(title: string, summary?: string, showControlsToggle = false): ReactNode {
     if (!mobileCollapsible) {
       return <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">{title}</div>;
     }
 
     return (
-      <button
-        type="button"
-        aria-expanded={bridgeOpen}
-        onClick={() => {
-          void handleToggleBridgePanel();
-        }}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-slate-800/40"
-      >
+      <div className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="min-w-0 flex-1">
           <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
           {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
         </div>
-        <ChevronDown className={clsx('h-4 w-4 shrink-0 text-slate-400 transition-transform', bridgeOpen && 'rotate-180')} />
-      </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={bridgeOpen}
+            aria-label={bridgeOpen ? 'Collapse live input bridge' : 'Expand live input bridge'}
+            onClick={() => {
+              void handleToggleBridgePanel();
+            }}
+            className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
+          >
+            <ChevronDown className={clsx('h-4 w-4 transition-transform', bridgeOpen && 'rotate-180')} />
+          </button>
+          {showControlsToggle && (
+            <button
+              type="button"
+              aria-label={mobileControlsHidden ? 'Show bridge controls and status' : 'Hide bridge controls and status'}
+              title={mobileControlsHidden ? 'Show bridge controls and status' : 'Hide bridge controls and status'}
+              onClick={onToggleMobileControls}
+              className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
+            >
+              <ChevronRight className={clsx('h-4 w-4 transition-transform', mobileControlsHidden && 'rotate-180')} />
+            </button>
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -881,7 +873,7 @@ function LiveSessionInputBridge({
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90">
-      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.')}
+      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', mobileCollapsible)}
       {(!mobileCollapsible || bridgeOpen) && (
         <div className={bridgeBodyClassName}>
           <textarea
@@ -994,60 +986,74 @@ function LiveSessionInputBridge({
               compact ? 'h-28 sm:h-48' : 'h-24',
             )}
           />
-          <div className="mt-3 flex flex-wrap gap-2">
-            {specialKeyButtons.map((button) => (
+          {(!mobileCollapsible || !mobileControlsHidden) && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {specialKeyButtons.map((button) => (
+                <button
+                  key={button.label}
+                  type="button"
+                  disabled={bridgeBusy}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    void handleSpecialKey(button.keys[0]!, 'button');
+                    captureRef.current?.focus({ preventScroll: true });
+                  }}
+                  className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {button.label}
+                </button>
+              ))}
               <button
-                key={button.label}
                 type="button"
+                aria-pressed={textBypassEnabled}
                 disabled={bridgeBusy}
                 onPointerDown={(event) => event.preventDefault()}
                 onClick={() => {
-                  void handleSpecialKey(button.keys[0]!, 'button');
-                  captureRef.current?.focus({ preventScroll: true });
+                  void handleToggleTextBypass();
                 }}
-                className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                className={clsx(
+                  'rounded-xl border px-3 py-2 text-xs font-medium transition',
+                  textBypassEnabled
+                    ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
+                    : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+                  bridgeBusy && 'cursor-not-allowed opacity-60',
+                )}
               >
-                {button.label}
+                Text Bypass
               </button>
-            ))}
-            <button
-              type="button"
-              aria-pressed={textBypassEnabled}
-              disabled={bridgeBusy}
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={() => {
-                void handleToggleTextBypass();
-              }}
-              className={clsx(
-                'rounded-xl border px-3 py-2 text-xs font-medium transition',
-                textBypassEnabled
-                  ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
-                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-                bridgeBusy && 'cursor-not-allowed opacity-60',
+              <button
+                type="button"
+                aria-label="Copy latest assistant message"
+                title={copyingLastMessage ? 'Loading latest assistant message…' : 'Copy latest assistant message'}
+                disabled={copyingLastMessage}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  void handleCopyLatestAssistantMessage();
+                }}
+                className={clsx(
+                  'inline-flex h-9 w-9 items-center justify-center rounded-xl border transition',
+                  copiedLastMessage
+                    ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20'
+                    : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+                  copyingLastMessage && 'cursor-not-allowed opacity-60',
+                )}
+              >
+                {copiedLastMessage ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              </button>
+              {mobileCollapsible && (
+                <button
+                  type="button"
+                  aria-label={mobileChromeHidden ? 'Show mobile banners' : 'Hide mobile banners'}
+                  title={mobileChromeHidden ? 'Show mobile banners' : 'Hide mobile banners'}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={onToggleMobileChrome}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-700 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
+                >
+                  <ChevronDown className={clsx('h-4 w-4 transition-transform', !mobileChromeHidden && 'rotate-180')} />
+                </button>
               )}
-            >
-              Text Bypass
-            </button>
-            <button
-              type="button"
-              aria-label="Copy latest assistant message"
-              title={copyingLastMessage ? 'Loading latest assistant message…' : 'Copy latest assistant message'}
-              disabled={copyingLastMessage}
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={() => {
-                void handleCopyLatestAssistantMessage();
-              }}
-              className={clsx(
-                'inline-flex h-9 w-9 items-center justify-center rounded-xl border transition',
-                copiedLastMessage
-                  ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20'
-                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-                copyingLastMessage && 'cursor-not-allowed opacity-60',
-              )}
-            >
-              {copiedLastMessage ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            </button>
-          </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1061,6 +1067,10 @@ interface ConversationPaneProps {
   timeline?: ConversationTimeline;
   loading: boolean;
   workMode: boolean;
+  mobileChromeHidden: boolean;
+  onToggleMobileChrome: () => void;
+  mobileControlsHidden: boolean;
+  onToggleMobileControls: () => void;
   onBind: () => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSendText: (sessionId: string, text: string) => Promise<boolean>;
@@ -1081,6 +1091,10 @@ export function ConversationPane({
   timeline,
   loading,
   workMode,
+  mobileChromeHidden,
+  onToggleMobileChrome,
+  mobileControlsHidden,
+  onToggleMobileControls,
   onBind,
   onRelease,
   onSendText,
@@ -1095,14 +1109,12 @@ export function ConversationPane({
 }: ConversationPaneProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const isMobile = useMediaQuery('(max-width: 767px)');
-  const [mobileTopPanelOpen, setMobileTopPanelOpen] = useState(false);
   const [mobileBridgeOpen, setMobileBridgeOpen] = useState(true);
-  const [mobileStatusOpen, setMobileStatusOpen] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
   const compactLiveLayout = workMode && liveMode;
-  const hideTopPanel = compactLiveLayout && !isMobile;
+  const hideTopPanel = isMobile ? mobileChromeHidden : compactLiveLayout;
   const latestAssistantMessage = [...(timeline?.messages ?? [])]
     .reverse()
     .find((message) => message.role === 'assistant')
@@ -1167,80 +1179,15 @@ export function ConversationPane({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {!hideTopPanel && (
         isMobile ? (
-          <MobileSectionShell
+          <MobileSummaryStrip
             title="Conversation"
             summary={[
               timeline.conversation.title,
               boundSession ? 'Bound' : 'Not bound',
               timeline.conversation.degraded ? 'Degraded parse' : undefined,
             ].filter(Boolean).join(' · ')}
-            open={mobileTopPanelOpen}
-            onToggle={() => setMobileTopPanelOpen((current) => !current)}
             className="border-b border-slate-800 bg-slate-950/90 backdrop-blur"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <NavigationCrumbs project={project} selectedProvider={timeline.conversation.provider} conversationTitle={timeline.conversation.title} />
-                <h1 className="truncate text-xl font-semibold text-white">{timeline.conversation.title}</h1>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-                  <span className={clsx('rounded-full border px-2.5 py-1', boundSession ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-400')}>
-                    {boundSession ? 'Bound' : 'Not bound'}
-                  </span>
-                  {timeline.conversation.degraded && (
-                    <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onToggleDebug}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-                >
-                  <Bug className="h-4 w-4" />
-                  {debugOpen ? 'Hide debug' : 'Show debug'}
-                </button>
-                {boundSession ? (
-                  <button
-                    type="button"
-                    onClick={() => onRelease(boundSession.id)}
-                    disabled={releasing}
-                    className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
-                  >
-                    <Unplug className="h-4 w-4" />
-                    Release
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={onBind}
-                    disabled={binding}
-                    className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
-                  >
-                    <PlugZap className="h-4 w-4" />
-                    Bind / resume
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {proxyLinks.length > 0 && (
-              <div className="mt-4 flex flex-wrap gap-2">
-                {proxyLinks.map((port) => (
-                  <a
-                    key={port}
-                    href={`/proxy/${encodeURIComponent(project!.slug)}/${port}/`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-2 rounded-full border border-slate-700 px-3 py-1.5 text-sm text-slate-200 transition hover:border-sky-400 hover:bg-sky-500/10"
-                  >
-                    <LinkIcon className="h-4 w-4 text-sky-300" />
-                    localhost:{port}
-                  </a>
-                ))}
-              </div>
-            )}
-          </MobileSectionShell>
+          />
         ) : (
           <div className="border-b border-slate-800 bg-slate-950/90 px-4 py-4 backdrop-blur">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1361,6 +1308,10 @@ export function ConversationPane({
           mobileCollapsible={isMobile}
           bridgeOpen={mobileBridgeOpen}
           onToggleBridge={() => setMobileBridgeOpen((current) => !current)}
+          mobileControlsHidden={mobileControlsHidden}
+          onToggleMobileControls={onToggleMobileControls}
+          mobileChromeHidden={mobileChromeHidden}
+          onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
         />
       ) : (
@@ -1369,13 +1320,11 @@ export function ConversationPane({
         </div>
       )}
 
-      {liveMode && liveScreen && (
+      {liveMode && liveScreen && !(isMobile && mobileControlsHidden) && (
         <LiveSessionStatus
           status={liveScreen.status}
           statusAnsi={liveScreen.statusAnsi}
-          mobileCollapsible={isMobile}
-          open={mobileStatusOpen}
-          onToggle={() => setMobileStatusOpen((current) => !current)}
+          mobileCompact={isMobile}
         />
       )}
 
