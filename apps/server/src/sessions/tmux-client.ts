@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { shellEscape } from '../lib/shell.js';
 
 async function runTmux(args: string[]): Promise<string> {
@@ -34,6 +37,7 @@ export interface TmuxClient {
   newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void>;
   pipePaneToFile(sessionName: string, filePath: string): Promise<void>;
   sendLiteralText(sessionName: string, text: string): Promise<void>;
+  pasteText(sessionName: string, text: string): Promise<void>;
   sendKeys(sessionName: string, keys: string[]): Promise<void>;
   sendLiteralInput(sessionName: string, text: string): Promise<void>;
   capturePane(sessionName: string, startLine?: number): Promise<string>;
@@ -59,6 +63,30 @@ export class ShellTmuxClient implements TmuxClient {
       return;
     }
     await runTmux(['send-keys', '-t', sessionName, '-l', '--', text]);
+  }
+
+  async pasteText(sessionName: string, text: string): Promise<void> {
+    if (!text.length) {
+      return;
+    }
+
+    const bufferName = `agent-console-paste-${randomUUID()}`;
+    const bufferPath = path.join(os.tmpdir(), `${bufferName}.txt`);
+
+    try {
+      await fsPromises.writeFile(bufferPath, text, 'utf8');
+      await runTmux(['load-buffer', '-b', bufferName, bufferPath]);
+      await runTmux(['paste-buffer', '-d', '-p', '-r', '-b', bufferName, '-t', sessionName]);
+    } catch (error) {
+      try {
+        await runTmux(['delete-buffer', '-b', bufferName]);
+      } catch {
+        // Ignore cleanup failures after a failed paste.
+      }
+      throw error;
+    } finally {
+      await fsPromises.rm(bufferPath, { force: true }).catch(() => undefined);
+    }
   }
 
   async sendKeys(sessionName: string, keys: string[]): Promise<void> {

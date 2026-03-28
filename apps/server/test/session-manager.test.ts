@@ -14,6 +14,7 @@ class FakeTmux implements TmuxClient {
   created: string[] = [];
   createdCommands: string[] = [];
   sent: string[] = [];
+  pasted: string[] = [];
   sentKeys: string[][] = [];
   alive = new Set<string>();
   failPipePane = false;
@@ -32,6 +33,10 @@ class FakeTmux implements TmuxClient {
     }
   }
   async sendLiteralText(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
+  async pasteText(_sessionName: string, text: string): Promise<void> {
+    this.pasted.push(text);
+    this.sent.push(text);
+  }
   async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
   async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
   async capturePane(): Promise<string> {
@@ -112,7 +117,7 @@ describe('SessionManager', () => {
     expect(session.status).toBe('bound');
     await manager.sendInput(session.id, 'Hello agent');
     expect(tmux.sent).toEqual(['Hello agent']);
-    expect(tmux.sentKeys).toEqual([]);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
 
     await manager.releaseSession(session.id);
     const ended = db.getBoundSessionById(session.id);
@@ -710,6 +715,252 @@ describe('SessionManager', () => {
     expect(screens.at(-1)?.inputText).toBe('');
     expect(`${screens.at(-1)?.content ?? ''}`).toContain('Working through the request…');
     unsubscribe();
+    db.close();
+  });
+
+  it('uses bracketed paste for long submitted input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-long-input',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const longText = 'A'.repeat(1300);
+    await manager.sendInput(session.id, longText);
+
+    expect(tmux.pasted).toEqual([longText]);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    db.close();
+  });
+
+  it('uses bracketed paste for long bridge text before the submit key', async () => {
+    class LongComposerTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          '❯ draft',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          `❯ ${this.sent.join('')}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      override async pasteText(_sessionName: string, text: string): Promise<void> {
+        this.pasted.push(text);
+        this.sent.push(text);
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          `❯ ${text}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Working through the request…',
+          '• Working (1s • esc to interrupt)',
+          '',
+          '❯ ',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new LongComposerTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-long-keystrokes',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const longText = 'follow-up '.repeat(180);
+    await manager.sendKeystrokes(session.id, { text: longText, keys: ['Enter'] });
+
+    expect(tmux.pasted).toEqual([longText]);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    db.close();
+  });
+
+  it('opens the Codex composer before applying a large text-only paste', async () => {
+    class QueueMessagePasteTmux extends FakeTmux {
+      private stage: 'queue' | 'composer' | 'pasted' = 'queue';
+
+      constructor() {
+        super();
+        this.paneText = this.renderQueue();
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Tab')) {
+          return;
+        }
+        this.stage = 'composer';
+        this.paneText = this.renderComposer('');
+      }
+
+      override async pasteText(_sessionName: string, text: string): Promise<void> {
+        this.pasted.push(text);
+        this.stage = 'pasted';
+        this.paneText = this.renderComposer(text);
+      }
+
+      private renderQueue(): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Ready when you are.',
+          'Tab to queue message',
+          'gpt-5.4 xhigh · 88% left · ~/demo',
+        ].join('\n');
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Ready when you are.',
+          '',
+          `❯ ${input}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new QueueMessagePasteTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-queue-paste',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const longText = `${'deep context '.repeat(80)}\n${'follow-up '.repeat(40)}`;
+    await manager.sendKeystrokes(session.id, { text: longText });
+
+    expect(tmux.sentKeys).toContainEqual(['Tab']);
+    expect(tmux.pasted).toEqual([longText]);
+    db.close();
+  });
+
+  it('stages very large submitted bridge text into a file-backed instruction', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    class StagedInputTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = this.renderComposer('');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.paneText = this.renderComposer(text);
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Working through the staged prompt…',
+          '• Working (1s • esc to interrupt)',
+          '',
+          '❯ ',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          `❯ ${input}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tmux = new StagedInputTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-file-backed-live-input',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const veryLongText = 'long prompt content '.repeat(220);
+    await manager.sendKeystrokes(session.id, { text: veryLongText, keys: ['Enter'] });
+
+    expect(tmux.pasted).toEqual([]);
+    expect(tmux.sent).toHaveLength(1);
+    const stagedMessage = tmux.sent[0];
+    expect(stagedMessage).toBeTruthy();
+    if (!stagedMessage) {
+      throw new Error('Expected staged bridge instruction');
+    }
+    expect(stagedMessage).toContain('Read and follow the full user prompt saved at');
+    expect(stagedMessage).toContain('Treat the file contents as the user\'s latest message before replying.');
+    const stagedPathMatch = stagedMessage.match(/"([^"]+bridge-inputs[^"]+\.md)"/);
+    expect(stagedPathMatch?.[1]).toBeTruthy();
+    const stagedPath = stagedPathMatch?.[1];
+    if (!stagedPath) {
+      throw new Error('Expected staged file path in bridge instruction');
+    }
+    expect(await fs.readFile(stagedPath, 'utf8')).toBe(veryLongText);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
     db.close();
   });
 

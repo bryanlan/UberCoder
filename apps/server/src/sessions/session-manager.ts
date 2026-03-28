@@ -30,6 +30,8 @@ const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
 const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
+const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
+const MAX_INLINE_LIVE_INPUT_CHARS = 1_800;
 
 export class SessionKeystrokeRejectedError extends Error {
   readonly statusCode = 409;
@@ -138,6 +140,37 @@ function combinedTextKeySettleWaitMs(text: string): number {
   );
 }
 
+function shouldUseBracketedPasteTransport(text: string): boolean {
+  return text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
+}
+
+function shouldStageLargeLiveInput(text: string): boolean {
+  return text.length > MAX_INLINE_LIVE_INPUT_CHARS;
+}
+
+function splitLiteralTextForTmux(text: string): string[] {
+  if (!text.length) {
+    return [];
+  }
+
+  const chunks: string[] = [];
+  let currentChunk = '';
+  let currentChunkLength = 0;
+  for (const char of text) {
+    currentChunk += char;
+    currentChunkLength += 1;
+    if (currentChunkLength >= TMUX_LITERAL_TEXT_CHUNK_SIZE) {
+      chunks.push(currentChunk);
+      currentChunk = '';
+      currentChunkLength = 0;
+    }
+  }
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+  return chunks;
+}
+
 export class SessionManager {
   private readonly watchers = new Map<string, WatchState>();
   private readonly lastScreenHashes = new Map<string, string>();
@@ -160,6 +193,42 @@ export class SessionManager {
     for (const session of this.listActiveSessions()) {
       await this.refreshSessionState(session);
     }
+  }
+
+  private async sendLiteralTextToSession(sessionName: string, text: string): Promise<void> {
+    for (const chunk of splitLiteralTextForTmux(text)) {
+      await this.tmuxClient.sendLiteralText(sessionName, chunk);
+    }
+  }
+
+  private async sendLiteralInputToSession(sessionName: string, text: string): Promise<void> {
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      if (line.length > 0) {
+        if (shouldUseBracketedPasteTransport(line)) {
+          await this.tmuxClient.pasteText(sessionName, line);
+        } else {
+          await this.sendLiteralTextToSession(sessionName, line);
+        }
+      }
+      await this.tmuxClient.sendKeys(sessionName, ['Enter']);
+    }
+  }
+
+  private async stageLargeLiveInput(session: BoundSession, text: string): Promise<string> {
+    const sessionDir = session.rawLogPath ? path.dirname(session.rawLogPath) : path.join(this.runtimeDir, session.id);
+    const bridgeInputsDir = path.join(sessionDir, 'bridge-inputs');
+    await fsPromises.mkdir(bridgeInputsDir, { recursive: true });
+    const filePath = path.join(
+      bridgeInputsDir,
+      `${Date.now()}-${stableTextHash(text).slice(0, 10)}.md`,
+    );
+    await fsPromises.writeFile(filePath, text, 'utf8');
+    return filePath;
+  }
+
+  private buildStagedLiveInputInstruction(filePath: string): string {
+    return `Read and follow the full user prompt saved at "${filePath}". Treat the file contents as the user's latest message before replying.`;
   }
 
   async bindConversation(input: {
@@ -285,7 +354,10 @@ export class SessionManager {
     if (!liveSession) {
       throw new Error('Session is no longer running.');
     }
-    await this.tmuxClient.sendLiteralInput(liveSession.tmuxSessionName, text);
+    const transportText = shouldStageLargeLiveInput(text)
+      ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, text))
+      : text;
+    await this.sendLiteralInputToSession(liveSession.tmuxSessionName, transportText);
     const updated: BoundSession = {
       ...liveSession,
       updatedAt: nowIso(),
@@ -324,25 +396,34 @@ export class SessionManager {
     let latestObservedHash = hashScreen(beforeScreen);
 
     if (payload.text) {
-      if (payload.keys?.length && !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, payload.text)) {
+      const transportText = shouldStageLargeLiveInput(payload.text)
+        ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, payload.text))
+        : payload.text;
+      const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
+      const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
+      if ((payload.keys?.length || useBracketedPasteTransport) && expectsVisibleInputChange) {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
         latestObservedHash = hashScreen(latestObservedScreen);
       }
       const textEntryScreen = latestObservedScreen;
-      await this.tmuxClient.sendLiteralText(liveSession.tmuxSessionName, payload.text);
-      if (payload.keys?.length) {
+      if (useBracketedPasteTransport) {
+        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
+      } else {
+        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
+      }
+      if (payload.keys?.length || useBracketedPasteTransport) {
         const textSettledScreen = await this.waitForInputTextChange(
           liveSession,
           latestObservedHash,
           textEntryScreen,
-          combinedTextKeySettleWaitMs(payload.text),
+          combinedTextKeySettleWaitMs(transportText),
         );
         if (textSettledScreen) {
           latestObservedScreen = textSettledScreen;
           latestObservedHash = hashScreen(textSettledScreen);
           this.publishScreenUpdate(liveSession, textSettledScreen);
         }
-        if (!screenInputChanged(textEntryScreen, latestObservedScreen) && !screenAllowsLiteralSelectionWithoutInput(textEntryScreen, payload.text)) {
+        if (expectsVisibleInputChange && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
           this.appendDebugTrace(liveSession, {
             action: 'send-keystrokes-rejected',
             text: payload.text,
