@@ -1229,15 +1229,48 @@ export function ConversationPane({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {!hideTopPanel && (
         isMobile ? (
-          <MobileSummaryStrip
-            title="Conversation"
-            summary={[
-              timeline.conversation.title,
-              boundSession ? 'Bound' : 'Not bound',
-              timeline.conversation.degraded ? 'Degraded parse' : undefined,
-            ].filter(Boolean).join(' · ')}
-            className="border-b border-slate-800 bg-slate-950/90 backdrop-blur"
-          />
+          <div className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+            <MobileSummaryStrip
+              title="Conversation"
+              summary={[
+                timeline.conversation.title,
+                boundSession ? 'Bound' : 'Not bound',
+                timeline.conversation.degraded ? 'Degraded parse' : undefined,
+              ].filter(Boolean).join(' · ')}
+              className=""
+            />
+            <div className="flex flex-wrap gap-2 px-4 pb-3">
+              <button
+                type="button"
+                onClick={onToggleDebug}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+              >
+                <Bug className="h-4 w-4" />
+                {debugOpen ? 'Hide debug' : 'Show debug'}
+              </button>
+              {boundSession ? (
+                <button
+                  type="button"
+                  onClick={() => onRelease(boundSession.id)}
+                  disabled={releasing}
+                  className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
+                >
+                  <Unplug className="h-4 w-4" />
+                  Release
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onBind}
+                  disabled={binding}
+                  className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
+                >
+                  <PlugZap className="h-4 w-4" />
+                  Bind / resume
+                </button>
+              )}
+            </div>
+          </div>
         ) : (
           <div className="border-b border-slate-800 bg-slate-950/90 px-4 py-4 backdrop-blur">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1366,7 +1399,28 @@ export function ConversationPane({
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
-          Bind this conversation to unlock the live input bridge.
+          <div>Bind this conversation to unlock the live input bridge.</div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void onBind()}
+              disabled={binding}
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
+            >
+              <PlugZap className="h-4 w-4" />
+              Bind / resume
+            </button>
+            {isMobile && mobileChromeHidden && (
+              <button
+                type="button"
+                onClick={onToggleMobileChrome}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
+              >
+                <ChevronDown className="h-4 w-4 rotate-180" />
+                Show mobile banners
+              </button>
+            )}
+          </div>
         </div>
       )}
 
