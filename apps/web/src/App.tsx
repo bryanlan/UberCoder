@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
   BoundSession,
@@ -893,7 +893,19 @@ function AppShell() {
         refreshing={refreshMutation.isPending}
       />
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-        <header className={`sticky top-0 z-20 shrink-0 border-b border-slate-800 bg-slate-950/90 backdrop-blur ${mobileChromeHidden ? 'hidden lg:block' : ''}`}>
+        {mobileChromeHidden && (
+          <div className="pointer-events-none absolute right-4 top-4 z-30">
+            <button
+              type="button"
+              onClick={() => setMobileChromeHidden(false)}
+              className="pointer-events-auto inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/90 px-3 py-2 text-sm text-slate-200 shadow-panel backdrop-blur transition hover:border-slate-500 hover:bg-slate-900"
+            >
+              <ChevronDown className="h-4 w-4 rotate-180" />
+              Show banners
+            </button>
+          </div>
+        )}
+        <header className={`sticky top-0 z-20 shrink-0 border-b border-slate-800 bg-slate-950/90 backdrop-blur ${mobileChromeHidden ? 'hidden' : ''}`}>
           <div className="flex items-center justify-between px-4 py-3 lg:hidden">
             <div className="flex min-w-0 items-center gap-3">
               <button

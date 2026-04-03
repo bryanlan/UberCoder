@@ -508,11 +508,11 @@ function LiveSessionInputBridge({
   }, [needsBufferedFirstCodexTurn, sessionId]);
 
   useEffect(() => {
-    if (!mobileCollapsible || !bridgeOpen || needsBufferedFirstCodexTurn) {
+    if (!bridgeOpen || needsBufferedFirstCodexTurn) {
       return;
     }
     captureRef.current?.focus();
-  }, [bridgeOpen, mobileCollapsible, needsBufferedFirstCodexTurn]);
+  }, [bridgeOpen, needsBufferedFirstCodexTurn]);
 
   useEffect(() => {
     pendingTextRef.current = '';
@@ -846,19 +846,23 @@ function LiveSessionInputBridge({
   }
 
   async function handleToggleBridgePanel(): Promise<void> {
-    if (mobileCollapsible && bridgeOpen && textBypassEnabled) {
+    if (bridgeOpen && textBypassEnabled) {
       await flushBufferedText();
     }
     onToggleBridge();
   }
 
-  function renderBridgeHeader(title: string, summary?: string, showControlsToggle = false): ReactNode {
-    if (!mobileCollapsible) {
-      return <div className="mb-2 text-xs uppercase tracking-[0.18em] text-slate-500">{title}</div>;
-    }
-
+  function renderBridgeHeader(
+    title: string,
+    summary?: string,
+    options: { showControlsToggle?: boolean; showChromeToggle?: boolean } = {},
+  ): ReactNode {
+    const { showControlsToggle = false, showChromeToggle = true } = options;
     return (
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className={clsx(
+        'flex items-center justify-between gap-3',
+        mobileCollapsible ? 'px-4 py-3' : 'mb-2 py-1',
+      )}>
         <div className="min-w-0 flex-1">
           <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
           {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
@@ -886,6 +890,17 @@ function LiveSessionInputBridge({
               <ChevronRight className={clsx('h-4 w-4 transition-transform', mobileControlsHidden && 'rotate-180')} />
             </button>
           )}
+          {showChromeToggle && (
+            <button
+              type="button"
+              aria-label={mobileChromeHidden ? 'Show banners' : 'Hide banners'}
+              title={mobileChromeHidden ? 'Show banners' : 'Hide banners'}
+              onClick={onToggleMobileChrome}
+              className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
+            >
+              <ChevronDown className={clsx('h-4 w-4 transition-transform', !mobileChromeHidden && 'rotate-180')} />
+            </button>
+          )}
         </div>
       </div>
     );
@@ -897,7 +912,7 @@ function LiveSessionInputBridge({
     return (
       <div className="border-t border-slate-800 bg-slate-950/90">
         {renderBridgeHeader('First prompt', 'Buffered locally until Enter launches the session.')}
-        {(!mobileCollapsible || bridgeOpen) && (
+        {bridgeOpen && (
           <div className={bridgeBodyClassName}>
             <div className="mb-3 text-sm text-slate-400">Codex first-turn startup is buffered locally until you press Enter, then it is launched into the hidden session.</div>
             <textarea
@@ -922,8 +937,8 @@ function LiveSessionInputBridge({
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90">
-      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', mobileCollapsible)}
-      {(!mobileCollapsible || bridgeOpen) && (
+      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', { showControlsToggle: true })}
+      {bridgeOpen && (
         <div className={bridgeBodyClassName}>
           <textarea
             ref={captureRef}
@@ -1036,7 +1051,7 @@ function LiveSessionInputBridge({
               compact ? 'h-28 sm:h-48' : 'h-24',
             )}
           />
-          {(!mobileCollapsible || !mobileControlsHidden) && (
+          {!mobileControlsHidden && (
             <div className="mt-3 flex flex-wrap gap-2">
               {specialKeyButtons.map((button) => (
                 <button
@@ -1087,21 +1102,9 @@ function LiveSessionInputBridge({
                     : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
                   copyingLastMessage && 'cursor-not-allowed opacity-60',
                 )}
-              >
-                {copiedLastMessage ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              </button>
-              {mobileCollapsible && (
-                <button
-                  type="button"
-                  aria-label={mobileChromeHidden ? 'Show mobile banners' : 'Hide mobile banners'}
-                  title={mobileChromeHidden ? 'Show mobile banners' : 'Hide mobile banners'}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={onToggleMobileChrome}
-                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-700 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
                 >
-                  <ChevronDown className={clsx('h-4 w-4 transition-transform', !mobileChromeHidden && 'rotate-180')} />
+                  {copiedLastMessage ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                 </button>
-              )}
             </div>
           )}
         </div>
@@ -1164,7 +1167,7 @@ export function ConversationPane({
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
   const compactLiveLayout = workMode && liveMode;
-  const hideTopPanel = isMobile ? mobileChromeHidden : compactLiveLayout;
+  const hideTopPanel = mobileChromeHidden;
   const latestAssistantMessage = [...(timeline?.messages ?? [])]
     .reverse()
     .find((message) => message.role === 'assistant')
@@ -1410,21 +1413,21 @@ export function ConversationPane({
               <PlugZap className="h-4 w-4" />
               Bind / resume
             </button>
-            {isMobile && mobileChromeHidden && (
+            {mobileChromeHidden && (
               <button
                 type="button"
                 onClick={onToggleMobileChrome}
                 className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
               >
                 <ChevronDown className="h-4 w-4 rotate-180" />
-                Show mobile banners
+                Show banners
               </button>
             )}
           </div>
         </div>
       )}
 
-      {liveMode && liveScreen && !(isMobile && mobileControlsHidden) && (
+      {liveMode && liveScreen && !mobileControlsHidden && (
         <LiveSessionStatus
           status={liveScreen.status}
           statusAnsi={liveScreen.statusAnsi}
