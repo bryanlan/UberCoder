@@ -16,7 +16,7 @@ const project: ActiveProject = {
   matchPaths: ['/tmp/demo-project'],
   allowedLocalhostPorts: [],
   tags: [],
-  config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
+  config: { active: true, explicit: false, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
 };
 
 describe('provider history discovery', () => {
@@ -200,6 +200,79 @@ describe('provider history discovery', () => {
 
     const conversations = await provider.listConversations(nestedRepoProject, settings);
     expect(conversations).toHaveLength(1);
+  });
+
+  it('indexes Codex and Claude transcripts for explicit markerless project folders', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-markerless-project-'));
+    const markerlessProjectPath = path.join(tempDir, 'workspace');
+    await fs.mkdir(markerlessProjectPath, { recursive: true });
+
+    const codexSessionsDir = path.join(tempDir, 'codex-home', 'sessions', '2026', '04', '04');
+    await fs.mkdir(codexSessionsDir, { recursive: true });
+    await fs.writeFile(path.join(codexSessionsDir, 'rollout-markerless.jsonl'), [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: markerlessProjectPath,
+          id: 'markerless-codex',
+        },
+      }),
+      JSON.stringify({
+        role: 'user',
+        text: 'Markerless Codex prompt',
+        timestamp: '2026-04-04T00:00:00.000Z',
+      }),
+    ].join('\n'));
+
+    const claudeProjectDir = path.join(tempDir, 'claude-home', 'projects', '-tmp-agent-console-markerless-project--workspace-');
+    await fs.mkdir(claudeProjectDir, { recursive: true });
+    const claudeTranscriptPath = path.join(claudeProjectDir, 'markerless-claude.jsonl');
+    await fs.writeFile(claudeTranscriptPath, [
+      JSON.stringify({
+        cwd: markerlessProjectPath,
+        timestamp: '2026-04-04T00:01:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Markerless Claude prompt',
+        },
+      }),
+    ].join('\n'));
+    await fs.writeFile(path.join(tempDir, 'claude-home', 'history.jsonl'), `${JSON.stringify({
+      cwd: markerlessProjectPath,
+      transcript_path: claudeTranscriptPath,
+    })}\n`);
+
+    const markerlessProject: ActiveProject = {
+      ...project,
+      slug: 'workspace',
+      directoryName: 'workspace',
+      displayName: 'workspace',
+      rootPath: markerlessProjectPath,
+      path: markerlessProjectPath,
+      matchPaths: [markerlessProjectPath],
+      config: { active: true, explicit: true, allowedLocalhostPorts: [], tags: [], providers: {} },
+    };
+
+    const codexProvider = new CodexProvider();
+    const codexConversations = await codexProvider.listConversations(markerlessProject, {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: path.join(tempDir, 'codex-home'),
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings);
+    expect(codexConversations).toHaveLength(1);
+    expect(codexConversations[0]?.title).toContain('Markerless Codex prompt');
+
+    const claudeProvider = new ClaudeProvider();
+    const claudeConversations = await claudeProvider.listConversations(markerlessProject, {
+      id: 'claude',
+      enabled: true,
+      discoveryRoot: path.join(tempDir, 'claude-home'),
+      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+    } satisfies MergedProviderSettings);
+    expect(claudeConversations).toHaveLength(1);
+    expect(claudeConversations[0]?.title).toContain('Markerless Claude prompt');
   });
 
   it('skips Codex transcripts that provide no project signal at all', async () => {

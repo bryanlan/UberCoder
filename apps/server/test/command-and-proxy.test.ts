@@ -14,7 +14,7 @@ const project: ActiveProject = {
   matchPaths: ['/srv/demo'],
   allowedLocalhostPorts: [3000, 5173],
   tags: [],
-  config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [3000, 5173], tags: [], providers: {} },
+  config: { active: true, explicit: false, displayName: 'Demo', allowedLocalhostPorts: [3000, 5173], tags: [], providers: {} },
 };
 
 const settings = {

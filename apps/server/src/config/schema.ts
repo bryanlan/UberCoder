@@ -29,6 +29,7 @@ const providerOverrideSchema = z.object({
 export const projectConfigSchema = z.object({
   active: z.boolean().default(false),
   path: z.string().optional(),
+  explicit: z.boolean().default(false),
   displayName: z.string().optional(),
   allowedLocalhostPorts: z.array(portSchema).default([]),
   tags: z.array(z.string()).default([]),

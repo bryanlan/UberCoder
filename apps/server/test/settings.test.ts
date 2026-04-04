@@ -9,6 +9,7 @@ async function setup(): Promise<{ configPath: string; root: string }> {
   const root = path.join(tempDir, 'projects');
   await fs.mkdir(path.join(root, 'demo', 'app'), { recursive: true });
   await fs.mkdir(path.join(root, 'alpha', 'service'), { recursive: true });
+  await fs.mkdir(path.join(root, 'empty-workspace'), { recursive: true });
   await fs.writeFile(path.join(root, 'demo', 'app', 'AGENTS.md'), '# demo');
   await fs.writeFile(path.join(root, 'alpha', 'service', 'claude.md'), '# alpha');
   await fs.writeFile(path.join(root, 'README.txt'), 'not a directory');
@@ -130,7 +131,25 @@ describe('settings routes', () => {
         directories: [
           { name: 'alpha', path: path.join(root, 'alpha'), isSymlink: false },
           { name: 'demo', path: path.join(root, 'demo'), isSymlink: false },
+          { name: 'empty-workspace', path: path.join(root, 'empty-workspace'), isSymlink: false },
         ],
+      });
+
+      const createDirectory = await app.inject({
+        method: 'POST',
+        url: '/api/settings/directories',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+        payload: {
+          parentPath: root,
+          name: 'new-project',
+        },
+      });
+      expect(createDirectory.statusCode).toBe(200);
+      expect(createDirectory.json()).toEqual({
+        path: path.join(root, 'new-project'),
       });
 
       const create = await app.inject({
@@ -149,6 +168,24 @@ describe('settings routes', () => {
         directoryName: 'alpha--service',
         active: true,
         path: path.join(root, 'alpha', 'service'),
+      });
+
+      const createMarkerlessProject = await app.inject({
+        method: 'POST',
+        url: '/api/settings/projects',
+        headers: {
+          cookie,
+          'x-csrf-token': csrfToken,
+        },
+        payload: {
+          path: path.join(root, 'empty-workspace'),
+        },
+      });
+      expect(createMarkerlessProject.statusCode).toBe(200);
+      expect(createMarkerlessProject.json().project).toMatchObject({
+        directoryName: 'empty-workspace',
+        active: true,
+        path: path.join(root, 'empty-workspace'),
       });
 
       const updateUiPreferences = await app.inject({
@@ -172,7 +209,7 @@ describe('settings routes', () => {
       expect(updateUiPreferences.json()).toEqual({
         preferences: {
           recentActivitySortEnabled: false,
-          manualProjectOrder: ['alpha--service', 'demo'],
+          manualProjectOrder: ['alpha--service', 'demo', 'empty-workspace'],
           sessionFreshnessThresholds: {
             yellowMinutes: 2,
             orangeMinutes: 6,

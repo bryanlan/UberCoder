@@ -19,7 +19,7 @@ const project: ActiveProject = {
   matchPaths: ['/tmp/demo-project'],
   allowedLocalhostPorts: [],
   tags: [],
-  config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
+  config: { active: true, explicit: false, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
 };
 
 const providerSettings = {

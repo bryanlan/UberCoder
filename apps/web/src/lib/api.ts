@@ -2,6 +2,7 @@ import type {
   AuthState,
   BoundSession,
   ConversationTimeline,
+  CreateDirectoryRequest,
   CreateProjectSettingsRequest,
   DirectoryBrowserResponse,
   EditableProjectSettings,
@@ -90,6 +91,8 @@ export const api = {
   uiPreferences: () => request<UiPreferences>('/api/settings/ui-preferences'),
   browseDirectories: (directoryPath?: string) =>
     request<DirectoryBrowserResponse>(directoryPath ? `/api/settings/directories?path=${encodeURIComponent(directoryPath)}` : '/api/settings/directories'),
+  createDirectory: (body: CreateDirectoryRequest, csrfToken?: string) =>
+    request<{ path: string }>('/api/settings/directories', { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   updateGlobalSettings: (body: UpdateGlobalSettingsRequest, csrfToken?: string) =>
     request<{ settings: SettingsSummary; restartRequired: boolean }>('/api/settings/global', { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
   createProject: (body: CreateProjectSettingsRequest, csrfToken?: string) =>

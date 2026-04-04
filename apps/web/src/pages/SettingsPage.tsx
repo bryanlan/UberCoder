@@ -469,9 +469,13 @@ export function SettingsPage({
         initialPath={globalDraft.projectsRoot}
         onClose={() => setProjectPickerOpen(false)}
         title="Add project"
-        description="Choose a folder under the current projects root. It must contain AGENTS.md or CLAUDE.md."
+        description="Choose any folder under the current projects root. Saved Codex and Claude history will still be indexed even without AGENTS.md or CLAUDE.md."
         confirmLabel="Add this project"
         helperText="The selected folder will be saved as an explicit project path."
+        allowCreateDirectory
+        createDirectoryRoot={globalDraft.projectsRoot}
+        createDirectoryLabel="Create folder here"
+        csrfToken={csrfToken}
         onSelect={(nextPath) => {
           createProjectMutation.mutate({ path: nextPath });
           setProjectPickerOpen(false);
@@ -700,7 +704,7 @@ export function SettingsPage({
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-slate-100">Saved projects</h2>
-                <p className="mt-1 text-sm text-slate-400">Projects are explicit folders under `projectsRoot`. Add only folders that contain AGENTS.md or CLAUDE.md.</p>
+                <p className="mt-1 text-sm text-slate-400">Projects are explicit folders under `projectsRoot`. Marker files are optional; saved Codex and Claude history is matched from the folder path.</p>
               </div>
               <button
                 type="button"

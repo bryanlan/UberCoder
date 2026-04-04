@@ -193,6 +193,11 @@ export interface CreateProjectSettingsRequest {
   path: string;
 }
 
+export interface CreateDirectoryRequest {
+  parentPath: string;
+  name: string;
+}
+
 export interface UpdateUiPreferencesRequest {
   recentActivitySortEnabled?: boolean;
   manualProjectOrder?: string[];

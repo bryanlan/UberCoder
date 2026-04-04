@@ -69,7 +69,7 @@ const project: ActiveProject = {
   matchPaths: ['/srv/demo'],
   allowedLocalhostPorts: [],
   tags: [],
-  config: { active: true, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
+  config: { active: true, explicit: false, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
 };
 
 const provider: ProviderAdapter = {

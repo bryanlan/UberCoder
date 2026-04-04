@@ -247,6 +247,59 @@ describe('ConfigService', () => {
     expect(reloaded.getConfiguredProjectDirectoryNames()).toEqual([]);
   });
 
+  it('drops legacy saved top-level project entries even when the folder only contains files', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-legacy-files-only-'));
+    const projectsRoot = path.join(tempDir, 'projects');
+    const legacyProjectPath = path.join(projectsRoot, 'notes-app');
+    await fs.mkdir(legacyProjectPath, { recursive: true });
+    await fs.writeFile(path.join(legacyProjectPath, 'README.txt'), 'legacy top-level project without marker files');
+    const configPath = await writeTempConfig({
+      projectsRoot,
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: {
+          enabled: true,
+          discoveryRoot: '~/.codex',
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        },
+        claude: {
+          enabled: true,
+          discoveryRoot: '~/.claude',
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        },
+      },
+      projects: {
+        'notes-app': {
+          active: true,
+          path: legacyProjectPath,
+          allowedLocalhostPorts: [],
+          tags: [],
+        },
+      },
+    });
+
+    const service = new ConfigService(configPath);
+    const reloaded = new ConfigService(configPath);
+
+    expect(service.getProjectConfig('notes-app')).toBeUndefined();
+    expect(service.getConfiguredProjectDirectoryNames()).toEqual([]);
+    expect(reloaded.getProjectConfig('notes-app')).toBeUndefined();
+    expect(reloaded.getConfiguredProjectDirectoryNames()).toEqual([]);
+  });
+
   it('generates project keys from the stored root after a global root change pending restart', async () => {
     const configPath = await writeTempConfig({
       projectsRoot: '/tmp/projects',
@@ -299,6 +352,57 @@ describe('ConfigService', () => {
     });
 
     expect(created.directoryName).toBe('UberCoder--agent-console-mvp--agent-console');
+  });
+
+  it('preserves explicitly added top-level folders without marker files across reloads', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-explicit-project-'));
+    const projectsRoot = path.join(tempDir, 'projects');
+    const explicitProjectPath = path.join(projectsRoot, 'workspace');
+    await fs.mkdir(explicitProjectPath, { recursive: true });
+
+    const configPath = await writeTempConfig({
+      projectsRoot,
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: {
+          enabled: true,
+          discoveryRoot: '~/.codex',
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        },
+        claude: {
+          enabled: true,
+          discoveryRoot: '~/.claude',
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        },
+      },
+      projects: {},
+    });
+
+    const service = new ConfigService(configPath);
+    const created = service.createProjectConfig({
+      path: explicitProjectPath,
+    });
+    const reloaded = new ConfigService(configPath);
+
+    expect(created.directoryName).toBe('workspace');
+    expect(service.getProjectConfig('workspace')?.explicit).toBe(true);
+    expect(reloaded.getProjectConfig('workspace')).toMatchObject({
+      path: explicitProjectPath,
+      explicit: true,
+    });
   });
 
   it('stores global settings for restart without changing the current runtime snapshot', async () => {

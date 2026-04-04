@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../lib/api';
 
 export function DirectoryPickerModal({
@@ -11,6 +11,10 @@ export function DirectoryPickerModal({
   description = 'Browse folders on the Linux host. The selected path is written into config as `projectsRoot`.',
   confirmLabel = 'Use this folder',
   helperText = 'Choose the currently shown folder to use it as the projects root.',
+  allowCreateDirectory = false,
+  createDirectoryRoot,
+  createDirectoryLabel = 'Create folder',
+  csrfToken,
 }: {
   open: boolean;
   initialPath: string;
@@ -20,12 +24,21 @@ export function DirectoryPickerModal({
   description?: string;
   confirmLabel?: string;
   helperText?: string;
+  allowCreateDirectory?: boolean;
+  createDirectoryRoot?: string;
+  createDirectoryLabel?: string;
+  csrfToken?: string;
 }) {
+  const queryClient = useQueryClient();
   const [currentPath, setCurrentPath] = useState(initialPath);
+  const [newDirectoryName, setNewDirectoryName] = useState('');
+  const [createMessage, setCreateMessage] = useState<string>();
 
   useEffect(() => {
     if (!open) return;
     setCurrentPath(initialPath);
+    setNewDirectoryName('');
+    setCreateMessage(undefined);
   }, [initialPath, open]);
 
   useEffect(() => {
@@ -45,10 +58,23 @@ export function DirectoryPickerModal({
     enabled: open,
   });
 
+  const createDirectoryMutation = useMutation({
+    mutationFn: ({ parentPath, name }: { parentPath: string; name: string }) => api.createDirectory({ parentPath, name }, csrfToken),
+    onSuccess: async ({ path: createdPath }) => {
+      setCreateMessage('Folder created.');
+      setNewDirectoryName('');
+      setCurrentPath(createdPath);
+      await queryClient.invalidateQueries({ queryKey: ['directory-browser'] });
+    },
+  });
+
   if (!open) return null;
 
   const current = directoryQuery.data?.currentPath ?? currentPath;
   const errorMessage = directoryQuery.error instanceof ApiError ? directoryQuery.error.message : 'Unable to load directories.';
+  const createErrorMessage = createDirectoryMutation.error instanceof ApiError
+    ? createDirectoryMutation.error.message
+    : createMessage;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" onClick={onClose}>
@@ -122,6 +148,38 @@ export function DirectoryPickerModal({
             <div className="p-4 text-sm text-slate-400">No child directories here.</div>
           )}
         </div>
+
+        {allowCreateDirectory ? (
+          <div className="mt-4 rounded-3xl border border-slate-800 bg-slate-950/70 p-4">
+            <div className="text-xs uppercase tracking-wide text-slate-500">Create child folder</div>
+            <div className="mt-3 flex flex-col gap-3 md:flex-row">
+              <input
+                type="text"
+                value={newDirectoryName}
+                onChange={(event) => {
+                  setNewDirectoryName(event.target.value);
+                  setCreateMessage(undefined);
+                }}
+                placeholder="new-workspace"
+                className="min-w-0 flex-1 rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
+              />
+              <button
+                type="button"
+                disabled={createDirectoryMutation.isPending || !newDirectoryName.trim() || (createDirectoryRoot ? !current.startsWith(createDirectoryRoot) : false)}
+                onClick={() => {
+                  setCreateMessage(undefined);
+                  createDirectoryMutation.mutate({ parentPath: current, name: newDirectoryName.trim() });
+                }}
+                className="rounded-2xl border border-slate-700 px-4 py-3 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+              >
+                {createDirectoryMutation.isPending ? 'Creating…' : createDirectoryLabel}
+              </button>
+            </div>
+            <p className={`mt-3 text-sm ${createErrorMessage === 'Folder created.' ? 'text-emerald-300' : 'text-rose-300'}`}>
+              {createErrorMessage ?? 'Create an empty folder here, then add it as a project.'}
+            </p>
+          </div>
+        ) : null}
 
         <div className="mt-4 flex items-center justify-between gap-3">
           <p className="text-sm text-slate-400">{helperText}</p>

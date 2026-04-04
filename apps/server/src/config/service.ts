@@ -51,6 +51,7 @@ export class ConfigService {
         {
           ...project,
           path: project.path ? normalizeFsPath(project.path) : undefined,
+          explicit: project.explicit ?? false,
         },
       ])),
       server: {
@@ -168,6 +169,7 @@ export class ConfigService {
     const nextProject = projectConfigSchema.parse({
       active: input.active ?? true,
       path: normalizedPath,
+      explicit: true,
       displayName: input.displayName,
       allowedLocalhostPorts: input.allowedLocalhostPorts ?? [],
       tags: input.tags ?? [],
@@ -296,7 +298,11 @@ export class ConfigService {
         return [];
       }
 
-      if (configuredPath === legacyProjectPath && !this.hasProjectMarkerFile(configuredPath)) {
+      if (
+        project.explicit !== true
+        && configuredPath === legacyProjectPath
+        && !this.hasProjectMarkerFile(configuredPath)
+      ) {
         changed = true;
         return [];
       }

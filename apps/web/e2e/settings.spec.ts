@@ -47,6 +47,17 @@ test.describe('settings project management', () => {
     await expect(page.locator('body')).toContainText('Legacy migrated Codex conversation');
   });
 
+  test('lets you create a folder in Settings and add it as a project without marker files', async ({ page }) => {
+    await login(page);
+    await page.goto('/settings');
+    await page.getByRole('button', { name: 'Add project' }).click();
+    await page.getByPlaceholder('new-workspace').fill('fresh-workspace');
+    await page.getByRole('button', { name: 'Create folder here' }).click();
+    await expect(page.locator('body')).toContainText('Folder created.');
+    await page.getByRole('button', { name: 'Add this project' }).click();
+    await expect(page.locator('body')).toContainText('fresh-workspace');
+  });
+
   test('removes a saved project and keeps it out of the console after reload', async ({ page }) => {
     await login(page);
     await addAlphaProject(page);

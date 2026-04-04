@@ -29,6 +29,13 @@ const createProjectBodySchema = z.object({
   path: z.string().trim().min(1),
 });
 
+const createDirectoryBodySchema = z.object({
+  parentPath: z.string().trim().min(1),
+  name: z.string().trim().min(1).max(120)
+    .refine((value) => value !== '.' && value !== '..', 'Invalid directory name.')
+    .refine((value) => !value.includes('/') && !value.includes('\\'), 'Directory name must not include path separators.'),
+});
+
 const updateGlobalSettingsBodySchema = z.object({
   projectsRoot: z.string().trim().min(1),
   serverHost: z.string().trim().min(1),
@@ -60,7 +67,6 @@ const browseDirectoriesQuerySchema = z.object({
   path: z.string().optional(),
 });
 
-const PROJECT_MARKER_FILES = ['AGENTS.md', 'agents.md', 'CLAUDE.md', 'claude.md'];
 const SIDEBAR_UI_PREFERENCES_KEY = 'sidebar';
 const DEFAULT_SESSION_FRESHNESS_THRESHOLDS = {
   yellowMinutes: 3,
@@ -101,18 +107,6 @@ function normalizeOptionalText(value: string | undefined): string | undefined {
 function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
   const relative = path.relative(rootPath, candidatePath);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
-
-async function hasProjectMarkerFile(projectPath: string): Promise<boolean> {
-  for (const fileName of PROJECT_MARKER_FILES) {
-    try {
-      const stats = await fs.stat(path.join(projectPath, fileName));
-      if (stats.isFile()) return true;
-    } catch {
-      // ignore missing marker file
-    }
-  }
-  return false;
 }
 
 function normalizeUiPreferences(input: Partial<UiPreferences> | undefined, availableProjectSlugs: string[]): UiPreferences {
@@ -220,6 +214,62 @@ export async function registerSettingsRoutes(
       rootPath: path.parse(requestedPath).root || '/',
       directories,
     };
+  });
+
+  app.post('/api/settings/directories', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+
+    const parsedBody = createDirectoryBodySchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid directory request.', details: parsedBody.error.flatten() });
+      return;
+    }
+
+    const projectsRoot = normalizeFsPath(configService.getStoredConfig().projectsRoot ?? os.homedir());
+    const parentPath = normalizeFsPath(parsedBody.data.parentPath);
+    if (!isPathInsideRoot(projectsRoot, parentPath)) {
+      reply.code(400).send({ error: 'New folders must be created inside the current projects root.' });
+      return;
+    }
+
+    try {
+      const parentStats = await fs.stat(parentPath);
+      if (!parentStats.isDirectory()) {
+        reply.code(400).send({ error: 'Parent path must be a directory.' });
+        return;
+      }
+    } catch {
+      reply.code(404).send({ error: 'Parent directory not found.' });
+      return;
+    }
+
+    const createdPath = path.join(parentPath, parsedBody.data.name);
+    if (!isPathInsideRoot(projectsRoot, createdPath)) {
+      reply.code(400).send({ error: 'New folder must stay inside the current projects root.' });
+      return;
+    }
+
+    try {
+      await fs.mkdir(createdPath);
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error) {
+        if (error.code === 'EEXIST') {
+          reply.code(409).send({ error: 'A file or folder with that name already exists.' });
+          return;
+        }
+        if (error.code === 'ENOENT') {
+          reply.code(404).send({ error: 'Parent directory not found.' });
+          return;
+        }
+      }
+      throw error;
+    }
+
+    return { path: createdPath };
   });
 
   app.get('/api/settings', async (request, reply) => {
@@ -359,11 +409,6 @@ export async function registerSettingsRoutes(
       }
     } catch {
       reply.code(404).send({ error: 'Project path not found.' });
-      return;
-    }
-
-    if (!(await hasProjectMarkerFile(projectPath))) {
-      reply.code(400).send({ error: 'Project folder must contain AGENTS.md or CLAUDE.md.' });
       return;
     }
 
