@@ -588,17 +588,6 @@ function AppShell() {
     },
   });
 
-  const sendMutation = useMutation({
-    mutationFn: ({ sessionId, text }: { sessionId: string; text: string }) => api.sendInput(sessionId, text, authQuery.data?.csrfToken),
-    onSuccess: () => {
-      setActionError(undefined);
-      queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-      if (timelineQuery.data?.boundSession?.id) {
-        queryClient.invalidateQueries({ queryKey: ['raw-output', timelineQuery.data.boundSession.id] });
-      }
-    },
-  });
-
   const logoutMutation = useMutation({
     mutationFn: () => api.logout(authQuery.data?.csrfToken),
     onSuccess: () => {
@@ -649,17 +638,6 @@ function AppShell() {
       await releaseMutation.mutateAsync(sessionId);
     } catch (error) {
       setActionError(describeError(error, 'Unable to release this session.'));
-    }
-  }
-
-  async function handleSendText(sessionId: string, text: string): Promise<boolean> {
-    setActionError(undefined);
-    try {
-      await sendMutation.mutateAsync({ sessionId, text });
-      return true;
-    } catch (error) {
-      setActionError(describeError(error, 'Unable to send input to the session.'));
-      return false;
     }
   }
 
@@ -1011,9 +989,7 @@ function AppShell() {
               onToggleMobileControls={() => setMobileControlsHidden((current) => !current)}
               onBind={handleBindExisting}
               onRelease={handleRelease}
-              onSendText={handleSendText}
               onSendKeystrokes={handleSendKeystrokes}
-              sendingText={sendMutation.isPending}
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
               debugOpen={debugOpen}

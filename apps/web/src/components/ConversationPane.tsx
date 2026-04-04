@@ -420,7 +420,6 @@ const specialKeyButtons = [
 interface LiveBridgeDraftState {
   draftText?: string;
   draftDirty?: boolean;
-  firstPrompt?: string;
 }
 
 const liveBridgeDraftStore = new Map<string, LiveBridgeDraftState>();
@@ -430,7 +429,7 @@ function upsertLiveBridgeDraft(
   updater: (current: LiveBridgeDraftState) => LiveBridgeDraftState,
 ): void {
   const next = updater(liveBridgeDraftStore.get(conversationKey) ?? {});
-  if (!next.firstPrompt && !next.draftText && !next.draftDirty) {
+  if (!next.draftText && !next.draftDirty) {
     liveBridgeDraftStore.delete(conversationKey);
     return;
   }
@@ -443,12 +442,8 @@ function LiveSessionInputBridge({
   conversationKey,
   conversationRef,
   provider,
-  conversationKind,
-  rawMetadata,
   inputText,
-  onSendText,
   onSendKeystrokes,
-  sendingText,
   compact,
   mobileCollapsible,
   bridgeOpen,
@@ -464,12 +459,8 @@ function LiveSessionInputBridge({
   conversationKey: string;
   conversationRef: string;
   provider: ConversationTimeline['conversation']['provider'];
-  conversationKind: ConversationTimeline['conversation']['kind'];
-  rawMetadata?: Record<string, unknown>;
   inputText: string;
-  onSendText: (sessionId: string, text: string) => Promise<boolean>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
-  sendingText: boolean;
   compact: boolean;
   mobileCollapsible: boolean;
   bridgeOpen: boolean;
@@ -480,7 +471,6 @@ function LiveSessionInputBridge({
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
 }) {
-  const [firstPrompt, setFirstPrompt] = useState('');
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
   const [draftDirty, setDraftDirty] = useState(false);
@@ -496,23 +486,16 @@ function LiveSessionInputBridge({
   const bridgeBusyRef = useRef(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
 
-  const needsBufferedFirstCodexTurn =
-    provider === 'codex'
-    && conversationKind === 'pending'
-    && typeof rawMetadata?.lastUserInputHash !== 'string';
+  useEffect(() => {
+    captureRef.current?.focus();
+  }, [sessionId]);
 
   useEffect(() => {
-    if (!needsBufferedFirstCodexTurn) {
-      captureRef.current?.focus();
-    }
-  }, [needsBufferedFirstCodexTurn, sessionId]);
-
-  useEffect(() => {
-    if (!bridgeOpen || needsBufferedFirstCodexTurn) {
+    if (!bridgeOpen) {
       return;
     }
     captureRef.current?.focus();
-  }, [bridgeOpen, needsBufferedFirstCodexTurn]);
+  }, [bridgeOpen]);
 
   useEffect(() => {
     pendingTextRef.current = '';
@@ -520,7 +503,6 @@ function LiveSessionInputBridge({
     setTextBypassEnabled(false);
     setBypassPreviewText(undefined);
     const storedDraft = liveBridgeDraftStore.get(conversationKey);
-    setFirstPrompt(storedDraft?.firstPrompt ?? '');
     if (storedDraft) {
       setDraftText(storedDraft.draftText ?? '');
       setDraftDirty(storedDraft.draftDirty ?? false);
@@ -535,13 +517,6 @@ function LiveSessionInputBridge({
       committedInputRef.current = inputText;
     }
   }, [inputText, draftDirty, textBypassEnabled]);
-
-  useEffect(() => {
-    upsertLiveBridgeDraft(conversationKey, (current) => ({
-      ...current,
-      firstPrompt,
-    }));
-  }, [conversationKey, firstPrompt]);
 
   useEffect(() => {
     if (textBypassEnabled || (!draftDirty && !draftText)) {
@@ -803,19 +778,6 @@ function LiveSessionInputBridge({
     });
   }
 
-  async function submitFirstPrompt(): Promise<void> {
-    await runBridgeAction(async () => {
-      const nextPrompt = firstPrompt.trim();
-      if (!nextPrompt) {
-        return;
-      }
-      const sent = await onSendText(sessionId, nextPrompt);
-      if (sent) {
-        setFirstPrompt('');
-      }
-    });
-  }
-
   async function handleCopyLatestAssistantMessage(): Promise<void> {
     setCopyingLastMessage(true);
     try {
@@ -907,33 +869,6 @@ function LiveSessionInputBridge({
   }
 
   const bridgeBodyClassName = mobileCollapsible ? 'px-4 pb-4' : 'px-4 py-4';
-
-  if (needsBufferedFirstCodexTurn) {
-    return (
-      <div className="border-t border-slate-800 bg-slate-950/90">
-        {renderBridgeHeader('First prompt', 'Buffered locally until Enter launches the session.')}
-        {bridgeOpen && (
-          <div className={bridgeBodyClassName}>
-            <div className="mb-3 text-sm text-slate-400">Codex first-turn startup is buffered locally until you press Enter, then it is launched into the hidden session.</div>
-            <textarea
-              value={firstPrompt}
-              onChange={(event) => setFirstPrompt(event.target.value)}
-              onKeyDown={async (event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  await submitFirstPrompt();
-                }
-              }}
-              placeholder="Type the first prompt, then press Enter…"
-              disabled={sendingText || bridgeBusy}
-              rows={3}
-              className="min-h-[5rem] w-full resize-y rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
-            />
-          </div>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90">
@@ -1126,9 +1061,7 @@ interface ConversationPaneProps {
   onToggleMobileControls: () => void;
   onBind: () => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
-  onSendText: (sessionId: string, text: string) => Promise<boolean>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
-  sendingText: boolean;
   binding: boolean;
   releasing: boolean;
   debugOpen: boolean;
@@ -1150,9 +1083,7 @@ export function ConversationPane({
   onToggleMobileControls,
   onBind,
   onRelease,
-  onSendText,
   onSendKeystrokes,
-  sendingText,
   binding,
   releasing,
   debugOpen,
@@ -1384,12 +1315,8 @@ export function ConversationPane({
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
-          conversationKind={timeline.conversation.kind}
-          rawMetadata={timeline.conversation.rawMetadata}
           inputText={liveScreen?.inputText ?? ''}
-          onSendText={onSendText}
           onSendKeystrokes={onSendKeystrokes}
-          sendingText={sendingText}
           compact={compactLiveLayout}
           mobileCollapsible={isMobile}
           bridgeOpen={mobileBridgeOpen}

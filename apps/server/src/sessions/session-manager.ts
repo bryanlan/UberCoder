@@ -445,6 +445,24 @@ export class SessionManager {
       lastActivityAt: nowIso(),
     };
     this.db.upsertBoundSession(updated);
+    if (payload.text && updated.conversationRef.startsWith('pending:')) {
+      const pending = this.db.getPendingConversation(updated.conversationRef);
+      if (pending) {
+        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
+        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
+        rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
+        this.db.putPendingConversation({
+          ...pending,
+          updatedAt: nowIso(),
+          isBound: true,
+          boundSessionId: updated.id,
+          rawMetadata,
+        });
+      }
+    }
+    if (payload.text) {
+      this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
+    }
     await this.emitScreenUpdate(updated, { waitForChange: Boolean(payload.keys?.length) });
     const afterScreen = await this.captureSessionScreen(updated);
     this.publishScreenUpdate(updated, afterScreen);
