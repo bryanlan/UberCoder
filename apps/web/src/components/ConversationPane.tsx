@@ -221,7 +221,7 @@ function LiveSessionStatus({
     .filter(Boolean)
     .join(' · ') || undefined;
 
-  const statusAlreadyHasMeta = model && status.includes(model);
+  const statusAlreadyHasMeta = (model && status.includes(model)) || /\d{1,3}% left/.test(status);
 
   if (mobileCompact) {
     return (

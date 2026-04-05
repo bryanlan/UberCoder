@@ -238,7 +238,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 function extractChromeMetadata(lines: ScreenLine[]): { model?: string; contextPercent?: number } {
   let model: string | undefined;
   let contextPercent: number | undefined;
-  for (let index = 0; index < Math.min(lines.length, 8); index += 1) {
+  for (let index = 0; index < Math.min(lines.length, 5); index += 1) {
     const normalized = normalizeWhitespace(lines[index]?.plain ?? '');
     const modelMatch = normalized.match(/^Model:\s*(.+)/i);
     if (modelMatch) {
@@ -310,14 +310,16 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
 
   let finalModel = model;
   let finalContextPercent = contextPercent;
-  if (footerText && (!finalModel || finalContextPercent === undefined)) {
+  if (footerText) {
     const footerCtxMatch = footerText.match(/(\d{1,3})% left/);
     if (footerCtxMatch && finalContextPercent === undefined) {
       finalContextPercent = Number(footerCtxMatch[1]);
     }
-    const footerModelMatch = footerText.match(/^([^·]+?)·/);
-    if (footerModelMatch && !finalModel) {
-      finalModel = footerModelMatch[1]!.trim();
+    if (!finalModel && footerCtxMatch) {
+      const footerModelMatch = footerText.match(/^([^·]+?)·/);
+      if (footerModelMatch) {
+        finalModel = footerModelMatch[1]!.trim();
+      }
     }
   }
 
