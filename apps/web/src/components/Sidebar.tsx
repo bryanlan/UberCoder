@@ -2,7 +2,7 @@ import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, Menu, Pencil, P
 import { Link, useLocation } from 'react-router-dom';
 import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useEffect, useState, type DragEvent, type ReactNode } from 'react';
+import { useEffect, useState, type DragEvent } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 
@@ -46,23 +46,32 @@ function getConversationRecencyTimestamp(
     ?? conversation.updatedAt;
 }
 
-function getConversationIndicator(
+function getConversationFreshnessClass(
   isBound: boolean,
-  session?: BoundSessionItem,
-): ReactNode {
+  freshnessTimestamp: string | undefined,
+  thresholds: SessionFreshnessThresholds,
+  nowMs: number,
+): string {
   if (!isBound) {
-    return <span className="h-2.5 w-2.5 rounded-full border border-slate-700 bg-transparent" />;
+    return 'border border-slate-700 bg-transparent';
   }
 
-  if (session?.attentionState === 'working') {
-    return <X className="h-3 w-3 text-rose-400" strokeWidth={2.5} />;
+  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
+  if (!Number.isFinite(parsedTime)) {
+    return 'bg-emerald-400';
   }
 
-  if (session?.attentionState === 'waiting') {
-    return <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />;
+  const ageMinutes = Math.max(0, nowMs - parsedTime) / 60_000;
+  if (ageMinutes >= thresholds.redMinutes) {
+    return 'bg-rose-500';
   }
-
-  return <span className="h-2.5 w-2.5 rounded-full bg-slate-600" />;
+  if (ageMinutes >= thresholds.orangeMinutes) {
+    return 'bg-orange-400';
+  }
+  if (ageMinutes >= thresholds.yellowMinutes) {
+    return 'bg-amber-400';
+  }
+  return 'bg-emerald-400';
 }
 
 function ConversationLink({
@@ -72,7 +81,7 @@ function ConversationLink({
   title,
   prefixLabel,
   isBound,
-  indicator,
+  indicatorClassName,
   canRebind,
   onClose,
   onRebindConversation,
@@ -86,7 +95,7 @@ function ConversationLink({
   title: string;
   prefixLabel?: string;
   isBound: boolean;
-  indicator: ReactNode;
+  indicatorClassName: string;
   canRebind: boolean;
   onClose: () => void;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
@@ -181,7 +190,7 @@ function ConversationLink({
           active ? 'bg-sky-500/15 text-sky-100' : 'text-slate-300 hover:bg-slate-800/70 hover:text-white',
         )}
       >
-        <span className="flex h-3 w-3 shrink-0 items-center justify-center" aria-hidden="true">{indicator}</span>
+        <span className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)} />
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
@@ -260,7 +269,7 @@ function ProjectSection({
       provider: ProviderId;
       conversation: ProjectSummary['providers'][ProviderId]['conversations'][number];
       freshnessTimestamp: string;
-      indicator: ReactNode;
+      indicatorClassName: string;
     }>;
   };
   workMode: boolean;
@@ -514,7 +523,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, indicator }) => (
+            {displayedConversations.map(({ provider, conversation, indicatorClassName }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -523,7 +532,7 @@ function ProjectSection({
                 title={conversation.title}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
-                indicator={indicator}
+                indicatorClassName={indicatorClassName}
                 canRebind={conversation.kind === 'history'}
                 onClose={onClose}
                 onRebindConversation={onRebindConversation}
@@ -545,9 +554,7 @@ function ProjectSection({
             ) : null}
           </div>
         ) : (
-          <div className="px-3 py-2 text-sm text-slate-500">
-            {workMode ? 'No bound conversations right now.' : 'No conversations indexed yet.'}
-          </div>
+          <div className="px-3 py-2 text-sm text-slate-500">No conversations indexed yet.</div>
         )}
       </div>
     </section>
@@ -576,7 +583,13 @@ export function Sidebar({
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -619,9 +632,11 @@ export function Sidebar({
             provider,
             conversation,
             freshnessTimestamp,
-            indicator: getConversationIndicator(
+            indicatorClassName: getConversationFreshnessClass(
               conversation.isBound,
-              session,
+              freshnessTimestamp,
+              sessionFreshnessThresholds,
+              nowMs,
             ),
           };
         }))
@@ -632,7 +647,8 @@ export function Sidebar({
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
         combinedConversations,
       };
-    });
+    })
+    .filter((project) => !workMode || project.combinedConversations.length > 0);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -717,7 +733,7 @@ export function Sidebar({
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
-                No active projects are visible yet. Check your config JSON and refresh.
+                {workMode ? 'No bound sessions are active right now.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
               </div>
             )}
           </div>
