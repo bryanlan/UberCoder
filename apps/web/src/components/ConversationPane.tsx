@@ -135,18 +135,28 @@ function TranscriptBubble({ role, text, timestamp }: { role: string; text: strin
   );
 }
 
-function LiveSessionOutput({ content, contentAnsi }: { content: string; contentAnsi?: string }) {
-  return <LiveSessionOutputBlock content={content} contentAnsi={contentAnsi} compact={false} />;
+function LiveSessionOutput({
+  content,
+  contentAnsi,
+  scrollResetKey,
+}: {
+  content: string;
+  contentAnsi?: string;
+  scrollResetKey: string;
+}) {
+  return <LiveSessionOutputBlock content={content} contentAnsi={contentAnsi} compact={false} scrollResetKey={scrollResetKey} />;
 }
 
 function LiveSessionOutputBlock({
   content,
   contentAnsi,
   compact,
+  scrollResetKey,
 }: {
   content: string;
   contentAnsi?: string;
   compact: boolean;
+  scrollResetKey: string;
 }) {
   const outputRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -174,6 +184,15 @@ function LiveSessionOutputBlock({
     }
     output.scrollTo({ top: output.scrollHeight, behavior: 'auto' });
   }, [content]);
+
+  useEffect(() => {
+    const output = outputRef.current;
+    if (!output) {
+      return;
+    }
+    stickToBottomRef.current = true;
+    output.scrollTo({ top: output.scrollHeight, behavior: 'auto' });
+  }, [scrollResetKey]);
 
   if (compact) {
     return (
@@ -1171,6 +1190,9 @@ export function ConversationPane({
   }
 
   const proxyLinks = project?.allowedLocalhostPorts ?? [];
+  const liveOutputScrollResetKey = boundSession
+    ? `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}:${boundSession.id}`
+    : `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -1301,8 +1323,8 @@ export function ConversationPane({
           <div className="text-sm text-slate-400">Loading conversation…</div>
         ) : liveMode && liveScreen ? (
           compactLiveLayout
-            ? <LiveSessionOutputBlock content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} compact />
-            : <LiveSessionOutput content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} />
+            ? <LiveSessionOutputBlock content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} compact scrollResetKey={liveOutputScrollResetKey} />
+            : <LiveSessionOutput content={liveScreen.content} contentAnsi={liveScreen.contentAnsi} scrollResetKey={liveOutputScrollResetKey} />
         ) : timeline.messages.length > 0 ? (
           <div className="space-y-4">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
