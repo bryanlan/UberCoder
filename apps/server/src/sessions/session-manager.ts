@@ -7,6 +7,7 @@ import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
 import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl, truncate } from '../lib/text.js';
+import { buildPendingInputMetadata, buildStagedLiveInputInstruction, collectPendingMatchHashes } from '../lib/pending-input.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
@@ -236,7 +237,7 @@ export class SessionManager {
   }
 
   private buildStagedLiveInputInstruction(filePath: string): string {
-    return `Read and follow the full user prompt saved at "${filePath}". Treat the file contents as the user's latest message before replying.`;
+    return buildStagedLiveInputInstruction(filePath);
   }
 
   private ensureSessionLogPaths(session: BoundSession): BoundSession {
@@ -272,19 +273,15 @@ export class SessionManager {
     return undefined;
   }
 
-  private scorePendingMatch(
-    pendingLastUserHash: string | undefined,
-    pending: ConversationSummary,
-    conversation: ConversationSummary,
-  ): number {
+  private scorePendingMatch(pendingHashes: string[], conversation: ConversationSummary): number {
     const rawMetadata = conversation.rawMetadata ?? {};
     const candidateHashes = [
       rawMetadata.lastUserTextHash,
       rawMetadata.firstUserTextHash,
     ].filter((value): value is string => typeof value === 'string');
 
-    if (pendingLastUserHash) {
-      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
+    if (pendingHashes.length > 0) {
+      return candidateHashes.some((hash) => pendingHashes.includes(hash)) ? 0 : -1;
     }
 
     return -1;
@@ -306,10 +303,11 @@ export class SessionManager {
     }
 
     const pendingTimestamp = Date.parse(pending.createdAt ?? pending.updatedAt);
-    const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string'
-      ? pending.rawMetadata.lastUserInputHash
-      : undefined;
-    if (!Number.isFinite(pendingTimestamp) || !pendingLastUserHash) {
+    const pendingMatchHashes = await collectPendingMatchHashes(pending, {
+      session,
+      runtimeDir: this.runtimeDir,
+    });
+    if (!Number.isFinite(pendingTimestamp) || pendingMatchHashes.length === 0) {
       return session;
     }
 
@@ -319,7 +317,7 @@ export class SessionManager {
       .map((conversation) => ({
         conversation,
         delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
-        score: this.scorePendingMatch(pendingLastUserHash, pending, conversation),
+        score: this.scorePendingMatch(pendingMatchHashes, conversation),
       }))
       .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= 30 * 60 * 1000)
       .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
@@ -586,15 +584,12 @@ export class SessionManager {
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
         const pending = this.db.getPendingConversation(boundSession.conversationRef);
         if (pending) {
-          const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-          rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(initialPrompt));
-          rawMetadata.lastUserInputPreview = truncate(initialPrompt, 120);
           this.db.putPendingConversation({
             ...pending,
             updatedAt: nowIso(),
             isBound: true,
             boundSessionId: boundSession.id,
-            rawMetadata,
+            rawMetadata: buildPendingInputMetadata(pending.rawMetadata, initialPrompt),
           });
         }
         this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: nowIso() });
@@ -637,8 +632,11 @@ export class SessionManager {
     if (!liveSession) {
       throw new Error('Session is no longer running.');
     }
-    const transportText = shouldStageLargeLiveInput(text)
-      ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, text))
+    const stagedPath = shouldStageLargeLiveInput(text)
+      ? await this.stageLargeLiveInput(liveSession, text)
+      : undefined;
+    const transportText = stagedPath
+      ? this.buildStagedLiveInputInstruction(stagedPath)
       : text;
     await this.sendLiteralInputToSession(liveSession.tmuxSessionName, transportText);
     const updated: BoundSession = {
@@ -650,15 +648,12 @@ export class SessionManager {
     if (updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
-        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(text));
-        rawMetadata.lastUserInputPreview = truncate(text, 120);
         this.db.putPendingConversation({
           ...pending,
           updatedAt: nowIso(),
           isBound: true,
           boundSessionId: updated.id,
-          rawMetadata,
+          rawMetadata: buildPendingInputMetadata(pending.rawMetadata, text, { stagedPath }),
         });
       }
     }
@@ -677,10 +672,14 @@ export class SessionManager {
     const beforeScreen = await this.captureSessionScreen(liveSession);
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
+    let stagedTransportPath: string | undefined;
 
     if (payload.text) {
-      const transportText = shouldStageLargeLiveInput(payload.text)
-        ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, payload.text))
+      stagedTransportPath = shouldStageLargeLiveInput(payload.text)
+        ? await this.stageLargeLiveInput(liveSession, payload.text)
+        : undefined;
+      const transportText = stagedTransportPath
+        ? this.buildStagedLiveInputInstruction(stagedTransportPath)
         : payload.text;
       const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
       const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
@@ -731,15 +730,12 @@ export class SessionManager {
     if (payload.text && updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
-        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
-        rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
         this.db.putPendingConversation({
           ...pending,
           updatedAt: nowIso(),
           isBound: true,
           boundSessionId: updated.id,
-          rawMetadata,
+          rawMetadata: buildPendingInputMetadata(pending.rawMetadata, payload.text, { stagedPath: stagedTransportPath }),
         });
       }
     }
@@ -1134,8 +1130,12 @@ export class SessionManager {
   }
 
   private detectModelSwitch(chunk: string): string | undefined {
-    const plain = normalizeWhitespace(stripAnsiAndControl(chunk));
-    const setMatch = plain.match(/Set\s+model\s+to\s+(.+?)(?:\s*\(default\))?\s*$/i);
+    // Replace cursor-right sequences with spaces before stripping ANSI (they act as word separators)
+    const withSpaces = chunk.replace(/\u001b\[\d*C/g, ' ');
+    const plain = normalizeWhitespace(stripAnsiAndControl(withSpaces));
+    // Match "Set model to <Name> <Version> [(<qualifier>)]" — use a specific model name pattern
+    // to avoid capturing trailing conversation text (normalizeWhitespace collapses newlines)
+    const setMatch = plain.match(/Set\s+model\s+to\s+((?:Opus|Sonnet|Haiku)\s+[\d.]+(?:\s*\([^)]*\))?)/i);
     if (setMatch) return setMatch[1]!.trim();
     const startupMatch = plain.match(/((?:Opus|Sonnet|Haiku)\s+[\d.]+(?:\s*\([^)]*\))?)\s+with\s+\w+\s+effort/i);
     if (startupMatch) return startupMatch[1]!.trim();

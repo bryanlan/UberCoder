@@ -218,10 +218,23 @@ function LiveSessionOutputBlock({
   );
 }
 
+function formatModelName(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // Already a display name (e.g., "Opus 4.6 (1M context)")
+  if (/^(?:Opus|Sonnet|Haiku)\b/i.test(raw)) return raw;
+  // API model ID like "claude-opus-4-6" or "claude-sonnet-4-6"
+  const match = raw.match(/(?:claude-)?(opus|sonnet|haiku)[- ]([\d]+)[- ]([\d]+)/i);
+  if (match) {
+    const family = match[1]!.charAt(0).toUpperCase() + match[1]!.slice(1).toLowerCase();
+    return `${family} ${match[2]}.${match[3]}`;
+  }
+  return raw;
+}
+
 function LiveSessionStatus({
   status,
   statusAnsi,
-  model,
+  model: rawModel,
   contextPercent,
   mobileCompact,
 }: {
@@ -236,6 +249,7 @@ function LiveSessionStatus({
     .map((line) => line.trim())
     .find(Boolean) ?? 'Session active';
 
+  const model = formatModelName(rawModel);
   const metaLine = [model, contextPercent !== undefined ? `${contextPercent}% left` : undefined]
     .filter(Boolean)
     .join(' · ') || undefined;
@@ -1135,6 +1149,9 @@ export function ConversationPane({
     .reverse()
     .find((message) => message.role === 'assistant')
     ?.text ?? '';
+  const conversationScrollResetKey = timeline
+    ? `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}:${boundSession?.id ?? 'unbound'}`
+    : undefined;
 
   useEffect(() => {
     if (liveMode) {
@@ -1142,6 +1159,22 @@ export function ConversationPane({
     }
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [liveMode, timeline?.messages.length, rawOutput, liveScreen?.capturedAt, liveScreen?.content]);
+
+  useEffect(() => {
+    if (!conversationScrollResetKey) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      const scroller = scrollRef.current;
+      if (!scroller) {
+        return;
+      }
+      scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversationScrollResetKey]);
 
   if (!timeline) {
     if (loading && selectedProvider && project) {

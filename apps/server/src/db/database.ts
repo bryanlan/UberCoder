@@ -149,6 +149,9 @@ export class AppDatabase {
         where status in ('starting', 'bound', 'releasing')
       `);
     }
+    if (!boundSessionColumns.some((column) => column.name === 'current_model')) {
+      this.sqlite.exec(`alter table bound_sessions add column current_model text`);
+    }
     if (!boundSessionColumns.some((column) => column.name === 'resume_conversation_ref')) {
       this.sqlite.exec(`alter table bound_sessions add column resume_conversation_ref text`);
       this.sqlite.exec(`
@@ -390,10 +393,10 @@ export class AppDatabase {
     this.sqlite.prepare(`
       insert into bound_sessions (
         id, provider, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
-        started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, pid, raw_log_path, event_log_path
+        started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, pid, raw_log_path, event_log_path, current_model
       ) values (
         @id, @provider, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
-        @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @pid, @raw_log_path, @event_log_path
+        @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @pid, @raw_log_path, @event_log_path, @current_model
       )
       on conflict(id) do update set
         conversation_ref = excluded.conversation_ref,
@@ -409,7 +412,8 @@ export class AppDatabase {
         is_working = excluded.is_working,
         pid = excluded.pid,
         raw_log_path = excluded.raw_log_path,
-        event_log_path = excluded.event_log_path
+        event_log_path = excluded.event_log_path,
+        current_model = coalesce(excluded.current_model, bound_sessions.current_model)
     `).run({
       id: session.id,
       provider: session.provider,
@@ -429,6 +433,7 @@ export class AppDatabase {
       pid: session.pid ?? null,
       raw_log_path: session.rawLogPath ?? null,
       event_log_path: session.eventLogPath ?? null,
+      current_model: session.currentModel ?? null,
     });
   }
 
@@ -558,6 +563,7 @@ export class AppDatabase {
     lastOutputAt: row.last_output_at ? String(row.last_output_at) : undefined,
     lastCompletedAt: row.last_completed_at ? String(row.last_completed_at) : undefined,
     isWorking: Boolean(row.is_working),
+    currentModel: row.current_model ? String(row.current_model) : undefined,
     pid: typeof row.pid === 'number' ? row.pid : row.pid ? Number(row.pid) : undefined,
     rawLogPath: row.raw_log_path ? String(row.raw_log_path) : undefined,
     eventLogPath: row.event_log_path ? String(row.event_log_path) : undefined,

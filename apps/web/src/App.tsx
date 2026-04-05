@@ -39,7 +39,7 @@ function useLocalStorageString(key: string, fallback: string) {
 }
 
 const defaultUiPreferences: UiPreferences = {
-  recentActivitySortEnabled: true,
+  recentActivitySortEnabled: false,
   manualProjectOrder: [],
   sessionFreshnessThresholds: {
     yellowMinutes: 3,
@@ -777,13 +777,6 @@ function AppShell() {
     }
   }
 
-  async function handleToggleRecentActivity(): Promise<void> {
-    await handleUpdateUiPreferences(
-      { recentActivitySortEnabled: !uiPreferences.recentActivitySortEnabled },
-      'Unable to update sidebar sorting.',
-    );
-  }
-
   async function handleReorderProjects(sourceSlug: string, targetSlug: string): Promise<void> {
     if (sourceSlug === targetSlug) {
       return;
@@ -853,10 +846,8 @@ function AppShell() {
         onClose={closeSidebarIfMobile}
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
-        recentActivitySortEnabled={uiPreferences.recentActivitySortEnabled}
         manualProjectOrder={uiPreferences.manualProjectOrder}
         sessionFreshnessThresholds={uiPreferences.sessionFreshnessThresholds}
-        onToggleRecentActivity={handleToggleRecentActivity}
         onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
         onRenameProject={handleRenameProject}
@@ -866,7 +857,6 @@ function AppShell() {
         renamingProjectKey={renamingProjectKey}
         rebindingConversationKey={rebindingConversationKey}
         renamingConversationKey={renamingConversationKey}
-        updatingUiPreferences={updateUiPreferencesMutation.isPending}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />

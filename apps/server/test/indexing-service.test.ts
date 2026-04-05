@@ -6,6 +6,8 @@ import type { ConversationSummary } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import { IndexingService } from '../src/indexing/indexing-service.js';
+import { buildStagedLiveInputInstruction } from '../src/lib/pending-input.js';
+import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
@@ -188,6 +190,89 @@ describe('IndexingService', () => {
 
     const tree = indexing.getTree();
     expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref).sort()).toEqual(['pending:mismatch', 'real-but-wrong']);
+    db.close();
+  });
+
+  it('adopts pending conversations when the transcript only captured the staged bridge instruction hash', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const runtimeDir = path.join(tempDir, 'runtime', 'session-staged');
+    const bridgeInputsDir = path.join(runtimeDir, 'bridge-inputs');
+    await fs.mkdir(bridgeInputsDir, { recursive: true });
+    const stagedPath = path.join(bridgeInputsDir, '1000-b0bc257719.md');
+    const stagedPrompt = 'ship the staged prompt restore fix';
+    await fs.writeFile(stagedPath, stagedPrompt, 'utf8');
+    const stagedPromptHash = stableTextHash(normalizeComparableText(stagedPrompt));
+    const stagedInstructionHash = stableTextHash(normalizeComparableText(buildStagedLiveInputInstruction(stagedPath)));
+
+    db.putPendingConversation({
+      ref: 'pending:staged',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      boundSessionId: 'session-staged',
+      isBound: true,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: stagedPromptHash,
+        lastUserInputPreview: stagedPrompt,
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-staged',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:staged',
+      tmuxSessionName: 'ac-codex-demo-staged',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      rawLogPath: path.join(runtimeDir, 'raw.log'),
+      eventLogPath: path.join(runtimeDir, 'events.jsonl'),
+    });
+
+    const conversations: ConversationSummary[] = [{
+      ref: 'real-staged-conversation',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Real staged conversation',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      transcriptPath: '/tmp/codex/real-staged-conversation.jsonl',
+      providerConversationId: 'real-staged-conversation',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+        lastUserTextHash: stagedInstructionHash,
+      },
+    }];
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: (providerId: string) => ({
+          listConversations: async () => providerId === 'codex' ? conversations : [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.getBoundSessionById('session-staged')?.conversationRef).toBe('real-staged-conversation');
+    expect(db.getPendingConversation('pending:staged')?.rawMetadata?.adoptedConversationRef).toBe('real-staged-conversation');
     db.close();
   });
 

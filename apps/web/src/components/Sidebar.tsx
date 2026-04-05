@@ -20,10 +20,8 @@ interface SidebarProps {
   onClose: () => void;
   workMode: boolean;
   onToggleWorkMode: () => void;
-  recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
   sessionFreshnessThresholds: SessionFreshnessThresholds;
-  onToggleRecentActivity: () => Promise<void>;
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
@@ -33,7 +31,6 @@ interface SidebarProps {
   renamingProjectKey?: string;
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
-  updatingUiPreferences: boolean;
   onRefresh: () => void;
   refreshing: boolean;
 }
@@ -571,10 +568,8 @@ export function Sidebar({
   onClose,
   workMode,
   onToggleWorkMode,
-  recentActivitySortEnabled,
   manualProjectOrder,
   sessionFreshnessThresholds,
-  onToggleRecentActivity,
   onReorderProjects,
   onNewConversation,
   onRenameProject,
@@ -584,7 +579,6 @@ export function Sidebar({
   renamingProjectKey,
   rebindingConversationKey,
   renamingConversationKey,
-  updatingUiPreferences,
   onRefresh,
   refreshing,
 }: SidebarProps) {
@@ -655,16 +649,10 @@ export function Sidebar({
         ...project,
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
         combinedConversations,
-        latestActivityAt: combinedConversations[0]
-          ? combinedConversations[0].freshnessTimestamp
-          : '',
       };
     })
     .filter((project) => !workMode || project.combinedConversations.length > 0)
     .sort((a, b) => {
-      if (recentActivitySortEnabled) {
-        return (b.latestActivityAt || '').localeCompare(a.latestActivityAt || '');
-      }
       const aIndex = manualOrderIndex.get(a.slug) ?? Number.MAX_SAFE_INTEGER;
       const bIndex = manualOrderIndex.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
       if (aIndex !== bIndex) {
@@ -720,19 +708,6 @@ export function Sidebar({
             >
               Work mode
             </button>
-            <button
-              type="button"
-              onClick={() => void onToggleRecentActivity()}
-              disabled={updatingUiPreferences}
-              className={clsx(
-                'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
-                recentActivitySortEnabled
-                  ? enabledToggleClassName
-                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-              )}
-            >
-              Recent activity
-            </button>
           </div>
           <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
             {visibleProjects.length ? visibleProjects.map((project) => (
@@ -746,11 +721,11 @@ export function Sidebar({
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}
                 onClose={onClose}
-                manualOrderingEnabled={!recentActivitySortEnabled}
+                manualOrderingEnabled
                 isDragTarget={dragOverProjectSlug === project.slug}
                 onDragStartProject={setDraggingProjectSlug}
                 onDragOverProject={(event, projectSlug) => {
-                  if (recentActivitySortEnabled || draggingProjectSlug === projectSlug) {
+                  if (draggingProjectSlug === projectSlug) {
                     return;
                   }
                   event.preventDefault();

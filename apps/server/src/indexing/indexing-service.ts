@@ -5,6 +5,7 @@ import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService, MergedProviderSettings } from '../config/service.js';
 import { AppDatabase } from '../db/database.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
+import { collectPendingMatchHashes } from '../lib/pending-input.js';
 import { nowIso } from '../lib/time.js';
 import { ProjectService, type ActiveProject } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
@@ -122,7 +123,7 @@ export class IndexingService {
           continue;
         }
         const conversations = await provider.listConversations(project, settings);
-        this.reconcilePendingConversations(
+        await this.reconcilePendingConversations(
           project.slug,
           providerId,
           conversations,
@@ -285,12 +286,12 @@ export class IndexingService {
     }
   }
 
-  private reconcilePendingConversations(
+  private async reconcilePendingConversations(
     projectSlug: string,
     providerId: ProviderId,
     conversations: ConversationSummary[],
     pendingConversations: ConversationSummary[],
-  ): void {
+  ): Promise<void> {
     const scopedPending = pendingConversations
       .filter((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId)
       .sort((a, b) => (a.createdAt ?? a.updatedAt).localeCompare(b.createdAt ?? b.updatedAt));
@@ -300,13 +301,16 @@ export class IndexingService {
     const claimedRefs = new Set<string>();
     for (const pending of scopedPending) {
       const pendingTimestamp = Date.parse(pending.createdAt ?? pending.updatedAt);
-      const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string' ? pending.rawMetadata.lastUserInputHash : undefined;
+      const session = pending.boundSessionId
+        ? this.db.getBoundSessionById(pending.boundSessionId)
+        : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);
+      const pendingMatchHashes = await collectPendingMatchHashes(pending, { session });
       const matchedConversation = conversations
         .filter((conversation) => !claimedRefs.has(conversation.ref) && conversation.ref !== pending.ref)
         .map((conversation) => ({
           conversation,
           delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
-          score: this.scorePendingMatch(pendingLastUserHash, pending, conversation),
+          score: this.scorePendingMatch(pendingMatchHashes, conversation),
         }))
         .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= 30 * 60 * 1000)
         .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
@@ -326,9 +330,6 @@ export class IndexingService {
         this.db.deleteConversationTitleOverride(projectSlug, providerId, pending.ref);
       }
 
-      const session = pending.boundSessionId
-        ? this.db.getBoundSessionById(pending.boundSessionId)
-        : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);
       if (session && session.shouldRestore && session.conversationRef === pending.ref) {
         const reboundSession = {
           ...session,
@@ -357,19 +358,15 @@ export class IndexingService {
     }
   }
 
-  private scorePendingMatch(
-    pendingLastUserHash: string | undefined,
-    pending: ConversationSummary,
-    conversation: ConversationSummary,
-  ): number {
+  private scorePendingMatch(pendingHashes: string[], conversation: ConversationSummary): number {
     const rawMetadata = conversation.rawMetadata ?? {};
     const candidateHashes = [
       rawMetadata.lastUserTextHash,
       rawMetadata.firstUserTextHash,
     ].filter((value): value is string => typeof value === 'string');
 
-    if (pendingLastUserHash) {
-      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
+    if (pendingHashes.length > 0) {
+      return candidateHashes.some((hash) => pendingHashes.includes(hash)) ? 0 : -1;
     }
 
     return -1;

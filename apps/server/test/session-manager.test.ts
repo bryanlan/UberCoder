@@ -3,6 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
+import { buildStagedLiveInputInstruction } from '../src/lib/pending-input.js';
+import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
 import type { TmuxClient } from '../src/sessions/tmux-client.js';
@@ -297,6 +299,104 @@ describe('SessionManager', () => {
     expect(tmux.created).toHaveLength(1);
     expect(db.getBoundSessionById(session.id)?.status).toBe('error');
     expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(true);
+    db.close();
+  });
+
+  it('restores pending sessions when the real conversation only captured the staged bridge instruction hash', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const runtimeDir = path.join(tempDir, 'runtime');
+    const stagedPrompt = 'ship the staged prompt restore fix';
+    const stagedPromptHash = stableTextHash(normalizeComparableText(stagedPrompt));
+    const stagedPath = path.join(runtimeDir, 'placeholder', 'bridge-inputs', '1000-b0bc257719.md');
+    const stagedInstructionHash = stableTextHash(normalizeComparableText(buildStagedLiveInputInstruction(stagedPath)));
+    const recoveryProvider: ProviderAdapter = {
+      ...provider,
+      async listConversations() {
+        return [{
+          ref: 'real-staged',
+          kind: 'history',
+          projectSlug: project.slug,
+          provider: 'codex',
+          title: 'Recovered staged conversation',
+          createdAt: '2026-03-14T18:00:30.000Z',
+          updatedAt: '2026-03-14T18:00:30.000Z',
+          transcriptPath: '/tmp/real-staged.jsonl',
+          isBound: false,
+          degraded: false,
+          rawMetadata: {
+            lastUserTextHash: stagedInstructionHash,
+          },
+        }];
+      },
+      getLaunchCommand(_project, conversationRef) {
+        return {
+          cwd: '/srv/demo',
+          argv: ['codex', 'resume', conversationRef ?? ''],
+          env: {},
+        };
+      },
+    };
+    const manager = createRecoveryManager(db, tmux, runtimeDir, new RealtimeEventBus(), recoveryProvider);
+    db.putPendingConversation({
+      ref: 'pending:restore-staged',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: stagedPromptHash,
+        lastUserInputPreview: stagedPrompt,
+      },
+    });
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:restore-staged',
+      title: 'Pending conversation',
+      kind: 'pending',
+    });
+    const stagedDir = path.join(runtimeDir, session.id, 'bridge-inputs');
+    await fs.mkdir(stagedDir, { recursive: true });
+    const sessionStagedPath = path.join(stagedDir, '1000-b0bc257719.md');
+    await fs.writeFile(
+      sessionStagedPath,
+      stagedPrompt,
+      'utf8',
+    );
+    const sessionStagedInstructionHash = stableTextHash(
+      normalizeComparableText(buildStagedLiveInputInstruction(sessionStagedPath)),
+    );
+    recoveryProvider.listConversations = async () => [{
+      ref: 'real-staged',
+      kind: 'history',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Recovered staged conversation',
+      createdAt: '2026-03-14T18:00:30.000Z',
+      updatedAt: '2026-03-14T18:00:30.000Z',
+      transcriptPath: '/tmp/real-staged.jsonl',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        lastUserTextHash: sessionStagedInstructionHash,
+      },
+    }];
+    tmux.alive.clear();
+
+    const restored = await manager.ensureSession(session.id);
+
+    expect(restored?.conversationRef).toBe('real-staged');
+    expect(db.getPendingConversation('pending:restore-staged')?.rawMetadata?.adoptedConversationRef).toBe('real-staged');
     db.close();
   });
 
