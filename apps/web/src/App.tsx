@@ -48,6 +48,25 @@ const defaultUiPreferences: UiPreferences = {
   },
 };
 
+function orderProjects(
+  projects: ProjectSummary[] | undefined,
+  manualProjectOrder: string[],
+): ProjectSummary[] {
+  if (!projects?.length) {
+    return [];
+  }
+
+  const orderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
+  return [...projects].sort((a, b) => {
+    const aIndex = orderIndex.get(a.slug) ?? Number.MAX_SAFE_INTEGER;
+    const bIndex = orderIndex.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
+    if (aIndex !== bIndex) {
+      return aIndex - bIndex;
+    }
+    return a.displayName.localeCompare(b.displayName);
+  });
+}
+
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
 }
@@ -596,8 +615,19 @@ function AppShell() {
     },
   });
 
-  const project = useMemo(() => treeQuery.data?.projects.find((item) => item.slug === selectedProjectSlug), [selectedProjectSlug, treeQuery.data?.projects]);
   const uiPreferences = uiPreferencesQuery.data ?? defaultUiPreferences;
+  const orderedProjects = useMemo(
+    () => orderProjects(treeQuery.data?.projects, uiPreferences.manualProjectOrder),
+    [treeQuery.data?.projects, uiPreferences.manualProjectOrder],
+  );
+  const orderedTree = useMemo(
+    () => (treeQuery.data ? { ...treeQuery.data, projects: orderedProjects } : undefined),
+    [orderedProjects, treeQuery.data],
+  );
+  const project = useMemo(
+    () => orderedProjects.find((item) => item.slug === selectedProjectSlug),
+    [orderedProjects, selectedProjectSlug],
+  );
 
   async function handleRefresh(): Promise<void> {
     setActionError(undefined);
@@ -841,12 +871,11 @@ function AppShell() {
   return (
     <div className="fixed inset-0 flex h-[100dvh] overflow-hidden bg-slate-950">
       <Sidebar
-        tree={treeQuery.data}
+        tree={orderedTree}
         open={navOpen}
         onClose={closeSidebarIfMobile}
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
-        manualProjectOrder={uiPreferences.manualProjectOrder}
         sessionFreshnessThresholds={uiPreferences.sessionFreshnessThresholds}
         onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
@@ -967,9 +996,9 @@ function AppShell() {
             />
           ) : (
             <ConversationPane
-              projects={treeQuery.data?.projects}
+              projects={orderedProjects}
               project={project}
-              boundSessions={treeQuery.data?.boundSessions}
+              boundSessions={orderedTree?.boundSessions}
               selectedProvider={selectedProvider}
               timeline={timelineQuery.data}
               loading={timelineQuery.isLoading}

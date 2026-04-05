@@ -20,7 +20,6 @@ interface SidebarProps {
   onClose: () => void;
   workMode: boolean;
   onToggleWorkMode: () => void;
-  manualProjectOrder: string[];
   sessionFreshnessThresholds: SessionFreshnessThresholds;
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
@@ -559,7 +558,6 @@ export function Sidebar({
   onClose,
   workMode,
   onToggleWorkMode,
-  manualProjectOrder,
   sessionFreshnessThresholds,
   onReorderProjects,
   onNewConversation,
@@ -597,7 +595,6 @@ export function Sidebar({
   }, []);
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
-  const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
   const visibleProjects = (tree?.projects ?? [])
     .map((project) => {
       const providerEntries = (['codex', 'claude'] as const).map((provider) => {
@@ -634,15 +631,7 @@ export function Sidebar({
         combinedConversations,
       };
     })
-    .filter((project) => !workMode || project.combinedConversations.length > 0)
-    .sort((a, b) => {
-      const aIndex = manualOrderIndex.get(a.slug) ?? Number.MAX_SAFE_INTEGER;
-      const bIndex = manualOrderIndex.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
-      if (aIndex !== bIndex) {
-        return aIndex - bIndex;
-      }
-      return a.displayName.localeCompare(b.displayName);
-    });
+    .filter((project) => !workMode || project.combinedConversations.length > 0);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {

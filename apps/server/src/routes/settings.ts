@@ -128,7 +128,7 @@ function normalizeUiPreferences(input: Partial<UiPreferences> | undefined, avail
   }
 
   return {
-    recentActivitySortEnabled: input?.recentActivitySortEnabled ?? true,
+    recentActivitySortEnabled: input?.recentActivitySortEnabled ?? false,
     manualProjectOrder: dedupedOrder,
     sessionFreshnessThresholds: (() => {
       const thresholds = input?.sessionFreshnessThresholds;
