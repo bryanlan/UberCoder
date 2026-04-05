@@ -94,6 +94,7 @@ export interface BoundSession {
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;
+  currentModel?: string;
 }
 
 export interface SessionInputRequest {

@@ -6,7 +6,7 @@ import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } fro
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
-import { normalizeComparableText, normalizeWhitespace, stableTextHash, truncate } from '../lib/text.js';
+import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl, truncate } from '../lib/text.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
@@ -1109,25 +1109,37 @@ export class SessionManager {
     try {
       const session = this.mustGetSession(sessionId);
       const hasMeaningfulOutput = normalizeRawOutputLines(chunk).length > 0;
-      const updated = hasMeaningfulOutput
+      const detectedModel = this.detectModelSwitch(chunk);
+      const updated = hasMeaningfulOutput || detectedModel
         ? {
             ...session,
             updatedAt: now,
-            lastActivityAt: now,
-            lastOutputAt: now,
+            ...(hasMeaningfulOutput ? { lastActivityAt: now, lastOutputAt: now } : {}),
+            ...(detectedModel ? { currentModel: detectedModel } : {}),
           }
         : session;
-      if (hasMeaningfulOutput) {
+      if (hasMeaningfulOutput || detectedModel) {
         this.db.upsertBoundSession(updated);
         if (session.isWorking) {
           this.scheduleWorkingExpiry(sessionId, now);
         }
-        this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
+        if (hasMeaningfulOutput) {
+          this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
+        }
       }
       void this.emitScreenUpdate(updated);
     } catch {
       // Session may have ended while the debounce timer was pending.
     }
+  }
+
+  private detectModelSwitch(chunk: string): string | undefined {
+    const plain = normalizeWhitespace(stripAnsiAndControl(chunk));
+    const setMatch = plain.match(/Set\s+model\s+to\s+(.+?)(?:\s*\(default\))?\s*$/i);
+    if (setMatch) return setMatch[1]!.trim();
+    const startupMatch = plain.match(/((?:Opus|Sonnet|Haiku)\s+[\d.]+(?:\s*\([^)]*\))?)\s+with\s+\w+\s+effort/i);
+    if (startupMatch) return startupMatch[1]!.trim();
+    return undefined;
   }
 
   private repairIgnoredIdleOutput(session: BoundSession): BoundSession {
@@ -1407,18 +1419,21 @@ export class SessionManager {
     }
 
     const badge = 'bypass permissions on';
-    if (screen.status.toLowerCase().includes(badge)) {
-      return screen;
+    const decorated = screen.status.toLowerCase().includes(badge)
+      ? screen
+      : {
+          ...screen,
+          status: screen.status === 'Session active'
+            ? badge
+            : `${badge} · ${screen.status}`,
+          statusAnsi: screen.status === 'Session active'
+            ? badge
+            : `${badge} · ${screen.status}`,
+        };
+
+    if (session.currentModel && !decorated.model) {
+      return { ...decorated, model: session.currentModel };
     }
-
-    const nextStatus = screen.status === 'Session active'
-      ? badge
-      : `${badge} · ${screen.status}`;
-
-    return {
-      ...screen,
-      status: nextStatus,
-      statusAnsi: nextStatus,
-    };
+    return decorated;
   }
 }

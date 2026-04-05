@@ -79,7 +79,7 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
       projectPaths.add(record.project_path);
     }
 
-    if (!model) {
+    {
       const msg = asObject(record.message);
       if (msg && typeof msg.model === 'string') {
         model = msg.model;
