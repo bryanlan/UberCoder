@@ -67,6 +67,7 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
+  let model: string | undefined;
 
   for (const { index, record } of records) {
     collectProjectPaths(record, projectPaths);
@@ -76,6 +77,13 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     }
     if (typeof record.project_path === 'string') {
       projectPaths.add(record.project_path);
+    }
+
+    if (!model) {
+      const msg = asObject(record.message);
+      if (msg && typeof msg.model === 'string') {
+        model = msg.model;
+      }
     }
 
     const extracted = extractClaudeMessage(record);
@@ -102,5 +110,6 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     displayMessages,
     projectPaths,
     authoritativeProjectPaths,
+    model,
   });
 }

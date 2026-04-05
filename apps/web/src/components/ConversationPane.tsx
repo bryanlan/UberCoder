@@ -1371,7 +1371,7 @@ export function ConversationPane({
         <LiveSessionStatus
           status={liveScreen.status}
           statusAnsi={liveScreen.statusAnsi}
-          model={liveScreen.model}
+          model={liveScreen.model ?? timeline?.conversation.model}
           contextPercent={liveScreen.contextPercent}
           mobileCompact={isMobile}
         />

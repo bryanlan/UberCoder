@@ -41,6 +41,7 @@ export interface ConversationSummary {
   isBound: boolean;
   boundSessionId?: string;
   degraded: boolean;
+  model?: string;
   rawMetadata?: Record<string, unknown>;
 }
 

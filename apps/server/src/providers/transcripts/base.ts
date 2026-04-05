@@ -293,6 +293,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
   displayMessages?: NormalizedMessage[];
   projectPaths: Set<string>;
   authoritativeProjectPaths: Set<string>;
+  model?: string;
 }): ParsedTranscript {
   const sortedMessages = [...input.messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const displayMessages = [...(input.displayMessages ?? filterUserVisibleMessages(sortedMessages))]
@@ -324,6 +325,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
     providerConversationId: input.conversationRef,
     isBound: false,
     degraded: displayMessages.length === 0,
+    model: input.model,
     rawMetadata: {
       projectPaths: [...input.projectPaths],
       authoritativeProjectPaths: [...input.authoritativeProjectPaths],

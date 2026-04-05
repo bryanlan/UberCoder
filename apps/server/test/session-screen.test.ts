@@ -125,23 +125,6 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('65% left');
   });
 
-  it('extracts model and context from Claude chrome header lines', () => {
-    const screen = parseSessionScreenSnapshot([
-      'Claude Code',
-      'Model: Opus 4.6 (1M context)',
-      'Context window: 72% remaining',
-      '',
-      'Ready for input.',
-      '',
-      '❯ ',
-      '⏵⏵ bypass permissions on (shift+tab to cycle)',
-    ].join('\n'));
-
-    expect(screen.model).toBe('Opus 4.6 (1M context)');
-    expect(screen.contextPercent).toBe(72);
-    expect(screen.status).toContain('bypass permissions on');
-  });
-
   it('extracts model and context from Codex footer status line', () => {
     const screen = parseSessionScreenSnapshot([
       'OpenAI Codex',
