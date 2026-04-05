@@ -66,6 +66,23 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('98% left');
   });
 
+  it('keeps Claude pasted-text placeholders attached to the active composer input', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '',
+      'Ready for input.',
+      '',
+      '❯ ',
+      '⎿ [Pasted text #1 +58 lines]',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('[Pasted text #1 +58 lines]');
+    expect(screen.content).toContain('Ready for input.');
+    expect(screen.content).not.toContain('Pasted text #1');
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
   it('keeps timed Working lines in the main content when the composer is visible', () => {
     const screen = parseSessionScreenSnapshot([
       'OpenAI Codex',

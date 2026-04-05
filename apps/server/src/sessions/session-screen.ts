@@ -55,7 +55,7 @@ function isLikelyFooterStatus(line: string): boolean {
 }
 
 function parsePromptInput(line: string): string | undefined {
-  const match = line.match(/^\s*[❯›>]\s*(.+?)\s*$/u);
+  const match = line.match(/^\s*[❯›>]\s*(.*?)\s*$/u);
   if (!match) {
     return undefined;
   }

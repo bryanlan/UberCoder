@@ -841,6 +841,72 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('accepts Claude pasted-text placeholders rendered on companion lines before submitting', async () => {
+    class ClaudeCompanionPasteTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = this.renderComposer();
+      }
+
+      override async pasteText(_sessionName: string, text: string): Promise<void> {
+        this.pasted.push(text);
+        this.sent.push(text);
+        this.paneText = this.renderComposer('⎿ [Pasted text #1 +58 lines]');
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        this.paneText = [
+          'Claude Code',
+          '',
+          'Running the pasted request…',
+          '• Working (1s • esc to interrupt)',
+          '',
+          '❯ ',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      private renderComposer(pastedPlaceholder?: string): string {
+        return [
+          'Claude Code',
+          '',
+          'Ready for input.',
+          '',
+          '❯ ',
+          ...(pastedPlaceholder ? [pastedPlaceholder] : []),
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new ClaudeCompanionPasteTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'session-claude-companion-paste',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, {
+      text: 'line one\nline two',
+      keys: ['Enter'],
+    });
+
+    expect(tmux.pasted).toEqual(['line one\nline two']);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    db.close();
+  });
+
   it('uses bracketed paste for long submitted input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
