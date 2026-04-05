@@ -366,6 +366,37 @@ export class SessionManager {
     return reboundSession;
   }
 
+  private clearPendingRestoreBinding(session: BoundSession): BoundSession {
+    if (!session.conversationRef.startsWith('pending:')) {
+      return session;
+    }
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    if (pending) {
+      this.db.putPendingConversation({
+        ...pending,
+        isBound: false,
+        boundSessionId: undefined,
+        updatedAt: nowIso(),
+      });
+    }
+
+    const ended: BoundSession = {
+      ...session,
+      status: 'ended',
+      shouldRestore: false,
+      updatedAt: nowIso(),
+      isWorking: false,
+    };
+    this.db.upsertBoundSession(ended);
+    this.appendEvent(ended, {
+      type: 'status',
+      text: 'Pending session expired before its first prompt was submitted.',
+      timestamp: nowIso(),
+    });
+    this.eventBus.emit({ type: 'session.updated', session: ended });
+    return ended;
+  }
+
   private async restoreSession(session: BoundSession): Promise<BoundSession | undefined> {
     if (!session.shouldRestore || session.status === 'releasing') {
       return undefined;
@@ -398,6 +429,14 @@ export class SessionManager {
     const resolvedSession = await this.tryResolvePendingResumeSession(session, project, provider, providerSettings);
     const launch = this.buildRecoveryLaunchCommand(resolvedSession, project, provider, providerSettings);
     if (!launch) {
+      const pending = resolvedSession.conversationRef.startsWith('pending:')
+        ? this.db.getPendingConversation(resolvedSession.conversationRef)
+        : undefined;
+      const hasRecordedUserInput = typeof pending?.rawMetadata?.lastUserInputHash === 'string';
+      if (pending && !hasRecordedUserInput) {
+        this.clearPendingRestoreBinding(resolvedSession);
+        return undefined;
+      }
       const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
       const shouldEmitFailure = resolvedSession.status !== 'error';
       this.db.upsertBoundSession(failed);

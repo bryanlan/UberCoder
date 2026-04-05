@@ -162,8 +162,11 @@ export async function registerConversationRoutes(
         if (liveSession) {
           return { session: liveSession, conversationRef: existingPending.ref };
         }
-        reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
-        return;
+        const refreshedSession = sessions.getSessionById(existingSession.id);
+        if (refreshedSession?.shouldRestore) {
+          reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
+          return;
+        }
       }
     }
     const pendingRef = `pending:${randomUUID()}`;
@@ -232,8 +235,11 @@ export async function registerConversationRoutes(
         if (liveSession) {
           return { session: liveSession };
         }
-        reply.code(409).send({ error: 'Conversation is already bound but could not be restored.' });
-        return;
+        const refreshedSession = sessions.getSessionById(existingSession.id);
+        if (refreshedSession?.shouldRestore) {
+          reply.code(409).send({ error: 'Conversation is already bound but could not be restored.' });
+          return;
+        }
       }
     }
     if (parsedBody.data.force) {

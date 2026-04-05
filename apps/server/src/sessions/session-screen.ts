@@ -235,8 +235,27 @@ function extractActiveInput(contentLines: ScreenLine[]): {
   };
 }
 
+function extractChromeMetadata(lines: ScreenLine[]): { model?: string; contextPercent?: number } {
+  let model: string | undefined;
+  let contextPercent: number | undefined;
+  for (let index = 0; index < Math.min(lines.length, 8); index += 1) {
+    const normalized = normalizeWhitespace(lines[index]?.plain ?? '');
+    const modelMatch = normalized.match(/^Model:\s*(.+)/i);
+    if (modelMatch) {
+      model = modelMatch[1]!.trim();
+    }
+    const contextMatch = normalized.match(/^Context window:\s*(\d{1,3})%/i);
+    if (contextMatch) {
+      contextPercent = Number(contextMatch[1]);
+    }
+  }
+  return { model, contextPercent };
+}
+
 export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso()): SessionScreen {
   const lines = toScreenLines(snapshot);
+
+  const { model, contextPercent } = extractChromeMetadata(lines);
 
   const visibleLines = collapseBlankRuns(
     lines.filter((line, index) => {
@@ -289,6 +308,19 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const footerText = joinPlain(footerStatusLines);
   const footerAnsi = joinAnsi(footerStatusLines);
 
+  let finalModel = model;
+  let finalContextPercent = contextPercent;
+  if (footerText && (!finalModel || finalContextPercent === undefined)) {
+    const footerCtxMatch = footerText.match(/(\d{1,3})% left/);
+    if (footerCtxMatch && finalContextPercent === undefined) {
+      finalContextPercent = Number(footerCtxMatch[1]);
+    }
+    const footerModelMatch = footerText.match(/^([^·]+?)·/);
+    if (footerModelMatch && !finalModel) {
+      finalModel = footerModelMatch[1]!.trim();
+    }
+  }
+
   return {
     content,
     contentAnsi,
@@ -296,5 +328,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     status: footerText || plainStatus,
     statusAnsi: footerAnsi || statusLineRaw || plainStatus,
     capturedAt,
+    model: finalModel,
+    contextPercent: finalContextPercent,
   };
 }

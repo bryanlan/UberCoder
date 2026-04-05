@@ -300,6 +300,46 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('abandons dead zero-turn pending sessions instead of keeping them durably bound', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    db.putPendingConversation({
+      ref: 'pending:zero-turn',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+      },
+    });
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:zero-turn',
+      title: 'Pending conversation',
+      kind: 'pending',
+    });
+    tmux.alive.clear();
+
+    const restored = await manager.ensureSession(session.id);
+
+    expect(restored).toBeUndefined();
+    expect(db.getBoundSessionById(session.id)?.status).toBe('ended');
+    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(false);
+    expect(db.getPendingConversation('pending:zero-turn')?.isBound).toBe(false);
+    db.close();
+  });
+
   it('surfaces release failures instead of reporting ended sessions', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

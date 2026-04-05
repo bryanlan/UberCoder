@@ -62,6 +62,8 @@ export interface SessionScreen {
   status: string;
   statusAnsi?: string;
   capturedAt: string;
+  model?: string;
+  contextPercent?: number;
 }
 
 export interface ConversationTimeline {

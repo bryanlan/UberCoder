@@ -202,10 +202,14 @@ function LiveSessionOutputBlock({
 function LiveSessionStatus({
   status,
   statusAnsi,
+  model,
+  contextPercent,
   mobileCompact,
 }: {
   status: string;
   statusAnsi?: string;
+  model?: string;
+  contextPercent?: number;
   mobileCompact: boolean;
 }) {
   const statusSummary = status
@@ -213,11 +217,17 @@ function LiveSessionStatus({
     .map((line) => line.trim())
     .find(Boolean) ?? 'Session active';
 
+  const metaLine = [model, contextPercent !== undefined ? `${contextPercent}% left` : undefined]
+    .filter(Boolean)
+    .join(' · ') || undefined;
+
+  const statusAlreadyHasMeta = model && status.includes(model);
+
   if (mobileCompact) {
     return (
       <MobileSummaryStrip
         title="Status"
-        summary={statusSummary}
+        summary={metaLine && !statusAlreadyHasMeta ? `${metaLine} · ${statusSummary}` : statusSummary}
         className="border-t border-slate-800 bg-slate-900/90"
       />
     );
@@ -226,6 +236,9 @@ function LiveSessionStatus({
   return (
     <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
       <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Status</div>
+      {metaLine && !statusAlreadyHasMeta && (
+        <div className="mb-1 font-mono text-sm leading-6 text-slate-400">{metaLine}</div>
+      )}
       <LiveAnsiBlock
         text={status || 'Session active'}
         ansiText={statusAnsi}
@@ -1358,6 +1371,8 @@ export function ConversationPane({
         <LiveSessionStatus
           status={liveScreen.status}
           statusAnsi={liveScreen.statusAnsi}
+          model={liveScreen.model}
+          contextPercent={liveScreen.contextPercent}
           mobileCompact={isMobile}
         />
       )}

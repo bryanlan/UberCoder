@@ -114,6 +114,128 @@ describe('conversation routes', () => {
     }
   });
 
+  it('creates a new pending conversation when the old zero-turn pending bind cannot be restored and gets cleared', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:stale',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'claude',
+      title: 'New Claude conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-stale',
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+
+    const staleSession: BoundSession = {
+      id: 'session-stale',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:stale',
+      tmuxSessionName: 'ac-claude-demo-stale',
+      status: 'error',
+      shouldRestore: true,
+      title: 'New Claude conversation',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:01:00.000Z',
+    };
+    db.upsertBoundSession(staleSession);
+
+    const freshSession: BoundSession = {
+      id: 'session-new',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:new',
+      tmuxSessionName: 'ac-claude-demo-new',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'New Claude conversation',
+      startedAt: '2026-03-14T18:02:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+    };
+
+    const bindConversation = vi.fn(async () => freshSession);
+    const ensureSession = vi.fn(async () => undefined);
+    let getSessionByIdCalls = 0;
+    const getSessionById = vi.fn((id: string) => {
+      if (id === 'session-stale') {
+        getSessionByIdCalls += 1;
+        if (getSessionByIdCalls === 1) {
+          return staleSession;
+        }
+        return {
+          ...staleSession,
+          shouldRestore: false,
+          status: 'ended',
+        };
+      }
+      return undefined;
+    });
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'claude',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => null,
+        }),
+      } as never,
+      {
+        bindConversation,
+        ensureSession,
+        getSessionById,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/claude/new/bind',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(ensureSession).toHaveBeenCalledWith('session-stale');
+      expect(bindConversation).toHaveBeenCalledOnce();
+      expect(response.json()).toMatchObject({
+        session: { id: 'session-new' },
+      });
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('serves a live adopted session before the conversation has been indexed', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -284,6 +406,7 @@ describe('conversation routes', () => {
       {
         bindConversation,
         ensureSession,
+        getSessionById: vi.fn(() => existingSession),
         getSessionByConversation: vi.fn(() => existingSession),
       } as never,
       new RealtimeEventBus(),
