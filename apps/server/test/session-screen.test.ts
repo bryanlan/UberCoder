@@ -51,6 +51,7 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.content).toContain('Create a new branch');
     expect(screen.content).toContain('Enter to confirm');
     expect(screen.status).toBe('Session active');
+    expect(screen.awaitingUserInput).toBe(true);
   });
 
   it('keeps a short real prompt in inputText even when a footer status is present', () => {
@@ -64,6 +65,7 @@ describe('parseSessionScreenSnapshot', () => {
 
     expect(screen.inputText).toBe('hi');
     expect(screen.status).toContain('98% left');
+    expect(screen.awaitingUserInput).toBe(true);
   });
 
   it('keeps Claude pasted-text placeholders attached to the active composer input', () => {
@@ -81,6 +83,7 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.content).toContain('Ready for input.');
     expect(screen.content).not.toContain('Pasted text #1');
     expect(screen.status).toContain('bypass permissions on');
+    expect(screen.awaitingUserInput).toBe(true);
   });
 
   it('keeps timed Working lines in the main content when the composer is visible', () => {
@@ -100,6 +103,7 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.content).toContain('Working (2m 46s • esc to interrupt)');
     expect(screen.status).not.toContain('Working (2m 46s • esc to interrupt)');
     expect(screen.status).toContain('93% left');
+    expect(screen.awaitingUserInput).toBe(true);
   });
 
   it('does not treat previously submitted prompt lines as the active composer after assistant output follows', () => {
@@ -141,6 +145,8 @@ describe('parseSessionScreenSnapshot', () => {
   it('recognizes working status lines with alternate bullet glyphs', () => {
     expect(isWorkingStatusLine('◦ Working (12s • esc to interrupt)')).toBe(true);
     expect(isWorkingStatusLine('▪ Working...')).toBe(true);
+    expect(isWorkingStatusLine('Thinking about the repository…')).toBe(true);
+    expect(isWorkingStatusLine('Applying patch...')).toBe(true);
   });
 
   it('keeps a trailing numbered plan in the main content instead of treating it like a picker', () => {
@@ -160,5 +166,19 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.content).toContain('3. add drag-and-drop for project rows when the toggle is off');
     expect(screen.status).toContain('98% left');
     expect(screen.status).not.toContain('restore the toggle');
+    expect(screen.awaitingUserInput).toBe(false);
+  });
+
+  it('treats an empty composer prompt as waiting for user input', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '',
+      'Ready for input.',
+      '❯ ',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.awaitingUserInput).toBe(true);
   });
 });

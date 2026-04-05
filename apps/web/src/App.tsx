@@ -969,6 +969,7 @@ function AppShell() {
             <ConversationPane
               projects={treeQuery.data?.projects}
               project={project}
+              boundSessions={treeQuery.data?.boundSessions}
               selectedProvider={selectedProvider}
               timeline={timelineQuery.data}
               loading={timelineQuery.isLoading}

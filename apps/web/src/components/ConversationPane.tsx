@@ -1,5 +1,5 @@
-import { Bot, Bug, Check, ChevronDown, ChevronRight, Copy, FolderTree, Link as LinkIcon, PlugZap, Sparkles, Unplug } from 'lucide-react';
-import type { ConversationTimeline, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
+import { Bot, Bug, Check, ChevronDown, ChevronRight, Copy, FolderTree, Link as LinkIcon, PlugZap, Sparkles, Unplug, X } from 'lucide-react';
+import type { BoundSession, ConversationTimeline, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -49,6 +49,22 @@ ansiConverter.palette_256.splice(0, 16, ...ansiConverter.ansi_colors[0], ...ansi
 
 function renderAnsiHtml(text: string): string {
   return ansiConverter.ansi_to_html(text);
+}
+
+function renderConversationAttentionIndicator(isBound: boolean, session?: BoundSession) {
+  if (!isBound) {
+    return <span className="h-2.5 w-2.5 rounded-full border border-slate-700 bg-transparent" />;
+  }
+
+  if (session?.attentionState === 'working') {
+    return <X className="h-3 w-3 text-rose-400" strokeWidth={2.5} />;
+  }
+
+  if (session?.attentionState === 'waiting') {
+    return <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />;
+  }
+
+  return <span className="h-2.5 w-2.5 rounded-full bg-slate-600" />;
 }
 
 function LiveAnsiBlock({
@@ -334,12 +350,19 @@ function NavigationCrumbs({
 function ExplorerPane({
   projects,
   project,
+  boundSessions,
   selectedProvider,
 }: {
   projects?: ProjectSummary[];
   project?: ProjectSummary;
+  boundSessions?: BoundSession[];
   selectedProvider?: ProviderId;
 }) {
+  const boundSessionMap = new Map((boundSessions ?? []).map((session) => [
+    `${session.projectSlug}:${session.provider}:${session.conversationRef}`,
+    session,
+  ]));
+
   if (!project) {
     return (
       <div className="h-full overflow-y-auto p-6">
@@ -432,7 +455,12 @@ function ExplorerPane({
                 to={`/projects/${encodeURIComponent(project.slug)}/${selectedProvider}/${encodeURIComponent(conversation.ref)}`}
                 className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 px-4 py-3 shadow-panel transition hover:border-slate-600 hover:bg-slate-900"
               >
-                <span className={clsx('h-2.5 w-2.5 rounded-full', conversation.isBound ? 'bg-emerald-400' : 'border border-slate-700 bg-transparent')} />
+                <span className="flex h-3 w-3 shrink-0 items-center justify-center" aria-hidden="true">
+                  {renderConversationAttentionIndicator(
+                    conversation.isBound,
+                    boundSessionMap.get(`${conversation.projectSlug}:${conversation.provider}:${conversation.ref}`),
+                  )}
+                </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-medium text-slate-100">{conversation.title}</div>
                   <div className="truncate text-xs text-slate-500">{new Date(conversation.updatedAt).toLocaleString()}</div>
@@ -1097,6 +1125,7 @@ function LiveSessionInputBridge({
 interface ConversationPaneProps {
   projects?: ProjectSummary[];
   project?: ProjectSummary;
+  boundSessions?: BoundSession[];
   selectedProvider?: ProviderId;
   timeline?: ConversationTimeline;
   loading: boolean;
@@ -1119,6 +1148,7 @@ interface ConversationPaneProps {
 export function ConversationPane({
   projects,
   project,
+  boundSessions,
   selectedProvider,
   timeline,
   loading,
@@ -1197,7 +1227,7 @@ export function ConversationPane({
         </div>
       );
     }
-    return <ExplorerPane projects={projects} project={project} selectedProvider={selectedProvider} />;
+    return <ExplorerPane projects={projects} project={project} boundSessions={boundSessions} selectedProvider={selectedProvider} />;
   }
 
   if (workMode && !liveMode) {

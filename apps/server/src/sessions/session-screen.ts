@@ -8,6 +8,7 @@ interface ScreenLine {
 }
 
 const WORKING_STATUS_LINE_RE = /^working(?:(?:\s*(?:[.…]|\.{3}))|(?:\s*\([^)]*\)))*$/i;
+const ELLIPSIS_STATUS_LINE_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s'’:/-]*?(?:…|\.{3})$/u;
 
 function trimRightPreservingIndentation(line: string): string {
   return line.replace(/\s+$/g, '');
@@ -29,7 +30,7 @@ export function isWorkingStatusLine(line: string): boolean {
     return false;
   }
 
-  return WORKING_STATUS_LINE_RE.test(normalized);
+  return WORKING_STATUS_LINE_RE.test(normalized) || ELLIPSIS_STATUS_LINE_RE.test(normalized);
 }
 
 function isLikelyFooterStatus(line: string): boolean {
@@ -155,6 +156,10 @@ function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
   return lines.filter((line) => isLikelyFooterStatus(line.plain));
 }
 
+function contentShowsInteractivePicker(lines: ScreenLine[]): boolean {
+  return lines.some((line) => isInteractivePickerHint(line.plain));
+}
+
 function toScreenLines(snapshot: string): ScreenLine[] {
   return snapshot
     .replace(/\r\n?/g, '\n')
@@ -175,6 +180,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
   contentLines: ScreenLine[];
   inputText: string;
   footerLines: ScreenLine[];
+  hasActiveInput: boolean;
 } {
   for (let index = contentLines.length - 1; index >= Math.max(0, contentLines.length - 12); index -= 1) {
     const promptText = parsePromptInput(contentLines[index]?.plain ?? '');
@@ -225,6 +231,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       contentLines: trimBlankEdges(contentLines.slice(0, index)),
       inputText: inputParts.join(' ').trim(),
       footerLines,
+      hasActiveInput: true,
     };
   }
 
@@ -232,6 +239,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     contentLines,
     inputText: '',
     footerLines: [],
+    hasActiveInput: false,
   };
 }
 
@@ -262,6 +270,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
       status: 'Starting session…',
       statusAnsi: 'Starting session…',
       capturedAt,
+      awaitingUserInput: false,
     };
   }
 
@@ -279,7 +288,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     return true;
   });
 
-  const { contentLines, inputText, footerLines } = extractActiveInput(baseContentLines);
+  const { contentLines, inputText, footerLines, hasActiveInput } = extractActiveInput(baseContentLines);
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
   const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
@@ -288,6 +297,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const contentAnsi = joinAnsi(visibleContentLines) || content;
   const footerText = joinPlain(footerStatusLines);
   const footerAnsi = joinAnsi(footerStatusLines);
+  const awaitingUserInput = hasActiveInput || contentShowsInteractivePicker(visibleContentLines);
 
   let finalModel: string | undefined;
   let finalContextPercent: number | undefined;
@@ -309,6 +319,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     status: footerText || plainStatus,
     statusAnsi: footerAnsi || statusLineRaw || plainStatus,
     capturedAt,
+    awaitingUserInput,
     model: finalModel,
     contextPercent: finalContextPercent,
   };

@@ -96,6 +96,7 @@ export class AppDatabase {
         last_output_at text,
         last_completed_at text,
         is_working integer not null default 0,
+        attention_state text,
         pid integer,
         raw_log_path text,
         event_log_path text
@@ -140,6 +141,9 @@ export class AppDatabase {
     }
     if (!boundSessionColumns.some((column) => column.name === 'is_working')) {
       this.sqlite.exec(`alter table bound_sessions add column is_working integer not null default 0`);
+    }
+    if (!boundSessionColumns.some((column) => column.name === 'attention_state')) {
+      this.sqlite.exec(`alter table bound_sessions add column attention_state text`);
     }
     if (!boundSessionColumns.some((column) => column.name === 'should_restore')) {
       this.sqlite.exec(`alter table bound_sessions add column should_restore integer not null default 0`);
@@ -393,10 +397,10 @@ export class AppDatabase {
     this.sqlite.prepare(`
       insert into bound_sessions (
         id, provider, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
-        started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, pid, raw_log_path, event_log_path, current_model
+        started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, attention_state, pid, raw_log_path, event_log_path, current_model
       ) values (
         @id, @provider, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
-        @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @pid, @raw_log_path, @event_log_path, @current_model
+        @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @attention_state, @pid, @raw_log_path, @event_log_path, @current_model
       )
       on conflict(id) do update set
         conversation_ref = excluded.conversation_ref,
@@ -410,6 +414,7 @@ export class AppDatabase {
         last_output_at = excluded.last_output_at,
         last_completed_at = excluded.last_completed_at,
         is_working = excluded.is_working,
+        attention_state = excluded.attention_state,
         pid = excluded.pid,
         raw_log_path = excluded.raw_log_path,
         event_log_path = excluded.event_log_path,
@@ -430,6 +435,7 @@ export class AppDatabase {
       last_output_at: session.lastOutputAt ?? null,
       last_completed_at: session.lastCompletedAt ?? null,
       is_working: boolAsInt(Boolean(session.isWorking)),
+      attention_state: session.attentionState ?? null,
       pid: session.pid ?? null,
       raw_log_path: session.rawLogPath ?? null,
       event_log_path: session.eventLogPath ?? null,
@@ -563,6 +569,7 @@ export class AppDatabase {
     lastOutputAt: row.last_output_at ? String(row.last_output_at) : undefined,
     lastCompletedAt: row.last_completed_at ? String(row.last_completed_at) : undefined,
     isWorking: Boolean(row.is_working),
+    attentionState: row.attention_state ? String(row.attention_state) as BoundSession['attentionState'] : undefined,
     currentModel: row.current_model ? String(row.current_model) : undefined,
     pid: typeof row.pid === 'number' ? row.pid : row.pid ? Number(row.pid) : undefined,
     rawLogPath: row.raw_log_path ? String(row.raw_log_path) : undefined,

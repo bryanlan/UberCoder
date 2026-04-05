@@ -6,6 +6,8 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number];
 
 export const SESSION_STATUSES = ['starting', 'bound', 'releasing', 'ended', 'error'] as const;
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
+export const SESSION_ATTENTION_STATES = ['idle', 'waiting', 'working'] as const;
+export type SessionAttentionState = (typeof SESSION_ATTENTION_STATES)[number];
 
 export type ConversationKind = 'history' | 'pending';
 
@@ -63,6 +65,7 @@ export interface SessionScreen {
   status: string;
   statusAnsi?: string;
   capturedAt: string;
+  awaitingUserInput?: boolean;
   model?: string;
   contextPercent?: number;
 }
@@ -91,6 +94,7 @@ export interface BoundSession {
   lastOutputAt?: string;
   lastCompletedAt?: string;
   isWorking?: boolean;
+  attentionState?: SessionAttentionState;
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;

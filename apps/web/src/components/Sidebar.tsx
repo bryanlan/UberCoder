@@ -2,7 +2,7 @@ import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, Menu, Pencil, P
 import { Link, useLocation } from 'react-router-dom';
 import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useEffect, useState, type DragEvent } from 'react';
+import { useEffect, useState, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 
@@ -47,32 +47,23 @@ function getConversationRecencyTimestamp(
     ?? conversation.updatedAt;
 }
 
-function getConversationFreshnessClass(
+function getConversationIndicator(
   isBound: boolean,
-  freshnessTimestamp: string | undefined,
-  thresholds: SessionFreshnessThresholds,
-  nowMs: number,
-): string {
+  session?: BoundSessionItem,
+): ReactNode {
   if (!isBound) {
-    return 'border border-slate-700 bg-transparent';
+    return <span className="h-2.5 w-2.5 rounded-full border border-slate-700 bg-transparent" />;
   }
 
-  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
-  if (!Number.isFinite(parsedTime)) {
-    return 'bg-emerald-400';
+  if (session?.attentionState === 'working') {
+    return <X className="h-3 w-3 text-rose-400" strokeWidth={2.5} />;
   }
 
-  const ageMinutes = Math.max(0, nowMs - parsedTime) / 60_000;
-  if (ageMinutes >= thresholds.redMinutes) {
-    return 'bg-rose-500';
+  if (session?.attentionState === 'waiting') {
+    return <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />;
   }
-  if (ageMinutes >= thresholds.orangeMinutes) {
-    return 'bg-orange-400';
-  }
-  if (ageMinutes >= thresholds.yellowMinutes) {
-    return 'bg-amber-400';
-  }
-  return 'bg-emerald-400';
+
+  return <span className="h-2.5 w-2.5 rounded-full bg-slate-600" />;
 }
 
 function ConversationLink({
@@ -82,7 +73,7 @@ function ConversationLink({
   title,
   prefixLabel,
   isBound,
-  indicatorClassName,
+  indicator,
   canRebind,
   onClose,
   onRebindConversation,
@@ -96,7 +87,7 @@ function ConversationLink({
   title: string;
   prefixLabel?: string;
   isBound: boolean;
-  indicatorClassName: string;
+  indicator: ReactNode;
   canRebind: boolean;
   onClose: () => void;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
@@ -191,7 +182,7 @@ function ConversationLink({
           active ? 'bg-sky-500/15 text-sky-100' : 'text-slate-300 hover:bg-slate-800/70 hover:text-white',
         )}
       >
-        <span className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)} />
+        <span className="flex h-3 w-3 shrink-0 items-center justify-center" aria-hidden="true">{indicator}</span>
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
@@ -270,7 +261,7 @@ function ProjectSection({
       provider: ProviderId;
       conversation: ProjectSummary['providers'][ProviderId]['conversations'][number];
       freshnessTimestamp: string;
-      indicatorClassName: string;
+      indicator: ReactNode;
     }>;
   };
   workMode: boolean;
@@ -524,7 +515,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, indicatorClassName }) => (
+            {displayedConversations.map(({ provider, conversation, indicator }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -533,7 +524,7 @@ function ProjectSection({
                 title={conversation.title}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
-                indicatorClassName={indicatorClassName}
+                indicator={indicator}
                 canRebind={conversation.kind === 'history'}
                 onClose={onClose}
                 onRebindConversation={onRebindConversation}
@@ -585,13 +576,7 @@ export function Sidebar({
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -635,11 +620,9 @@ export function Sidebar({
             provider,
             conversation,
             freshnessTimestamp,
-            indicatorClassName: getConversationFreshnessClass(
+            indicator: getConversationIndicator(
               conversation.isBound,
-              freshnessTimestamp,
-              sessionFreshnessThresholds,
-              nowMs,
+              session,
             ),
           };
         }))

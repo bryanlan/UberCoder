@@ -489,6 +489,57 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('marks sessions as waiting when the live screen is waiting on user input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Ready for input.',
+      '❯ ',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-waiting-attention',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    expect(db.getBoundSessionById(session.id)?.attentionState).toBe('waiting');
+    db.close();
+  });
+
+  it('marks sessions as working when the live screen shows an ellipsis status line', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Thinking about the repository…',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-ellipsis-attention',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    expect(db.getBoundSessionById(session.id)?.attentionState).toBe('working');
+    db.close();
+  });
+
   it('adds the Claude bypass-permissions badge to live status', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -590,6 +641,7 @@ describe('SessionManager', () => {
     });
 
     expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
+    expect(db.getBoundSessionById(session.id)?.attentionState).toBe('working');
     expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBeUndefined();
 
     tmux.captureSequence = [[
@@ -603,6 +655,7 @@ describe('SessionManager', () => {
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
+    expect(updated?.attentionState).toBe('idle');
     expect(updated?.lastCompletedAt).toBeTruthy();
     expect(workingStates.some((state) => state.isWorking === true && !state.lastCompletedAt)).toBe(true);
     expect(workingStates.some((state) => state.isWorking === false && Boolean(state.lastCompletedAt))).toBe(true);
@@ -750,6 +803,7 @@ describe('SessionManager', () => {
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
+    expect(updated?.attentionState).toBe('idle');
     expect(updated?.lastCompletedAt).toBeTruthy();
     db.close();
   }, 10_000);

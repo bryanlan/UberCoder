@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, ProviderId, SessionAttentionState, SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -74,6 +74,16 @@ function screenIsStartingUp(screen: SessionScreen): boolean {
   return /^starting session/i.test(normalizedStatus)
     || /^waiting for session output/i.test(normalizedContent)
     || /starting mcp servers/i.test(`${normalizedContent}\n${normalizedStatus}`);
+}
+
+function resolveAttentionState(screen: SessionScreen, isWorking: boolean): SessionAttentionState {
+  if (isWorking) {
+    return 'working';
+  }
+  if (screen.awaitingUserInput) {
+    return 'waiting';
+  }
+  return 'idle';
 }
 
 function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
@@ -384,6 +394,7 @@ export class SessionManager {
       shouldRestore: false,
       updatedAt: nowIso(),
       isWorking: false,
+      attentionState: 'idle',
     };
     this.db.upsertBoundSession(ended);
     this.appendEvent(ended, {
@@ -407,7 +418,7 @@ export class SessionManager {
 
     const project = await dependencies.projectService.getProjectBySlug(session.projectSlug);
     if (!project) {
-      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false, attentionState: 'idle' as const };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: project not found.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
@@ -417,7 +428,7 @@ export class SessionManager {
     const provider = dependencies.providerRegistry.get(session.provider);
     const providerSettings = dependencies.projectService.getMergedProviderSettings(project, session.provider);
     if (!providerSettings.enabled) {
-      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false, attentionState: 'idle' as const };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: provider is disabled.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
@@ -435,7 +446,7 @@ export class SessionManager {
         this.clearPendingRestoreBinding(resolvedSession);
         return undefined;
       }
-      const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false, attentionState: 'idle' as const };
       const shouldEmitFailure = resolvedSession.status !== 'error';
       this.db.upsertBoundSession(failed);
       if (shouldEmitFailure) {
@@ -455,6 +466,7 @@ export class SessionManager {
       status: 'starting' as const,
       updatedAt: nowIso(),
       isWorking: false,
+      attentionState: 'idle' as const,
       pid: undefined,
     };
     this.db.upsertBoundSession(restoring);
@@ -496,6 +508,7 @@ export class SessionManager {
         status: 'error' as const,
         updatedAt: nowIso(),
         isWorking: false,
+        attentionState: 'idle' as const,
       };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, {
@@ -558,6 +571,7 @@ export class SessionManager {
       lastOutputAt: undefined,
       lastCompletedAt: undefined,
       isWorking: false,
+      attentionState: 'idle',
       rawLogPath,
       eventLogPath,
     };
@@ -614,6 +628,7 @@ export class SessionManager {
         shouldRestore: false,
         updatedAt: nowIso(),
         isWorking: false,
+        attentionState: 'idle',
       };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, {
@@ -786,6 +801,7 @@ export class SessionManager {
       shouldRestore: false,
       updatedAt: nowIso(),
       isWorking: false,
+      attentionState: 'idle' as const,
     };
     this.db.upsertBoundSession(releasing);
     this.eventBus.emit({ type: 'session.updated', session: releasing });
@@ -809,7 +825,7 @@ export class SessionManager {
 
     const stillAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => true);
     if (stillAlive) {
-      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false, attentionState: 'idle' as const };
       this.db.upsertBoundSession(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to release tmux session cleanly.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
@@ -818,7 +834,7 @@ export class SessionManager {
 
     this.stopWatching(session.id);
     this.lastScreenHashes.delete(session.id);
-    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
+    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false, attentionState: 'idle' as const };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(session.conversationRef);
@@ -1078,6 +1094,7 @@ export class SessionManager {
         ...session,
         updatedAt: nowIso(),
         isWorking: false,
+        attentionState: 'idle',
         lastCompletedAt: completedAt,
       };
       this.db.upsertBoundSession(updated);
@@ -1370,8 +1387,13 @@ export class SessionManager {
       : session.isWorking
         ? latestTimestamp(screen.capturedAt, session.lastOutputAt, session.lastCompletedAt) ?? screen.capturedAt
         : nextIdleCompletion;
+    const nextAttentionState = resolveAttentionState(screen, nextIsWorking);
 
-    if (session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt) {
+    if (
+      session.isWorking === nextIsWorking
+      && session.lastCompletedAt === nextLastCompletedAt
+      && session.attentionState === nextAttentionState
+    ) {
       return;
     }
 
@@ -1379,6 +1401,7 @@ export class SessionManager {
       ...session,
       updatedAt: screen.capturedAt,
       isWorking: nextIsWorking,
+      attentionState: nextAttentionState,
       lastCompletedAt: nextLastCompletedAt,
     };
     this.db.upsertBoundSession(tracked);
