@@ -25,7 +25,13 @@ function isLeadingTerminalChrome(line: string): boolean {
 }
 
 export function isWorkingStatusLine(line: string): boolean {
-  const normalized = normalizeWhitespace(stripAnsiAndControl(line)).replace(/^[•●·◦▪]\s*/u, '');
+  const plain = normalizeWhitespace(stripAnsiAndControl(line));
+  // Any line starting with a Braille spinner character is a working indicator
+  // (covers "⠋ Working...", "⠋ bash(ls)", "⠋ Read(file)", etc.)
+  if (/^[\u2800-\u28FF]/.test(plain)) {
+    return true;
+  }
+  const normalized = plain.replace(/^[•●·◦▪]\s*/u, '');
   if (!normalized) {
     return false;
   }

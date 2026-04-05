@@ -149,6 +149,13 @@ describe('parseSessionScreenSnapshot', () => {
     expect(isWorkingStatusLine('Applying patch...')).toBe(true);
   });
 
+  it('recognizes working status lines with Braille spinner characters', () => {
+    expect(isWorkingStatusLine('⠋ Working (12s · esc to interrupt)')).toBe(true);
+    expect(isWorkingStatusLine('⠙ Working...')).toBe(true);
+    expect(isWorkingStatusLine('⠸ bash(ls -la)')).toBe(true);
+    expect(isWorkingStatusLine('⠼ Read(/path/to/file)')).toBe(true);
+  });
+
   it('keeps a trailing numbered plan in the main content instead of treating it like a picker', () => {
     const screen = parseSessionScreenSnapshot([
       'OpenAI Codex',
