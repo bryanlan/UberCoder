@@ -138,7 +138,7 @@ export class IndexingService {
   }
 
   getTree(): TreeResponse {
-    const activeSessions = this.db.listBoundSessions().filter((session) => ['starting', 'bound', 'releasing'].includes(session.status));
+    const activeSessions = this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
     const history = this.db.listConversationIndex();
     const pending = this.db.listPendingConversations()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string');
@@ -329,10 +329,11 @@ export class IndexingService {
       const session = pending.boundSessionId
         ? this.db.getBoundSessionById(pending.boundSessionId)
         : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);
-      if (session && ['starting', 'bound', 'releasing'].includes(session.status) && session.conversationRef === pending.ref) {
+      if (session && session.shouldRestore && session.conversationRef === pending.ref) {
         const reboundSession = {
           ...session,
           conversationRef: matchedConversation.ref,
+          resumeConversationRef: matchedConversation.ref,
           title: matchedConversation.title,
           updatedAt: nowIso(),
         };

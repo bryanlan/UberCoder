@@ -34,7 +34,10 @@ export async function buildApp(options: AppOptions = {}) {
   const projectService = new ProjectService(configService);
   const providerRegistry = new ProviderRegistry();
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus);
-  const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus);
+  const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
+    projectService,
+    providerRegistry,
+  });
   const authService = new AuthService(config, db);
 
   const app = fastify({

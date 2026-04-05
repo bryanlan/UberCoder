@@ -157,8 +157,13 @@ export async function registerConversationRoutes(
       .find((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId && conversation.isBound);
     if (existingPending?.boundSessionId) {
       const existingSession = sessions.getSessionById(existingPending.boundSessionId);
-      if (existingSession && ['starting', 'bound', 'releasing'].includes(existingSession.status)) {
-        return { session: existingSession, conversationRef: existingPending.ref };
+      if (existingSession?.shouldRestore) {
+        const liveSession = await sessions.ensureSession(existingSession.id);
+        if (liveSession) {
+          return { session: liveSession, conversationRef: existingPending.ref };
+        }
+        reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
+        return;
       }
     }
     const pendingRef = `pending:${randomUUID()}`;
@@ -219,6 +224,17 @@ export async function registerConversationRoutes(
     if (!cached) {
       reply.code(404).send({ error: 'Conversation not indexed.' });
       return;
+    }
+    if (!parsedBody.data.force) {
+      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
+      if (existingSession?.shouldRestore) {
+        const liveSession = await sessions.ensureSession(existingSession.id);
+        if (liveSession) {
+          return { session: liveSession };
+        }
+        reply.code(409).send({ error: 'Conversation is already bound but could not be restored.' });
+        return;
+      }
     }
     if (parsedBody.data.force) {
       const existingSession = sessions.getSessionByConversation(projectSlug, providerId, conversationRef);

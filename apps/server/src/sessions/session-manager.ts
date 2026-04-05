@@ -15,6 +15,8 @@ import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output.js';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
+import type { ProjectService } from '../projects/project-service.js';
+import type { ProviderRegistry } from '../providers/registry.js';
 
 interface WatchState {
   offset: number;
@@ -32,6 +34,11 @@ const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const MAX_INLINE_LIVE_INPUT_CHARS = 1_800;
+
+interface SessionRecoveryDependencies {
+  projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
+  providerRegistry: Pick<ProviderRegistry, 'get'>;
+}
 
 export class SessionKeystrokeRejectedError extends Error {
   readonly statusCode = 409;
@@ -181,12 +188,13 @@ export class SessionManager {
     private readonly tmuxClient: TmuxClient,
     private readonly runtimeDir: string,
     private readonly eventBus: RealtimeEventBus,
+    private readonly recoveryDependencies?: SessionRecoveryDependencies,
   ) {
     fs.mkdirSync(this.runtimeDir, { recursive: true });
   }
 
   listActiveSessions(): BoundSession[] {
-    return this.db.listBoundSessions().filter((session) => ['starting', 'bound', 'releasing'].includes(session.status));
+    return this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
   }
 
   async recoverSessions(): Promise<void> {
@@ -231,6 +239,238 @@ export class SessionManager {
     return `Read and follow the full user prompt saved at "${filePath}". Treat the file contents as the user's latest message before replying.`;
   }
 
+  private ensureSessionLogPaths(session: BoundSession): BoundSession {
+    const sessionDir = path.join(this.runtimeDir, session.id);
+    const rawLogPath = session.rawLogPath ?? path.join(sessionDir, 'raw.log');
+    const eventLogPath = session.eventLogPath ?? path.join(sessionDir, 'events.jsonl');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(rawLogPath, '', { flag: 'a' });
+    fs.writeFileSync(eventLogPath, '', { flag: 'a' });
+    if (rawLogPath === session.rawLogPath && eventLogPath === session.eventLogPath) {
+      return session;
+    }
+    const updated = {
+      ...session,
+      rawLogPath,
+      eventLogPath,
+    };
+    this.db.upsertBoundSession(updated);
+    return updated;
+  }
+
+  private buildRecoveryLaunchCommand(
+    session: BoundSession,
+    project: ActiveProject,
+    provider: ProviderAdapter,
+    providerSettings: MergedProviderSettings,
+  ): { cwd: string; argv: string[]; env: Record<string, string> } | undefined {
+    const resumeConversationRef = session.resumeConversationRef
+      ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
+    if (resumeConversationRef) {
+      return provider.getLaunchCommand(project, resumeConversationRef, providerSettings);
+    }
+    return undefined;
+  }
+
+  private scorePendingMatch(
+    pendingLastUserHash: string | undefined,
+    pending: ConversationSummary,
+    conversation: ConversationSummary,
+  ): number {
+    const rawMetadata = conversation.rawMetadata ?? {};
+    const candidateHashes = [
+      rawMetadata.lastUserTextHash,
+      rawMetadata.firstUserTextHash,
+    ].filter((value): value is string => typeof value === 'string');
+
+    if (pendingLastUserHash) {
+      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
+    }
+
+    return -1;
+  }
+
+  private async tryResolvePendingResumeSession(
+    session: BoundSession,
+    project: ActiveProject,
+    provider: ProviderAdapter,
+    providerSettings: MergedProviderSettings,
+  ): Promise<BoundSession> {
+    if (!session.conversationRef.startsWith('pending:') || session.resumeConversationRef) {
+      return session;
+    }
+
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    if (!pending) {
+      return session;
+    }
+
+    const pendingTimestamp = Date.parse(pending.createdAt ?? pending.updatedAt);
+    const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string'
+      ? pending.rawMetadata.lastUserInputHash
+      : undefined;
+    if (!Number.isFinite(pendingTimestamp) || !pendingLastUserHash) {
+      return session;
+    }
+
+    const conversations = await provider.listConversations(project, providerSettings);
+    const matchedConversation = conversations
+      .filter((conversation) => conversation.ref !== pending.ref)
+      .map((conversation) => ({
+        conversation,
+        delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
+        score: this.scorePendingMatch(pendingLastUserHash, pending, conversation),
+      }))
+      .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= 30 * 60 * 1000)
+      .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
+
+    if (!matchedConversation) {
+      return session;
+    }
+
+    const titleOverride = this.db.getConversationTitleOverride(project.slug, provider.id, pending.ref);
+    if (titleOverride) {
+      this.db.setConversationTitleOverride(
+        project.slug,
+        provider.id,
+        matchedConversation.ref,
+        titleOverride.title,
+        nowIso(),
+      );
+      this.db.deleteConversationTitleOverride(project.slug, provider.id, pending.ref);
+    }
+
+    const adoptedAt = nowIso();
+    const reboundSession: BoundSession = {
+      ...session,
+      conversationRef: matchedConversation.ref,
+      resumeConversationRef: matchedConversation.ref,
+      title: matchedConversation.title,
+      updatedAt: adoptedAt,
+    };
+    this.db.upsertBoundSession(reboundSession);
+    this.db.putPendingConversation({
+      ...pending,
+      isBound: false,
+      boundSessionId: undefined,
+      updatedAt: adoptedAt,
+      transcriptPath: matchedConversation.transcriptPath,
+      rawMetadata: {
+        ...(pending.rawMetadata ?? {}),
+        adoptedConversationRef: matchedConversation.ref,
+        adoptedTranscriptPath: matchedConversation.transcriptPath,
+        adoptedAt,
+      },
+    });
+    this.eventBus.emit({ type: 'session.updated', session: reboundSession });
+    return reboundSession;
+  }
+
+  private async restoreSession(session: BoundSession): Promise<BoundSession | undefined> {
+    if (!session.shouldRestore || session.status === 'releasing') {
+      return undefined;
+    }
+
+    const dependencies = this.recoveryDependencies;
+    if (!dependencies) {
+      return undefined;
+    }
+
+    const project = await dependencies.projectService.getProjectBySlug(session.projectSlug);
+    if (!project) {
+      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: project not found.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      return undefined;
+    }
+
+    const provider = dependencies.providerRegistry.get(session.provider);
+    const providerSettings = dependencies.projectService.getMergedProviderSettings(project, session.provider);
+    if (!providerSettings.enabled) {
+      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: provider is disabled.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      return undefined;
+    }
+
+    const resolvedSession = await this.tryResolvePendingResumeSession(session, project, provider, providerSettings);
+    const launch = this.buildRecoveryLaunchCommand(resolvedSession, project, provider, providerSettings);
+    if (!launch) {
+      const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      const shouldEmitFailure = resolvedSession.status !== 'error';
+      this.db.upsertBoundSession(failed);
+      if (shouldEmitFailure) {
+        this.appendEvent(failed, {
+          type: 'status',
+          text: 'Failed to restore session: no resumable conversation reference is available yet.',
+          timestamp: nowIso(),
+        });
+        this.eventBus.emit({ type: 'session.updated', session: failed });
+      }
+      return undefined;
+    }
+
+    const prepared = this.ensureSessionLogPaths(resolvedSession);
+    const restoring = {
+      ...prepared,
+      status: 'starting' as const,
+      updatedAt: nowIso(),
+      isWorking: false,
+      pid: undefined,
+    };
+    this.db.upsertBoundSession(restoring);
+    this.eventBus.emit({ type: 'session.updated', session: restoring });
+    this.appendEvent(restoring, { type: 'status', text: 'Restoring bound session.', timestamp: nowIso() });
+
+    let tmuxCreated = false;
+    try {
+      await this.tmuxClient.newDetachedSession(restoring.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
+      tmuxCreated = true;
+      await this.tmuxClient.pipePaneToFile(restoring.tmuxSessionName, restoring.rawLogPath!);
+      await this.tmuxClient.setUserOption(restoring.tmuxSessionName, '@agent_console_session_id', restoring.id);
+      await this.tmuxClient.setUserOption(restoring.tmuxSessionName, '@agent_console_conversation_ref', restoring.conversationRef);
+      await this.tmuxClient.setUserOption(restoring.tmuxSessionName, '@agent_console_provider', restoring.provider);
+      const pid = await this.tmuxClient.getPanePid(restoring.tmuxSessionName);
+      const rebound: BoundSession = {
+        ...restoring,
+        status: 'bound',
+        updatedAt: nowIso(),
+        pid,
+      };
+      this.db.upsertBoundSession(rebound);
+      this.appendEvent(rebound, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: rebound });
+      this.watchSessionOutput(rebound);
+      await this.waitForStartupOutput(rebound);
+      await this.emitScreenUpdate(rebound);
+      return rebound;
+    } catch (error) {
+      if (tmuxCreated) {
+        try {
+          await this.tmuxClient.killSession(restoring.tmuxSessionName);
+        } catch {
+          // Best-effort cleanup after partial restore failure.
+        }
+      }
+      const failed = {
+        ...restoring,
+        status: 'error' as const,
+        updatedAt: nowIso(),
+        isWorking: false,
+      };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, {
+        type: 'status',
+        text: `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+        timestamp: nowIso(),
+      });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      return undefined;
+    }
+  }
+
   async bindConversation(input: {
     project: ActiveProject;
     provider: ProviderAdapter;
@@ -240,12 +480,13 @@ export class SessionManager {
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
   }): Promise<BoundSession> {
-    const existing = this.db.getBoundSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
+    const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
       const liveSession = await this.refreshSessionState(existing);
       if (liveSession) {
         return liveSession;
       }
+      throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
 
     const sessionId = randomUUID();
@@ -269,8 +510,10 @@ export class SessionManager {
       provider: input.provider.id,
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,
+      resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
       tmuxSessionName,
       status: 'starting',
+      shouldRestore: true,
       title: input.title,
       startedAt: now,
       updatedAt: now,
@@ -334,6 +577,7 @@ export class SessionManager {
       const failed: BoundSession = {
         ...session,
         status: 'error',
+        shouldRestore: false,
         updatedAt: nowIso(),
         isWorking: false,
       };
@@ -501,7 +745,13 @@ export class SessionManager {
 
   async releaseSession(sessionId: string): Promise<void> {
     const session = this.mustGetSession(sessionId);
-    const releasing = { ...session, status: 'releasing' as const, updatedAt: nowIso(), isWorking: false };
+    const releasing = {
+      ...session,
+      status: 'releasing' as const,
+      shouldRestore: false,
+      updatedAt: nowIso(),
+      isWorking: false,
+    };
     this.db.upsertBoundSession(releasing);
     this.eventBus.emit({ type: 'session.updated', session: releasing });
     this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
@@ -555,7 +805,12 @@ export class SessionManager {
   }
 
   getSessionByConversation(projectSlug: string, provider: ProviderId, conversationRef: string): BoundSession | undefined {
-    return this.db.getBoundSessionByConversation(projectSlug, provider, conversationRef);
+    return this.db.getRestorableSessionByConversation(projectSlug, provider, conversationRef);
+  }
+
+  async ensureSession(sessionId: string): Promise<BoundSession | undefined> {
+    const session = this.mustGetSession(sessionId);
+    return await this.refreshSessionState(session);
   }
 
   async getSessionScreen(sessionId: string): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
@@ -591,6 +846,9 @@ export class SessionManager {
     if (!alive) {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
+      if (session.shouldRestore && session.status !== 'releasing') {
+        return await this.restoreSession(session);
+      }
       const terminalStatus = session.status === 'releasing' ? 'ended' : 'error';
       const ended: BoundSession = {
         ...session,
@@ -610,7 +868,7 @@ export class SessionManager {
       return undefined;
     }
 
-    const nextStatus = session.status === 'starting' ? 'bound' : session.status;
+    const nextStatus = session.status === 'starting' || session.status === 'error' ? 'bound' : session.status;
     const refreshed: BoundSession = nextStatus === session.status
       ? session
       : {

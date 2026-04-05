@@ -98,6 +98,25 @@ const providerSettings = {
   commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
 } satisfies MergedProviderSettings;
 
+function createRecoveryManager(
+  db: AppDatabase,
+  tmux: TmuxClient,
+  runtimeDir: string,
+  eventBus = new RealtimeEventBus(),
+  recoveryProvider: ProviderAdapter = provider,
+  recoveryProviderSettings: MergedProviderSettings = providerSettings,
+): SessionManager {
+  return new SessionManager(db, tmux, runtimeDir, eventBus, {
+    projectService: {
+      getProjectBySlug: async (slug: string) => slug === project.slug ? project : undefined,
+      getMergedProviderSettings: () => recoveryProviderSettings,
+    },
+    providerRegistry: {
+      get: () => recoveryProvider,
+    },
+  });
+}
+
 describe('SessionManager', () => {
   it('tracks bind → input → release transitions through the database', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
@@ -147,11 +166,11 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('rebinds by creating a new session when the stored tmux session is gone', async () => {
+  it('restores the same bound session when the tmux session is gone', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
-    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
 
     const first = await manager.bindConversation({
       project,
@@ -163,17 +182,121 @@ describe('SessionManager', () => {
     });
     tmux.alive.clear();
 
-    const second = await manager.bindConversation({
+    const second = await manager.ensureSession(first.id);
+
+    expect(second?.id).toBe(first.id);
+    expect(second?.status).toBe('bound');
+    expect(tmux.created).toHaveLength(2);
+    db.close();
+  });
+
+  it('resolves and restores pending sessions after provider adoption can be matched', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const recoveryProvider: ProviderAdapter = {
+      ...provider,
+      async listConversations() {
+        return [{
+          ref: 'real-restored',
+          kind: 'history',
+          projectSlug: project.slug,
+          provider: 'codex',
+          title: 'Recovered conversation',
+          createdAt: '2026-03-14T18:00:30.000Z',
+          updatedAt: '2026-03-14T18:00:30.000Z',
+          transcriptPath: '/tmp/real-restored.jsonl',
+          isBound: false,
+          degraded: false,
+          rawMetadata: {
+            lastUserTextHash: 'match-hash',
+          },
+        }];
+      },
+      getLaunchCommand(_project, conversationRef) {
+        return {
+          cwd: '/srv/demo',
+          argv: ['codex', 'resume', conversationRef ?? ''],
+          env: {},
+        };
+      },
+    };
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), recoveryProvider);
+    db.putPendingConversation({
+      ref: 'pending:restore-me',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'match-hash',
+      },
+    });
+
+    const session = await manager.bindConversation({
       project,
       provider,
       providerSettings,
-      conversationRef: 'session-rebind',
-      title: 'Conversation',
-      kind: 'history',
+      conversationRef: 'pending:restore-me',
+      title: 'Pending conversation',
+      kind: 'pending',
+    });
+    tmux.alive.clear();
+
+    const restored = await manager.ensureSession(session.id);
+
+    expect(restored?.id).toBe(session.id);
+    expect(restored?.conversationRef).toBe('real-restored');
+    expect(restored?.resumeConversationRef).toBe('real-restored');
+    expect(db.getPendingConversation('pending:restore-me')?.rawMetadata?.adoptedConversationRef).toBe('real-restored');
+    expect(tmux.createdCommands.at(-1)).toContain("'codex' 'resume' 'real-restored'");
+    db.close();
+  });
+
+  it('leaves pending sessions unrestored when no resumable conversation can be resolved yet', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    db.putPendingConversation({
+      ref: 'pending:unresolved',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'missing-match',
+      },
     });
 
-    expect(second.id).not.toBe(first.id);
-    expect(tmux.created).toHaveLength(2);
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:unresolved',
+      title: 'Pending conversation',
+      kind: 'pending',
+    });
+    tmux.alive.clear();
+
+    const restored = await manager.ensureSession(session.id);
+
+    expect(restored).toBeUndefined();
+    expect(tmux.created).toHaveLength(1);
+    expect(db.getBoundSessionById(session.id)?.status).toBe('error');
+    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(true);
     db.close();
   });
 

@@ -75,6 +75,27 @@ function looksLikeMenuChoice(line: string): boolean {
     || /^\d+\.\s/.test(normalized);
 }
 
+function isInteractivePickerHint(line: string): boolean {
+  const normalized = normalizeWhitespace(line);
+  return /Enter to confirm · Esc to exit/i.test(normalized)
+    || /Esc to cancel · Tab to amend/i.test(normalized);
+}
+
+function looksLikePickerOption(line: string): boolean {
+  const normalized = normalizeWhitespace(line);
+  return looksLikeMenuChoice(line)
+    || /^\s{2,}\S/.test(line)
+    || /^(?:[❯›>]\s*)[^/].+/u.test(normalized);
+}
+
+function parsePastedTextPlaceholder(line: string): string | undefined {
+  const normalized = normalizeWhitespace(line.replace(/^\s*⎿\s*/u, ''));
+  if (!/pasted text #\d+/i.test(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
 function isComposerBoundary(line: string): boolean {
   if (!line.trim()) {
     return true;
@@ -88,7 +109,7 @@ function isComposerBoundary(line: string): boolean {
     return true;
   }
 
-  if (/^\s*⎿/.test(line)) {
+  if (/^\s*⎿/.test(line) && !parsePastedTextPlaceholder(line)) {
     return true;
   }
 
@@ -171,6 +192,14 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       continue;
     }
 
+    const firstPickerHintIndex = following.findIndex((line) => isInteractivePickerHint(line.plain));
+    if (firstPickerHintIndex !== -1) {
+      const pickerContext = following.slice(0, firstPickerHintIndex);
+      if (pickerContext.every((line) => looksLikePickerOption(line.plain))) {
+        continue;
+      }
+    }
+
     const inputParts = [promptText];
     let nextSectionStart = index + 1;
     let boundaryLine: ScreenLine | undefined;
@@ -181,7 +210,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
         boundaryLine = candidate;
         break;
       }
-      inputParts.push(candidate.plain.trim());
+      inputParts.push(parsePastedTextPlaceholder(candidate.plain) ?? candidate.plain.trim());
       nextSectionStart = lineIndex + 1;
     }
 

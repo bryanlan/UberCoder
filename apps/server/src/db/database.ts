@@ -85,8 +85,10 @@ export class AppDatabase {
         provider text not null,
         project_slug text not null,
         conversation_ref text not null,
+        resume_conversation_ref text,
         tmux_session_name text not null,
         status text not null,
+        should_restore integer not null default 0,
         title text,
         started_at text not null,
         updated_at text not null,
@@ -138,6 +140,23 @@ export class AppDatabase {
     }
     if (!boundSessionColumns.some((column) => column.name === 'is_working')) {
       this.sqlite.exec(`alter table bound_sessions add column is_working integer not null default 0`);
+    }
+    if (!boundSessionColumns.some((column) => column.name === 'should_restore')) {
+      this.sqlite.exec(`alter table bound_sessions add column should_restore integer not null default 0`);
+      this.sqlite.exec(`
+        update bound_sessions
+        set should_restore = 1
+        where status in ('starting', 'bound', 'releasing')
+      `);
+    }
+    if (!boundSessionColumns.some((column) => column.name === 'resume_conversation_ref')) {
+      this.sqlite.exec(`alter table bound_sessions add column resume_conversation_ref text`);
+      this.sqlite.exec(`
+        update bound_sessions
+        set resume_conversation_ref = conversation_ref
+        where resume_conversation_ref is null
+          and conversation_ref not like 'pending:%'
+      `);
     }
   }
 
@@ -195,7 +214,7 @@ export class AppDatabase {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.status in ('starting','bound','releasing')
+        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.should_restore = 1
       order by ci.updated_at desc
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
@@ -224,7 +243,7 @@ export class AppDatabase {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.status in ('starting','bound','releasing')
+        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.should_restore = 1
       where ci.project_slug = ? and ci.provider = ? and ci.ref = ?
       limit 1
     `).get(projectSlug, provider, ref) as Record<string, unknown> | undefined;
@@ -312,7 +331,7 @@ export class AppDatabase {
       from pending_conversations pc
       left join conversation_title_overrides cto
         on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
-      left join bound_sessions bs on bs.id = pc.bound_session_id and bs.status in ('starting','bound','releasing')
+      left join bound_sessions bs on bs.id = pc.bound_session_id and bs.should_restore = 1
       order by pc.updated_at desc
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
@@ -338,7 +357,7 @@ export class AppDatabase {
       from pending_conversations pc
       left join conversation_title_overrides cto
         on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
-      left join bound_sessions bs on bs.id = pc.bound_session_id and bs.status in ('starting','bound','releasing')
+      left join bound_sessions bs on bs.id = pc.bound_session_id and bs.should_restore = 1
       where pc.ref = ?
       limit 1
     `).get(ref) as Record<string, unknown> | undefined;
@@ -365,16 +384,23 @@ export class AppDatabase {
   }
 
   upsertBoundSession(session: BoundSession): void {
+    const shouldRestore = session.shouldRestore ?? ['starting', 'bound', 'releasing'].includes(session.status);
+    const resumeConversationRef = session.resumeConversationRef
+      ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
     this.sqlite.prepare(`
       insert into bound_sessions (
-        id, provider, project_slug, conversation_ref, tmux_session_name, status, title,
+        id, provider, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
         started_at, updated_at, last_activity_at, last_output_at, last_completed_at, is_working, pid, raw_log_path, event_log_path
       ) values (
-        @id, @provider, @project_slug, @conversation_ref, @tmux_session_name, @status, @title,
+        @id, @provider, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
         @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @is_working, @pid, @raw_log_path, @event_log_path
       )
       on conflict(id) do update set
+        conversation_ref = excluded.conversation_ref,
+        resume_conversation_ref = excluded.resume_conversation_ref,
+        tmux_session_name = excluded.tmux_session_name,
         status = excluded.status,
+        should_restore = excluded.should_restore,
         title = excluded.title,
         updated_at = excluded.updated_at,
         last_activity_at = excluded.last_activity_at,
@@ -383,16 +409,16 @@ export class AppDatabase {
         is_working = excluded.is_working,
         pid = excluded.pid,
         raw_log_path = excluded.raw_log_path,
-        event_log_path = excluded.event_log_path,
-        tmux_session_name = excluded.tmux_session_name,
-        conversation_ref = excluded.conversation_ref
+        event_log_path = excluded.event_log_path
     `).run({
       id: session.id,
       provider: session.provider,
       project_slug: session.projectSlug,
       conversation_ref: session.conversationRef,
+      resume_conversation_ref: resumeConversationRef ?? null,
       tmux_session_name: session.tmuxSessionName,
       status: session.status,
+      should_restore: boolAsInt(shouldRestore),
       title: session.title ?? null,
       started_at: session.startedAt,
       updated_at: session.updatedAt,
@@ -419,7 +445,17 @@ export class AppDatabase {
   getBoundSessionByConversation(projectSlug: string, provider: string, conversationRef: string): BoundSession | undefined {
     const row = this.sqlite.prepare(`
       select * from bound_sessions
-      where project_slug = ? and provider = ? and conversation_ref = ? and status in ('starting', 'bound', 'releasing')
+      where project_slug = ? and provider = ? and conversation_ref = ? and should_restore = 1
+      order by updated_at desc
+      limit 1
+    `).get(projectSlug, provider, conversationRef) as Record<string, unknown> | undefined;
+    return row ? this.mapBoundSessionRow(row) : undefined;
+  }
+
+  getRestorableSessionByConversation(projectSlug: string, provider: string, conversationRef: string): BoundSession | undefined {
+    const row = this.sqlite.prepare(`
+      select * from bound_sessions
+      where project_slug = ? and provider = ? and conversation_ref = ? and should_restore = 1
       order by updated_at desc
       limit 1
     `).get(projectSlug, provider, conversationRef) as Record<string, unknown> | undefined;
@@ -511,8 +547,10 @@ export class AppDatabase {
     provider: String(row.provider) as BoundSession['provider'],
     projectSlug: String(row.project_slug),
     conversationRef: String(row.conversation_ref),
+    resumeConversationRef: row.resume_conversation_ref ? String(row.resume_conversation_ref) : undefined,
     tmuxSessionName: String(row.tmux_session_name),
     status: String(row.status) as BoundSession['status'],
+    shouldRestore: Boolean(row.should_restore),
     title: row.title ? String(row.title) : undefined,
     startedAt: String(row.started_at),
     updatedAt: String(row.updated_at),

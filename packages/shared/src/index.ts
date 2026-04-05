@@ -77,9 +77,11 @@ export interface BoundSession {
   provider: ProviderId;
   projectSlug: string;
   conversationRef: string;
+  resumeConversationRef?: string;
   tmuxSessionName: string;
   status: BoundSessionStatus;
   title?: string;
+  shouldRestore?: boolean;
   startedAt: string;
   updatedAt: string;
   lastActivityAt?: string;

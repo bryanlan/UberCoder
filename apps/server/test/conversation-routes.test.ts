@@ -216,6 +216,99 @@ describe('conversation routes', () => {
     }
   });
 
+  it('returns 409 when a history conversation is still durably bound but cannot be restored', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-ref',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Existing conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:05.000Z',
+      isBound: true,
+      boundSessionId: 'session-old',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const existingSession: BoundSession = {
+      id: 'session-old',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-ref',
+      tmuxSessionName: 'ac-codex-demo-old',
+      status: 'error',
+      shouldRestore: true,
+      title: 'Existing conversation',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:01:00.000Z',
+    };
+
+    const bindConversation = vi.fn();
+    const ensureSession = vi.fn(async () => undefined);
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => null,
+        }),
+      } as never,
+      {
+        bindConversation,
+        ensureSession,
+        getSessionByConversation: vi.fn(() => existingSession),
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/codex/history-ref/bind',
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: 'Conversation is already bound but could not be restored.',
+      });
+      expect(ensureSession).toHaveBeenCalledWith('session-old');
+      expect(bindConversation).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('loads indexed history directly from the cached transcript path without rediscovering provider files', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const transcriptPath = path.join(tempDir, 'cached-history.jsonl');
