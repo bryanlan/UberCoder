@@ -1101,6 +1101,78 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('retries Claude multiline paste submission when the first Enter leaves the draft parked in the composer', async () => {
+    class ClaudeRetrySubmitTmux extends FakeTmux {
+      private enterAttempts = 0;
+
+      constructor() {
+        super();
+        this.paneText = this.renderComposer('');
+      }
+
+      override async pasteText(_sessionName: string, text: string): Promise<void> {
+        this.pasted.push(text);
+        this.sent.push(text);
+        this.paneText = this.renderComposer('[Pasted text #1 +31 lines]');
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        this.enterAttempts += 1;
+        if (this.enterAttempts === 1) {
+          this.paneText = this.renderComposer('[Pasted text #1 +31 lines]');
+          return;
+        }
+        this.paneText = [
+          'Claude Code',
+          '',
+          'Running the retried pasted request…',
+          '• Working (1s • esc to interrupt)',
+          '',
+          '❯ ',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      private renderComposer(inputText: string): string {
+        return [
+          'Claude Code',
+          '',
+          'Ready for input.',
+          '',
+          `❯ ${inputText}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new ClaudeRetrySubmitTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'session-claude-retry-submit',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, {
+      text: 'line one\nline two\nline three',
+      keys: ['Enter'],
+    });
+
+    expect(tmux.pasted).toEqual(['line one\nline two\nline three']);
+    expect(tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
+    db.close();
+  });
+
   it('uses bracketed paste for long submitted input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -1324,7 +1396,7 @@ describe('SessionManager', () => {
       kind: 'history',
     });
 
-    const veryLongText = 'long prompt content '.repeat(220);
+    const veryLongText = 'long prompt content '.repeat(800);
     await manager.sendKeystrokes(session.id, { text: veryLongText, keys: ['Enter'] });
 
     expect(tmux.pasted).toEqual([]);

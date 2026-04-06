@@ -33,6 +33,8 @@ const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
 const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
+const SUBMITTED_DRAFT_SETTLE_WAIT_MS = 1_500;
+const SUBMITTED_DRAFT_RETRY_SETTLE_WAIT_MS = 900;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const MAX_INLINE_LIVE_INPUT_CHARS = 12_000;
 
@@ -59,6 +61,11 @@ function sessionScreenShowsWorking(screen: SessionScreen): boolean {
 
 function screenInputChanged(previous: SessionScreen, next: SessionScreen): boolean {
   return normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
+}
+
+function screenDraftWasSubmitted(previous: SessionScreen, next: SessionScreen): boolean {
+  return sessionScreenShowsWorking(next)
+    || normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
 }
 
 function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {
@@ -688,6 +695,8 @@ export class SessionManager {
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
     let stagedTransportPath: string | undefined;
+    let usedBracketedPasteTransport = false;
+    let expectsVisibleDraftInput = false;
 
     if (payload.text) {
       stagedTransportPath = shouldStageLargeLiveInput(payload.text)
@@ -696,19 +705,19 @@ export class SessionManager {
       const transportText = stagedTransportPath
         ? this.buildStagedLiveInputInstruction(stagedTransportPath)
         : payload.text;
-      const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
-      const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
-      if ((payload.keys?.length || useBracketedPasteTransport) && expectsVisibleInputChange) {
+      expectsVisibleDraftInput = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
+      usedBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
+      if ((payload.keys?.length || usedBracketedPasteTransport) && expectsVisibleDraftInput) {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
         latestObservedHash = hashScreen(latestObservedScreen);
       }
       const textEntryScreen = latestObservedScreen;
-      if (useBracketedPasteTransport) {
+      if (usedBracketedPasteTransport) {
         await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
       } else {
         await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
       }
-      if (payload.keys?.length || useBracketedPasteTransport) {
+      if (payload.keys?.length || usedBracketedPasteTransport) {
         const textSettledScreen = await this.waitForInputTextChange(
           liveSession,
           latestObservedHash,
@@ -720,7 +729,7 @@ export class SessionManager {
           latestObservedHash = hashScreen(textSettledScreen);
           this.publishScreenUpdate(liveSession, textSettledScreen);
         }
-        if (expectsVisibleInputChange && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
+        if (expectsVisibleDraftInput && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
           this.appendDebugTrace(liveSession, {
             action: 'send-keystrokes-rejected',
             text: payload.text,
@@ -733,7 +742,56 @@ export class SessionManager {
       }
     }
     if (payload.keys?.length) {
+      const draftScreenBeforeSubmit = payload.text && payload.keys.includes('Enter') && expectsVisibleDraftInput
+        ? latestObservedScreen
+        : undefined;
       await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
+      if (draftScreenBeforeSubmit) {
+        const settledAfterSubmit = await this.waitForDraftSubmission(
+          liveSession,
+          draftScreenBeforeSubmit,
+          SUBMITTED_DRAFT_SETTLE_WAIT_MS,
+        );
+        if (settledAfterSubmit) {
+          latestObservedScreen = settledAfterSubmit;
+          latestObservedHash = hashScreen(settledAfterSubmit);
+          this.publishScreenUpdate(liveSession, settledAfterSubmit);
+        } else {
+          latestObservedScreen = await this.captureSessionScreen(liveSession);
+          latestObservedHash = hashScreen(latestObservedScreen);
+        }
+
+        if (!screenDraftWasSubmitted(draftScreenBeforeSubmit, latestObservedScreen)) {
+          if (usedBracketedPasteTransport) {
+            await sleep(150);
+            await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, ['Enter']);
+            const retrySettledScreen = await this.waitForDraftSubmission(
+              liveSession,
+              latestObservedScreen,
+              SUBMITTED_DRAFT_RETRY_SETTLE_WAIT_MS,
+            );
+            if (retrySettledScreen) {
+              latestObservedScreen = retrySettledScreen;
+              latestObservedHash = hashScreen(retrySettledScreen);
+              this.publishScreenUpdate(liveSession, retrySettledScreen);
+            } else {
+              latestObservedScreen = await this.captureSessionScreen(liveSession);
+              latestObservedHash = hashScreen(latestObservedScreen);
+            }
+          }
+
+          if (!screenDraftWasSubmitted(draftScreenBeforeSubmit, latestObservedScreen)) {
+            this.appendDebugTrace(liveSession, {
+              action: 'send-keystrokes-submit-rejected',
+              text: payload.text,
+              keys: payload.keys,
+              before: draftScreenBeforeSubmit,
+              after: latestObservedScreen,
+            });
+            throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
+          }
+        }
+      }
     }
 
     const updated: BoundSession = {
@@ -1284,6 +1342,32 @@ export class SessionManager {
         }
       }
       if (!previousHash || Date.now() >= deadline) {
+        return latestChangedScreen;
+      }
+      await sleep(35);
+    }
+  }
+
+  private async waitForDraftSubmission(
+    session: BoundSession,
+    previousScreen: SessionScreen,
+    timeoutMs: number,
+  ): Promise<SessionScreen | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    let latestChangedScreen: SessionScreen | undefined;
+    let latestHash = hashScreen(previousScreen);
+
+    while (true) {
+      const screen = await this.captureSessionScreen(session);
+      const nextHash = hashScreen(screen);
+      if (nextHash !== latestHash) {
+        latestChangedScreen = screen;
+        latestHash = nextHash;
+        if (screenDraftWasSubmitted(previousScreen, screen)) {
+          return screen;
+        }
+      }
+      if (Date.now() >= deadline) {
         return latestChangedScreen;
       }
       await sleep(35);
