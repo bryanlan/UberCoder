@@ -64,8 +64,13 @@ function screenInputChanged(previous: SessionScreen, next: SessionScreen): boole
 }
 
 function screenDraftWasSubmitted(previous: SessionScreen, next: SessionScreen): boolean {
-  return sessionScreenShowsWorking(next)
-    || normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
+  if (sessionScreenShowsWorking(next)) {
+    return true;
+  }
+
+  const previousInput = normalizeComparableText(previous.inputText);
+  const nextInput = normalizeComparableText(next.inputText);
+  return previousInput.length > 0 && nextInput.length === 0;
 }
 
 function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {

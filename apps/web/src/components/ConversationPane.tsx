@@ -7,6 +7,12 @@ import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 
+const DESKTOP_BRIDGE_HEIGHT_STORAGE_KEY = 'agent-console:desktop-bridge-height:v1';
+const DEFAULT_DESKTOP_BRIDGE_HEIGHT = 232;
+const DEFAULT_COMPACT_DESKTOP_BRIDGE_HEIGHT = 320;
+const MIN_DESKTOP_BRIDGE_HEIGHT = 176;
+const MIN_AGENT_OUTPUT_HEIGHT = 180;
+
 type AnsiPaletteColor = {
   rgb: [number, number, number];
   class_name: string;
@@ -111,6 +117,23 @@ function useMediaQuery(query: string): boolean {
   }, [query]);
 
   return matches;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function readStoredDesktopBridgeHeight(): number | undefined {
+  const rawValue = globalThis.localStorage?.getItem(DESKTOP_BRIDGE_HEIGHT_STORAGE_KEY);
+  if (!rawValue) {
+    return undefined;
+  }
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function getDefaultDesktopBridgeHeight(compact: boolean): number {
+  return compact ? DEFAULT_COMPACT_DESKTOP_BRIDGE_HEIGHT : DEFAULT_DESKTOP_BRIDGE_HEIGHT;
 }
 
 function MobileSummaryStrip({
@@ -527,6 +550,7 @@ function LiveSessionInputBridge({
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
+  agentPaneRef,
 }: {
   sessionId: string;
   projectSlug: string;
@@ -544,6 +568,7 @@ function LiveSessionInputBridge({
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
+  agentPaneRef: RefObject<HTMLDivElement | null>;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -558,11 +583,111 @@ function LiveSessionInputBridge({
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const committedInputRef = useRef(inputText);
   const bridgeBusyRef = useRef(false);
+  const bridgeRootRef = useRef<HTMLDivElement | null>(null);
+  const desktopBridgeHeightRef = useRef(getDefaultDesktopBridgeHeight(compact));
+  const dragStateRef = useRef<{
+    startY: number;
+    startHeight: number;
+    minHeight: number;
+    maxHeight: number;
+  } | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [desktopBridgeHeight, setDesktopBridgeHeight] = useState(() => readStoredDesktopBridgeHeight() ?? getDefaultDesktopBridgeHeight(compact));
+  const desktopResizable = !mobileCollapsible;
+
+  function getDesktopBridgeHeightBounds(currentBridgeHeight: number): { minHeight: number; maxHeight: number } {
+    const currentAgentHeight = agentPaneRef.current?.getBoundingClientRect().height ?? 0;
+    const maxHeight = Math.max(
+      MIN_DESKTOP_BRIDGE_HEIGHT,
+      Math.round(currentBridgeHeight + Math.max(0, currentAgentHeight - MIN_AGENT_OUTPUT_HEIGHT)),
+    );
+    return {
+      minHeight: MIN_DESKTOP_BRIDGE_HEIGHT,
+      maxHeight,
+    };
+  }
+
+  function clampDesktopBridgeHeight(nextHeight: number, currentBridgeHeight = nextHeight): number {
+    const { minHeight, maxHeight } = getDesktopBridgeHeightBounds(currentBridgeHeight);
+    return clampNumber(nextHeight, minHeight, maxHeight);
+  }
 
   useEffect(() => {
     captureRef.current?.focus();
   }, [sessionId]);
+
+  useEffect(() => {
+    desktopBridgeHeightRef.current = desktopBridgeHeight;
+  }, [desktopBridgeHeight]);
+
+  useEffect(() => {
+    if (!desktopResizable) {
+      return;
+    }
+    globalThis.localStorage?.setItem(DESKTOP_BRIDGE_HEIGHT_STORAGE_KEY, String(Math.round(desktopBridgeHeight)));
+  }, [desktopBridgeHeight, desktopResizable]);
+
+  useEffect(() => {
+    if (!desktopResizable || !bridgeOpen) {
+      return;
+    }
+
+    const clampCurrentHeight = () => {
+      const currentBridgeHeight = bridgeRootRef.current?.getBoundingClientRect().height ?? desktopBridgeHeightRef.current;
+      setDesktopBridgeHeight((current) => {
+        const next = clampDesktopBridgeHeight(current, currentBridgeHeight);
+        return current === next ? current : next;
+      });
+    };
+
+    const frame = window.requestAnimationFrame(clampCurrentHeight);
+    const handleWindowResize = () => clampCurrentHeight();
+    window.addEventListener('resize', handleWindowResize);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('resize', handleWindowResize);
+    };
+  }, [bridgeOpen, compact, desktopResizable]);
+
+  useEffect(() => {
+    if (!desktopResizable) {
+      return;
+    }
+
+    const stopDragging = () => {
+      if (!dragStateRef.current) {
+        return;
+      }
+      dragStateRef.current = null;
+      document.body.style.removeProperty('cursor');
+      document.body.style.removeProperty('user-select');
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = dragStateRef.current;
+      if (!dragState) {
+        return;
+      }
+      event.preventDefault();
+      const dragDelta = event.clientY - dragState.startY;
+      const nextHeight = clampNumber(
+        dragState.startHeight - dragDelta,
+        dragState.minHeight,
+        dragState.maxHeight,
+      );
+      setDesktopBridgeHeight(nextHeight);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopDragging);
+    window.addEventListener('pointercancel', stopDragging);
+    return () => {
+      stopDragging();
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopDragging);
+      window.removeEventListener('pointercancel', stopDragging);
+    };
+  }, [desktopResizable]);
 
   useEffect(() => {
     if (!bridgeOpen) {
@@ -888,6 +1013,23 @@ function LiveSessionInputBridge({
     onToggleBridge();
   }
 
+  function handleDesktopResizeStart(event: React.PointerEvent<HTMLDivElement>): void {
+    if (!desktopResizable || !bridgeOpen || event.button !== 0) {
+      return;
+    }
+    const currentBridgeHeight = bridgeRootRef.current?.getBoundingClientRect().height ?? desktopBridgeHeight;
+    const { minHeight, maxHeight } = getDesktopBridgeHeightBounds(currentBridgeHeight);
+    dragStateRef.current = {
+      startY: event.clientY,
+      startHeight: currentBridgeHeight,
+      minHeight,
+      maxHeight,
+    };
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    event.preventDefault();
+  }
+
   function renderBridgeHeader(
     title: string,
     summary?: string,
@@ -899,8 +1041,18 @@ function LiveSessionInputBridge({
         'flex items-center justify-between gap-3',
         mobileCollapsible ? 'px-4 py-3' : 'mb-2 py-1',
       )}>
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
+        <div
+          className={clsx(
+            'min-w-0 flex-1',
+            desktopResizable && bridgeOpen && 'cursor-ns-resize select-none',
+          )}
+          onPointerDown={handleDesktopResizeStart}
+          title={desktopResizable && bridgeOpen ? 'Drag to resize the live input bridge' : undefined}
+        >
+          <div className="flex items-center gap-2">
+            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
+            {desktopResizable && bridgeOpen ? <div className="h-1 w-8 rounded-full bg-slate-700" /> : null}
+          </div>
           {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
         </div>
         <div className="flex items-center gap-2">
@@ -942,11 +1094,23 @@ function LiveSessionInputBridge({
     );
   }
 
-  const bridgeBodyClassName = mobileCollapsible ? 'px-4 pb-4' : 'px-4 py-4';
+  const bridgeBodyClassName = clsx(
+    mobileCollapsible ? 'px-4 pb-4' : 'flex min-h-0 flex-1 flex-col px-4 py-4',
+  );
+  const desktopBridgeStyle = desktopResizable && bridgeOpen
+    ? { height: clampDesktopBridgeHeight(desktopBridgeHeight, bridgeRootRef.current?.getBoundingClientRect().height ?? desktopBridgeHeight) }
+    : undefined;
 
   return (
-    <div className="border-t border-slate-800 bg-slate-950/90">
-      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', { showControlsToggle: true })}
+    <div
+      ref={bridgeRootRef}
+      className={clsx(
+        'border-t border-slate-800 bg-slate-950/90',
+        desktopResizable && bridgeOpen && 'flex min-h-0 shrink-0 flex-col',
+      )}
+      style={desktopBridgeStyle}
+    >
+      {renderBridgeHeader('Live input bridge', undefined, { showControlsToggle: true })}
       {bridgeOpen && (
         <div className={bridgeBodyClassName}>
           <textarea
@@ -1057,11 +1221,11 @@ function LiveSessionInputBridge({
             value={bridgeText}
             className={clsx(
               'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
-              compact ? 'h-28 sm:h-48' : 'h-24',
+              desktopResizable ? 'min-h-[96px] flex-1' : compact ? 'h-28 sm:h-48' : 'h-24',
             )}
           />
           {!mobileControlsHidden && (
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="mt-3 shrink-0 flex flex-wrap gap-2">
               {specialKeyButtons.map((button) => (
                 <button
                   key={button.label}
@@ -1414,6 +1578,7 @@ export function ConversationPane({
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
           inputText={liveScreen?.inputText ?? ''}
+          agentPaneRef={scrollRef}
           onSendKeystrokes={onSendKeystrokes}
           compact={compactLiveLayout}
           mobileCollapsible={isMobile}
