@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { PROVIDERS, type ConversationSummary, type ProviderId } from '@agent-console/shared';
+import { PROVIDERS, type BoundSession, type ConversationSummary, type ProviderId } from '@agent-console/shared';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
@@ -23,6 +23,10 @@ const bindConversationBodySchema = z.object({
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
+const timelineQuerySchema = z.object({
+  before: z.coerce.number().int().nonnegative().optional(),
+  limit: z.coerce.number().int().min(0).max(200).optional(),
+});
 
 function parseProvider(raw: string): ProviderId {
   return providerSchema.parse(raw);
@@ -32,6 +36,52 @@ function resolveAdoptedConversationRef(summary: ConversationSummary | undefined)
   return typeof summary?.rawMetadata?.adoptedConversationRef === 'string'
     ? summary.rawMetadata.adoptedConversationRef
     : undefined;
+}
+
+function paginateMessages<T>(
+  messages: T[],
+  options: { before?: number; limit?: number },
+): {
+  pageMessages: T[];
+  pageInfo?: {
+    hasOlder: boolean;
+    olderCursor?: number;
+    total: number;
+  };
+} {
+  const { before, limit } = options;
+  if (limit === undefined) {
+    return { pageMessages: messages };
+  }
+
+  const cappedEnd = before !== undefined ? Math.min(messages.length, Math.max(0, before)) : messages.length;
+  const start = Math.max(0, cappedEnd - limit);
+  return {
+    pageMessages: messages.slice(start, cappedEnd),
+    pageInfo: {
+      hasOlder: start > 0,
+      olderCursor: start > 0 ? start : undefined,
+      total: messages.length,
+    },
+  };
+}
+
+function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
+  const updatedAt = nowIso();
+  db.putPendingConversation({
+    ...pending,
+    isBound: false,
+    boundSessionId: undefined,
+    updatedAt,
+  });
+  db.upsertBoundSession({
+    ...session,
+    status: 'ended',
+    shouldRestore: false,
+    updatedAt,
+    isWorking: false,
+    pid: undefined,
+  });
 }
 
 export async function registerConversationRoutes(
@@ -50,6 +100,11 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
+    const parsedQuery = timelineQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      reply.code(400).send({ error: 'Invalid timeline query.', details: parsedQuery.error.flatten() });
+      return;
+    }
     const providerId = parseProvider(providerRaw);
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
@@ -109,6 +164,7 @@ export async function registerConversationRoutes(
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const pagedMessages = paginateMessages(mergedMessages, parsedQuery.data);
 
     if (!summary) {
       if (resolvedBoundSession) {
@@ -127,10 +183,11 @@ export async function registerConversationRoutes(
         isBound: Boolean(resolvedBoundSession),
         boundSessionId: resolvedBoundSession?.id,
       },
-      messages: mergedMessages,
+      messages: pagedMessages.pageMessages,
       allMessages: mergedAllMessages,
       boundSession: resolvedBoundSession,
       liveScreen,
+      messagePage: pagedMessages.pageInfo,
     };
   });
 
@@ -164,8 +221,12 @@ export async function registerConversationRoutes(
         }
         const refreshedSession = sessions.getSessionById(existingSession.id);
         if (refreshedSession?.shouldRestore) {
-          reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
-          return;
+          if (refreshedSession.conversationRef === existingPending.ref && refreshedSession.conversationRef.startsWith('pending:')) {
+            clearUnrestorablePendingBinding(db, existingPending, refreshedSession);
+          } else {
+            reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
+            return;
+          }
         }
       }
     }

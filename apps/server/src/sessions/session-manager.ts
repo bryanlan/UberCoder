@@ -852,13 +852,16 @@ export class SessionManager {
     return await this.refreshSessionState(session);
   }
 
-  async getSessionScreen(sessionId: string): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
+  async getSessionScreen(
+    sessionId: string,
+    options: { startLine?: number } = {},
+  ): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
       return undefined;
     }
-    const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName).catch(() => '');
+    const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName, options.startLine).catch(() => '');
     const screen = this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso()));
     this.syncSessionScreenState(this.mustGetSession(liveSession.id), screen);
     return {

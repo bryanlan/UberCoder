@@ -13,6 +13,9 @@ import { SessionKeystrokeRejectedError, SessionManager } from '../sessions/sessi
 const inputBodySchema = z.object({
   text: z.string().min(1),
 });
+const screenQuerySchema = z.object({
+  lines: z.coerce.number().int().min(50).max(20000).optional(),
+});
 const keystrokeKeySchema = z.enum(['Enter', 'Escape', 'Up', 'Down', 'Left', 'Right', 'BSpace', 'Tab', 'C-c']);
 const keystrokeBodySchema = z.object({
   text: z.string().min(1).optional(),
@@ -92,6 +95,33 @@ export async function registerSessionRoutes(
     const sessionId = (request.params as { sessionId: string }).sessionId;
     await sessions.releaseSession(sessionId);
     reply.code(204).send();
+  });
+
+  app.get('/api/sessions/:sessionId/screen', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply, false);
+    } catch {
+      return;
+    }
+    const parsedQuery = screenQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      reply.code(400).send({ error: 'Invalid screen query.', details: parsedQuery.error.flatten() });
+      return;
+    }
+    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const session = sessions.getSessionById(sessionId);
+    if (!session) {
+      reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    const screenState = await sessions.getSessionScreen(sessionId, {
+      startLine: parsedQuery.data.lines ? -parsedQuery.data.lines : undefined,
+    });
+    if (!screenState) {
+      reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    return screenState;
   });
 
   app.get('/api/sessions/:sessionId/raw-output', async (request, reply) => {

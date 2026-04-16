@@ -21,6 +21,7 @@ class FakeTmux implements TmuxClient {
   failKill = false;
   paneText = '';
   captureSequence: string[] = [];
+  captureStartLines: Array<number | undefined> = [];
 
   async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
     this.created.push(sessionName);
@@ -39,7 +40,8 @@ class FakeTmux implements TmuxClient {
   }
   async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
   async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
-  async capturePane(): Promise<string> {
+  async capturePane(_sessionName?: string, startLine?: number): Promise<string> {
+    this.captureStartLines.push(startLine);
     if (this.captureSequence.length > 0) {
       const next = this.captureSequence.shift();
       if (next !== undefined) {
@@ -386,6 +388,34 @@ describe('SessionManager', () => {
     const liveScreen = await manager.getSessionScreen(session.id);
     expect(liveScreen?.screen.content).toContain('Reviewing repository state…');
     expect(liveScreen?.screen.status).toContain('98% left');
+    db.close();
+  });
+
+  it('captures deeper live screen scrollback when a start line is requested', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Earlier output line',
+      'Most recent output line',
+      'gpt-5.4 medium · 98% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-screen-scrollback',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const liveScreen = await manager.getSessionScreen(session.id, { startLine: -800 });
+    expect(tmux.captureStartLines.at(-1)).toBe(-800);
+    expect(liveScreen?.screen.content).toContain('Earlier output line');
     db.close();
   });
 

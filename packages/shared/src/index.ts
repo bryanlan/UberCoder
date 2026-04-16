@@ -67,12 +67,19 @@ export interface SessionScreen {
   contextPercent?: number;
 }
 
+export interface ConversationMessagePage {
+  hasOlder: boolean;
+  olderCursor?: number;
+  total: number;
+}
+
 export interface ConversationTimeline {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
   allMessages?: NormalizedMessage[];
   boundSession?: BoundSession;
   liveScreen?: SessionScreen;
+  messagePage?: ConversationMessagePage;
 }
 
 export interface BoundSession {

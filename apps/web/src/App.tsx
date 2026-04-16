@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
@@ -47,6 +47,8 @@ const defaultUiPreferences: UiPreferences = {
     redMinutes: 20,
   },
 };
+
+const TIMELINE_MESSAGE_PAGE_SIZE = 80;
 
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
@@ -233,6 +235,21 @@ function applySessionActivityToTimeline(
   };
 }
 
+function resetTimelineHistoryQuery(
+  queryClient: ReturnType<typeof useQueryClient>,
+  projectSlug: string | undefined,
+  provider: ProviderId | undefined,
+  conversationRef: string | undefined,
+): void {
+  if (!projectSlug || !provider || !conversationRef) {
+    return;
+  }
+  void queryClient.resetQueries({
+    queryKey: ['timeline-history', projectSlug, provider, conversationRef],
+    exact: true,
+  });
+}
+
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -278,28 +295,60 @@ function AppShell() {
 
   const timelineQuery = useQuery({
     queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-    queryFn: () => api.timeline(selectedProjectSlug!, selectedProvider!, selectedConversationRef!),
+    queryFn: () => api.timeline(selectedProjectSlug!, selectedProvider!, selectedConversationRef!, { limit: 0 }),
     enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
     refetchInterval: (query) => {
       if (!realtimeDegraded) return false;
       return query.state.data?.boundSession ? 1000 : 5000;
     },
   });
+  const timelineHistoryQuery = useInfiniteQuery({
+    queryKey: ['timeline-history', selectedProjectSlug, selectedProvider, selectedConversationRef],
+    queryFn: ({ pageParam }) => api.timeline(
+      selectedProjectSlug!,
+      selectedProvider!,
+      selectedConversationRef!,
+      {
+        limit: TIMELINE_MESSAGE_PAGE_SIZE,
+        before: typeof pageParam === 'number' ? pageParam : undefined,
+      },
+    ),
+    enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (lastPage) => lastPage.messagePage?.olderCursor,
+  });
+  const pagedTimelineMessages = useMemo(
+    () => [...(timelineHistoryQuery.data?.pages ?? [])]
+      .reverse()
+      .flatMap((page) => page.messages),
+    [timelineHistoryQuery.data?.pages],
+  );
+  const timeline = useMemo(
+    () => timelineQuery.data
+      ? {
+          ...timelineQuery.data,
+          messages: pagedTimelineMessages,
+          messagePage: timelineHistoryQuery.data?.pages.at(-1)?.messagePage,
+        }
+      : undefined,
+    [pagedTimelineMessages, timelineHistoryQuery.data?.pages, timelineQuery.data],
+  );
+  const hasOlderTimelineMessages = Boolean(timelineHistoryQuery.hasNextPage);
 
   useEffect(() => {
-    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef || !timelineQuery.data?.conversation.ref) return;
-    if (timelineQuery.data.conversation.ref === selectedConversationRef) return;
+    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef || !timeline?.conversation.ref) return;
+    if (timeline.conversation.ref === selectedConversationRef) return;
     navigate(
-      `/projects/${encodeURIComponent(selectedProjectSlug)}/${selectedProvider}/${encodeURIComponent(timelineQuery.data.conversation.ref)}`,
+      `/projects/${encodeURIComponent(selectedProjectSlug)}/${selectedProvider}/${encodeURIComponent(timeline.conversation.ref)}`,
       { replace: true },
     );
-  }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timelineQuery.data?.conversation.ref]);
+  }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.conversation.ref]);
 
   const rawOutputQuery = useQuery({
-    queryKey: ['raw-output', timelineQuery.data?.boundSession?.id],
-    queryFn: () => api.rawOutput(timelineQuery.data!.boundSession!.id),
-    enabled: Boolean(debugOpen && timelineQuery.data?.boundSession?.id),
-    refetchInterval: realtimeDegraded && timelineQuery.data?.boundSession ? 1000 : false,
+    queryKey: ['raw-output', timeline?.boundSession?.id],
+    queryFn: () => api.rawOutput(timeline!.boundSession!.id),
+    enabled: Boolean(debugOpen && timeline?.boundSession?.id),
+    refetchInterval: realtimeDegraded && timeline?.boundSession ? 1000 : false,
   });
 
   useEffect(() => {
@@ -309,11 +358,11 @@ function AppShell() {
   }, [location.pathname, setLastConsolePath]);
 
   useEffect(() => {
-    if (location.pathname === '/settings' || !timelineQuery.data?.boundSession) {
+    if (location.pathname === '/settings' || !timeline?.boundSession) {
       setMobileChromeHidden(false);
       setMobileControlsHidden(false);
     }
-  }, [location.pathname, setMobileChromeHidden, timelineQuery.data?.boundSession]);
+  }, [location.pathname, setMobileChromeHidden, timeline?.boundSession]);
 
   useEffect(() => {
     setMobileControlsHidden(false);
@@ -336,7 +385,7 @@ function AppShell() {
           return;
         }
         if (parsed.type === 'session.screen-updated') {
-          const matchesSelectedSession = parsed.sessionId === timelineQuery.data?.boundSession?.id
+          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
             || (
               parsed.projectSlug === selectedProjectSlug
               && parsed.provider === selectedProvider
@@ -359,7 +408,7 @@ function AppShell() {
             ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
             (current) => applySessionActivityToTimeline(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
           );
-          if (parsed.sessionId === timelineQuery.data?.boundSession?.id && debugOpen) {
+          if (parsed.sessionId === timeline?.boundSession?.id && debugOpen) {
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
           }
           return;
@@ -388,7 +437,7 @@ function AppShell() {
             && selectedProvider
             && selectedConversationRef
             && (
-              parsed.sessionId === timelineQuery.data?.boundSession?.id
+              parsed.sessionId === timeline?.boundSession?.id
               || (
                 parsed.projectSlug === selectedProjectSlug
                 && parsed.provider === selectedProvider
@@ -397,6 +446,7 @@ function AppShell() {
             )
           ) {
             queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+            resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
           }
           return;
         }
@@ -414,11 +464,13 @@ function AppShell() {
           );
           if (conversationSelection?.params.conversationRef && eventTargetsSelection) {
             queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+            resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
           }
           return;
         }
         if (conversationSelection?.params.conversationRef) {
           queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+          resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
         }
       } catch {
         setEventError('Lost event stream parsing. Refresh to recover.');
@@ -428,7 +480,7 @@ function AppShell() {
       setEventError('Realtime connection dropped. The page is still usable and polling the project tree and selected conversation.');
     };
     return () => source.close();
-  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, queryClient, selectedConversationRef, selectedProjectSlug, selectedProvider, timelineQuery.data?.boundSession?.id]);
+  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, queryClient, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.boundSession?.id]);
 
   function describeError(error: unknown, fallback: string): string {
     return error instanceof ApiError ? error.message : fallback;
@@ -457,6 +509,7 @@ function AppShell() {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     },
   });
 
@@ -467,6 +520,7 @@ function AppShell() {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
+      resetTimelineHistoryQuery(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
       navigate(`/projects/${encodeURIComponent(variables.projectSlug)}/${variables.provider}/${encodeURIComponent(variables.conversationRef)}`);
       closeSidebarIfMobile();
     },
@@ -527,6 +581,7 @@ function AppShell() {
       }
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
+      resetTimelineHistoryQuery(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
     },
     onSettled: () => {
       setRenamingConversationKey(undefined);
@@ -585,6 +640,7 @@ function AppShell() {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
       queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     },
   });
 
@@ -656,8 +712,9 @@ function AppShell() {
           : current,
       );
       void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     }
-    if (sessionId === timelineQuery.data?.boundSession?.id) {
+    if (sessionId === timeline?.boundSession?.id) {
       void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
     }
   }
@@ -666,7 +723,7 @@ function AppShell() {
     if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
       return undefined;
     }
-    if (timelineQuery.data?.conversation.kind !== 'history') {
+    if (timeline?.conversation.kind !== 'history') {
       return undefined;
     }
 
@@ -695,6 +752,7 @@ function AppShell() {
     );
     void queryClient.invalidateQueries({ queryKey: ['tree'] });
     void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+    resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     return session;
   }
 
@@ -709,7 +767,7 @@ function AppShell() {
         error instanceof ApiError
         && error.status === 409
         && error.message.includes('did not accept the typed text into its input buffer')
-        && timelineQuery.data?.boundSession?.id === sessionId
+        && timeline?.boundSession?.id === sessionId
       ) {
         try {
           const usePromptedCodexRebind = selectedProvider === 'codex'
@@ -980,8 +1038,8 @@ function AppShell() {
               projects={treeQuery.data?.projects}
               project={project}
               selectedProvider={selectedProvider}
-              timeline={timelineQuery.data}
-              loading={timelineQuery.isLoading}
+              timeline={timeline}
+              loading={timelineQuery.isLoading || (timelineHistoryQuery.isLoading && !timelineHistoryQuery.data)}
               workMode={workMode}
               mobileChromeHidden={mobileChromeHidden}
               onToggleMobileChrome={() => setMobileChromeHidden((current) => !current)}
@@ -996,6 +1054,9 @@ function AppShell() {
               onToggleDebug={() => setDebugOpen((current) => !current)}
               rawOutput={rawOutputQuery.data?.text}
               rawLoading={rawOutputQuery.isLoading}
+              hasOlderMessages={hasOlderTimelineMessages}
+              loadingOlderMessages={timelineHistoryQuery.isFetchingNextPage}
+              onLoadOlderMessages={() => timelineHistoryQuery.fetchNextPage().then(() => undefined)}
             />
           )}
         </main>
