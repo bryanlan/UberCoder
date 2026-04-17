@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
+import { useConversationScrollController } from '../features/conversation/useConversationScrollController';
 
 type AnsiPaletteColor = {
   rgb: [number, number, number];
@@ -97,10 +98,6 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-const DEFAULT_LIVE_OUTPUT_LINES = 240;
-const LIVE_OUTPUT_LINE_INCREMENT = 360;
-const MAX_LIVE_OUTPUT_LINES = 20_000;
-
 function MobileSummaryStrip({
   title,
   summary,
@@ -143,95 +140,30 @@ function LiveSessionOutputBlock({
   content,
   contentAnsi,
   compact,
-  scrollResetKey,
-  embedded = false,
 }: {
   content: string;
   contentAnsi?: string;
   compact: boolean;
-  scrollResetKey: string;
-  embedded?: boolean;
 }) {
-  if (embedded) {
-    if (compact) {
-      return (
-        <div className="rounded-[1.25rem] border border-slate-800 bg-slate-950/80 shadow-panel">
-          <LiveAnsiBlock
-            text={content.trim() || 'Waiting for session output…'}
-            ansiText={contentAnsi}
-            className="whitespace-pre-wrap break-words bg-slate-950/80 px-4 py-4 font-mono text-[13px] leading-6 text-slate-300"
-          />
-        </div>
-      );
-    }
-
+  if (compact) {
     return (
-      <div className="rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
-        <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
+      <div className="rounded-[1.25rem] border border-slate-800 bg-slate-950/80 shadow-panel">
         <LiveAnsiBlock
           text={content.trim() || 'Waiting for session output…'}
           ansiText={contentAnsi}
-          className="whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-300"
+          className="whitespace-pre-wrap break-words bg-slate-950/80 px-4 py-4 font-mono text-[13px] leading-6 text-slate-300"
         />
       </div>
     );
   }
 
-  const outputRef = useRef<HTMLDivElement | null>(null);
-  const stickToBottomRef = useRef(true);
-
-  useEffect(() => {
-    const output = outputRef.current;
-    if (!output) {
-      return;
-    }
-
-    const updateStickiness = () => {
-      const distanceFromBottom = output.scrollHeight - output.scrollTop - output.clientHeight;
-      stickToBottomRef.current = distanceFromBottom <= 48;
-    };
-
-    updateStickiness();
-    output.addEventListener('scroll', updateStickiness);
-    return () => output.removeEventListener('scroll', updateStickiness);
-  }, []);
-
-  useEffect(() => {
-    const output = outputRef.current;
-    if (!output || !stickToBottomRef.current) {
-      return;
-    }
-    output.scrollTo({ top: output.scrollHeight, behavior: 'auto' });
-  }, [content]);
-
-  useEffect(() => {
-    const output = outputRef.current;
-    if (!output) {
-      return;
-    }
-    stickToBottomRef.current = true;
-    output.scrollTo({ top: output.scrollHeight, behavior: 'auto' });
-  }, [scrollResetKey]);
-
-  if (compact) {
-    return (
-      <LiveAnsiBlock
-        containerRef={outputRef}
-        text={content.trim() || 'Waiting for session output…'}
-        ansiText={contentAnsi}
-        className="scrollbar-thin h-full min-h-0 overflow-auto whitespace-pre-wrap break-words bg-slate-950/80 px-4 py-4 font-mono text-[13px] leading-6 text-slate-300"
-      />
-    );
-  }
-
   return (
-    <div className="flex h-full min-h-0 flex-col rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
+    <div className="rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
       <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
       <LiveAnsiBlock
-        containerRef={outputRef}
         text={content.trim() || 'Waiting for session output…'}
         ansiText={contentAnsi}
-        className="scrollbar-thin flex-1 min-h-0 overflow-auto whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-300"
+        className="whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-300"
       />
     </div>
   );
@@ -1104,6 +1036,8 @@ interface ConversationPaneProps {
   project?: ProjectSummary;
   selectedProvider?: ProviderId;
   timeline?: ConversationTimeline;
+  liveMode: boolean;
+  liveOutputScreen?: ConversationTimeline['liveScreen'];
   loading: boolean;
   workMode: boolean;
   mobileChromeHidden: boolean;
@@ -1122,6 +1056,13 @@ interface ConversationPaneProps {
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   onLoadOlderMessages: () => Promise<void>;
+  hasOlderLiveOutput: boolean;
+  loadingOlderLiveOutput: boolean;
+  onLoadOlderLiveOutput: () => Promise<void>;
+  conversationKey?: string;
+  historyPrependVersion: number;
+  liveOutputPrependVersion: number;
+  tailKey?: string;
 }
 
 export function ConversationPane({
@@ -1129,6 +1070,8 @@ export function ConversationPane({
   project,
   selectedProvider,
   timeline,
+  liveMode,
+  liveOutputScreen,
   loading,
   workMode,
   mobileChromeHidden,
@@ -1147,195 +1090,53 @@ export function ConversationPane({
   hasOlderMessages,
   loadingOlderMessages,
   onLoadOlderMessages,
+  hasOlderLiveOutput,
+  loadingOlderLiveOutput,
+  onLoadOlderLiveOutput,
+  conversationKey,
+  historyPrependVersion,
+  liveOutputPrependVersion,
+  tailKey,
 }: ConversationPaneProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const stickToBottomRef = useRef(true);
-  const prependScrollHeightRef = useRef<number | null>(null);
-  const olderLoadInFlightRef = useRef(false);
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [mobileBridgeOpen, setMobileBridgeOpen] = useState(true);
-  const [liveOutputLines, setLiveOutputLines] = useState(DEFAULT_LIVE_OUTPUT_LINES);
-  const [expandedLiveScreen, setExpandedLiveScreen] = useState<ConversationTimeline['liveScreen']>();
-  const [loadingLiveOutputMore, setLoadingLiveOutputMore] = useState(false);
-  const [liveOutputHasMore, setLiveOutputHasMore] = useState(true);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
-  const liveMode = Boolean(boundSession && liveScreen);
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = mobileChromeHidden;
-  const latestAssistantMessage = [...(timeline?.messages ?? [])]
+  const historyMessages = timeline?.messages ?? [];
+  const showHistory = !liveMode && historyMessages.length > 0;
+  const latestAssistantMessage = [...historyMessages]
     .reverse()
     .find((message) => message.role === 'assistant')
     ?.text ?? '';
-  const conversationScrollResetKey = timeline
-    ? `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}:${boundSession?.id ?? 'unbound'}`
-    : undefined;
-  const effectiveLiveScreen = liveMode && liveOutputLines > DEFAULT_LIVE_OUTPUT_LINES
-    ? (expandedLiveScreen ?? liveScreen)
-    : liveScreen;
-
-  function requestOlderMessages(): void {
-    if (!hasOlderMessages || loadingOlderMessages || olderLoadInFlightRef.current) {
-      return;
-    }
-
-    prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? null;
-    olderLoadInFlightRef.current = true;
-    void onLoadOlderMessages()
-      .catch(() => {
-        prependScrollHeightRef.current = null;
-      })
-      .finally(() => {
-        olderLoadInFlightRef.current = false;
-      });
-  }
-
-  async function loadMoreLiveOutput(): Promise<void> {
-    if (!boundSession || !liveMode || loadingLiveOutputMore || !liveOutputHasMore) {
-      return;
-    }
-
-    const nextLines = Math.min(MAX_LIVE_OUTPUT_LINES, liveOutputLines + LIVE_OUTPUT_LINE_INCREMENT);
-    if (nextLines <= liveOutputLines) {
-      setLiveOutputHasMore(false);
-      return;
-    }
-
-    prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? null;
-    setLoadingLiveOutputMore(true);
-    try {
-      const previousRenderedText = `${effectiveLiveScreen?.contentAnsi ?? effectiveLiveScreen?.content ?? ''}\n${effectiveLiveScreen?.statusAnsi ?? effectiveLiveScreen?.status ?? ''}`;
-      const response = await api.sessionScreen(boundSession.id, { lines: nextLines });
-      const nextScreen = response.screen;
-      const nextRenderedText = `${nextScreen?.contentAnsi ?? nextScreen?.content ?? ''}\n${nextScreen?.statusAnsi ?? nextScreen?.status ?? ''}`;
-      setExpandedLiveScreen(nextScreen ?? undefined);
-      setLiveOutputLines(nextLines);
-      setLiveOutputHasMore(nextLines < MAX_LIVE_OUTPUT_LINES && nextRenderedText !== previousRenderedText);
-    } catch {
-      prependScrollHeightRef.current = null;
-    } finally {
-      setLoadingLiveOutputMore(false);
-    }
-  }
-
-  useEffect(() => {
-    const scroller = scrollRef.current;
-    if (!scroller) {
-      return;
-    }
-
-    const updateScrollState = () => {
-      const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-      stickToBottomRef.current = distanceFromBottom <= 48;
-      if (scroller.scrollTop <= 160) {
-        if (liveMode) {
-          void loadMoreLiveOutput();
-        } else {
-          requestOlderMessages();
-        }
-      }
-    };
-
-    updateScrollState();
-    scroller.addEventListener('scroll', updateScrollState);
-    return () => scroller.removeEventListener('scroll', updateScrollState);
-  }, [hasOlderMessages, liveMode, liveOutputHasMore, loadingLiveOutputMore, loadingOlderMessages, onLoadOlderMessages, timeline?.conversation.ref]);
-
-  useEffect(() => {
-    if (!conversationScrollResetKey) {
-      return;
-    }
-
-    setLiveOutputLines(DEFAULT_LIVE_OUTPUT_LINES);
-    setExpandedLiveScreen(undefined);
-    setLoadingLiveOutputMore(false);
-    setLiveOutputHasMore(true);
-
-    const frame = window.requestAnimationFrame(() => {
-      const scroller = scrollRef.current;
-      if (!scroller) {
-        return;
-      }
-      scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
-    });
-
-    return () => window.cancelAnimationFrame(frame);
-  }, [conversationScrollResetKey]);
-
-  useEffect(() => {
-    const scroller = scrollRef.current;
-    const previousScrollHeight = prependScrollHeightRef.current;
-    if (!scroller || previousScrollHeight === null) {
-      return;
-    }
-
-    scroller.scrollTop += scroller.scrollHeight - previousScrollHeight;
-    prependScrollHeightRef.current = null;
-  }, [effectiveLiveScreen?.content, liveMode, timeline?.messages.length]);
-
-  useEffect(() => {
-    if (!liveMode || !stickToBottomRef.current || prependScrollHeightRef.current !== null) {
-      return;
-    }
-
-    const scroller = scrollRef.current;
-    if (!scroller) {
-      return;
-    }
-
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
-  }, [effectiveLiveScreen?.capturedAt, effectiveLiveScreen?.content, liveMode, timeline?.messages.length]);
-
-  useEffect(() => {
-    const scroller = scrollRef.current;
-    if (!scroller || loading) {
-      return;
-    }
-
-    if (liveMode) {
-      if (!liveOutputHasMore || loadingLiveOutputMore) {
-        return;
-      }
-      if (scroller.scrollHeight <= scroller.clientHeight + 64) {
-        void loadMoreLiveOutput();
-      }
-      return;
-    }
-
-    if (!hasOlderMessages || loadingOlderMessages) {
-      return;
-    }
-    if (scroller.scrollHeight <= scroller.clientHeight + 64) {
-      requestOlderMessages();
-    }
-  }, [hasOlderMessages, liveMode, liveOutputHasMore, loading, loadingLiveOutputMore, loadingOlderMessages, timeline?.messages.length]);
-
-  useEffect(() => {
-    if (!boundSession || !liveMode || liveOutputLines <= DEFAULT_LIVE_OUTPUT_LINES) {
-      return;
-    }
-
-    let cancelled = false;
-    void api.sessionScreen(boundSession.id, { lines: liveOutputLines })
-      .then((response) => {
-        if (cancelled) {
-          return;
-        }
-        setExpandedLiveScreen(response.screen ?? undefined);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [boundSession?.id, liveMode, liveOutputLines, liveScreen?.capturedAt]);
-
-  useEffect(() => {
-    if (!liveMode || liveOutputLines <= DEFAULT_LIVE_OUTPUT_LINES) {
-      return;
-    }
-    setLiveOutputHasMore(true);
-  }, [liveMode, liveOutputLines, liveScreen?.capturedAt]);
+  const activeSurface = liveMode
+    ? 'live'
+    : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
+  const layoutKey = [
+    hideTopPanel ? 'top:hidden' : 'top:shown',
+    debugOpen ? 'debug:open' : 'debug:closed',
+    mobileBridgeOpen ? 'bridge:open' : 'bridge:closed',
+    mobileControlsHidden ? 'controls:hidden' : 'controls:shown',
+    `surface:${activeSurface}`,
+    compactLiveLayout ? 'layout:compact' : 'layout:regular',
+    isMobile ? 'viewport:mobile' : 'viewport:desktop',
+  ].join('|');
+  const { scrollRef } = useConversationScrollController({
+    conversationKey,
+    activeSurface,
+    tailKey,
+    layoutKey,
+    historyPrependVersion,
+    liveOutputPrependVersion,
+    hasOlderHistory: hasOlderMessages,
+    loadingOlderHistory: loadingOlderMessages,
+    onLoadOlderHistory: onLoadOlderMessages,
+    hasOlderLiveOutput,
+    loadingOlderLiveOutput,
+    onLoadOlderLiveOutput,
+    loading,
+  });
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1361,7 +1162,7 @@ export function ConversationPane({
     return <ExplorerPane projects={projects} project={project} selectedProvider={selectedProvider} />;
   }
 
-  if (workMode && !liveMode) {
+  if (workMode && !boundSession) {
     return (
       <div className="flex h-full items-center justify-center px-6 text-center">
         <div className="max-w-md">
@@ -1384,11 +1185,6 @@ export function ConversationPane({
   }
 
   const proxyLinks = project?.allowedLocalhostPorts ?? [];
-  const historyMessages = timeline.messages;
-  const showHistory = !liveMode && historyMessages.length > 0;
-  const liveOutputScrollResetKey = boundSession
-    ? `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}:${boundSession.id}`
-    : `${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -1511,18 +1307,16 @@ export function ConversationPane({
           !liveMode && 'space-y-4',
         )}
       >
-        {loading ? (
-          <div className="text-sm text-slate-400">Loading conversation…</div>
-        ) : liveMode && effectiveLiveScreen ? (
+        {liveMode && liveOutputScreen ? (
           <div className="space-y-4">
-            {(liveOutputHasMore || loadingLiveOutputMore) && (
+            {(hasOlderLiveOutput || loadingOlderLiveOutput) && (
               <div className="text-center text-xs text-slate-500">
-                {loadingLiveOutputMore ? 'Loading earlier live output…' : 'Scroll up to load earlier live output'}
+                {loadingOlderLiveOutput ? 'Loading earlier live output…' : 'Scroll up to load earlier live output'}
               </div>
             )}
             {compactLiveLayout
-              ? <LiveSessionOutputBlock content={effectiveLiveScreen.content} contentAnsi={effectiveLiveScreen.contentAnsi} compact embedded scrollResetKey={liveOutputScrollResetKey} />
-              : <LiveSessionOutputBlock content={effectiveLiveScreen.content} contentAnsi={effectiveLiveScreen.contentAnsi} compact={false} embedded scrollResetKey={liveOutputScrollResetKey} />}
+              ? <LiveSessionOutputBlock content={liveOutputScreen.content} contentAnsi={liveOutputScreen.contentAnsi} compact />
+              : <LiveSessionOutputBlock content={liveOutputScreen.content} contentAnsi={liveOutputScreen.contentAnsi} compact={false} />}
           </div>
         ) : showHistory || hasOlderMessages || loadingOlderMessages ? (
           <div className="space-y-4 pb-5">
@@ -1597,12 +1391,12 @@ export function ConversationPane({
         </div>
       )}
 
-      {liveMode && effectiveLiveScreen && !mobileControlsHidden && (
+      {liveMode && liveOutputScreen && !mobileControlsHidden && (
         <LiveSessionStatus
-          status={effectiveLiveScreen.status}
-          statusAnsi={effectiveLiveScreen.statusAnsi}
-          model={effectiveLiveScreen.model ?? timeline?.conversation.model}
-          contextPercent={effectiveLiveScreen.contextPercent}
+          status={liveOutputScreen.status}
+          statusAnsi={liveOutputScreen.statusAnsi}
+          model={liveOutputScreen.model ?? timeline?.conversation.model}
+          contextPercent={liveOutputScreen.contextPercent}
           mobileCompact={isMobile}
         />
       )}

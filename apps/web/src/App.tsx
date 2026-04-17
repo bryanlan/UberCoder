@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
@@ -16,6 +16,7 @@ import type {
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
+import { useConversationDataController, resetTimelineHistoryQuery } from './features/conversation/useConversationDataController';
 import { LoginPage } from './pages/LoginPage';
 import { SettingsPage } from './pages/SettingsPage';
 
@@ -47,8 +48,6 @@ const defaultUiPreferences: UiPreferences = {
     redMinutes: 20,
   },
 };
-
-const TIMELINE_MESSAGE_PAGE_SIZE = 80;
 
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
@@ -235,21 +234,6 @@ function applySessionActivityToTimeline(
   };
 }
 
-function resetTimelineHistoryQuery(
-  queryClient: ReturnType<typeof useQueryClient>,
-  projectSlug: string | undefined,
-  provider: ProviderId | undefined,
-  conversationRef: string | undefined,
-): void {
-  if (!projectSlug || !provider || !conversationRef) {
-    return;
-  }
-  void queryClient.resetQueries({
-    queryKey: ['timeline-history', projectSlug, provider, conversationRef],
-    exact: true,
-  });
-}
-
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -293,47 +277,31 @@ function AppShell() {
   const selectedProvider = (conversationSelection?.params.provider ?? providerSelection?.params.provider) as ProviderId | undefined;
   const selectedConversationRef = conversationSelection?.params.conversationRef ? decodeURIComponent(conversationSelection.params.conversationRef) : undefined;
 
-  const timelineQuery = useQuery({
-    queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-    queryFn: () => api.timeline(selectedProjectSlug!, selectedProvider!, selectedConversationRef!, { limit: 0 }),
-    enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
-    refetchInterval: (query) => {
-      if (!realtimeDegraded) return false;
-      return query.state.data?.boundSession ? 1000 : 5000;
-    },
+  const {
+    timeline,
+    liveMode,
+    effectiveLiveScreen,
+    loading: timelineLoading,
+    rawOutput,
+    rawLoading,
+    hasOlderMessages,
+    loadingOlderMessages,
+    loadOlderMessages,
+    hasOlderLiveOutput,
+    loadingOlderLiveOutput,
+    loadOlderLiveOutput,
+    conversationKey,
+    historyPrependVersion,
+    liveOutputPrependVersion,
+    tailKey,
+  } = useConversationDataController({
+    authenticated: authQuery.data?.authenticated,
+    selectedProjectSlug,
+    selectedProvider,
+    selectedConversationRef,
+    debugOpen,
+    realtimeDegraded,
   });
-  const timelineHistoryQuery = useInfiniteQuery({
-    queryKey: ['timeline-history', selectedProjectSlug, selectedProvider, selectedConversationRef],
-    queryFn: ({ pageParam }) => api.timeline(
-      selectedProjectSlug!,
-      selectedProvider!,
-      selectedConversationRef!,
-      {
-        limit: TIMELINE_MESSAGE_PAGE_SIZE,
-        before: typeof pageParam === 'number' ? pageParam : undefined,
-      },
-    ),
-    enabled: Boolean(authQuery.data?.authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
-    initialPageParam: undefined as number | undefined,
-    getNextPageParam: (lastPage) => lastPage.messagePage?.olderCursor,
-  });
-  const pagedTimelineMessages = useMemo(
-    () => [...(timelineHistoryQuery.data?.pages ?? [])]
-      .reverse()
-      .flatMap((page) => page.messages),
-    [timelineHistoryQuery.data?.pages],
-  );
-  const timeline = useMemo(
-    () => timelineQuery.data
-      ? {
-          ...timelineQuery.data,
-          messages: pagedTimelineMessages,
-          messagePage: timelineHistoryQuery.data?.pages.at(-1)?.messagePage,
-        }
-      : undefined,
-    [pagedTimelineMessages, timelineHistoryQuery.data?.pages, timelineQuery.data],
-  );
-  const hasOlderTimelineMessages = Boolean(timelineHistoryQuery.hasNextPage);
 
   useEffect(() => {
     if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef || !timeline?.conversation.ref) return;
@@ -343,13 +311,6 @@ function AppShell() {
       { replace: true },
     );
   }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.conversation.ref]);
-
-  const rawOutputQuery = useQuery({
-    queryKey: ['raw-output', timeline?.boundSession?.id],
-    queryFn: () => api.rawOutput(timeline!.boundSession!.id),
-    enabled: Boolean(debugOpen && timeline?.boundSession?.id),
-    refetchInterval: realtimeDegraded && timeline?.boundSession ? 1000 : false,
-  });
 
   useEffect(() => {
     if (location.pathname !== '/settings' && location.pathname !== '/login') {
@@ -1039,7 +1000,9 @@ function AppShell() {
               project={project}
               selectedProvider={selectedProvider}
               timeline={timeline}
-              loading={timelineQuery.isLoading || (timelineHistoryQuery.isLoading && !timelineHistoryQuery.data)}
+              liveMode={liveMode}
+              liveOutputScreen={effectiveLiveScreen}
+              loading={timelineLoading}
               workMode={workMode}
               mobileChromeHidden={mobileChromeHidden}
               onToggleMobileChrome={() => setMobileChromeHidden((current) => !current)}
@@ -1052,11 +1015,18 @@ function AppShell() {
               releasing={releaseMutation.isPending}
               debugOpen={debugOpen}
               onToggleDebug={() => setDebugOpen((current) => !current)}
-              rawOutput={rawOutputQuery.data?.text}
-              rawLoading={rawOutputQuery.isLoading}
-              hasOlderMessages={hasOlderTimelineMessages}
-              loadingOlderMessages={timelineHistoryQuery.isFetchingNextPage}
-              onLoadOlderMessages={() => timelineHistoryQuery.fetchNextPage().then(() => undefined)}
+              rawOutput={rawOutput}
+              rawLoading={rawLoading}
+              hasOlderMessages={hasOlderMessages}
+              loadingOlderMessages={loadingOlderMessages}
+              onLoadOlderMessages={loadOlderMessages}
+              hasOlderLiveOutput={hasOlderLiveOutput}
+              loadingOlderLiveOutput={loadingOlderLiveOutput}
+              onLoadOlderLiveOutput={loadOlderLiveOutput}
+              conversationKey={conversationKey}
+              historyPrependVersion={historyPrependVersion}
+              liveOutputPrependVersion={liveOutputPrependVersion}
+              tailKey={tailKey}
             />
           )}
         </main>
