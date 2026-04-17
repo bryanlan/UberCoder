@@ -1146,16 +1146,22 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('stages very large submitted bridge text into a file-backed instruction', async () => {
+  it('submits very large bridge text directly through bracketed paste', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    class StagedInputTmux extends FakeTmux {
+    class LargeInputTmux extends FakeTmux {
       constructor() {
         super();
         this.paneText = this.renderComposer('');
       }
 
       override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        this.paneText = this.renderComposer(text);
+      }
+
+      override async pasteText(_sessionName: string, text: string): Promise<void> {
+        this.pasted.push(text);
         this.sent.push(text);
         this.paneText = this.renderComposer(text);
       }
@@ -1168,7 +1174,7 @@ describe('SessionManager', () => {
         this.paneText = [
           'OpenAI Codex',
           '',
-          'Working through the staged prompt…',
+          'Working through the submitted prompt…',
           '• Working (1s • esc to interrupt)',
           '',
           '❯ ',
@@ -1188,7 +1194,7 @@ describe('SessionManager', () => {
       }
     }
 
-    const tmux = new StagedInputTmux();
+    const tmux = new LargeInputTmux();
     const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
 
     const session = await manager.bindConversation({
@@ -1203,22 +1209,8 @@ describe('SessionManager', () => {
     const veryLongText = 'long prompt content '.repeat(220);
     await manager.sendKeystrokes(session.id, { text: veryLongText, keys: ['Enter'] });
 
-    expect(tmux.pasted).toEqual([]);
-    expect(tmux.sent).toHaveLength(1);
-    const stagedMessage = tmux.sent[0];
-    expect(stagedMessage).toBeTruthy();
-    if (!stagedMessage) {
-      throw new Error('Expected staged bridge instruction');
-    }
-    expect(stagedMessage).toContain('Read and follow the full user prompt saved at');
-    expect(stagedMessage).toContain('Treat the file contents as the user\'s latest message before replying.');
-    const stagedPathMatch = stagedMessage.match(/"([^"]+bridge-inputs[^"]+\.md)"/);
-    expect(stagedPathMatch?.[1]).toBeTruthy();
-    const stagedPath = stagedPathMatch?.[1];
-    if (!stagedPath) {
-      throw new Error('Expected staged file path in bridge instruction');
-    }
-    expect(await fs.readFile(stagedPath, 'utf8')).toBe(veryLongText);
+    expect(tmux.pasted).toEqual([veryLongText]);
+    expect(tmux.sent).toEqual([veryLongText]);
     expect(tmux.sentKeys).toContainEqual(['Enter']);
     db.close();
   });

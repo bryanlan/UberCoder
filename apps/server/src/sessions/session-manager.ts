@@ -33,8 +33,6 @@ const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
-const MAX_INLINE_LIVE_INPUT_CHARS = 1_800;
-
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -151,10 +149,6 @@ function shouldUseBracketedPasteTransport(text: string): boolean {
   return text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
 }
 
-function shouldStageLargeLiveInput(text: string): boolean {
-  return text.length > MAX_INLINE_LIVE_INPUT_CHARS;
-}
-
 function splitLiteralTextForTmux(text: string): string[] {
   if (!text.length) {
     return [];
@@ -221,22 +215,6 @@ export class SessionManager {
       }
       await this.tmuxClient.sendKeys(sessionName, ['Enter']);
     }
-  }
-
-  private async stageLargeLiveInput(session: BoundSession, text: string): Promise<string> {
-    const sessionDir = session.rawLogPath ? path.dirname(session.rawLogPath) : path.join(this.runtimeDir, session.id);
-    const bridgeInputsDir = path.join(sessionDir, 'bridge-inputs');
-    await fsPromises.mkdir(bridgeInputsDir, { recursive: true });
-    const filePath = path.join(
-      bridgeInputsDir,
-      `${Date.now()}-${stableTextHash(text).slice(0, 10)}.md`,
-    );
-    await fsPromises.writeFile(filePath, text, 'utf8');
-    return filePath;
-  }
-
-  private buildStagedLiveInputInstruction(filePath: string): string {
-    return `Read and follow the full user prompt saved at "${filePath}". Treat the file contents as the user's latest message before replying.`;
   }
 
   private ensureSessionLogPaths(session: BoundSession): BoundSession {
@@ -637,10 +615,7 @@ export class SessionManager {
     if (!liveSession) {
       throw new Error('Session is no longer running.');
     }
-    const transportText = shouldStageLargeLiveInput(text)
-      ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, text))
-      : text;
-    await this.sendLiteralInputToSession(liveSession.tmuxSessionName, transportText);
+    await this.sendLiteralInputToSession(liveSession.tmuxSessionName, text);
     const updated: BoundSession = {
       ...liveSession,
       updatedAt: nowIso(),
@@ -679,9 +654,7 @@ export class SessionManager {
     let latestObservedHash = hashScreen(beforeScreen);
 
     if (payload.text) {
-      const transportText = shouldStageLargeLiveInput(payload.text)
-        ? this.buildStagedLiveInputInstruction(await this.stageLargeLiveInput(liveSession, payload.text))
-        : payload.text;
+      const transportText = payload.text;
       const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
       const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
       if ((payload.keys?.length || useBracketedPasteTransport) && expectsVisibleInputChange) {
