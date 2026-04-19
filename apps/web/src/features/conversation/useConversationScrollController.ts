@@ -155,11 +155,13 @@ export function useConversationScrollController({
 
     const observer = new ResizeObserver(() => {
       const wasSticky = stickToBottomRef.current;
-      updateStickiness(scroller, stickToBottomRef);
-      if (wasSticky || stickToBottomRef.current) {
+      if (wasSticky) {
         scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
         stickToBottomRef.current = true;
+        return;
       }
+
+      updateStickiness(scroller, stickToBottomRef);
     });
 
     observer.observe(scroller);

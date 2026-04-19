@@ -576,6 +576,195 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('repairs overwritten idle recency from the event log after a bad restart', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-recency-overwrite-repair',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const realOutputAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const overwrittenAt = new Date(Date.now() - 30_000).toISOString();
+    await fs.writeFile(
+      session.eventLogPath!,
+      `${JSON.stringify({ type: 'raw-output', text: 'Meaningful output', timestamp: realOutputAt })}\n`,
+      'utf8',
+    );
+
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastOutputAt: overwrittenAt,
+      lastCompletedAt: overwrittenAt,
+    });
+
+    await manager.getSessionScreen(session.id);
+
+    const repaired = db.getBoundSessionById(session.id);
+    expect(repaired?.lastOutputAt).toBe(realOutputAt);
+    expect(repaired?.lastCompletedAt).toBe(realOutputAt);
+    db.close();
+  });
+
+  it('preserves legitimate later completion recency for idle sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-legitimate-completion',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const outputAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const completedAt = new Date(Date.now() - 19 * 60_000).toISOString();
+    await fs.writeFile(
+      session.eventLogPath!,
+      `${JSON.stringify({ type: 'raw-output', text: 'Meaningful output', timestamp: outputAt })}\n`,
+      'utf8',
+    );
+
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastOutputAt: outputAt,
+      lastCompletedAt: completedAt,
+    });
+
+    await manager.getSessionScreen(session.id);
+
+    const repaired = db.getBoundSessionById(session.id);
+    expect(repaired?.lastOutputAt).toBe(outputAt);
+    expect(repaired?.lastCompletedAt).toBe(completedAt);
+    db.close();
+  });
+
+  it('repairs overwritten idle recency only once', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    const repairedUpdates: string[] = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.updated' && event.session.conversationRef === 'session-idle-recency-overwrite-once') {
+        repairedUpdates.push(`${event.session.lastOutputAt ?? ''}|${event.session.lastCompletedAt ?? ''}`);
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-recency-overwrite-once',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const realOutputAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const overwrittenAt = new Date(Date.now() - 30_000).toISOString();
+    await fs.writeFile(
+      session.eventLogPath!,
+      `${JSON.stringify({ type: 'raw-output', text: 'Meaningful output', timestamp: realOutputAt })}\n`,
+      'utf8',
+    );
+
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastOutputAt: overwrittenAt,
+      lastCompletedAt: overwrittenAt,
+    });
+    repairedUpdates.length = 0;
+
+    await manager.getSessionScreen(session.id);
+    await manager.getSessionScreen(session.id);
+
+    expect(
+      repairedUpdates.filter((value) => value === `${realOutputAt}|${realOutputAt}`),
+    ).toHaveLength(1);
+    unsubscribe();
+    db.close();
+  });
+
+  it('repairs overwritten idle recency even when the event log has malformed lines', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-idle-recency-malformed-log',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const realOutputAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const overwrittenAt = new Date(Date.now() - 30_000).toISOString();
+    await fs.writeFile(
+      session.eventLogPath!,
+      [
+        '{"type":"raw-output","text":"broken"',
+        JSON.stringify({ type: 'raw-output', text: 'Meaningful output', timestamp: realOutputAt }),
+      ].join('\n'),
+      'utf8',
+    );
+
+    db.upsertBoundSession({
+      ...session,
+      isWorking: false,
+      lastOutputAt: overwrittenAt,
+      lastCompletedAt: overwrittenAt,
+    });
+
+    await manager.getSessionScreen(session.id);
+
+    const repaired = db.getBoundSessionById(session.id);
+    expect(repaired?.lastOutputAt).toBe(realOutputAt);
+    expect(repaired?.lastCompletedAt).toBe(realOutputAt);
+    db.close();
+  });
+
   it('backfills completion recency for already-idle sessions on first screen capture', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -647,6 +836,46 @@ describe('SessionManager', () => {
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBe(staleTimestamp);
+    db.close();
+  });
+
+  it('does not refresh completion recency during recovery when a stale working session comes back idle', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+
+    const firstManager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await firstManager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-recovery-recency',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const staleOutputAt = new Date(Date.now() - 15 * 60_000).toISOString();
+    const staleCompletedAt = new Date(Date.now() - 16 * 60_000).toISOString();
+    db.upsertBoundSession({
+      ...session,
+      isWorking: true,
+      lastActivityAt: staleOutputAt,
+      lastOutputAt: staleOutputAt,
+      lastCompletedAt: staleCompletedAt,
+    });
+
+    const recoveredManager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    await recoveredManager.ensureSession(session.id);
+
+    const recovered = db.getBoundSessionById(session.id);
+    expect(recovered?.isWorking).toBe(false);
+    expect(recovered?.lastCompletedAt).toBe(staleOutputAt);
     db.close();
   });
 

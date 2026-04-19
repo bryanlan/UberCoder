@@ -940,7 +940,7 @@ export class SessionManager {
     this.watchSessionOutput(refreshed);
     const repaired = this.repairIgnoredIdleOutput(refreshed);
     if (!this.lastScreenHashes.has(repaired.id)) {
-      await this.emitScreenUpdate(repaired);
+      await this.emitScreenUpdate(repaired, { preserveCompletionRecencyOnIdleTransition: true });
     }
     return repaired;
   }
@@ -1153,6 +1153,8 @@ export class SessionManager {
       session.isWorking
       || !session.lastOutputAt
       || !session.lastCompletedAt
+      // Legitimate idle sessions generally diverge these timestamps. Equality is the
+      // known corruption shape from housekeeping noise and bad recovery captures.
       || session.lastCompletedAt !== session.lastOutputAt
       || !session.eventLogPath
       || !fs.existsSync(session.eventLogPath)
@@ -1166,29 +1168,59 @@ export class SessionManager {
         .filter(Boolean);
       let latestRawOutputAt: string | undefined;
       let latestMeaningfulOutputAt: string | undefined;
-      let latestRawOutputWasIgnorable = false;
+      let latestRawOutputWasMeaningful = false;
 
       for (const line of events) {
-        const event = JSON.parse(line) as { type?: string; text?: string; timestamp?: string };
+        let event: { type?: string; text?: string; timestamp?: string };
+        try {
+          event = JSON.parse(line) as { type?: string; text?: string; timestamp?: string };
+        } catch {
+          continue;
+        }
         if (event.type !== 'raw-output' || typeof event.text !== 'string' || typeof event.timestamp !== 'string') {
           continue;
         }
         latestRawOutputAt = event.timestamp;
-        latestRawOutputWasIgnorable = normalizeRawOutputLines(event.text).length === 0;
-        if (!latestRawOutputWasIgnorable) {
+        latestRawOutputWasMeaningful = normalizeRawOutputLines(event.text).length > 0;
+        if (latestRawOutputWasMeaningful) {
           latestMeaningfulOutputAt = event.timestamp;
         }
       }
 
-      if (!latestRawOutputWasIgnorable || latestRawOutputAt !== session.lastOutputAt) {
+      if (!latestRawOutputAt) {
         return session;
       }
 
-      const repairedLastCompletedAt = latestMeaningfulOutputAt ?? session.startedAt;
+      if (!latestMeaningfulOutputAt) {
+        if (latestRawOutputAt !== session.lastOutputAt || latestRawOutputWasMeaningful) {
+          return session;
+        }
+        const repairedLastOutputAt = undefined;
+        const repairedLastCompletedAt = session.startedAt;
+        if (
+          repairedLastOutputAt === session.lastOutputAt
+          && repairedLastCompletedAt === session.lastCompletedAt
+        ) {
+          return session;
+        }
+
+        const repaired: BoundSession = {
+          ...session,
+          updatedAt: nowIso(),
+          lastOutputAt: repairedLastOutputAt,
+          lastCompletedAt: repairedLastCompletedAt,
+        };
+        this.db.upsertBoundSession(repaired);
+        this.eventBus.emit({ type: 'session.updated', session: repaired });
+        return repaired;
+      }
+
       const repairedLastOutputAt = latestMeaningfulOutputAt;
+      const repairedLastCompletedAt = latestMeaningfulOutputAt;
+
       if (
-        repairedLastCompletedAt === session.lastCompletedAt
-        && repairedLastOutputAt === session.lastOutputAt
+        repairedLastOutputAt === session.lastOutputAt
+        && repairedLastCompletedAt === session.lastCompletedAt
       ) {
         return session;
       }
@@ -1207,14 +1239,18 @@ export class SessionManager {
     }
   }
 
-  private publishScreenUpdate(session: BoundSession, screen: SessionScreen): boolean {
+  private publishScreenUpdate(
+    session: BoundSession,
+    screen: SessionScreen,
+    options: { preserveCompletionRecencyOnIdleTransition?: boolean } = {},
+  ): boolean {
     const nextHash = hashScreen(screen);
     if (this.lastScreenHashes.get(session.id) === nextHash) {
       return false;
     }
 
     this.lastScreenHashes.set(session.id, nextHash);
-    this.syncSessionScreenState(this.mustGetSession(session.id), screen);
+    this.syncSessionScreenState(this.mustGetSession(session.id), screen, options);
     const currentSession = this.mustGetSession(session.id);
     this.eventBus.emit({
       type: 'session.screen-updated',
@@ -1341,7 +1377,10 @@ export class SessionManager {
     return screen;
   }
 
-  private async emitScreenUpdate(session: BoundSession, options: { waitForChange?: boolean } = {}): Promise<void> {
+  private async emitScreenUpdate(
+    session: BoundSession,
+    options: { waitForChange?: boolean; preserveCompletionRecencyOnIdleTransition?: boolean } = {},
+  ): Promise<void> {
     const previousHash = this.lastScreenHashes.get(session.id);
     const screen = await this.waitForScreenChange(
       session,
@@ -1349,11 +1388,15 @@ export class SessionManager {
       options.waitForChange ? 220 : 0,
     );
     if (screen) {
-      this.publishScreenUpdate(session, screen);
+      this.publishScreenUpdate(session, screen, options);
     }
   }
 
-  private syncSessionScreenState(session: BoundSession, screen: SessionScreen): void {
+  private syncSessionScreenState(
+    session: BoundSession,
+    screen: SessionScreen,
+    options: { preserveCompletionRecencyOnIdleTransition?: boolean } = {},
+  ): void {
     const screenShowsWorking = sessionScreenShowsWorking(screen);
     const workingHeartbeatAt = latestTimestamp(
       session.lastOutputAt,
@@ -1374,7 +1417,9 @@ export class SessionManager {
     const nextLastCompletedAt = nextIsWorking
       ? session.lastCompletedAt
       : session.isWorking
-        ? latestTimestamp(screen.capturedAt, session.lastOutputAt, session.lastCompletedAt) ?? screen.capturedAt
+        ? options.preserveCompletionRecencyOnIdleTransition
+          ? latestTimestamp(session.lastOutputAt, session.lastCompletedAt) ?? session.startedAt ?? screen.capturedAt
+          : latestTimestamp(screen.capturedAt, session.lastOutputAt, session.lastCompletedAt) ?? screen.capturedAt
         : nextIdleCompletion;
 
     if (session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt) {

@@ -389,6 +389,11 @@ function ExplorerPane({
 
 type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
 
+const MIN_BRIDGE_HEIGHT_PX = 96;
+const COMPACT_BRIDGE_HEIGHT_PX = 192;
+const REGULAR_BRIDGE_HEIGHT_PX = 96;
+const MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.6;
+
 const specialKeyButtons = [
   { label: 'Enter', keys: ['Enter'] },
   { label: 'Esc', keys: ['Escape'] },
@@ -460,7 +465,11 @@ function LiveSessionInputBridge({
   const [bypassPreviewText, setBypassPreviewText] = useState<string>();
   const [copyingLastMessage, setCopyingLastMessage] = useState(false);
   const [copiedLastMessage, setCopiedLastMessage] = useState(false);
+  const [bridgeHeight, setBridgeHeight] = useState(() => compact ? COMPACT_BRIDGE_HEIGHT_PX : REGULAR_BRIDGE_HEIGHT_PX);
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
+  const bridgeHeightRef = useRef(bridgeHeight);
+  const resizeSessionRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
@@ -474,6 +483,15 @@ function LiveSessionInputBridge({
   useEffect(() => {
     captureRef.current?.focus();
   }, [sessionId]);
+
+  useEffect(() => {
+    bridgeHeightRef.current = bridgeHeight;
+  }, [bridgeHeight]);
+
+  useEffect(() => {
+    resizeCleanupRef.current?.();
+    setBridgeHeight(compact ? COMPACT_BRIDGE_HEIGHT_PX : REGULAR_BRIDGE_HEIGHT_PX);
+  }, [compact, sessionId]);
 
   useEffect(() => {
     if (!bridgeOpen) {
@@ -528,6 +546,7 @@ function LiveSessionInputBridge({
     if (copyResetTimerRef.current !== undefined) {
       window.clearTimeout(copyResetTimerRef.current);
     }
+    resizeCleanupRef.current?.();
   }, []);
 
   useEffect(() => {
@@ -832,6 +851,47 @@ function LiveSessionInputBridge({
     onToggleBridge();
   }
 
+  function clampBridgeHeight(nextHeight: number): number {
+    const viewportCap = Math.floor(window.innerHeight * MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO);
+    return Math.max(MIN_BRIDGE_HEIGHT_PX, Math.min(viewportCap, Math.round(nextHeight)));
+  }
+
+  function beginBridgeResize(pointerY: number): void {
+    resizeCleanupRef.current?.();
+    resizeSessionRef.current = {
+      startY: pointerY,
+      startHeight: bridgeHeightRef.current,
+    };
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const active = resizeSessionRef.current;
+      if (!active) {
+        return;
+      }
+      const nextHeight = active.startHeight + (active.startY - event.clientY);
+      setBridgeHeight(clampBridgeHeight(nextHeight));
+    };
+
+    const endResize = () => {
+      resizeSessionRef.current = null;
+      document.body.style.removeProperty('cursor');
+      document.body.style.removeProperty('user-select');
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', endResize);
+      window.removeEventListener('pointercancel', endResize);
+      if (resizeCleanupRef.current === endResize) {
+        resizeCleanupRef.current = null;
+      }
+    };
+
+    resizeCleanupRef.current = endResize;
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', endResize);
+    window.addEventListener('pointercancel', endResize);
+  }
+
   function renderBridgeHeader(
     title: string,
     summary?: string,
@@ -893,6 +953,19 @@ function LiveSessionInputBridge({
       {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', { showControlsToggle: true })}
       {bridgeOpen && (
         <div className={bridgeBodyClassName}>
+          <button
+            type="button"
+            aria-label="Resize live input bridge"
+            title="Drag to resize live input bridge"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              beginBridgeResize(event.clientY);
+            }}
+            className="mb-3 flex h-4 w-full touch-none cursor-row-resize items-center justify-center rounded-xl text-slate-500 transition hover:text-slate-300"
+          >
+            <span className="h-1.5 w-16 rounded-full bg-slate-700/90" />
+          </button>
           <textarea
             ref={captureRef}
             readOnly={bridgeBusy}
@@ -1010,9 +1083,9 @@ function LiveSessionInputBridge({
             }}
             rows={3}
             value={bridgeText}
+            style={{ height: `${bridgeHeight}px` }}
             className={clsx(
-              'w-full resize-y overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
-              compact ? 'h-28 sm:h-48' : 'h-24',
+              'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
             )}
           />
           {!mobileControlsHidden && (
