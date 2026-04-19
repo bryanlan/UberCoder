@@ -813,6 +813,37 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('avoids extra pane captures for text-only keystroke sends', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Prompt body',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'session-text-only-fast-path',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    tmux.captureStartLines.length = 0;
+    await manager.sendKeystrokes(session.id, { text: '5' });
+
+    expect(tmux.sent).toEqual(['5']);
+    expect(tmux.sentKeys).toEqual([]);
+    expect(tmux.captureStartLines).toHaveLength(1);
+    db.close();
+  });
+
   it('waits for pasted text to settle before sending Enter on combined submit keystrokes', async () => {
     class PasteAwareTmux extends FakeTmux {
       private pasteVisible = false;

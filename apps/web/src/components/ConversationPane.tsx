@@ -463,6 +463,7 @@ function LiveSessionInputBridge({
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingTextRef = useRef('');
+  const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
   const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const committedInputRef = useRef(inputText);
@@ -482,6 +483,7 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     pendingTextRef.current = '';
+    textFlushInFlightRef.current = undefined;
     committedInputRef.current = inputText;
     setTextBypassEnabled(false);
     setBypassPreviewText(undefined);
@@ -577,16 +579,39 @@ function LiveSessionInputBridge({
   }
 
   async function flushBufferedText(): Promise<boolean> {
+    if (textFlushInFlightRef.current) {
+      return await textFlushInFlightRef.current;
+    }
     if (!pendingTextRef.current) {
       return true;
     }
-    const text = pendingTextRef.current;
-    pendingTextRef.current = '';
     if (flushTimerRef.current !== undefined) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = undefined;
     }
-    return await queueKeystrokes({ text });
+    const task = (async (): Promise<boolean> => {
+      let ok = true;
+      while (pendingTextRef.current) {
+        const text = pendingTextRef.current;
+        pendingTextRef.current = '';
+        ok = await queueKeystrokes({ text });
+        if (!ok) {
+          break;
+        }
+      }
+      return ok;
+    })();
+    textFlushInFlightRef.current = task;
+    try {
+      return await task;
+    } finally {
+      if (textFlushInFlightRef.current === task) {
+        textFlushInFlightRef.current = undefined;
+      }
+      if (pendingTextRef.current) {
+        scheduleBufferedTextFlush();
+      }
+    }
   }
 
   function scheduleBufferedTextFlush(): void {

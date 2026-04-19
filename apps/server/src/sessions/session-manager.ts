@@ -649,6 +649,48 @@ export class SessionManager {
       throw new Error('Session is no longer running.');
     }
 
+    const hasSpecialKeys = Boolean(payload.keys?.length);
+    if (payload.text && !hasSpecialKeys) {
+      let preparedScreen: SessionScreen | undefined;
+      if (liveSession.provider === 'codex') {
+        preparedScreen = await this.captureSessionScreen(liveSession);
+        if (screenIsStartingUp(preparedScreen) || screenShowsQueuedMessageHint(preparedScreen)) {
+          await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
+        }
+      }
+      const transportText = payload.text;
+      if (shouldUseBracketedPasteTransport(transportText)) {
+        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
+      } else {
+        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
+      }
+
+      const updated: BoundSession = {
+        ...liveSession,
+        updatedAt: nowIso(),
+        lastActivityAt: nowIso(),
+      };
+      this.db.upsertBoundSession(updated);
+      if (updated.conversationRef.startsWith('pending:')) {
+        const pending = this.db.getPendingConversation(updated.conversationRef);
+        if (pending) {
+          const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
+          rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
+          rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
+          this.db.putPendingConversation({
+            ...pending,
+            updatedAt: nowIso(),
+            isBound: true,
+            boundSessionId: updated.id,
+            rawMetadata,
+          });
+        }
+      }
+      this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
+      await this.emitScreenUpdate(updated);
+      return updated;
+    }
+
     const beforeScreen = await this.captureSessionScreen(liveSession);
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
