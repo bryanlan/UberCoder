@@ -151,6 +151,17 @@ function joinAnsi(lines: ScreenLine[]): string {
   return lines.map((line) => line.raw).join('\n').trim();
 }
 
+function extractClaudeHeaderModel(lines: ScreenLine[]): string | undefined {
+  for (const line of lines.slice(0, 12)) {
+    const normalized = normalizeWhitespace(line.plain);
+    const match = normalized.match(/\b(Opus|Sonnet|Haiku)\s+([0-9]+(?:\.[0-9]+)?)\b/i);
+    if (match) {
+      return `${match[1]![0]!.toUpperCase()}${match[1]!.slice(1).toLowerCase()} ${match[2]}`;
+    }
+  }
+  return undefined;
+}
+
 function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
   return lines.filter((line) => isLikelyFooterStatus(line.plain));
 }
@@ -301,6 +312,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
       }
     }
   }
+  finalModel ??= extractClaudeHeaderModel(visibleLines);
 
   return {
     content,

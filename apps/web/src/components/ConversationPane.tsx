@@ -464,6 +464,7 @@ function LiveSessionInputBridge({
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
+  const keepBypassSelectionPinnedRef = useRef(false);
   const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const committedInputRef = useRef(inputText);
@@ -484,6 +485,7 @@ function LiveSessionInputBridge({
   useEffect(() => {
     pendingTextRef.current = '';
     textFlushInFlightRef.current = undefined;
+    keepBypassSelectionPinnedRef.current = false;
     committedInputRef.current = inputText;
     setTextBypassEnabled(false);
     setBypassPreviewText(undefined);
@@ -541,12 +543,12 @@ function LiveSessionInputBridge({
     }
     const value = bridgeText;
     if (document.activeElement === capture) {
-      if (textBypassEnabled) {
+      if (textBypassEnabled && keepBypassSelectionPinnedRef.current) {
         const end = value.length;
         capture.setSelectionRange(end, end);
       }
     }
-    if (textBypassEnabled) {
+    if (textBypassEnabled && keepBypassSelectionPinnedRef.current) {
       capture.scrollTop = capture.scrollHeight;
     }
   }, [bridgeText, textBypassEnabled]);
@@ -624,6 +626,7 @@ function LiveSessionInputBridge({
   }
 
   function appendLiteralText(text: string): void {
+    keepBypassSelectionPinnedRef.current = true;
     pendingTextRef.current += text;
     setBypassPreviewText((current) => `${current ?? inputText}${text}`);
     scheduleBufferedTextFlush();
@@ -692,6 +695,7 @@ function LiveSessionInputBridge({
         setDraftText('');
         setDraftDirty(false);
         setTextBypassEnabled(false);
+        keepBypassSelectionPinnedRef.current = false;
         setBypassPreviewText(undefined);
         captureRef.current?.focus({ preventScroll: true });
         return;
@@ -705,6 +709,7 @@ function LiveSessionInputBridge({
       }
       setBypassPreviewText(draftDirty ? draftText : inputText);
       setTextBypassEnabled(true);
+      keepBypassSelectionPinnedRef.current = true;
       captureRef.current?.focus({ preventScroll: true });
     });
   }
@@ -717,6 +722,7 @@ function LiveSessionInputBridge({
           if (!ok) {
             return;
           }
+          keepBypassSelectionPinnedRef.current = true;
           setBypassPreviewText('');
           enqueueKeystrokes({ keys: ['Enter'] });
           return;
@@ -731,6 +737,7 @@ function LiveSessionInputBridge({
         if (!ok) {
           return;
         }
+        keepBypassSelectionPinnedRef.current = true;
         if (specialKey === 'BSpace') {
           setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
         } else {
@@ -748,10 +755,12 @@ function LiveSessionInputBridge({
     if (specialKey === 'BSpace') {
       if (textBypassEnabled) {
         if (pendingTextRef.current.length > 0) {
+          keepBypassSelectionPinnedRef.current = true;
           pendingTextRef.current = pendingTextRef.current.slice(0, -1);
           setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
           return;
         }
+        keepBypassSelectionPinnedRef.current = true;
         setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
         enqueueKeystrokes({ keys: ['BSpace'] });
         return;
@@ -765,6 +774,7 @@ function LiveSessionInputBridge({
       if (!ok) {
         return;
       }
+      keepBypassSelectionPinnedRef.current = true;
       if (specialKey === 'Enter') {
         setBypassPreviewText('');
       } else {
@@ -892,9 +902,21 @@ function LiveSessionInputBridge({
             enterKeyHint="send"
             onFocus={(event) => {
               if (textBypassEnabled) {
+                keepBypassSelectionPinnedRef.current = true;
                 const end = bridgeText.length;
                 event.currentTarget.setSelectionRange(end, end);
               }
+            }}
+            onPointerDown={() => {
+              keepBypassSelectionPinnedRef.current = false;
+            }}
+            onSelect={(event) => {
+              if (!textBypassEnabled) {
+                return;
+              }
+              const target = event.currentTarget;
+              const end = target.value.length;
+              keepBypassSelectionPinnedRef.current = target.selectionStart === end && target.selectionEnd === end;
             }}
             onChange={(event) => {
               if (bridgeBusy) {
@@ -986,7 +1008,6 @@ function LiveSessionInputBridge({
                 void handleSpecialKey('Enter');
               }
             }}
-            placeholder={bridgeText ? undefined : 'Type directly into the live session…'}
             rows={3}
             value={bridgeText}
             className={clsx(

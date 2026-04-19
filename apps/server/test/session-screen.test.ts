@@ -138,6 +138,22 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.contextPercent).toBe(98);
   });
 
+  it('extracts the Claude model name from the header when the footer has no model metadata', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '▐▛███▜▌ Opus 4.7 (1M context) with medium effort · Claude Max',
+      '▝▜█████▛▘ ~/code/plaidbasic',
+      '',
+      'Ready for input.',
+      '❯ hello',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(screen.model).toBe('Opus 4.7');
+    expect(screen.contextPercent).toBeUndefined();
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
   it('recognizes working status lines with alternate bullet glyphs', () => {
     expect(isWorkingStatusLine('◦ Working (12s • esc to interrupt)')).toBe(true);
     expect(isWorkingStatusLine('▪ Working...')).toBe(true);
