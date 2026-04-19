@@ -177,4 +177,27 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('98% left');
     expect(screen.status).not.toContain('restore the toggle');
   });
+
+  it('keeps Claude numbered response menus in content and out of the composer buffer', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '',
+      'Sonnet sub-agent hit Cloudflare Turnstile error 600010 on RC login.',
+      '',
+      '❯ 1. I\'ll log in manually first, then you resume',
+      '  You open Chrome, log in to RC with 2FA, then I send the agent back to take over.',
+      '2. Export cookies from my logged-in session, paste them in',
+      '  You export rightcapital.com cookies from your browser, paste them, and the agent injects them.',
+      '3. You should just download the PDF manually via a different method',
+      '4. This is new — weekly download has been failing too',
+      '5. Type something.',
+      'Enter to select · ↑/↓ to navigate · ctrl+g to edit in VS Code · Esc to cancel',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('1. I\'ll log in manually first, then you resume');
+    expect(screen.content).toContain('5. Type something.');
+    expect(screen.content).toContain('Enter to select');
+    expect(screen.status).toBe('Session active');
+  });
 });

@@ -78,7 +78,8 @@ function looksLikeMenuChoice(line: string): boolean {
 function isInteractivePickerHint(line: string): boolean {
   const normalized = normalizeWhitespace(line);
   return /Enter to confirm · Esc to exit/i.test(normalized)
-    || /Esc to cancel · Tab to amend/i.test(normalized);
+    || /Esc to cancel · Tab to amend/i.test(normalized)
+    || /Enter to select · .*Esc to cancel/i.test(normalized);
 }
 
 function looksLikePickerOption(line: string): boolean {
