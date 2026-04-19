@@ -1011,7 +1011,7 @@ function LiveSessionInputBridge({
             rows={3}
             value={bridgeText}
             className={clsx(
-              'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
+              'w-full resize-y overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
               compact ? 'h-28 sm:h-48' : 'h-24',
             )}
           />
