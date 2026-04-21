@@ -64,4 +64,34 @@ describe('ProjectService', () => {
       path: path.join(root, 'hidden'),
     });
   });
+
+  it('does not broaden match paths for explicit nested projects', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-projects-'));
+    const root = path.join(tempDir, 'projects');
+    const parentPath = path.join(root, 'waltium');
+    const childPath = path.join(parentPath, 'agent', 'cio');
+    await fs.mkdir(childPath, { recursive: true });
+    const configPath = path.join(tempDir, 'config.json');
+    await fs.writeFile(configPath, JSON.stringify({
+      projectsRoot: root,
+      security: {
+        passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      providers: {
+        codex: { commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} } },
+        claude: { commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} } },
+      },
+      projects: {
+        cio: { active: true, explicit: true, path: childPath },
+      },
+    }, null, 2));
+
+    const service = new ProjectService(new ConfigService(configPath));
+    const projects = await service.listActiveProjects();
+
+    expect(projects).toHaveLength(1);
+    expect(projects[0]?.rootPath).toBe(parentPath);
+    expect(projects[0]?.matchPaths).toEqual([childPath]);
+  });
 });

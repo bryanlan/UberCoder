@@ -40,7 +40,7 @@ export class ProjectService {
       if (!config?.active) continue;
       const projectPath = this.resolveProjectPath(directoryName, config);
       if (!(await this.isDirectory(projectPath))) continue;
-      const { rootPath, matchPaths } = this.buildProjectPaths(directoryName, projectPath, projectsRoot);
+      const { rootPath, matchPaths } = this.buildProjectPaths(directoryName, projectPath, projectsRoot, config);
 
       projects.push({
         slug: directoryName,
@@ -98,16 +98,24 @@ export class ProjectService {
     return config?.path ?? path.join(this.configService.getProjectsRoot(), directoryName);
   }
 
-  private buildProjectPaths(directoryName: string, projectPath: string, projectsRoot: string): { rootPath: string; matchPaths: string[] } {
+  private buildProjectPaths(
+    directoryName: string,
+    projectPath: string,
+    projectsRoot: string,
+    config: ProjectConfig,
+  ): { rootPath: string; matchPaths: string[] } {
     const relativePath = path.relative(projectsRoot, projectPath);
     const [firstSegment] = relativePath.split(path.sep).filter(Boolean);
     const rootPath = firstSegment && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)
       ? path.join(projectsRoot, firstSegment)
       : projectPath;
+    const matchPaths = config.explicit || rootPath === projectPath
+      ? [projectPath]
+      : [projectPath, rootPath];
 
     return {
       rootPath,
-      matchPaths: Array.from(new Set([projectPath, rootPath])),
+      matchPaths: Array.from(new Set(matchPaths)),
     };
   }
 

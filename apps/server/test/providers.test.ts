@@ -19,6 +19,10 @@ const project: ActiveProject = {
   config: { active: true, explicit: false, displayName: 'Demo', allowedLocalhostPorts: [], tags: [], providers: {} },
 };
 
+function encodeClaudeProjectDir(projectPath: string): string {
+  return projectPath.replace(/[^A-Za-z0-9]/g, '-');
+}
+
 describe('provider history discovery', () => {
   it('passes an initial prompt through Codex resume launches', async () => {
     const provider = new CodexProvider();
@@ -273,6 +277,144 @@ describe('provider history discovery', () => {
     } satisfies MergedProviderSettings);
     expect(claudeConversations).toHaveLength(1);
     expect(claudeConversations[0]?.title).toContain('Markerless Claude prompt');
+  });
+
+  it('does not attach parent Claude history to an explicit nested child project', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-'));
+    const parentProjectPath = path.join(tempDir, 'waltium');
+    const childProjectPath = path.join(parentProjectPath, 'agent', 'cio');
+    await fs.mkdir(childProjectPath, { recursive: true });
+
+    const encodedParentDir = path.join(
+      tempDir,
+      'claude-home',
+      'projects',
+      encodeClaudeProjectDir(parentProjectPath),
+    );
+    const encodedChildDir = path.join(
+      tempDir,
+      'claude-home',
+      'projects',
+      encodeClaudeProjectDir(childProjectPath),
+    );
+    await fs.mkdir(encodedParentDir, { recursive: true });
+    await fs.mkdir(encodedChildDir, { recursive: true });
+
+    const parentTranscriptPath = path.join(encodedParentDir, 'waltium-parent.jsonl');
+    const childTranscriptPath = path.join(encodedChildDir, 'cio-child.jsonl');
+    await fs.writeFile(parentTranscriptPath, `${JSON.stringify({
+      cwd: parentProjectPath,
+      timestamp: '2026-04-20T00:00:00.000Z',
+      type: 'user',
+      message: {
+        role: 'user',
+        content: 'Waltium parent chat',
+      },
+    })}\n`);
+    await fs.writeFile(childTranscriptPath, `${JSON.stringify({
+      cwd: childProjectPath,
+      timestamp: '2026-04-20T00:01:00.000Z',
+      type: 'user',
+      message: {
+        role: 'user',
+        content: 'CIO child chat',
+      },
+    })}\n`);
+    await fs.mkdir(path.join(tempDir, 'claude-home'), { recursive: true });
+    await fs.writeFile(path.join(tempDir, 'claude-home', 'history.jsonl'), [
+      JSON.stringify({
+        cwd: parentProjectPath,
+        transcript_path: parentTranscriptPath,
+      }),
+      JSON.stringify({
+        cwd: childProjectPath,
+        transcript_path: childTranscriptPath,
+      }),
+    ].join('\n'));
+
+    const provider = new ClaudeProvider();
+    const settings = {
+      id: 'claude',
+      enabled: true,
+      discoveryRoot: path.join(tempDir, 'claude-home'),
+      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const explicitChildProject: ActiveProject = {
+      ...project,
+      slug: 'cio',
+      directoryName: 'cio',
+      displayName: 'cio',
+      rootPath: parentProjectPath,
+      path: childProjectPath,
+      matchPaths: [childProjectPath],
+      config: { active: true, explicit: true, allowedLocalhostPorts: [], tags: [], providers: {} },
+    };
+
+    const conversations = await provider.listConversations(explicitChildProject, settings);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.title).toContain('CIO child chat');
+  });
+
+  it('does not attach parent Codex history to an explicit nested child project', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const parentProjectPath = path.join(tempDir, 'waltium');
+    const childProjectPath = path.join(parentProjectPath, 'agent', 'cio');
+    await fs.mkdir(childProjectPath, { recursive: true });
+
+    const sessionsDir = path.join(tempDir, 'codex-home', 'sessions', '2026', '04', '20');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(path.join(sessionsDir, 'rollout-parent.jsonl'), [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: parentProjectPath,
+          id: 'parent',
+        },
+      }),
+      JSON.stringify({
+        role: 'user',
+        text: 'Waltium parent codex chat',
+        timestamp: '2026-04-20T00:00:00.000Z',
+      }),
+    ].join('\n'));
+    await fs.writeFile(path.join(sessionsDir, 'rollout-child.jsonl'), [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: childProjectPath,
+          id: 'child',
+        },
+      }),
+      JSON.stringify({
+        role: 'user',
+        text: 'CIO child codex chat',
+        timestamp: '2026-04-20T00:01:00.000Z',
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: path.join(tempDir, 'codex-home'),
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const explicitChildProject: ActiveProject = {
+      ...project,
+      slug: 'cio',
+      directoryName: 'cio',
+      displayName: 'cio',
+      rootPath: parentProjectPath,
+      path: childProjectPath,
+      matchPaths: [childProjectPath],
+      config: { active: true, explicit: true, allowedLocalhostPorts: [], tags: [], providers: {} },
+    };
+
+    const conversations = await provider.listConversations(explicitChildProject, settings);
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.title).toContain('CIO child codex chat');
   });
 
   it('skips Codex transcripts that provide no project signal at all', async () => {
