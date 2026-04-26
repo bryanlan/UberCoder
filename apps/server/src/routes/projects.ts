@@ -9,31 +9,31 @@ export async function registerProjectRoutes(
   indexing: IndexingService,
   sessions: SessionManager,
 ): Promise<void> {
-  const TREE_RECOVERY_INTERVAL_MS = 5_000;
-  let lastTreeRecoveryCompletedAt = 0;
-  let treeRecoveryPromise: Promise<void> | undefined;
+  const TREE_OBSERVATION_INTERVAL_MS = 5_000;
+  let lastTreeObservationCompletedAt = 0;
+  let treeObservationPromise: Promise<void> | undefined;
 
-  async function maybeRecoverSessionsForTree(): Promise<void> {
-    if (treeRecoveryPromise) {
-      await treeRecoveryPromise;
+  async function maybeObserveSessionsForTree(): Promise<void> {
+    if (treeObservationPromise) {
+      await treeObservationPromise;
       return;
     }
 
-    if (Date.now() - lastTreeRecoveryCompletedAt < TREE_RECOVERY_INTERVAL_MS) {
+    if (Date.now() - lastTreeObservationCompletedAt < TREE_OBSERVATION_INTERVAL_MS) {
       return;
     }
 
-    let currentRecovery: Promise<void>;
-    currentRecovery = (async () => {
-      await sessions.recoverSessions();
-      lastTreeRecoveryCompletedAt = Date.now();
+    let currentObservation: Promise<void>;
+    currentObservation = (async () => {
+      await sessions.observeSessions();
+      lastTreeObservationCompletedAt = Date.now();
     })();
-    treeRecoveryPromise = currentRecovery;
+    treeObservationPromise = currentObservation;
     try {
-      await currentRecovery;
+      await currentObservation;
     } finally {
-      if (treeRecoveryPromise === currentRecovery) {
-        treeRecoveryPromise = undefined;
+      if (treeObservationPromise === currentObservation) {
+        treeObservationPromise = undefined;
       }
     }
   }
@@ -44,7 +44,7 @@ export async function registerProjectRoutes(
     } catch {
       return;
     }
-    await maybeRecoverSessionsForTree();
+    await maybeObserveSessionsForTree();
     return indexing.getTree();
   });
 
@@ -54,7 +54,7 @@ export async function registerProjectRoutes(
     } catch {
       return;
     }
-    await sessions.recoverSessions();
+    await sessions.observeSessions();
     await indexing.refreshAll();
     return indexing.getTree();
   });

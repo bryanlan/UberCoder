@@ -390,9 +390,21 @@ function ExplorerPane({
 type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
 
 const MIN_BRIDGE_HEIGHT_PX = 96;
-const COMPACT_BRIDGE_HEIGHT_PX = 192;
-const REGULAR_BRIDGE_HEIGHT_PX = 96;
 const MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.6;
+const BRIDGE_HEIGHT_STORAGE_KEY = 'agent-console:live-bridge-height';
+
+function readStoredBridgeHeight(): number {
+  const stored = globalThis.localStorage?.getItem(BRIDGE_HEIGHT_STORAGE_KEY);
+  if (!stored) {
+    return MIN_BRIDGE_HEIGHT_PX;
+  }
+  const parsed = Number(stored);
+  return Number.isFinite(parsed) ? parsed : MIN_BRIDGE_HEIGHT_PX;
+}
+
+function storeBridgeHeight(height: number): void {
+  globalThis.localStorage?.setItem(BRIDGE_HEIGHT_STORAGE_KEY, String(height));
+}
 
 const specialKeyButtons = [
   { label: 'Enter', keys: ['Enter'] },
@@ -465,7 +477,7 @@ function LiveSessionInputBridge({
   const [bypassPreviewText, setBypassPreviewText] = useState<string>();
   const [copyingLastMessage, setCopyingLastMessage] = useState(false);
   const [copiedLastMessage, setCopiedLastMessage] = useState(false);
-  const [bridgeHeight, setBridgeHeight] = useState(() => compact ? COMPACT_BRIDGE_HEIGHT_PX : REGULAR_BRIDGE_HEIGHT_PX);
+  const [bridgeHeight, setBridgeHeight] = useState(readStoredBridgeHeight);
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
   const bridgeHeightRef = useRef(bridgeHeight);
   const resizeSessionRef = useRef<{ startY: number; startHeight: number } | null>(null);
@@ -474,6 +486,7 @@ function LiveSessionInputBridge({
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
   const keepBypassSelectionPinnedRef = useRef(false);
+  const slashBypassActiveRef = useRef(false);
   const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const committedInputRef = useRef(inputText);
@@ -490,7 +503,9 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     resizeCleanupRef.current?.();
-    setBridgeHeight(compact ? COMPACT_BRIDGE_HEIGHT_PX : REGULAR_BRIDGE_HEIGHT_PX);
+    const nextHeight = clampBridgeHeight(bridgeHeightRef.current);
+    setBridgeHeight(nextHeight);
+    storeBridgeHeight(nextHeight);
   }, [compact, sessionId]);
 
   useEffect(() => {
@@ -504,6 +519,7 @@ function LiveSessionInputBridge({
     pendingTextRef.current = '';
     textFlushInFlightRef.current = undefined;
     keepBypassSelectionPinnedRef.current = false;
+    slashBypassActiveRef.current = false;
     committedInputRef.current = inputText;
     setTextBypassEnabled(false);
     setBypassPreviewText(undefined);
@@ -651,6 +667,20 @@ function LiveSessionInputBridge({
     scheduleBufferedTextFlush();
   }
 
+  function exitSlashBypassIfComplete(specialKey: SessionKeyToken): void {
+    if (!slashBypassActiveRef.current || (specialKey !== 'Enter' && specialKey !== 'Escape')) {
+      return;
+    }
+
+    slashBypassActiveRef.current = false;
+    committedInputRef.current = '';
+    keepBypassSelectionPinnedRef.current = false;
+    setDraftText('');
+    setDraftDirty(false);
+    setTextBypassEnabled(false);
+    setBypassPreviewText(undefined);
+  }
+
   function replaceDraftText(text: string): void {
     setDraftDirty(true);
     setDraftText(text);
@@ -699,8 +729,26 @@ function LiveSessionInputBridge({
     if (!ok) {
       return;
     }
+    slashBypassActiveRef.current = false;
     setTextBypassEnabled(true);
     captureRef.current?.focus({ preventScroll: true });
+  }
+
+  async function handleSlashTextBypass(): Promise<void> {
+    await runBridgeAction(async () => {
+      if (draftDirty) {
+        const ok = await syncDraftToRemote();
+        if (!ok) {
+          return;
+        }
+      }
+      slashBypassActiveRef.current = true;
+      setBypassPreviewText(draftDirty ? draftText : inputText);
+      setTextBypassEnabled(true);
+      keepBypassSelectionPinnedRef.current = true;
+      appendLiteralText('/');
+      captureRef.current?.focus({ preventScroll: true });
+    });
   }
 
   async function handleToggleTextBypass(): Promise<void> {
@@ -710,6 +758,7 @@ function LiveSessionInputBridge({
         if (!ok) {
           return;
         }
+        slashBypassActiveRef.current = false;
         committedInputRef.current = bypassPreviewText ?? inputText;
         setDraftText('');
         setDraftDirty(false);
@@ -726,6 +775,7 @@ function LiveSessionInputBridge({
           return;
         }
       }
+      slashBypassActiveRef.current = false;
       setBypassPreviewText(draftDirty ? draftText : inputText);
       setTextBypassEnabled(true);
       keepBypassSelectionPinnedRef.current = true;
@@ -744,6 +794,7 @@ function LiveSessionInputBridge({
           keepBypassSelectionPinnedRef.current = true;
           setBypassPreviewText('');
           enqueueKeystrokes({ keys: ['Enter'] });
+          exitSlashBypassIfComplete('Enter');
           return;
         }
         await runBridgeAction(async () => {
@@ -763,6 +814,7 @@ function LiveSessionInputBridge({
           setBypassPreviewText(undefined);
         }
         enqueueKeystrokes({ keys: [specialKey] });
+        exitSlashBypassIfComplete(specialKey);
         return;
       }
       await runBridgeAction(async () => {
@@ -800,6 +852,7 @@ function LiveSessionInputBridge({
         setBypassPreviewText(undefined);
       }
       enqueueKeystrokes({ keys: [specialKey] });
+      exitSlashBypassIfComplete(specialKey);
       return;
     }
 
@@ -856,6 +909,12 @@ function LiveSessionInputBridge({
     return Math.max(MIN_BRIDGE_HEIGHT_PX, Math.min(viewportCap, Math.round(nextHeight)));
   }
 
+  function updateBridgeHeight(nextHeight: number): void {
+    const clampedHeight = clampBridgeHeight(nextHeight);
+    setBridgeHeight(clampedHeight);
+    storeBridgeHeight(clampedHeight);
+  }
+
   function beginBridgeResize(pointerY: number): void {
     resizeCleanupRef.current?.();
     resizeSessionRef.current = {
@@ -871,7 +930,7 @@ function LiveSessionInputBridge({
         return;
       }
       const nextHeight = active.startHeight + (active.startY - event.clientY);
-      setBridgeHeight(clampBridgeHeight(nextHeight));
+      updateBridgeHeight(nextHeight);
     };
 
     const endResize = () => {
@@ -1060,6 +1119,11 @@ function LiveSessionInputBridge({
                 }
                 event.preventDefault();
                 void handleSpecialKey(specialKey);
+                return;
+              }
+              if (!textBypassEnabled && event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
+                event.preventDefault();
+                void handleSlashTextBypass();
                 return;
               }
               if (textBypassEnabled && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {

@@ -92,7 +92,7 @@ export async function buildApp(options: AppOptions = {}) {
   }
 
   await indexing.start();
-  await sessions.recoverSessions();
+  await sessions.observeSessions();
 
   app.addHook('onClose', async () => {
     await indexing.stop();

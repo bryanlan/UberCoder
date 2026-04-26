@@ -197,6 +197,12 @@ export class SessionManager {
     }
   }
 
+  async observeSessions(): Promise<void> {
+    for (const session of this.listActiveSessions()) {
+      await this.refreshSessionState(session, { restoreMissing: false });
+    }
+  }
+
   private async sendLiteralTextToSession(sessionName: string, text: string): Promise<void> {
     for (const chunk of splitLiteralTextForTmux(text)) {
       await this.tmuxClient.sendLiteralText(sessionName, chunk);
@@ -898,13 +904,20 @@ export class SessionManager {
     return session;
   }
 
-  private async refreshSessionState(session: BoundSession): Promise<BoundSession | undefined> {
+  private async refreshSessionState(
+    session: BoundSession,
+    options: { restoreMissing?: boolean } = {},
+  ): Promise<BoundSession | undefined> {
+    const restoreMissing = options.restoreMissing ?? true;
     const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
     if (!alive) {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
-      if (session.shouldRestore && session.status !== 'releasing') {
+      if (restoreMissing && session.shouldRestore && session.status !== 'releasing') {
         return await this.restoreSession(session);
+      }
+      if (session.shouldRestore && session.status !== 'releasing') {
+        return undefined;
       }
       const terminalStatus = session.status === 'releasing' ? 'ended' : 'error';
       const ended: BoundSession = {

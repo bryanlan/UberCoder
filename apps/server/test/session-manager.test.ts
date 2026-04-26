@@ -302,6 +302,35 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('observes dead restorable sessions without relaunching them', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:lazy',
+      title: 'Lazy restore',
+      kind: 'history',
+    });
+    tmux.alive.clear();
+
+    await manager.observeSessions();
+
+    expect(tmux.created).toHaveLength(1);
+    expect(db.getBoundSessionById(session.id)?.status).toBe('bound');
+    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(true);
+
+    const restored = await manager.ensureSession(session.id);
+
+    expect(restored?.id).toBe(session.id);
+    expect(tmux.created).toHaveLength(2);
+    db.close();
+  });
+
   it('abandons dead zero-turn pending sessions instead of keeping them durably bound', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

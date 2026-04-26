@@ -241,7 +241,7 @@ function AppShell() {
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
-  const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden', false);
+  const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden:v2', true);
   const [mobileControlsHidden, setMobileControlsHidden] = useState(false);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
@@ -320,10 +320,9 @@ function AppShell() {
 
   useEffect(() => {
     if (location.pathname === '/settings' || !timeline?.boundSession) {
-      setMobileChromeHidden(false);
       setMobileControlsHidden(false);
     }
-  }, [location.pathname, setMobileChromeHidden, timeline?.boundSession]);
+  }, [location.pathname, timeline?.boundSession]);
 
   useEffect(() => {
     setMobileControlsHidden(false);

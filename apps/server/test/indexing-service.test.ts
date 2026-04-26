@@ -40,6 +40,47 @@ const secondProject: ActiveProject = {
 };
 
 describe('IndexingService', () => {
+  it('starts from cached index data without scanning provider transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const projectPath = path.join(tempDir, 'project');
+    const providerRoot = path.join(tempDir, 'provider-home');
+    await fs.mkdir(projectPath, { recursive: true });
+    await fs.mkdir(providerRoot, { recursive: true });
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'cached-conversation',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Cached conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    }]);
+    const listConversations = vi.fn(async () => [] as ConversationSummary[]);
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [{ ...project, path: projectPath, matchPaths: [projectPath] }],
+        getMergedProviderSettings: () => ({ ...providerSettings, discoveryRoot: providerRoot }),
+      } as never,
+      {
+        get: () => ({
+          listConversations,
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.start();
+
+    expect(listConversations).not.toHaveBeenCalled();
+    expect(indexing.getTree().projects[0]?.providers.codex.conversations[0]?.ref).toBe('cached-conversation');
+    await indexing.stop();
+    db.close();
+  });
+
   it('adopts pending conversations into real history nodes and hides the pending alias from the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

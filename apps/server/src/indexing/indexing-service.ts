@@ -50,7 +50,7 @@ export class IndexingService {
   ) {}
 
   async start(): Promise<void> {
-    await this.refreshAll();
+    await this.syncWatchers();
   }
 
   async stop(): Promise<void> {
