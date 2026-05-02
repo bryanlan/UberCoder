@@ -98,6 +98,20 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
+function useFrozenValue<T,>(value: T, frozen: boolean, resetKey?: string): T {
+  const valueRef = useRef(value);
+  const resetKeyRef = useRef(resetKey);
+
+  if (resetKeyRef.current !== resetKey) {
+    resetKeyRef.current = resetKey;
+    valueRef.current = value;
+  } else if (!frozen) {
+    valueRef.current = value;
+  }
+
+  return valueRef.current;
+}
+
 function MobileSummaryStrip({
   title,
   summary,
@@ -486,7 +500,6 @@ function LiveSessionInputBridge({
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
   const keepBypassSelectionPinnedRef = useRef(false);
-  const slashBypassActiveRef = useRef(false);
   const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const committedInputRef = useRef(inputText);
@@ -519,7 +532,6 @@ function LiveSessionInputBridge({
     pendingTextRef.current = '';
     textFlushInFlightRef.current = undefined;
     keepBypassSelectionPinnedRef.current = false;
-    slashBypassActiveRef.current = false;
     committedInputRef.current = inputText;
     setTextBypassEnabled(false);
     setBypassPreviewText(undefined);
@@ -667,20 +679,6 @@ function LiveSessionInputBridge({
     scheduleBufferedTextFlush();
   }
 
-  function exitSlashBypassIfComplete(specialKey: SessionKeyToken): void {
-    if (!slashBypassActiveRef.current || (specialKey !== 'Enter' && specialKey !== 'Escape')) {
-      return;
-    }
-
-    slashBypassActiveRef.current = false;
-    committedInputRef.current = '';
-    keepBypassSelectionPinnedRef.current = false;
-    setDraftText('');
-    setDraftDirty(false);
-    setTextBypassEnabled(false);
-    setBypassPreviewText(undefined);
-  }
-
   function replaceDraftText(text: string): void {
     setDraftDirty(true);
     setDraftText(text);
@@ -729,26 +727,8 @@ function LiveSessionInputBridge({
     if (!ok) {
       return;
     }
-    slashBypassActiveRef.current = false;
     setTextBypassEnabled(true);
     captureRef.current?.focus({ preventScroll: true });
-  }
-
-  async function handleSlashTextBypass(): Promise<void> {
-    await runBridgeAction(async () => {
-      if (draftDirty) {
-        const ok = await syncDraftToRemote();
-        if (!ok) {
-          return;
-        }
-      }
-      slashBypassActiveRef.current = true;
-      setBypassPreviewText(draftDirty ? draftText : inputText);
-      setTextBypassEnabled(true);
-      keepBypassSelectionPinnedRef.current = true;
-      appendLiteralText('/');
-      captureRef.current?.focus({ preventScroll: true });
-    });
   }
 
   async function handleToggleTextBypass(): Promise<void> {
@@ -758,7 +738,6 @@ function LiveSessionInputBridge({
         if (!ok) {
           return;
         }
-        slashBypassActiveRef.current = false;
         committedInputRef.current = bypassPreviewText ?? inputText;
         setDraftText('');
         setDraftDirty(false);
@@ -775,7 +754,6 @@ function LiveSessionInputBridge({
           return;
         }
       }
-      slashBypassActiveRef.current = false;
       setBypassPreviewText(draftDirty ? draftText : inputText);
       setTextBypassEnabled(true);
       keepBypassSelectionPinnedRef.current = true;
@@ -794,7 +772,6 @@ function LiveSessionInputBridge({
           keepBypassSelectionPinnedRef.current = true;
           setBypassPreviewText('');
           enqueueKeystrokes({ keys: ['Enter'] });
-          exitSlashBypassIfComplete('Enter');
           return;
         }
         await runBridgeAction(async () => {
@@ -814,7 +791,6 @@ function LiveSessionInputBridge({
           setBypassPreviewText(undefined);
         }
         enqueueKeystrokes({ keys: [specialKey] });
-        exitSlashBypassIfComplete(specialKey);
         return;
       }
       await runBridgeAction(async () => {
@@ -852,7 +828,6 @@ function LiveSessionInputBridge({
         setBypassPreviewText(undefined);
       }
       enqueueKeystrokes({ keys: [specialKey] });
-      exitSlashBypassIfComplete(specialKey);
       return;
     }
 
@@ -1087,6 +1062,13 @@ function LiveSessionInputBridge({
               if (event.nativeEvent.isComposing) {
                 return;
               }
+              if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
+                event.preventDefault();
+                if (!event.repeat) {
+                  void handleToggleTextBypass();
+                }
+                return;
+              }
               if (textBypassEnabled && event.ctrlKey && event.key.toLowerCase() === 'c') {
                 event.preventDefault();
                 void flushBufferedText().then((ok) => {
@@ -1119,11 +1101,6 @@ function LiveSessionInputBridge({
                 }
                 event.preventDefault();
                 void handleSpecialKey(specialKey);
-                return;
-              }
-              if (!textBypassEnabled && event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
-                event.preventDefault();
-                void handleSlashTextBypass();
                 return;
               }
               if (textBypassEnabled && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
@@ -1305,7 +1282,7 @@ export function ConversationPane({
     compactLiveLayout ? 'layout:compact' : 'layout:regular',
     isMobile ? 'viewport:mobile' : 'viewport:desktop',
   ].join('|');
-  const { scrollRef } = useConversationScrollController({
+  const { scrollRef, selectionActive } = useConversationScrollController({
     conversationKey,
     activeSurface,
     tailKey,
@@ -1320,6 +1297,9 @@ export function ConversationPane({
     onLoadOlderLiveOutput,
     loading,
   });
+  const renderedLiveOutputScreen = useFrozenValue(liveOutputScreen, selectionActive, conversationKey);
+  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive, conversationKey);
+  const renderedShowHistory = !liveMode && renderedHistoryMessages.length > 0;
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1490,7 +1470,7 @@ export function ConversationPane({
           !liveMode && 'space-y-4',
         )}
       >
-        {liveMode && liveOutputScreen ? (
+        {liveMode && renderedLiveOutputScreen ? (
           <div className="space-y-4">
             {(hasOlderLiveOutput || loadingOlderLiveOutput) && (
               <div className="text-center text-xs text-slate-500">
@@ -1498,10 +1478,10 @@ export function ConversationPane({
               </div>
             )}
             {compactLiveLayout
-              ? <LiveSessionOutputBlock content={liveOutputScreen.content} contentAnsi={liveOutputScreen.contentAnsi} compact />
-              : <LiveSessionOutputBlock content={liveOutputScreen.content} contentAnsi={liveOutputScreen.contentAnsi} compact={false} />}
+              ? <LiveSessionOutputBlock content={renderedLiveOutputScreen.content} contentAnsi={renderedLiveOutputScreen.contentAnsi} compact />
+              : <LiveSessionOutputBlock content={renderedLiveOutputScreen.content} contentAnsi={renderedLiveOutputScreen.contentAnsi} compact={false} />}
           </div>
-        ) : showHistory || hasOlderMessages || loadingOlderMessages ? (
+        ) : renderedShowHistory || hasOlderMessages || loadingOlderMessages ? (
           <div className="space-y-4 pb-5">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
               {liveMode ? 'Conversation history' : 'Saved transcript'}
@@ -1511,7 +1491,7 @@ export function ConversationPane({
                 {loadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
               </div>
             )}
-            {historyMessages.map((message) => (
+            {renderedHistoryMessages.map((message) => (
               <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
             ))}
           </div>

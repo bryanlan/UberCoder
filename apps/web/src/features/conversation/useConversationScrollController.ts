@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 const BOTTOM_STICKINESS_THRESHOLD = 48;
 const TOP_LOAD_THRESHOLD = 160;
@@ -27,6 +27,20 @@ function updateStickiness(scroller: HTMLDivElement, stickToBottomRef: { current:
   stickToBottomRef.current = distanceFromBottom <= BOTTOM_STICKINESS_THRESHOLD;
 }
 
+function selectionTouchesScroller(scroller: HTMLDivElement): boolean {
+  const selection = document.getSelection();
+  if (!selection || selection.isCollapsed) {
+    return false;
+  }
+
+  const anchorNode = selection.anchorNode;
+  const focusNode = selection.focusNode;
+  return Boolean(
+    (anchorNode && scroller.contains(anchorNode))
+    || (focusNode && scroller.contains(focusNode)),
+  );
+}
+
 export function useConversationScrollController({
   conversationKey,
   activeSurface,
@@ -52,6 +66,21 @@ export function useConversationScrollController({
   const previousLiveOutputPrependVersionRef = useRef(liveOutputPrependVersion);
   const previousTailKeyRef = useRef<string | undefined>(tailKey);
   const previousLayoutKeyRef = useRef(layoutKey);
+  const pointerDownInsideScrollerRef = useRef(false);
+  const selectingInsideScrollerRef = useRef(false);
+  const [selectionActive, setSelectionActive] = useState(false);
+
+  function setSelectingInsideScroller(nextSelectionActive: boolean): void {
+    if (selectingInsideScrollerRef.current === nextSelectionActive) {
+      return;
+    }
+    selectingInsideScrollerRef.current = nextSelectionActive;
+    setSelectionActive(nextSelectionActive);
+  }
+
+  function isSelectingInScroller(scroller: HTMLDivElement): boolean {
+    return selectingInsideScrollerRef.current || selectionTouchesScroller(scroller);
+  }
 
   function requestOlderHistory(): void {
     if (!hasOlderHistory || loadingOlderHistory || historyLoadInFlightRef.current) {
@@ -86,6 +115,50 @@ export function useConversationScrollController({
   }
 
   useEffect(() => {
+    pointerDownInsideScrollerRef.current = false;
+    setSelectingInsideScroller(false);
+  }, [conversationKey]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) {
+      return;
+    }
+
+    const syncSelectionState = () => {
+      setSelectingInsideScroller(pointerDownInsideScrollerRef.current || selectionTouchesScroller(scroller));
+    };
+
+    const beginPotentialSelection = (event: PointerEvent) => {
+      if (event.button !== 0 || !(event.target instanceof Node) || !scroller.contains(event.target)) {
+        return;
+      }
+
+      pointerDownInsideScrollerRef.current = true;
+      setSelectingInsideScroller(true);
+    };
+
+    const endPotentialSelection = () => {
+      pointerDownInsideScrollerRef.current = false;
+      window.setTimeout(() => {
+        syncSelectionState();
+      }, 0);
+    };
+
+    scroller.addEventListener('pointerdown', beginPotentialSelection);
+    window.addEventListener('pointerup', endPotentialSelection);
+    window.addEventListener('pointercancel', endPotentialSelection);
+    document.addEventListener('selectionchange', syncSelectionState);
+
+    return () => {
+      scroller.removeEventListener('pointerdown', beginPotentialSelection);
+      window.removeEventListener('pointerup', endPotentialSelection);
+      window.removeEventListener('pointercancel', endPotentialSelection);
+      document.removeEventListener('selectionchange', syncSelectionState);
+    };
+  }, [conversationKey]);
+
+  useEffect(() => {
     const scroller = scrollRef.current;
     if (!scroller) {
       return;
@@ -93,6 +166,10 @@ export function useConversationScrollController({
 
     const updateScrollState = () => {
       updateStickiness(scroller, stickToBottomRef);
+
+      if (isSelectingInScroller(scroller)) {
+        return;
+      }
 
       if (loading || scroller.scrollTop > TOP_LOAD_THRESHOLD) {
         return;
@@ -121,7 +198,7 @@ export function useConversationScrollController({
 
   useEffect(() => {
     const scroller = scrollRef.current;
-    if (!scroller || loading) {
+    if (!scroller || loading || isSelectingInScroller(scroller)) {
       return;
     }
 
@@ -154,6 +231,10 @@ export function useConversationScrollController({
     }
 
     const observer = new ResizeObserver(() => {
+      if (isSelectingInScroller(scroller)) {
+        return;
+      }
+
       const wasSticky = stickToBottomRef.current;
       if (wasSticky) {
         scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
@@ -176,6 +257,9 @@ export function useConversationScrollController({
     const scroller = scrollRef.current;
     if (!scroller) {
       previousConversationKeyRef.current = conversationKey;
+      return;
+    }
+    if (isSelectingInScroller(scroller)) {
       return;
     }
 
@@ -208,6 +292,10 @@ export function useConversationScrollController({
       prependScrollHeightRef.current = null;
       return;
     }
+    if (isSelectingInScroller(scroller)) {
+      prependScrollHeightRef.current = null;
+      return;
+    }
 
     const previousScrollHeight = prependScrollHeightRef.current;
     if (previousScrollHeight !== null) {
@@ -231,6 +319,9 @@ export function useConversationScrollController({
     if (!scroller) {
       return;
     }
+    if (isSelectingInScroller(scroller)) {
+      return;
+    }
 
     if (stickToBottomRef.current && prependScrollHeightRef.current === null) {
       scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
@@ -252,11 +343,14 @@ export function useConversationScrollController({
     if (!scroller) {
       return;
     }
+    if (isSelectingInScroller(scroller)) {
+      return;
+    }
 
     if (stickToBottomRef.current) {
       scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
     }
   }, [layoutKey, loading]);
 
-  return { scrollRef };
+  return { scrollRef, selectionActive };
 }
