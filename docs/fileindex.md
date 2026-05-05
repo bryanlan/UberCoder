@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 1c87c2d00464940608ec9e83b2d1b13be560f9ab
-current_through_date: 2026-03-18T08:41:07-07:00
+current_through_commit: f20fe3941ffd6b488366c2c875fd055774993af7
+current_through_date: 2026-05-02T09:56:19-07:00
 ---
 
 # File Index
@@ -68,6 +68,6 @@ current_through_date: 2026-03-18T08:41:07-07:00
 ## Deferred or Unclear Areas
 
 - The repo is intentionally MVP-scoped; higher-level task/worktree abstractions are absent by design, so future additions in that direction would need new docs rather than incremental edits here.
-- The current working tree is dirty, so local UI changes and generated Playwright artifacts are ahead of the last recorded tracked-doc baseline.
+- The current working tree is dirty with active server and web edits outside `docs/`; generated Playwright artifacts may also exist under `test-results/`.
 - `node_modules/`, `dist/`, and `test-results/` are operational artifacts, not authored source.
 - There is only one nested git repo under `UberCoder`, so parent-folder naming should not be treated as the deployable project boundary.

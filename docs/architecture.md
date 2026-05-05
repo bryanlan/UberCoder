@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 1c87c2d00464940608ec9e83b2d1b13be560f9ab
-current_through_date: 2026-03-18T08:41:07-07:00
+current_through_commit: f20fe3941ffd6b488366c2c875fd055774993af7
+current_through_date: 2026-05-02T09:56:19-07:00
 ---
 
 # Architecture
@@ -85,6 +85,7 @@ The proxy path is:
 - The intended host is Ubuntu/Linux with Node.js, npm, tmux, Codex CLI, and Claude Code installed.
 - Runtime config lives outside the repo in the user's config directory, based on the example in `config/agent-console.example.json`.
 - The root build/test scripts depend on building `packages/shared/` before server/web tasks.
-- `npm run build` and `npm run typecheck` currently pass in the live tree.
+- `npm run typecheck` currently passes in the live tree.
+- `npm run test` currently passes the server Vitest suite.
 - The highest-value host integration check is `scripts/smoke-codex-adoption.mjs`, which exercises real Codex session adoption, persistence, and tmux teardown behavior against a running backend.
-- The current worktree is dirty: local web changes are in `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/ConversationPane.tsx`, and `apps/web/src/lib/clipboard.ts`, and those changes are part of the live tree these docs describe.
+- The current worktree is dirty with local server indexing/database/provider edits and web UI edits in `apps/web/src/App.tsx` and `apps/web/src/components/Sidebar.tsx`; those changes are part of the live tree these docs describe, but this docs sync commits only managed docs.

@@ -1,20 +1,951 @@
 {
-  "changed_paths": [],
-  "commits": [],
+  "changed_paths": [
+    "apps/server/src/app.ts",
+    "apps/server/src/config/schema.ts",
+    "apps/server/src/config/service.ts",
+    "apps/server/src/db/database.ts",
+    "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/projects/project-service.ts",
+    "apps/server/src/providers/transcripts/base.ts",
+    "apps/server/src/providers/transcripts/claude.ts",
+    "apps/server/src/routes/conversations.ts",
+    "apps/server/src/routes/projects.ts",
+    "apps/server/src/routes/sessions.ts",
+    "apps/server/src/routes/settings.ts",
+    "apps/server/src/sessions/session-manager.ts",
+    "apps/server/src/sessions/session-screen.ts",
+    "apps/server/src/sessions/tmux-client.ts",
+    "apps/server/test/command-and-proxy.test.ts",
+    "apps/server/test/config.test.ts",
+    "apps/server/test/conversation-routes.test.ts",
+    "apps/server/test/indexing-service.test.ts",
+    "apps/server/test/indexing.test.ts",
+    "apps/server/test/projects-routes.test.ts",
+    "apps/server/test/projects.test.ts",
+    "apps/server/test/providers.test.ts",
+    "apps/server/test/session-manager.test.ts",
+    "apps/server/test/session-screen.test.ts",
+    "apps/server/test/settings.test.ts",
+    "apps/web/e2e/settings.spec.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src/components/ConversationPane.tsx",
+    "apps/web/src/components/DirectoryPickerModal.tsx",
+    "apps/web/src/components/Sidebar.tsx",
+    "apps/web/src/features/conversation/useConversationDataController.ts",
+    "apps/web/src/features/conversation/useConversationScrollController.ts",
+    "apps/web/src/lib/api.ts",
+    "apps/web/src/lib/clipboard.ts",
+    "apps/web/src/pages/SettingsPage.tsx",
+    "docs/agent_docs/commit_dossier.json",
+    "docs/agent_docs/commit_dossier.md",
+    "docs/agent_docs/doc_status.json",
+    "docs/agent_docs/running_tests.md",
+    "docs/architecture.md",
+    "docs/fileindex.md",
+    "packages/shared/src/index.ts",
+    "test-results/.last-run.json",
+    "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md",
+    "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md",
+    "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
+  ],
+  "commits": [
+    {
+      "author": "bryanlan",
+      "commit": "93d10cb49ec81f43c967ee1e0e92f233ad788e22",
+      "date": "2026-03-21T20:07:13-07:00",
+      "files": [
+        {
+          "paths": [
+            "docs/agent_docs/commit_dossier.json"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "docs/agent_docs/commit_dossier.md"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "docs/agent_docs/doc_status.json"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "docs/agent_docs/running_tests.md"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "docs/architecture.md"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "docs/fileindex.md"
+          ],
+          "status": "A"
+        }
+      ],
+      "short_commit": "93d10cb",
+      "subject": "docs: sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "27ea2421e11b557bbcd16701b15ed3ddb35721d1",
+      "date": "2026-03-21T21:14:32-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/lib/clipboard.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "test-results/.last-run.json"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
+          ],
+          "status": "A"
+        }
+      ],
+      "short_commit": "27ea242",
+      "subject": "chore: checkpoint local changes"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "786d858bee47d65f5d8ecfe7de97df9ebb6dfe83",
+      "date": "2026-03-26T11:51:29-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "786d858",
+      "subject": "web: refine mobile live bridge chrome"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "c231e86592faabf5ae6ccbfb29d5b323faef775c",
+      "date": "2026-03-28T13:19:46-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/tmux-client.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "c231e86",
+      "subject": "bridge: keep scroll position and clear submitted input"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "6bea219c2b014930358356cb5b1ee868841be327",
+      "date": "2026-04-02T12:58:57-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "6bea219",
+      "subject": "web: restore mobile bind access"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "b1640f01e3a5bc9749da2b7c463eacec080aed49",
+      "date": "2026-04-03T09:10:42-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "b1640f0",
+      "subject": "web: extend chrome hiders to desktop"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "ed1f8f64c0238ce49955f6cf4434ec0b4f90c2c8",
+      "date": "2026-04-04T08:41:25-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/config/schema.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/config/service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/settings.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/command-and-proxy.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/config.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/settings.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/e2e/settings.spec.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/DirectoryPickerModal.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/lib/api.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/pages/SettingsPage.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "ed1f8f6",
+      "subject": "settings: support markerless projects"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "8885a87503a8739b2bf5033c4e011a7c2d9c0aa8",
+      "date": "2026-04-04T13:53:47-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "8885a87",
+      "subject": "sessions: keep live bridge controls for new sessions"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "205a111a3f1eadc2c247bd0d5309473fb29f0479",
+      "date": "2026-04-05T09:13:28-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "205a111",
+      "subject": "server: persist and restore bound sessions"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "261775876b7d8f37a8b6bf7fbcc11793f6201522",
+      "date": "2026-04-05T09:16:51-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-screen.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "2617758",
+      "subject": "server: fix Claude live paste detection"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "970a10a86921442e9d6951cabc7897cb013b7b9b",
+      "date": "2026-04-05T09:35:18-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-screen.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "970a10a",
+      "subject": "server: harden bound session restore edge cases"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "2fb7c7d8dd6bdd33e5938ac7e414319a274ee17d",
+      "date": "2026-04-05T09:51:03-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "2fb7c7d",
+      "subject": "server: fix model extraction from footer status lines"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "3ecc9b08e16d797f3d375a544f14c3a2dd393a8f",
+      "date": "2026-04-05T10:32:03-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/base.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/claude.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-screen.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "3ecc9b0",
+      "subject": "server: show model name in Claude session status"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "2a746841109f2a0606983289eede468d4905b6f6",
+      "date": "2026-04-16T07:29:05-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/sessions.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/lib/api.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "2a74684",
+      "subject": "console: restore deep history loading"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "06d556ef42ad5b8e21e007d6f08ab9bed0addb41",
+      "date": "2026-04-16T17:52:33-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationDataController.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "A"
+        }
+      ],
+      "short_commit": "06d556e",
+      "subject": "console: refactor conversation scroll ownership"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "c988eb8798a71018afff27761e9f6ec396a7b156",
+      "date": "2026-04-16T21:25:00-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "c988eb8",
+      "subject": "server: stop staging live bridge prompts"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "3b5b36fcebb9310c6304ce010e6be1966f33ab13",
+      "date": "2026-04-19T08:25:14-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "3b5b36f",
+      "subject": "bridge: reduce live bypass input lag"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "ba98517d9aa45ea2d807df12e48aa07756be8ced",
+      "date": "2026-04-19T08:27:56-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-screen.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "ba98517",
+      "subject": "bridge: fix selection and claude model parsing"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "7d2786a78ac60eb5f873e2f93cea0afe4f88b778",
+      "date": "2026-04-19T11:00:42-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-screen.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-screen.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "7d2786a",
+      "subject": "screen: handle claude numbered choice menus"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "662bebae6c14b91dc6a8739ef2c69b258add64e6",
+      "date": "2026-04-19T11:01:09-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "662beba",
+      "subject": "bridge: restore live input resize"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "e603ac0b2234c2c78aa6ee726e2594899114f4f3",
+      "date": "2026-04-19T12:35:40-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "e603ac0",
+      "subject": "session: harden recency repair and bridge resize"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "ef79cde85d17bbf53d3a1cca16192513c352ca53",
+      "date": "2026-04-21T09:09:32-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/projects/project-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/projects.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "ef79cde",
+      "subject": "server: isolate explicit nested project history"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "f116c849b8249afadf4d9a27f7f00e246d2a9148",
+      "date": "2026-04-25T19:37:20-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/projects.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/projects-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "f116c84",
+      "subject": "agent-console: lazy restore sessions"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "f20fe3941ffd6b488366c2c875fd055774993af7",
+      "date": "2026-05-02T09:56:19-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "f20fe39",
+      "subject": "web: stabilize text selection and bypass toggle"
+    }
+  ],
   "docs_current_through": {
     "commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
     "date": "2026-03-18T08:41:07-07:00"
   },
   "from_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
-  "generated_at": "2026-03-22T02:12:37+00:00",
+  "generated_at": "2026-05-05T04:41:38+00:00",
   "head": {
-    "commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
-    "date": "2026-03-18T08:41:07-07:00",
-    "short_commit": "1c87c2d"
+    "commit": "f20fe3941ffd6b488366c2c875fd055774993af7",
+    "date": "2026-05-02T09:56:19-07:00",
+    "short_commit": "f20fe39"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "1c87c2d00464940608ec9e83b2d1b13be560f9ab",
+  "to_commit": "f20fe3941ffd6b488366c2c875fd055774993af7",
   "worktree_dirty": true
 }

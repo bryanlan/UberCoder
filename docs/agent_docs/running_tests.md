@@ -1,8 +1,8 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 1c87c2d00464940608ec9e83b2d1b13be560f9ab
-current_through_date: 2026-03-18T08:41:07-07:00
+current_through_commit: f20fe3941ffd6b488366c2c875fd055774993af7
+current_through_date: 2026-05-02T09:56:19-07:00
 ---
 
 # Running Tests
@@ -11,10 +11,9 @@ current_through_date: 2026-03-18T08:41:07-07:00
 
 Observed during this sync:
 
-- `npm run build` passed on March 21, 2026.
-- `npm run typecheck` passed on March 21, 2026.
-- `npm test` failed on March 21, 2026 with 1 failing Vitest case in `apps/server/test/session-screen.test.ts`.
-- `npm run test:e2e -- apps/web/e2e/settings.spec.ts` failed on March 21, 2026 with 3 failing Playwright cases in `apps/web/e2e/settings.spec.ts`.
+- `npm run typecheck` passed.
+- `npm test` passed: 15 test files, 111 tests.
+- I did not rerun Playwright in this pass; prior `test-results/` artifacts in the tree are stale failure output and should not be treated as current without rerunning `npm test:e2e`.
 
 Install dependencies from the repo root:
 
@@ -78,8 +77,7 @@ npm run test:e2e -- apps/web/e2e/settings.spec.ts
 - Root commands depend on `packages/shared/` building first; the workspace scripts handle that, but ad hoc package-local commands may not.
 - Many core behaviors depend on host filesystem layout and installed external CLIs, so a passing backend unit suite is not the same thing as a passing host integration environment.
 - The Codex smoke test is intentionally stateful and slower than unit coverage because it validates real adoption and transcript persistence behavior.
-- The current Vitest failure is specific to `parseSessionScreenSnapshot` handling trailing interactive picker output: the parser still surfaces picker text as `inputText` when the test expects that text to remain in main content only.
-- The current Playwright failures are not generic boot failures. One test assumes there are no saved projects, but the live settings config already contains multiple explicit projects; the other two fail while clicking directory-picker buttons because overlapping UI elements intercept pointer events during the modal flow.
+- Prior Playwright failure artifacts may reflect old local settings state or modal interaction timing; rerun Playwright before assuming those failures still apply.
 - Session and proxy behavior can fail for environment reasons such as missing tmux, bad allowlists, or incorrect project-root config even when the UI code is fine.
 
 ## Known Gaps
