@@ -41,13 +41,38 @@ interface SidebarProps {
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
 type BoundSessionItem = NonNullable<TreeResponse['boundSessions']>[number];
 
+function latestTimestamp(...values: Array<string | undefined>): string | undefined {
+  return values.reduce<string | undefined>((latest, value) => {
+    if (!value) {
+      return latest;
+    }
+    if (!latest) {
+      return value;
+    }
+    const latestTime = Date.parse(latest);
+    const valueTime = Date.parse(value);
+    if (!Number.isFinite(valueTime)) {
+      return latest;
+    }
+    if (!Number.isFinite(latestTime)) {
+      return value;
+    }
+    return valueTime > latestTime ? value : latest;
+  }, undefined);
+}
+
 function getConversationRecencyTimestamp(
   conversation: ConversationItem,
   session?: BoundSessionItem,
 ): string {
-  return session?.lastCompletedAt
-    ?? session?.startedAt
-    ?? conversation.updatedAt;
+  return latestTimestamp(
+    session?.lastOutputAt,
+    session?.lastActivityAt,
+    session?.lastCompletedAt,
+    session?.updatedAt,
+    session?.startedAt,
+    conversation.updatedAt,
+  ) ?? conversation.updatedAt;
 }
 
 function getConversationFreshnessClass(
@@ -344,8 +369,7 @@ function ProjectSection({
   const collapsedConversations = (['codex', 'claude'] as const)
     .flatMap((provider) => project.combinedConversations
       .filter((conversation) => conversation.provider === provider)
-      .slice(0, 2))
-    .sort((a, b) => b.freshnessTimestamp.localeCompare(a.freshnessTimestamp));
+      .slice(0, 2));
 
   const displayedConversations = workMode || showAllConversations
     ? project.combinedConversations
@@ -623,14 +647,7 @@ export function Sidebar({
     .map((project) => {
       const providerEntries = (['codex', 'claude'] as const).map((provider) => {
         const conversations = project.providers[provider].conversations
-          .filter((conversation) => !workMode || conversation.isBound)
-          .sort((a, b) => {
-            const aSession = boundSessionMap.get(`${project.slug}:${provider}:${a.ref}`);
-            const bSession = boundSessionMap.get(`${project.slug}:${provider}:${b.ref}`);
-            const aTimestamp = getConversationRecencyTimestamp(a, aSession);
-            const bTimestamp = getConversationRecencyTimestamp(b, bSession);
-            return bTimestamp.localeCompare(aTimestamp);
-          });
+          .filter((conversation) => !workMode || conversation.isBound);
         return [provider, { ...project.providers[provider], conversations }] as const;
       });
       const combinedConversations = (['codex', 'claude'] as const)
@@ -649,15 +666,16 @@ export function Sidebar({
             ),
           };
         }))
-        .filter(({ conversation }) => !workMode || conversation.isBound)
-        .sort((a, b) => b.freshnessTimestamp.localeCompare(a.freshnessTimestamp));
+        .filter(({ conversation }) => !workMode || conversation.isBound);
+      const latestActivityAt = combinedConversations.reduce(
+        (latest, conversation) => conversation.freshnessTimestamp > latest ? conversation.freshnessTimestamp : latest,
+        '',
+      );
       return {
         ...project,
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
         combinedConversations,
-        latestActivityAt: combinedConversations[0]
-          ? combinedConversations[0].freshnessTimestamp
-          : '',
+        latestActivityAt,
       };
     })
     .filter((project) => !workMode || project.combinedConversations.length > 0)

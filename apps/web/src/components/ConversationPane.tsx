@@ -101,13 +101,15 @@ function useMediaQuery(query: string): boolean {
 function useFrozenValue<T,>(value: T, frozen: boolean, resetKey?: string): T {
   const valueRef = useRef(value);
   const resetKeyRef = useRef(resetKey);
+  const frozenRef = useRef(frozen);
 
   if (resetKeyRef.current !== resetKey) {
     resetKeyRef.current = resetKey;
     valueRef.current = value;
-  } else if (!frozen) {
+  } else if (!frozen || !frozenRef.current) {
     valueRef.current = value;
   }
+  frozenRef.current = frozen;
 
   return valueRef.current;
 }

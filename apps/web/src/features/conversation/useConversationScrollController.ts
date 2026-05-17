@@ -1,8 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 
 const BOTTOM_STICKINESS_THRESHOLD = 48;
 const TOP_LOAD_THRESHOLD = 160;
 const UNDERFILL_THRESHOLD = 64;
+const SELECTION_RELEASE_GRACE_MS = 500;
 
 type ConversationSurface = 'live' | 'history' | 'empty';
 
@@ -56,7 +58,12 @@ export function useConversationScrollController({
   onLoadOlderLiveOutput,
   loading,
 }: UseConversationScrollControllerArgs) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollElementRef = useRef<HTMLDivElement | null>(null);
+  const [scrollNode, setScrollNode] = useState<HTMLDivElement | null>(null);
+  const scrollRef = useCallback((node: HTMLDivElement | null) => {
+    scrollElementRef.current = node;
+    setScrollNode((current) => (current === node ? current : node));
+  }, []);
   const stickToBottomRef = useRef(true);
   const prependScrollHeightRef = useRef<number | null>(null);
   const historyLoadInFlightRef = useRef(false);
@@ -67,14 +74,24 @@ export function useConversationScrollController({
   const previousTailKeyRef = useRef<string | undefined>(tailKey);
   const previousLayoutKeyRef = useRef(layoutKey);
   const pointerDownInsideScrollerRef = useRef(false);
+  const selectionHoldUntilRef = useRef(0);
+  const selectionReleaseTimerRef = useRef<number | undefined>(undefined);
   const selectingInsideScrollerRef = useRef(false);
   const [selectionActive, setSelectionActive] = useState(false);
 
-  function setSelectingInsideScroller(nextSelectionActive: boolean): void {
+  function setSelectingInsideScroller(nextSelectionActive: boolean, options: { sync?: boolean } = {}): void {
     if (selectingInsideScrollerRef.current === nextSelectionActive) {
       return;
     }
     selectingInsideScrollerRef.current = nextSelectionActive;
+    if (options.sync) {
+      try {
+        flushSync(() => setSelectionActive(nextSelectionActive));
+      } catch {
+        setSelectionActive(nextSelectionActive);
+      }
+      return;
+    }
     setSelectionActive(nextSelectionActive);
   }
 
@@ -87,7 +104,7 @@ export function useConversationScrollController({
       return;
     }
 
-    prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? null;
+    prependScrollHeightRef.current = scrollElementRef.current?.scrollHeight ?? null;
     historyLoadInFlightRef.current = true;
     void onLoadOlderHistory()
       .catch(() => {
@@ -103,7 +120,7 @@ export function useConversationScrollController({
       return;
     }
 
-    prependScrollHeightRef.current = scrollRef.current?.scrollHeight ?? null;
+    prependScrollHeightRef.current = scrollElementRef.current?.scrollHeight ?? null;
     liveOutputLoadInFlightRef.current = true;
     void onLoadOlderLiveOutput()
       .catch(() => {
@@ -116,17 +133,26 @@ export function useConversationScrollController({
 
   useEffect(() => {
     pointerDownInsideScrollerRef.current = false;
+    selectionHoldUntilRef.current = 0;
+    if (selectionReleaseTimerRef.current !== undefined) {
+      window.clearTimeout(selectionReleaseTimerRef.current);
+      selectionReleaseTimerRef.current = undefined;
+    }
     setSelectingInsideScroller(false);
   }, [conversationKey]);
 
   useEffect(() => {
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       return;
     }
 
     const syncSelectionState = () => {
-      setSelectingInsideScroller(pointerDownInsideScrollerRef.current || selectionTouchesScroller(scroller));
+      setSelectingInsideScroller(
+        pointerDownInsideScrollerRef.current
+        || Date.now() < selectionHoldUntilRef.current
+        || selectionTouchesScroller(scroller),
+      );
     };
 
     const beginPotentialSelection = (event: PointerEvent) => {
@@ -135,14 +161,37 @@ export function useConversationScrollController({
       }
 
       pointerDownInsideScrollerRef.current = true;
-      setSelectingInsideScroller(true);
+      selectionHoldUntilRef.current = 0;
+      if (selectionReleaseTimerRef.current !== undefined) {
+        window.clearTimeout(selectionReleaseTimerRef.current);
+        selectionReleaseTimerRef.current = undefined;
+      }
+      if (event.shiftKey) {
+        document.getSelection()?.removeAllRanges();
+      }
+      setSelectingInsideScroller(true, { sync: true });
     };
 
     const endPotentialSelection = () => {
+      const shouldHoldSelection = pointerDownInsideScrollerRef.current || selectionTouchesScroller(scroller);
       pointerDownInsideScrollerRef.current = false;
-      window.setTimeout(() => {
+      if (selectionReleaseTimerRef.current !== undefined) {
+        window.clearTimeout(selectionReleaseTimerRef.current);
+        selectionReleaseTimerRef.current = undefined;
+      }
+      if (!shouldHoldSelection) {
+        selectionHoldUntilRef.current = 0;
         syncSelectionState();
-      }, 0);
+        return;
+      }
+
+      selectionHoldUntilRef.current = Date.now() + SELECTION_RELEASE_GRACE_MS;
+      selectionReleaseTimerRef.current = window.setTimeout(() => {
+        selectionHoldUntilRef.current = 0;
+        selectionReleaseTimerRef.current = undefined;
+        syncSelectionState();
+      }, SELECTION_RELEASE_GRACE_MS);
+      syncSelectionState();
     };
 
     scroller.addEventListener('pointerdown', beginPotentialSelection);
@@ -155,11 +204,15 @@ export function useConversationScrollController({
       window.removeEventListener('pointerup', endPotentialSelection);
       window.removeEventListener('pointercancel', endPotentialSelection);
       document.removeEventListener('selectionchange', syncSelectionState);
+      if (selectionReleaseTimerRef.current !== undefined) {
+        window.clearTimeout(selectionReleaseTimerRef.current);
+        selectionReleaseTimerRef.current = undefined;
+      }
     };
-  }, [conversationKey]);
+  }, [conversationKey, scrollNode]);
 
   useEffect(() => {
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       return;
     }
@@ -189,6 +242,7 @@ export function useConversationScrollController({
     activeSurface,
     hasOlderHistory,
     hasOlderLiveOutput,
+    scrollNode,
     loading,
     loadingOlderHistory,
     loadingOlderLiveOutput,
@@ -197,7 +251,7 @@ export function useConversationScrollController({
   ]);
 
   useEffect(() => {
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller || loading || isSelectingInScroller(scroller)) {
       return;
     }
@@ -217,6 +271,7 @@ export function useConversationScrollController({
     hasOlderLiveOutput,
     historyPrependVersion,
     liveOutputPrependVersion,
+    scrollNode,
     loading,
     loadingOlderHistory,
     loadingOlderLiveOutput,
@@ -225,7 +280,7 @@ export function useConversationScrollController({
   ]);
 
   useEffect(() => {
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller || typeof ResizeObserver === 'undefined') {
       return;
     }
@@ -247,14 +302,14 @@ export function useConversationScrollController({
 
     observer.observe(scroller);
     return () => observer.disconnect();
-  }, [conversationKey]);
+  }, [conversationKey, scrollNode]);
 
   useLayoutEffect(() => {
     if (loading) {
       return;
     }
 
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       previousConversationKeyRef.current = conversationKey;
       return;
@@ -271,7 +326,7 @@ export function useConversationScrollController({
     stickToBottomRef.current = true;
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
     previousConversationKeyRef.current = conversationKey;
-  }, [conversationKey, loading]);
+  }, [conversationKey, loading, scrollNode]);
 
   useLayoutEffect(() => {
     if (loading) {
@@ -287,7 +342,7 @@ export function useConversationScrollController({
     previousHistoryPrependVersionRef.current = historyPrependVersion;
     previousLiveOutputPrependVersionRef.current = liveOutputPrependVersion;
 
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       prependScrollHeightRef.current = null;
       return;
@@ -302,7 +357,7 @@ export function useConversationScrollController({
       scroller.scrollTop += scroller.scrollHeight - previousScrollHeight;
       prependScrollHeightRef.current = null;
     }
-  }, [historyPrependVersion, liveOutputPrependVersion, loading]);
+  }, [historyPrependVersion, liveOutputPrependVersion, loading, scrollNode]);
 
   useLayoutEffect(() => {
     if (loading) {
@@ -315,7 +370,7 @@ export function useConversationScrollController({
 
     previousTailKeyRef.current = tailKey;
 
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       return;
     }
@@ -326,7 +381,7 @@ export function useConversationScrollController({
     if (stickToBottomRef.current && prependScrollHeightRef.current === null) {
       scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
     }
-  }, [loading, tailKey]);
+  }, [loading, scrollNode, tailKey]);
 
   useLayoutEffect(() => {
     if (loading) {
@@ -339,7 +394,7 @@ export function useConversationScrollController({
 
     previousLayoutKeyRef.current = layoutKey;
 
-    const scroller = scrollRef.current;
+    const scroller = scrollNode;
     if (!scroller) {
       return;
     }
@@ -350,7 +405,7 @@ export function useConversationScrollController({
     if (stickToBottomRef.current) {
       scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'auto' });
     }
-  }, [layoutKey, loading]);
+  }, [layoutKey, loading, scrollNode]);
 
   return { scrollRef, selectionActive };
 }

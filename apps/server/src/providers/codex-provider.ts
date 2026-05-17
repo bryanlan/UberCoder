@@ -8,6 +8,13 @@ import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './typ
 import { conversationBelongsToProject, deriveConversationRef, extractAuthoritativeProjectPathsFromJsonlText } from './transcripts/base.js';
 import { parseCodexConversationFile } from './transcripts/codex.js';
 
+function compareConversationDiscoveryOrder(a: ConversationSummary, b: ConversationSummary): number {
+  const aPlacedAt = a.createdAt ?? a.updatedAt;
+  const bPlacedAt = b.createdAt ?? b.updatedAt;
+  const placedAtComparison = bPlacedAt.localeCompare(aPlacedAt);
+  return placedAtComparison || a.ref.localeCompare(b.ref);
+}
+
 function ensureProviderFlag(argv: string[], flag: string): string[] {
   if (argv.length === 0 || argv.includes(flag)) {
     return argv;
@@ -71,7 +78,7 @@ export class CodexProvider implements ProviderAdapter {
     }
 
     for (const [projectSlug, conversations] of results) {
-      results.set(projectSlug, conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+      results.set(projectSlug, conversations.sort(compareConversationDiscoveryOrder));
     }
 
     return results;

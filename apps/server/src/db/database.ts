@@ -215,7 +215,7 @@ export class AppDatabase {
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
         on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.should_restore = 1
-      order by ci.updated_at desc
+      order by coalesce(ci.created_at, ci.updated_at) desc, ci.ref asc
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
       ref: String(row.ref),
@@ -332,7 +332,7 @@ export class AppDatabase {
       left join conversation_title_overrides cto
         on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
       left join bound_sessions bs on bs.id = pc.bound_session_id and bs.should_restore = 1
-      order by pc.updated_at desc
+      order by coalesce(pc.created_at, pc.updated_at) desc, pc.ref asc
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
       ref: String(row.ref),

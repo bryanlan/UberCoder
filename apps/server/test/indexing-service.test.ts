@@ -421,6 +421,70 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('keeps provider conversation tree order stationary when a bound session becomes active', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [
+      {
+        ref: 'older-created',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Older created, active now',
+        createdAt: '2026-03-07T00:00:00.000Z',
+        updatedAt: '2026-03-07T03:00:00.000Z',
+        isBound: false,
+        degraded: false,
+      },
+      {
+        ref: 'newer-created',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Newer created',
+        createdAt: '2026-03-07T01:00:00.000Z',
+        updatedAt: '2026-03-07T01:00:00.000Z',
+        isBound: false,
+        degraded: false,
+      },
+    ]);
+    db.upsertBoundSession({
+      id: 'session-active',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'older-created',
+      tmuxSessionName: 'ac-codex-demo-active',
+      status: 'bound',
+      title: 'Older created, active now',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T04:00:00.000Z',
+      lastOutputAt: '2026-03-07T04:00:00.000Z',
+    });
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.primeProjectMetadata();
+
+    expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref)).toEqual([
+      'newer-created',
+      'older-created',
+    ]);
+    db.close();
+  });
+
   it('carries a manual pending title override onto the adopted real conversation', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

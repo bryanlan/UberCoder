@@ -15,6 +15,13 @@ import { RealtimeEventBus } from '../realtime/event-bus.js';
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
 
+function compareConversationTreeOrder(a: ConversationSummary, b: ConversationSummary): number {
+  const aPlacedAt = a.createdAt ?? a.updatedAt;
+  const bPlacedAt = b.createdAt ?? b.updatedAt;
+  const placedAtComparison = bPlacedAt.localeCompare(aPlacedAt);
+  return placedAtComparison || a.ref.localeCompare(b.ref);
+}
+
 function getProviderRootRefreshDelay(eventName: string, changedPath: string): number | undefined {
   if (eventName === 'add' || eventName === 'unlink' || eventName === 'addDir' || eventName === 'unlinkDir') {
     return PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS;
@@ -172,7 +179,7 @@ export class IndexingService {
       const conversations = project.providers[session.provider].conversations;
       const existingIndex = conversations.findIndex((conversation) => conversation.ref === session.conversationRef);
       if (existingIndex === -1) {
-        conversations.unshift(buildSyntheticConversationFromSession(session));
+        conversations.push(buildSyntheticConversationFromSession(session));
         continue;
       }
       conversations[existingIndex] = {
@@ -188,11 +195,11 @@ export class IndexingService {
         providers: {
           codex: {
             ...project.providers.codex,
-            conversations: project.providers.codex.conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+            conversations: project.providers.codex.conversations.sort(compareConversationTreeOrder),
           },
           claude: {
             ...project.providers.claude,
-            conversations: project.providers.claude.conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+            conversations: project.providers.claude.conversations.sort(compareConversationTreeOrder),
           },
         },
       }))

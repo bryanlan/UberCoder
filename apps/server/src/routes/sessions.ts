@@ -10,6 +10,8 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../sessions/session-manager.js';
 
+const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
+
 const inputBodySchema = z.object({
   text: z.string().min(1),
 });
@@ -32,7 +34,7 @@ export async function registerSessionRoutes(
   providerRegistry: ProviderRegistry,
   sessions: SessionManager,
 ): Promise<void> {
-  app.post('/api/sessions/:sessionId/input', async (request, reply) => {
+  app.post('/api/sessions/:sessionId/input', { bodyLimit: LIVE_INPUT_BODY_LIMIT_BYTES }, async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
     } catch {
@@ -155,7 +157,7 @@ export async function registerSessionRoutes(
     }
   });
 
-  app.post('/api/sessions/:sessionId/keys', async (request, reply) => {
+  app.post('/api/sessions/:sessionId/keys', { bodyLimit: LIVE_INPUT_BODY_LIMIT_BYTES }, async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
     } catch {

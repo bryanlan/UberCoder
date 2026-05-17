@@ -10,6 +10,13 @@ import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './typ
 import { conversationBelongsToProject, deriveConversationRef } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
 
+function compareConversationDiscoveryOrder(a: ConversationSummary, b: ConversationSummary): number {
+  const aPlacedAt = a.createdAt ?? a.updatedAt;
+  const bPlacedAt = b.createdAt ?? b.updatedAt;
+  const placedAtComparison = bPlacedAt.localeCompare(aPlacedAt);
+  return placedAtComparison || a.ref.localeCompare(b.ref);
+}
+
 function ensureProviderFlag(argv: string[], flag: string): string[] {
   if (argv.length === 0 || argv.includes(flag)) {
     return argv;
@@ -116,7 +123,7 @@ export class ClaudeProvider implements ProviderAdapter {
         degraded: parsed.summary.degraded || parsed.projectPaths.size === 0,
       });
     }
-    return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return summaries.sort(compareConversationDiscoveryOrder);
   }
 
   async getConversation(project: ActiveProject, conversationRef: string, settings: MergedProviderSettings): Promise<ProviderConversation | null> {
