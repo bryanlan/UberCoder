@@ -1,0 +1,38 @@
+{
+  "agents_md_current_through_commit": "621b5805af3d4222dccc628bb1d6e5816cda8d41",
+  "agents_md_last_synced_at": "2026-05-10T10:04:26.185554+00:00",
+  "alias": {
+    "exists": true,
+    "is_symlink": true,
+    "path": "CLAUDE.md",
+    "resolved_target": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console/AGENTS.md",
+    "target": "AGENTS.md"
+  },
+  "baseline": {
+    "best_practice_path": "/home/bryan/code/workflow_optimizer/.claude/skills/refresh-agents-md/references/current-best-practice.md",
+    "best_practice_sha256": "7aa2e3ff3ad89088645789917330d81e8db1ac9e6ba4db592bf510cb5c50d75d",
+    "template_path": "/home/bryan/code/workflow_optimizer/.claude/skills/refresh-agents-md/references/agents-template.md",
+    "template_sha256": "08c278e2b4e4a22acd24bf0b43db03813de078515e3efde82c8c7a0a0df30e30"
+  },
+  "canonical_path": "AGENTS.md",
+  "canonical_sha256": "f981ad83f01739d685e12f7601ea115e7ec108cdd2467d63885b8ed4038745b2",
+  "git_ignore": {
+    "status": null
+  },
+  "git_status": {
+    "alias": "??",
+    "canonical": " M",
+    "status": "??"
+  },
+  "managed_by": "roll-agents-md",
+  "notes": [
+    "Rebuilt old generic guidelines into the current compact AGENTS template.",
+    "Preserved backend-authoritative state, explicit project config, tmux session model, provider adapter boundary, proxy allowlist, and secrets/config cautions."
+  ],
+  "referenced_calibration_docs": [
+    "docs/architecture.md",
+    "docs/fileindex.md",
+    "docs/agent_docs/running_tests.md"
+  ],
+  "schema_version": 1
+}
