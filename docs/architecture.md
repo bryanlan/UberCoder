@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 501b43929afb404d016e342639a6a206dc57e8e0
-current_through_date: 2026-05-11T02:21:23-07:00
+current_through_commit: a13b218ddf533a9a5a02b2a842dd2e2155596982
+current_through_date: 2026-05-17T17:36:58-07:00
 ---
 
 # Architecture
@@ -39,6 +39,13 @@ The common read path is:
 4. `IndexingService` normalizes conversations into a SQLite-backed cache and emits SSE invalidation events to the frontend.
 5. The browser requests conversations, settings, project state, or live session updates through HTTP/SSE routes.
 
+Indexing now deduplicates repeated provider refs before replacing a project's cached conversation
+index. When two summaries have the same ref, the database keeps the more recently updated item,
+prefers non-degraded summaries on ties, and prefers entries that have a transcript path. The tree
+orders conversations by created/updated time descending, hides already-adopted pending
+conversations, and overlays active bound sessions so live conversations stay selectable while
+provider history is still catching up.
+
 The settings/project-management path is:
 
 1. The settings UI reads stored config and current UI preferences through `/api/settings` and `/api/settings/ui-preferences`.
@@ -54,6 +61,9 @@ The live-session path is:
 4. tmux pane output is captured to runtime logs, simplified into a backend-owned `content + input + status` model, and replayed to the UI.
 5. User input is sent back through the backend into tmux rather than exposing a raw terminal surface to the browser.
 6. The live screen parser and event log let the UI survive refreshes or reconnects without becoming a raw terminal emulator.
+7. The conversation pane scroll controller protects text selection from auto-scroll, preserves
+   position when older history or live output is prepended, and only tails new output when the user
+   is already near the bottom.
 
 The proxy path is:
 
@@ -85,7 +95,6 @@ The proxy path is:
 - The intended host is Ubuntu/Linux with Node.js, npm, tmux, Codex CLI, and Claude Code installed.
 - Runtime config lives outside the repo in the user's config directory, based on the example in `config/agent-console.example.json`.
 - The root build/test scripts depend on building `packages/shared/` before server/web tasks.
-- `npm run typecheck` currently passes in the live tree.
-- `npm run test` currently passes the server Vitest suite.
+- `npm run typecheck` and `npm test` are the local gates for the shared/server/web TypeScript
+  surface.
 - The highest-value host integration check is `scripts/smoke-codex-adoption.mjs`, which exercises real Codex session adoption, persistence, and tmux teardown behavior against a running backend.
-- The current worktree is dirty with local server indexing/database/provider edits and web UI edits in `apps/web/src/App.tsx` and `apps/web/src/components/Sidebar.tsx`; those changes are part of the live tree these docs describe, but this docs sync commits only managed docs.

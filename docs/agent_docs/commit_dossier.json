@@ -1,5 +1,19 @@
 {
   "changed_paths": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "apps/server/src/db/database.ts",
+    "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/providers/claude-provider.ts",
+    "apps/server/src/providers/codex-provider.ts",
+    "apps/server/src/routes/sessions.ts",
+    "apps/server/test/database.test.ts",
+    "apps/server/test/indexing-service.test.ts",
+    "apps/server/test/session-routes.test.ts",
+    "apps/web/src/components/ConversationPane.tsx",
+    "apps/web/src/components/Sidebar.tsx",
+    "apps/web/src/features/conversation/useConversationScrollController.ts",
+    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
@@ -10,8 +24,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "501b43929afb404d016e342639a6a206dc57e8e0",
-      "date": "2026-05-11T02:21:23-07:00",
+      "commit": "3f3a18bd726211e719f2c9261f094eb0a72e378b",
+      "date": "2026-05-13T02:11:33-07:00",
       "files": [
         {
           "paths": [
@@ -50,24 +64,126 @@
           "status": "M"
         }
       ],
-      "short_commit": "501b439",
+      "short_commit": "3f3a18b",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "ff2da186c36c03211001b8a1f8352b1834c87ab0",
+      "date": "2026-05-17T16:19:17-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/claude-provider.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/codex-provider.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/sessions.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/database.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-routes.test.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "ff2da18",
+      "subject": "Fix live session selection and ordering"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "a13b218ddf533a9a5a02b2a842dd2e2155596982",
+      "date": "2026-05-17T17:36:58-07:00",
+      "files": [
+        {
+          "paths": [
+            "AGENTS.md"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "CLAUDE.md"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "docs/agent_docs/agents_md_status.json"
+          ],
+          "status": "A"
+        }
+      ],
+      "short_commit": "a13b218",
+      "subject": "docs: refresh agent instructions"
     }
   ],
   "docs_current_through": {
-    "commit": "621b5805af3d4222dccc628bb1d6e5816cda8d41",
-    "date": "2026-05-09T02:02:34-07:00"
-  },
-  "from_commit": "621b5805af3d4222dccc628bb1d6e5816cda8d41",
-  "generated_at": "2026-05-13T09:11:32+00:00",
-  "head": {
     "commit": "501b43929afb404d016e342639a6a206dc57e8e0",
-    "date": "2026-05-11T02:21:23-07:00",
-    "short_commit": "501b439"
+    "date": "2026-05-11T02:21:23-07:00"
+  },
+  "from_commit": "501b43929afb404d016e342639a6a206dc57e8e0",
+  "generated_at": "2026-05-18T09:03:46+00:00",
+  "head": {
+    "commit": "a13b218ddf533a9a5a02b2a842dd2e2155596982",
+    "date": "2026-05-17T17:36:58-07:00",
+    "short_commit": "a13b218"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "501b43929afb404d016e342639a6a206dc57e8e0",
+  "to_commit": "a13b218ddf533a9a5a02b2a842dd2e2155596982",
   "worktree_dirty": true
 }

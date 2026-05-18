@@ -1,8 +1,8 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 501b43929afb404d016e342639a6a206dc57e8e0
-current_through_date: 2026-05-11T02:21:23-07:00
+current_through_commit: a13b218ddf533a9a5a02b2a842dd2e2155596982
+current_through_date: 2026-05-17T17:36:58-07:00
 ---
 
 # Running Tests
@@ -11,8 +11,8 @@ current_through_date: 2026-05-11T02:21:23-07:00
 
 Observed during this sync:
 
-- `npm run typecheck` passed.
-- `npm test` passed: 15 test files, 111 tests.
+- `npm run typecheck` passed on May 18, 2026.
+- `npm test` passed on May 18, 2026: 16 test files, 115 tests.
 - I did not rerun Playwright in this pass; prior `test-results/` artifacts in the tree are stale failure output and should not be treated as current without rerunning `npm test:e2e`.
 
 Install dependencies from the repo root:
