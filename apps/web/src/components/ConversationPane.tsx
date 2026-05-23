@@ -2,7 +2,7 @@ import { Bot, Bug, Check, ChevronDown, ChevronRight, Copy, FolderTree, Link as L
 import type { ConversationTimeline, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
@@ -52,7 +52,7 @@ function renderAnsiHtml(text: string): string {
   return ansiConverter.ansi_to_html(text);
 }
 
-function LiveAnsiBlock({
+const LiveAnsiBlock = memo(function LiveAnsiBlock({
   text,
   ansiText,
   className,
@@ -70,7 +70,7 @@ function LiveAnsiBlock({
       dangerouslySetInnerHTML={{ __html: renderAnsiHtml(ansiText ?? text) }}
     />
   );
-}
+});
 
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => globalThis.matchMedia?.(query).matches ?? false);
@@ -131,7 +131,7 @@ function MobileSummaryStrip({
   );
 }
 
-function TranscriptBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
+const TranscriptBubble = memo(function TranscriptBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
   const isUser = role === 'user';
   const isStatus = role === 'status' || role === 'system';
   return (
@@ -150,9 +150,9 @@ function TranscriptBubble({ role, text, timestamp }: { role: string; text: strin
       </div>
     </div>
   );
-}
+});
 
-function LiveSessionOutputBlock({
+const LiveSessionOutputBlock = memo(function LiveSessionOutputBlock({
   content,
   contentAnsi,
   compact,
@@ -183,7 +183,7 @@ function LiveSessionOutputBlock({
       />
     </div>
   );
-}
+});
 
 function LiveSessionStatus({
   status,
@@ -469,6 +469,7 @@ function LiveSessionInputBridge({
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
+  onTextBypassActiveChange,
 }: {
   sessionId: string;
   projectSlug: string;
@@ -486,6 +487,7 @@ function LiveSessionInputBridge({
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
+  onTextBypassActiveChange: (active: boolean) => void;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -582,6 +584,14 @@ function LiveSessionInputBridge({
   useEffect(() => {
     setCopiedLastMessage(false);
   }, [latestAssistantMessage]);
+
+  useEffect(() => {
+    onTextBypassActiveChange(textBypassEnabled);
+  }, [onTextBypassActiveChange, textBypassEnabled]);
+
+  useEffect(() => () => {
+    onTextBypassActiveChange(false);
+  }, [onTextBypassActiveChange]);
 
   const bridgeText = textBypassEnabled ? (bypassPreviewText ?? inputText) : draftText;
 
@@ -1262,16 +1272,22 @@ export function ConversationPane({
 }: ConversationPaneProps) {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [mobileBridgeOpen, setMobileBridgeOpen] = useState(true);
+  const [textBypassActive, setTextBypassActive] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = mobileChromeHidden;
   const historyMessages = timeline?.messages ?? [];
   const showHistory = !liveMode && historyMessages.length > 0;
-  const latestAssistantMessage = [...historyMessages]
-    .reverse()
-    .find((message) => message.role === 'assistant')
-    ?.text ?? '';
+  const latestAssistantMessage = useMemo(() => {
+    for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
+      const message = historyMessages[index];
+      if (message?.role === 'assistant') {
+        return message.text;
+      }
+    }
+    return '';
+  }, [historyMessages]);
   const activeSurface = liveMode
     ? 'live'
     : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
@@ -1299,8 +1315,9 @@ export function ConversationPane({
     onLoadOlderLiveOutput,
     loading,
   });
-  const renderedLiveOutputScreen = useFrozenValue(liveOutputScreen, selectionActive, conversationKey);
-  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive, conversationKey);
+  const freezeConversationOutput = selectionActive || textBypassActive;
+  const renderedLiveOutputScreen = useFrozenValue(liveOutputScreen, freezeConversationOutput, conversationKey);
+  const renderedHistoryMessages = useFrozenValue(historyMessages, freezeConversationOutput, conversationKey);
   const renderedShowHistory = !liveMode && renderedHistoryMessages.length > 0;
 
   if (!timeline) {
@@ -1528,6 +1545,7 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
+          onTextBypassActiveChange={setTextBypassActive}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
