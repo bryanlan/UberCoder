@@ -655,7 +655,7 @@ function LiveSessionInputBridge({
       while (pendingTextRef.current) {
         const text = pendingTextRef.current;
         pendingTextRef.current = '';
-        ok = await queueKeystrokes({ text });
+        ok = await queueKeystrokes({ text, deferScreenUpdate: true });
         if (!ok) {
           break;
         }

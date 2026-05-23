@@ -657,7 +657,11 @@ function AppShell() {
     }
   }
 
-  function applyUpdatedSessionToSelection(sessionId: string, updatedSession: BoundSession): void {
+  function applyUpdatedSessionToSelection(
+    sessionId: string,
+    updatedSession: BoundSession,
+    options: { refreshTimeline?: boolean } = {},
+  ): void {
     if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
       queryClient.setQueryData<ConversationTimeline | undefined>(
         ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
@@ -671,10 +675,12 @@ function AppShell() {
             }
           : current,
       );
-      void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+      if (options.refreshTimeline) {
+        void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
+        resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+      }
     }
-    if (sessionId === timeline?.boundSession?.id) {
+    if (debugOpen && sessionId === timeline?.boundSession?.id) {
       void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
     }
   }

@@ -22,6 +22,7 @@ const keystrokeKeySchema = z.enum(['Enter', 'Escape', 'Up', 'Down', 'Left', 'Rig
 const keystrokeBodySchema = z.object({
   text: z.string().min(1).optional(),
   keys: z.array(keystrokeKeySchema).min(1).optional(),
+  deferScreenUpdate: z.boolean().optional(),
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
 });

@@ -110,6 +110,7 @@ export interface SessionInputRequest {
 export interface SessionKeystrokeRequest {
   text?: string;
   keys?: string[];
+  deferScreenUpdate?: boolean;
 }
 
 export interface LoginRequest {

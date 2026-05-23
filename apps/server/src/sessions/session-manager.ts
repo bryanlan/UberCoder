@@ -33,6 +33,7 @@ const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
+const DEFERRED_TEXT_READY_TTL_MS = 15_000;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -175,6 +176,7 @@ function splitLiteralTextForTmux(text: string): string[] {
 export class SessionManager {
   private readonly watchers = new Map<string, WatchState>();
   private readonly lastScreenHashes = new Map<string, string>();
+  private readonly deferredTextReadyUntil = new Map<string, number>();
   private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
@@ -648,7 +650,7 @@ export class SessionManager {
     return updated;
   }
 
-  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[] }): Promise<BoundSession> {
+  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean }): Promise<BoundSession> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -656,9 +658,15 @@ export class SessionManager {
     }
 
     const hasSpecialKeys = Boolean(payload.keys?.length);
+    if (hasSpecialKeys) {
+      this.deferredTextReadyUntil.delete(liveSession.id);
+    }
+
     if (payload.text && !hasSpecialKeys) {
       let preparedScreen: SessionScreen | undefined;
-      if (liveSession.provider === 'codex') {
+      const canUseDeferredTextReadyCache = payload.deferScreenUpdate === true
+        && (this.deferredTextReadyUntil.get(liveSession.id) ?? 0) > Date.now();
+      if (liveSession.provider === 'codex' && !canUseDeferredTextReadyCache) {
         preparedScreen = await this.captureSessionScreen(liveSession);
         if (screenIsStartingUp(preparedScreen) || screenShowsQueuedMessageHint(preparedScreen)) {
           await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
@@ -693,7 +701,10 @@ export class SessionManager {
         }
       }
       this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
-      await this.emitScreenUpdate(updated);
+      this.deferredTextReadyUntil.set(updated.id, Date.now() + DEFERRED_TEXT_READY_TTL_MS);
+      if (!payload.deferScreenUpdate) {
+        await this.emitScreenUpdate(updated);
+      }
       return updated;
     }
 
@@ -767,7 +778,10 @@ export class SessionManager {
     if (payload.text) {
       this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
     }
-    await this.emitScreenUpdate(updated, { waitForChange: Boolean(payload.keys?.length) });
+    await this.emitScreenUpdate(updated, {
+      waitForChange: Boolean(payload.keys?.length),
+      previousHashOverride: latestObservedHash,
+    });
     const afterScreen = await this.captureSessionScreen(updated);
     this.publishScreenUpdate(updated, afterScreen);
     this.appendDebugTrace(updated, {
@@ -843,6 +857,7 @@ export class SessionManager {
 
     this.stopWatching(session.id);
     this.lastScreenHashes.delete(session.id);
+    this.deferredTextReadyUntil.delete(session.id);
     const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
@@ -913,6 +928,7 @@ export class SessionManager {
     if (!alive) {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
+      this.deferredTextReadyUntil.delete(session.id);
       if (restoreMissing && session.shouldRestore && session.status !== 'releasing') {
         return await this.restoreSession(session);
       }
@@ -1392,9 +1408,13 @@ export class SessionManager {
 
   private async emitScreenUpdate(
     session: BoundSession,
-    options: { waitForChange?: boolean; preserveCompletionRecencyOnIdleTransition?: boolean } = {},
+    options: {
+      waitForChange?: boolean;
+      preserveCompletionRecencyOnIdleTransition?: boolean;
+      previousHashOverride?: string;
+    } = {},
   ): Promise<void> {
-    const previousHash = this.lastScreenHashes.get(session.id);
+    const previousHash = options.previousHashOverride ?? this.lastScreenHashes.get(session.id);
     const screen = await this.waitForScreenChange(
       session,
       previousHash,

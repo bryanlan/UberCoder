@@ -1102,6 +1102,83 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('defers screen captures while streaming buffered text bypass chunks', async () => {
+    class DeferredTypingTmux extends FakeTmux {
+      draft = '';
+
+      renderDraft(text: string): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Ready when you are.',
+          '',
+          `❯ ${text}`,
+          'gpt-5.4 xhigh · 88% left · ~/demo',
+        ].join('\n');
+      }
+
+      override async sendLiteralText(sessionName: string, text: string): Promise<void> {
+        await super.sendLiteralText(sessionName, text);
+        this.draft += text;
+        this.paneText = this.renderDraft(this.draft);
+      }
+
+      override async sendKeys(sessionName: string, keys: string[]): Promise<void> {
+        await super.sendKeys(sessionName, keys);
+        if (keys.includes('Enter')) {
+          const staleTypedScreen = this.renderDraft(this.draft);
+          this.draft = '';
+          this.captureSequence.push(staleTypedScreen, this.renderDraft(''));
+        }
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new DeferredTypingTmux();
+    tmux.paneText = tmux.renderDraft('');
+    const eventBus = new RealtimeEventBus();
+    let screenUpdates = 0;
+    const screenUpdateInputTexts: string[] = [];
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.screen-updated') {
+        screenUpdates += 1;
+        screenUpdateInputTexts.push(event.screen.inputText);
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-deferred-text-bypass',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    screenUpdates = 0;
+    tmux.captureStartLines.length = 0;
+    await manager.sendKeystrokes(session.id, { text: 'a', deferScreenUpdate: true });
+    await manager.sendKeystrokes(session.id, { text: 'b', deferScreenUpdate: true });
+
+    expect(tmux.sent).toEqual(['a', 'b']);
+    expect(tmux.captureStartLines).toHaveLength(1);
+    expect(screenUpdates).toBe(0);
+
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'] });
+    const capturesAfterEnter = tmux.captureStartLines.length;
+    expect(screenUpdateInputTexts).not.toContain('ab');
+    expect(screenUpdateInputTexts.at(-1)).toBe('');
+
+    await manager.sendKeystrokes(session.id, { text: 'c', deferScreenUpdate: true });
+    expect(tmux.sent).toEqual(['a', 'b', 'c']);
+    expect(tmux.captureStartLines).toHaveLength(capturesAfterEnter + 1);
+
+    unsubscribe();
+    db.close();
+  });
+
   it('waits for pasted text to settle before sending Enter on combined submit keystrokes', async () => {
     class PasteAwareTmux extends FakeTmux {
       private pasteVisible = false;
