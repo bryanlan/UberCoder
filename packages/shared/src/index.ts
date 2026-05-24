@@ -147,7 +147,6 @@ export interface TreeResponse {
 
 export interface SessionFreshnessThresholds {
   yellowMinutes: number;
-  orangeMinutes: number;
   redMinutes: number;
 }
 

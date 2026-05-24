@@ -114,6 +114,117 @@ describe('conversation routes', () => {
     }
   });
 
+  it('binds an adopted pending alias through its indexed history conversation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'real-history',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Adopted history',
+      createdAt: '2026-03-14T18:00:30.000Z',
+      updatedAt: '2026-03-14T18:00:30.000Z',
+      isBound: false,
+      degraded: false,
+    } satisfies ConversationSummary]);
+    db.putPendingConversation({
+      ref: 'pending:adopted',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-14T17:59:00.000Z',
+      updatedAt: '2026-03-14T18:01:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        adoptedConversationRef: 'real-history',
+      },
+    });
+
+    const reboundSession: BoundSession = {
+      id: 'session-real-history',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'real-history',
+      resumeConversationRef: 'real-history',
+      tmuxSessionName: 'ac-codex-demo-real-history',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Adopted history',
+      startedAt: '2026-03-14T18:02:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+    };
+    const bindConversation = vi.fn(async () => reboundSession);
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => null,
+        }),
+      } as never,
+      {
+        bindConversation,
+        getSessionByConversation: vi.fn(() => undefined),
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/codex/pending%3Aadopted/bind',
+        payload: {},
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
+        conversationRef: 'real-history',
+        title: 'Adopted history',
+        kind: 'history',
+      }));
+      expect(response.json()).toMatchObject({
+        session: {
+          id: 'session-real-history',
+          conversationRef: 'real-history',
+        },
+      });
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('creates a new pending conversation when the old zero-turn pending bind cannot be restored and gets cleared', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

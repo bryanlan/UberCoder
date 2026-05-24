@@ -7,6 +7,7 @@ import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
 import { normalizeComparableText, normalizeWhitespace, stableTextHash, truncate } from '../lib/text.js';
+import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
@@ -27,7 +28,7 @@ interface WatchState {
   flushTimer?: NodeJS.Timeout;
 }
 
-const WORKING_PULSE_GRACE_MS = 4_000;
+const SESSION_COMPLETION_IDLE_MS = 60_000;
 const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
 const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -291,7 +292,7 @@ export class SessionManager {
       return session;
     }
 
-    const pendingTimestamp = Date.parse(pending.createdAt ?? pending.updatedAt);
+    const pendingTimestamp = getPendingConversationMatchTimestamp(pending);
     const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string'
       ? pending.rawMetadata.lastUserInputHash
       : undefined;
@@ -572,12 +573,14 @@ export class SessionManager {
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
         const pending = this.db.getPendingConversation(boundSession.conversationRef);
         if (pending) {
+          const inputAt = nowIso();
           const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
           rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(initialPrompt));
           rawMetadata.lastUserInputPreview = truncate(initialPrompt, 120);
+          rawMetadata.lastUserInputAt = inputAt;
           this.db.putPendingConversation({
             ...pending,
-            updatedAt: nowIso(),
+            updatedAt: inputAt,
             isBound: true,
             boundSessionId: boundSession.id,
             rawMetadata,
@@ -633,12 +636,14 @@ export class SessionManager {
     if (updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
+        const inputAt = nowIso();
         const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
         rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(text));
         rawMetadata.lastUserInputPreview = truncate(text, 120);
+        rawMetadata.lastUserInputAt = inputAt;
         this.db.putPendingConversation({
           ...pending,
-          updatedAt: nowIso(),
+          updatedAt: inputAt,
           isBound: true,
           boundSessionId: updated.id,
           rawMetadata,
@@ -688,12 +693,14 @@ export class SessionManager {
       if (updated.conversationRef.startsWith('pending:')) {
         const pending = this.db.getPendingConversation(updated.conversationRef);
         if (pending) {
+          const inputAt = nowIso();
           const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
           rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
           rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
+          rawMetadata.lastUserInputAt = inputAt;
           this.db.putPendingConversation({
             ...pending,
-            updatedAt: nowIso(),
+            updatedAt: inputAt,
             isBound: true,
             boundSessionId: updated.id,
             rawMetadata,
@@ -763,12 +770,14 @@ export class SessionManager {
     if (payload.text && updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
+        const inputAt = nowIso();
         const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
         rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
         rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
+        rawMetadata.lastUserInputAt = inputAt;
         this.db.putPendingConversation({
           ...pending,
-          updatedAt: nowIso(),
+          updatedAt: inputAt,
           isBound: true,
           boundSessionId: updated.id,
           rawMetadata,
@@ -969,7 +978,7 @@ export class SessionManager {
     this.watchSessionOutput(refreshed);
     const repaired = this.repairIgnoredIdleOutput(refreshed);
     if (!this.lastScreenHashes.has(repaired.id)) {
-      await this.emitScreenUpdate(repaired, { preserveCompletionRecencyOnIdleTransition: true });
+      await this.emitScreenUpdate(repaired);
     }
     return repaired;
   }
@@ -1094,7 +1103,7 @@ export class SessionManager {
     if (existing) {
       clearTimeout(existing);
     }
-    const delayMs = Math.max(0, heartbeatMs + WORKING_PULSE_GRACE_MS - Date.now()) + 100;
+    const delayMs = Math.max(0, heartbeatMs + SESSION_COMPLETION_IDLE_MS - Date.now()) + 100;
     const timer = setTimeout(() => {
       this.workingIdleTimers.delete(sessionId);
       void this.handleWorkingIdleExpiry(sessionId, heartbeatAt);
@@ -1110,13 +1119,13 @@ export class SessionManager {
         return;
       }
 
-      const latestHeartbeatAt = latestTimestamp(session.lastOutputAt, session.lastActivityAt);
+      const latestHeartbeatAt = session.lastOutputAt;
       if (latestHeartbeatAt && latestHeartbeatAt !== expectedHeartbeatAt) {
         this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
         return;
       }
 
-      if (isRecentTimestamp(latestHeartbeatAt, nowIso(), WORKING_PULSE_GRACE_MS)) {
+      if (isRecentTimestamp(latestHeartbeatAt, nowIso(), SESSION_COMPLETION_IDLE_MS)) {
         if (latestHeartbeatAt) {
           this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
         }
@@ -1124,7 +1133,17 @@ export class SessionManager {
       }
 
       this.clearWorkingExpiry(sessionId);
-      const completedAt = latestTimestamp(session.lastOutputAt, session.lastCompletedAt, session.lastActivityAt) ?? nowIso();
+      const completedAt = session.lastOutputAt;
+      if (!completedAt) {
+        const updated: BoundSession = {
+          ...session,
+          updatedAt: nowIso(),
+          isWorking: false,
+        };
+        this.db.upsertBoundSession(updated);
+        this.eventBus.emit({ type: 'session.updated', session: updated });
+        return;
+      }
       const updated: BoundSession = {
         ...session,
         updatedAt: nowIso(),
@@ -1162,13 +1181,12 @@ export class SessionManager {
             updatedAt: now,
             lastActivityAt: now,
             lastOutputAt: now,
+            isWorking: true,
           }
         : session;
       if (hasMeaningfulOutput) {
         this.db.upsertBoundSession(updated);
-        if (session.isWorking) {
-          this.scheduleWorkingExpiry(sessionId, now);
-        }
+        this.scheduleWorkingExpiry(sessionId, now);
         this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       }
       void this.emitScreenUpdate(updated);
@@ -1271,7 +1289,6 @@ export class SessionManager {
   private publishScreenUpdate(
     session: BoundSession,
     screen: SessionScreen,
-    options: { preserveCompletionRecencyOnIdleTransition?: boolean } = {},
   ): boolean {
     const nextHash = hashScreen(screen);
     if (this.lastScreenHashes.get(session.id) === nextHash) {
@@ -1279,7 +1296,7 @@ export class SessionManager {
     }
 
     this.lastScreenHashes.set(session.id, nextHash);
-    this.syncSessionScreenState(this.mustGetSession(session.id), screen, options);
+    this.syncSessionScreenState(this.mustGetSession(session.id), screen);
     const currentSession = this.mustGetSession(session.id);
     this.eventBus.emit({
       type: 'session.screen-updated',
@@ -1410,7 +1427,6 @@ export class SessionManager {
     session: BoundSession,
     options: {
       waitForChange?: boolean;
-      preserveCompletionRecencyOnIdleTransition?: boolean;
       previousHashOverride?: string;
     } = {},
   ): Promise<void> {
@@ -1421,39 +1437,33 @@ export class SessionManager {
       options.waitForChange ? 220 : 0,
     );
     if (screen) {
-      this.publishScreenUpdate(session, screen, options);
+      this.publishScreenUpdate(session, screen);
     }
   }
 
   private syncSessionScreenState(
     session: BoundSession,
     screen: SessionScreen,
-    options: { preserveCompletionRecencyOnIdleTransition?: boolean } = {},
   ): void {
     const screenShowsWorking = sessionScreenShowsWorking(screen);
     const workingHeartbeatAt = latestTimestamp(
       session.lastOutputAt,
       screenShowsWorking ? session.lastActivityAt : undefined,
     );
-    const nextIsWorking = screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, screen.capturedAt, WORKING_PULSE_GRACE_MS);
-    const nextIdleCompletion = latestTimestamp(
-      session.lastCompletedAt,
-      session.lastOutputAt,
-    ) ?? session.startedAt ?? screen.capturedAt;
+    const outputIsCoolingDown = isRecentTimestamp(session.lastOutputAt, screen.capturedAt, SESSION_COMPLETION_IDLE_MS);
+    const nextIsWorking = outputIsCoolingDown
+      || (screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, screen.capturedAt, SESSION_COMPLETION_IDLE_MS));
 
-    if (nextIsWorking && workingHeartbeatAt) {
-      this.scheduleWorkingExpiry(session.id, workingHeartbeatAt);
+    if (nextIsWorking) {
+      const expiryHeartbeatAt = session.lastOutputAt ?? workingHeartbeatAt;
+      if (expiryHeartbeatAt) {
+        this.scheduleWorkingExpiry(session.id, expiryHeartbeatAt);
+      }
     } else {
       this.clearWorkingExpiry(session.id);
     }
 
-    const nextLastCompletedAt = nextIsWorking
-      ? session.lastCompletedAt
-      : session.isWorking
-        ? options.preserveCompletionRecencyOnIdleTransition
-          ? latestTimestamp(session.lastOutputAt, session.lastCompletedAt) ?? session.startedAt ?? screen.capturedAt
-          : latestTimestamp(screen.capturedAt, session.lastOutputAt, session.lastCompletedAt) ?? screen.capturedAt
-        : nextIdleCompletion;
+    const nextLastCompletedAt = session.lastCompletedAt;
 
     if (session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt) {
       return;

@@ -230,8 +230,8 @@ describe('SessionManager', () => {
       projectSlug: project.slug,
       provider: 'codex',
       title: 'Pending conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
+      createdAt: '2026-03-14T17:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:20.000Z',
       isBound: true,
       boundSessionId: 'placeholder',
       degraded: false,
@@ -517,7 +517,7 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('tracks completion recency only after the screen leaves Working', async () => {
+  it('does not refresh completion recency just because the screen leaves Working', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -562,14 +562,14 @@ describe('SessionManager', () => {
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
-    expect(updated?.lastCompletedAt).toBeTruthy();
+    expect(updated?.lastCompletedAt).toBeUndefined();
     expect(workingStates.some((state) => state.isWorking === true && !state.lastCompletedAt)).toBe(true);
-    expect(workingStates.some((state) => state.isWorking === false && Boolean(state.lastCompletedAt))).toBe(true);
+    expect(workingStates.some((state) => state.isWorking === false && !state.lastCompletedAt)).toBe(true);
     unsubscribe();
     db.close();
   });
 
-  it('repairs idle completion recency when newer output exists than the stored completion timestamp', async () => {
+  it('does not treat recent output as completed before the idle window elapses', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -601,7 +601,7 @@ describe('SessionManager', () => {
 
     await manager.getSessionScreen(session.id);
 
-    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBe(newerOutput);
+    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBe(staleCompletion);
     db.close();
   });
 
@@ -794,7 +794,7 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('backfills completion recency for already-idle sessions on first screen capture', async () => {
+  it('does not backfill completion recency from an idle screen capture', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -817,7 +817,7 @@ describe('SessionManager', () => {
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
-    expect(updated?.lastCompletedAt).toBeTruthy();
+    expect(updated?.lastCompletedAt).toBeUndefined();
     db.close();
   });
 
@@ -904,7 +904,7 @@ describe('SessionManager', () => {
 
     const recovered = db.getBoundSessionById(session.id);
     expect(recovered?.isWorking).toBe(false);
-    expect(recovered?.lastCompletedAt).toBe(staleOutputAt);
+    expect(recovered?.lastCompletedAt).toBe(staleCompletedAt);
     db.close();
   });
 
@@ -934,13 +934,70 @@ describe('SessionManager', () => {
 
     expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
 
-    await new Promise((resolve) => setTimeout(resolve, 4_500));
+    const staleHeartbeatAt = new Date(Date.now() - 61_000).toISOString();
+    db.upsertBoundSession({
+      ...session,
+      isWorking: true,
+      lastActivityAt: staleHeartbeatAt,
+      lastOutputAt: undefined,
+      lastCompletedAt: undefined,
+    });
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Investigating recency updates…',
+      '• Working (1m 1s • esc to interrupt)',
+      '',
+      '› review current changes',
+      'gpt-5.4 xhigh · 92% left · ~/demo',
+      '',
+    ].join('\n');
+    await manager.getSessionScreen(session.id);
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
-    expect(updated?.lastCompletedAt).toBeTruthy();
+    expect(updated?.lastCompletedAt).toBeUndefined();
     db.close();
-  }, 10_000);
+  });
+
+  it('marks output completed only after the output idle window has elapsed', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Summary ready.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-output-idle-completion',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    const outputAt = new Date(Date.now() - 61_000).toISOString();
+    db.upsertBoundSession({
+      ...session,
+      isWorking: true,
+      lastOutputAt: outputAt,
+      lastCompletedAt: undefined,
+    });
+
+    await (manager as unknown as {
+      handleWorkingIdleExpiry: (sessionId: string, expectedHeartbeatAt: string) => Promise<void>;
+    }).handleWorkingIdleExpiry(session.id, outputAt);
+
+    const updated = db.getBoundSessionById(session.id);
+    expect(updated?.isWorking).toBe(false);
+    expect(updated?.lastCompletedAt).toBe(outputAt);
+    db.close();
+  });
 
   it('does not treat idle housekeeping output as fresh completion activity', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));

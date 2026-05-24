@@ -11,6 +11,7 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { CodexProvider } from '../providers/codex-provider.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
+import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
@@ -306,7 +307,7 @@ export class IndexingService {
 
     const claimedRefs = new Set<string>();
     for (const pending of scopedPending) {
-      const pendingTimestamp = Date.parse(pending.createdAt ?? pending.updatedAt);
+      const pendingTimestamp = getPendingConversationMatchTimestamp(pending);
       const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string' ? pending.rawMetadata.lastUserInputHash : undefined;
       const matchedConversation = conversations
         .filter((conversation) => !claimedRefs.has(conversation.ref) && conversation.ref !== pending.ref)

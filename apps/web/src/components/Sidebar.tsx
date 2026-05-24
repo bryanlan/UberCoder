@@ -41,38 +41,14 @@ interface SidebarProps {
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
 type BoundSessionItem = NonNullable<TreeResponse['boundSessions']>[number];
 
-function latestTimestamp(...values: Array<string | undefined>): string | undefined {
-  return values.reduce<string | undefined>((latest, value) => {
-    if (!value) {
-      return latest;
-    }
-    if (!latest) {
-      return value;
-    }
-    const latestTime = Date.parse(latest);
-    const valueTime = Date.parse(value);
-    if (!Number.isFinite(valueTime)) {
-      return latest;
-    }
-    if (!Number.isFinite(latestTime)) {
-      return value;
-    }
-    return valueTime > latestTime ? value : latest;
-  }, undefined);
-}
-
 function getConversationRecencyTimestamp(
   conversation: ConversationItem,
   session?: BoundSessionItem,
 ): string {
-  return latestTimestamp(
-    session?.lastOutputAt,
-    session?.lastActivityAt,
-    session?.lastCompletedAt,
-    session?.updatedAt,
-    session?.startedAt,
-    conversation.updatedAt,
-  ) ?? conversation.updatedAt;
+  if (!session) {
+    return conversation.updatedAt;
+  }
+  return session.lastCompletedAt ?? conversation.updatedAt;
 }
 
 function getConversationFreshnessClass(
@@ -93,9 +69,6 @@ function getConversationFreshnessClass(
   const ageMinutes = Math.max(0, nowMs - parsedTime) / 60_000;
   if (ageMinutes >= thresholds.redMinutes) {
     return 'bg-rose-500';
-  }
-  if (ageMinutes >= thresholds.orangeMinutes) {
-    return 'bg-orange-400';
   }
   if (ageMinutes >= thresholds.yellowMinutes) {
     return 'bg-amber-400';

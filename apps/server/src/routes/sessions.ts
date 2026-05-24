@@ -74,12 +74,14 @@ export async function registerSessionRoutes(
         providerSettings,
         initialPrompt: parsed.data.text,
       });
+      const inputAt = nowIso();
       const rawMetadata = { ...(pendingConversation?.rawMetadata ?? {}) } as Record<string, unknown>;
       rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(parsed.data.text));
       rawMetadata.lastUserInputPreview = truncate(parsed.data.text, 120);
+      rawMetadata.lastUserInputAt = inputAt;
       db.putPendingConversation({
         ...pendingConversation!,
-        updatedAt: nowIso(),
+        updatedAt: inputAt,
         isBound: true,
         boundSessionId: restarted.id,
         rawMetadata,

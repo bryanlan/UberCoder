@@ -114,9 +114,8 @@ describe('settings routes', () => {
         recentActivitySortEnabled: true,
         manualProjectOrder: ['demo'],
         sessionFreshnessThresholds: {
-          yellowMinutes: 3,
-          orangeMinutes: 7,
-          redMinutes: 20,
+          yellowMinutes: 60,
+          redMinutes: 1440,
         },
       });
 
@@ -200,7 +199,6 @@ describe('settings routes', () => {
           manualProjectOrder: ['alpha--service', 'demo'],
           sessionFreshnessThresholds: {
             yellowMinutes: 2,
-            orangeMinutes: 6,
             redMinutes: 11,
           },
         },
@@ -212,7 +210,6 @@ describe('settings routes', () => {
           manualProjectOrder: ['alpha--service', 'demo', 'empty-workspace'],
           sessionFreshnessThresholds: {
             yellowMinutes: 2,
-            orangeMinutes: 6,
             redMinutes: 11,
           },
         },

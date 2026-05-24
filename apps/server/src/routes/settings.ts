@@ -50,10 +50,9 @@ const updateUiPreferencesBodySchema = z.object({
   manualProjectOrder: z.array(z.string().trim().min(1)).optional(),
   sessionFreshnessThresholds: z.object({
     yellowMinutes: z.number().int().min(1).max(24 * 60),
-    orangeMinutes: z.number().int().min(1).max(24 * 60),
     redMinutes: z.number().int().min(1).max(24 * 60),
-  }).refine((value) => value.yellowMinutes < value.orangeMinutes && value.orangeMinutes < value.redMinutes, {
-    message: 'Freshness thresholds must increase from yellow to orange to red.',
+  }).refine((value) => value.yellowMinutes < value.redMinutes, {
+    message: 'Freshness thresholds must increase from yellow to red.',
   }).optional(),
 }).refine((value) => (
   value.recentActivitySortEnabled !== undefined
@@ -69,9 +68,8 @@ const browseDirectoriesQuerySchema = z.object({
 
 const SIDEBAR_UI_PREFERENCES_KEY = 'sidebar';
 const DEFAULT_SESSION_FRESHNESS_THRESHOLDS = {
-  yellowMinutes: 3,
-  orangeMinutes: 7,
-  redMinutes: 20,
+  yellowMinutes: 60,
+  redMinutes: 24 * 60,
 } as const;
 
 function isTailscaleIpv4Address(address: string): boolean {
@@ -134,11 +132,14 @@ function normalizeUiPreferences(input: Partial<UiPreferences> | undefined, avail
       const thresholds = input?.sessionFreshnessThresholds;
       if (
         thresholds
+        && !Object.hasOwn(thresholds, 'orangeMinutes')
         && thresholds.yellowMinutes > 0
-        && thresholds.yellowMinutes < thresholds.orangeMinutes
-        && thresholds.orangeMinutes < thresholds.redMinutes
+        && thresholds.yellowMinutes < thresholds.redMinutes
       ) {
-        return thresholds;
+        return {
+          yellowMinutes: thresholds.yellowMinutes,
+          redMinutes: thresholds.redMinutes,
+        };
       }
       return DEFAULT_SESSION_FRESHNESS_THRESHOLDS;
     })(),

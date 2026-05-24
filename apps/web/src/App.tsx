@@ -43,9 +43,8 @@ const defaultUiPreferences: UiPreferences = {
   recentActivitySortEnabled: true,
   manualProjectOrder: [],
   sessionFreshnessThresholds: {
-    yellowMinutes: 3,
-    orangeMinutes: 7,
-    redMinutes: 20,
+    yellowMinutes: 60,
+    redMinutes: 24 * 60,
   },
 };
 
@@ -54,7 +53,7 @@ function isActiveSessionStatus(status: BoundSession['status']): boolean {
 }
 
 function getConversationUpdatedAtFromSession(session: BoundSession): string {
-  return session.lastCompletedAt ?? session.updatedAt;
+  return session.lastCompletedAt ?? session.startedAt;
 }
 
 function buildSyntheticConversationFromSession(session: BoundSession): ProjectSummary['providers'][ProviderId]['conversations'][number] {
@@ -118,7 +117,7 @@ function applySessionUpdateToTree(current: TreeResponse | undefined, session: Bo
                   return [{
                     ...conversation,
                     title: session.title ?? conversation.title,
-                    updatedAt: getConversationUpdatedAtFromSession(session),
+                    updatedAt: session.lastCompletedAt ?? conversation.updatedAt,
                     isBound: active,
                     boundSessionId: active ? session.id : undefined,
                   }];
@@ -202,7 +201,7 @@ function applySessionUpdateToTimeline(
         ref: nextRef,
         kind: refChanged ? (session.conversationRef.startsWith('pending:') ? 'pending' : 'history') : current.conversation.kind,
         title: session.title ?? current.conversation.title,
-        updatedAt: getConversationUpdatedAtFromSession(session),
+        updatedAt: session.lastCompletedAt ?? current.conversation.updatedAt,
         isBound: active,
         boundSessionId: active ? session.id : undefined,
       },

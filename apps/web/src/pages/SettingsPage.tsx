@@ -31,7 +31,6 @@ interface ProjectDraft {
 
 interface FreshnessDraft {
   yellowMinutes: string;
-  orangeMinutes: string;
   redMinutes: string;
 }
 
@@ -96,28 +95,25 @@ function normalizeProjectDraft(draft: ProjectDraft): UpdateProjectSettingsReques
 function toFreshnessDraft(uiPreferences: UiPreferences): FreshnessDraft {
   return {
     yellowMinutes: String(uiPreferences.sessionFreshnessThresholds.yellowMinutes),
-    orangeMinutes: String(uiPreferences.sessionFreshnessThresholds.orangeMinutes),
     redMinutes: String(uiPreferences.sessionFreshnessThresholds.redMinutes),
   };
 }
 
 function normalizeFreshnessDraft(draft: FreshnessDraft): UpdateUiPreferencesRequest {
   const yellowMinutes = Number.parseInt(draft.yellowMinutes, 10);
-  const orangeMinutes = Number.parseInt(draft.orangeMinutes, 10);
   const redMinutes = Number.parseInt(draft.redMinutes, 10);
 
-  if ([yellowMinutes, orangeMinutes, redMinutes].some((value) => Number.isNaN(value) || value < 1 || value > 24 * 60)) {
+  if ([yellowMinutes, redMinutes].some((value) => Number.isNaN(value) || value < 1 || value > 24 * 60)) {
     throw new Error('Freshness thresholds must be whole numbers between 1 and 1440 minutes.');
   }
 
-  if (!(yellowMinutes < orangeMinutes && orangeMinutes < redMinutes)) {
-    throw new Error('Freshness thresholds must increase from yellow to orange to red.');
+  if (!(yellowMinutes < redMinutes)) {
+    throw new Error('Freshness thresholds must increase from yellow to red.');
   }
 
   return {
     sessionFreshnessThresholds: {
       yellowMinutes,
-      orangeMinutes,
       redMinutes,
     },
   };
@@ -633,7 +629,7 @@ export function SettingsPage({
               <p className="mt-1 text-sm text-slate-400">These thresholds control the work-mode activity dot for bound Codex and Claude sessions. They save immediately and roam across browsers.</p>
             </div>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-3">
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
               <label className="space-y-2">
                 <span className="text-xs uppercase tracking-wide text-slate-500">Yellow after minutes</span>
                 <input
@@ -641,19 +637,6 @@ export function SettingsPage({
                   value={freshnessDraft.yellowMinutes}
                   onChange={(event) => {
                     setFreshnessDraft((current) => ({ ...current, yellowMinutes: event.target.value }));
-                    setFreshnessMessage(undefined);
-                  }}
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"
-                />
-              </label>
-
-              <label className="space-y-2">
-                <span className="text-xs uppercase tracking-wide text-slate-500">Orange after minutes</span>
-                <input
-                  type="text"
-                  value={freshnessDraft.orangeMinutes}
-                  onChange={(event) => {
-                    setFreshnessDraft((current) => ({ ...current, orangeMinutes: event.target.value }));
                     setFreshnessMessage(undefined);
                   }}
                   className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-500"

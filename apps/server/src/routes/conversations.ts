@@ -284,13 +284,32 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Provider is disabled for this project.' });
       return;
     }
-    const cached = db.getConversationIndexEntry(projectSlug, providerId, conversationRef);
+    const pendingSummary = db.getPendingConversation(conversationRef);
+    const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
+    const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
+    const cached = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
     if (!cached) {
+      if (pendingSummary && !parsedBody.data.force) {
+        const existingSession = pendingSummary.boundSessionId
+          ? sessions.getSessionById(pendingSummary.boundSessionId)
+          : sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
+        if (existingSession?.shouldRestore) {
+          const liveSession = await sessions.ensureSession(existingSession.id);
+          if (liveSession) {
+            return { session: liveSession };
+          }
+          const refreshedSession = sessions.getSessionById(existingSession.id);
+          if (refreshedSession?.shouldRestore) {
+            reply.code(409).send({ error: 'Pending conversation is already bound but could not be restored.' });
+            return;
+          }
+        }
+      }
       reply.code(404).send({ error: 'Conversation not indexed.' });
       return;
     }
     if (!parsedBody.data.force) {
-      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
+      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef);
       if (existingSession?.shouldRestore) {
         const liveSession = await sessions.ensureSession(existingSession.id);
         if (liveSession) {
@@ -304,7 +323,7 @@ export async function registerConversationRoutes(
       }
     }
     if (parsedBody.data.force) {
-      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
+      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef);
       if (existingSession) {
         await sessions.releaseSession(existingSession.id);
       }
@@ -313,7 +332,7 @@ export async function registerConversationRoutes(
       project,
       provider,
       providerSettings,
-      conversationRef,
+      conversationRef: resolvedConversationRef,
       title: cached.title,
       kind: 'history',
       initialPrompt: parsedBody.data.initialPrompt,
