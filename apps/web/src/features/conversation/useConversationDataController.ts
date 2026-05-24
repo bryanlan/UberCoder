@@ -32,6 +32,23 @@ function renderScreenText(screen?: ConversationTimeline['liveScreen']): string {
   return `${screen.contentAnsi ?? screen.content}\n${screen.statusAnsi ?? screen.status}`;
 }
 
+function screenIsAtLeastAsFresh(
+  candidate: ConversationTimeline['liveScreen'],
+  latest: ConversationTimeline['liveScreen'],
+): boolean {
+  if (!candidate || !latest) {
+    return false;
+  }
+
+  const candidateMs = Date.parse(candidate.capturedAt);
+  const latestMs = Date.parse(latest.capturedAt);
+  if (!Number.isFinite(candidateMs) || !Number.isFinite(latestMs)) {
+    return candidate.capturedAt >= latest.capturedAt;
+  }
+
+  return candidateMs >= latestMs;
+}
+
 interface UseConversationDataControllerArgs {
   authenticated?: boolean;
   selectedProjectSlug?: string;
@@ -136,7 +153,7 @@ export function useConversationDataController({
   }, [conversationKey]);
 
   const effectiveLiveScreen = liveMode && liveOutputLines > DEFAULT_LIVE_OUTPUT_LINES
-    ? (expandedLiveScreen ?? liveScreen)
+    ? (screenIsAtLeastAsFresh(expandedLiveScreen, liveScreen) ? expandedLiveScreen : liveScreen)
     : liveScreen;
 
   useEffect(() => {

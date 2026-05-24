@@ -469,7 +469,6 @@ function LiveSessionInputBridge({
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
-  onTextBypassActiveChange,
 }: {
   sessionId: string;
   projectSlug: string;
@@ -487,7 +486,6 @@ function LiveSessionInputBridge({
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
-  onTextBypassActiveChange: (active: boolean) => void;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -584,14 +582,6 @@ function LiveSessionInputBridge({
   useEffect(() => {
     setCopiedLastMessage(false);
   }, [latestAssistantMessage]);
-
-  useEffect(() => {
-    onTextBypassActiveChange(textBypassEnabled);
-  }, [onTextBypassActiveChange, textBypassEnabled]);
-
-  useEffect(() => () => {
-    onTextBypassActiveChange(false);
-  }, [onTextBypassActiveChange]);
 
   const bridgeText = textBypassEnabled ? (bypassPreviewText ?? inputText) : draftText;
 
@@ -1272,7 +1262,6 @@ export function ConversationPane({
 }: ConversationPaneProps) {
   const isMobile = useMediaQuery('(max-width: 767px)');
   const [mobileBridgeOpen, setMobileBridgeOpen] = useState(true);
-  const [textBypassActive, setTextBypassActive] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const compactLiveLayout = workMode && liveMode;
@@ -1315,9 +1304,8 @@ export function ConversationPane({
     onLoadOlderLiveOutput,
     loading,
   });
-  const freezeConversationOutput = selectionActive || textBypassActive;
-  const renderedLiveOutputScreen = useFrozenValue(liveOutputScreen, freezeConversationOutput, conversationKey);
-  const renderedHistoryMessages = useFrozenValue(historyMessages, freezeConversationOutput, conversationKey);
+  const renderedLiveOutputScreen = liveOutputScreen;
+  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive && !liveMode, conversationKey);
   const renderedShowHistory = !liveMode && renderedHistoryMessages.length > 0;
 
   if (!timeline) {
@@ -1545,7 +1533,6 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
-          onTextBypassActiveChange={setTextBypassActive}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
