@@ -524,8 +524,8 @@ describe('SessionManager', () => {
     tmux.paneText = [
       'OpenAI Codex',
       '',
-      'Reviewing repository state…',
-      '• Working (20s • esc to interrupt)',
+      'Ready when you are.',
+      'gpt-5.4 medium · 97% left · ~/demo',
     ].join('\n');
     const eventBus = new RealtimeEventBus();
     const workingStates: Array<{ isWorking?: boolean; lastCompletedAt?: string }> = [];
@@ -548,8 +548,17 @@ describe('SessionManager', () => {
       kind: 'history',
     });
 
-    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
+    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(false);
     expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBeUndefined();
+
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Reviewing repository state…',
+      '• Working (20s • esc to interrupt)',
+    ].join('\n');
+    await manager.sendInput(session.id, 'continue');
+    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
 
     tmux.captureSequence = [[
       'OpenAI Codex',
@@ -558,7 +567,7 @@ describe('SessionManager', () => {
       'gpt-5.4 medium · 97% left · ~/demo',
     ].join('\n')];
 
-    await manager.sendInput(session.id, 'continue');
+    await manager.getSessionScreen(session.id);
 
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
@@ -605,7 +614,7 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('repairs overwritten idle recency from the event log after a bad restart', async () => {
+  it('does not repair idle recency from raw event logs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -643,9 +652,9 @@ describe('SessionManager', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const repaired = db.getBoundSessionById(session.id);
-    expect(repaired?.lastOutputAt).toBe(realOutputAt);
-    expect(repaired?.lastCompletedAt).toBe(realOutputAt);
+    const tracked = db.getBoundSessionById(session.id);
+    expect(tracked?.lastOutputAt).toBe(overwrittenAt);
+    expect(tracked?.lastCompletedAt).toBe(overwrittenAt);
     db.close();
   });
 
@@ -693,7 +702,7 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('repairs overwritten idle recency only once', async () => {
+  it('does not emit repair updates from raw event logs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -740,14 +749,12 @@ describe('SessionManager', () => {
     await manager.getSessionScreen(session.id);
     await manager.getSessionScreen(session.id);
 
-    expect(
-      repairedUpdates.filter((value) => value === `${realOutputAt}|${realOutputAt}`),
-    ).toHaveLength(1);
+    expect(repairedUpdates).not.toContain(`${realOutputAt}|${realOutputAt}`);
     unsubscribe();
     db.close();
   });
 
-  it('repairs overwritten idle recency even when the event log has malformed lines', async () => {
+  it('ignores malformed event logs when preserving idle recency', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -788,9 +795,9 @@ describe('SessionManager', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const repaired = db.getBoundSessionById(session.id);
-    expect(repaired?.lastOutputAt).toBe(realOutputAt);
-    expect(repaired?.lastCompletedAt).toBe(realOutputAt);
+    const tracked = db.getBoundSessionById(session.id);
+    expect(tracked?.lastOutputAt).toBe(overwrittenAt);
+    expect(tracked?.lastCompletedAt).toBe(overwrittenAt);
     db.close();
   });
 
@@ -818,6 +825,57 @@ describe('SessionManager', () => {
     const updated = db.getBoundSessionById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBeUndefined();
+    db.close();
+  });
+
+  it('ignores restore output until user input makes raw output trackable', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Ready when you are.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let rawOutputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.raw-output') {
+        rawOutputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-restore-output-no-recency',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await fs.appendFile(session.rawLogPath!, '\nRestored session startup output.\n', 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const afterRestoreOutput = db.getBoundSessionById(session.id);
+    expect(afterRestoreOutput?.lastOutputAt).toBeUndefined();
+    expect(afterRestoreOutput?.lastCompletedAt).toBeUndefined();
+    expect(afterRestoreOutput?.isWorking).toBe(false);
+    expect(rawOutputEvents).toBe(0);
+
+    await manager.sendInput(session.id, 'continue');
+    await fs.appendFile(session.rawLogPath!, '\nReal response after user input.\n', 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const afterUserOutput = db.getBoundSessionById(session.id);
+    expect(afterUserOutput?.lastOutputAt).toBeTruthy();
+    expect(afterUserOutput?.lastCompletedAt).toBeUndefined();
+    expect(afterUserOutput?.isWorking).toBe(true);
+    expect(rawOutputEvents).toBe(1);
+
+    unsubscribe();
     db.close();
   });
 
@@ -931,8 +989,6 @@ describe('SessionManager', () => {
       title: 'Conversation',
       kind: 'history',
     });
-
-    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
 
     const staleHeartbeatAt = new Date(Date.now() - 61_000).toISOString();
     db.upsertBoundSession({
@@ -1048,7 +1104,7 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('repairs stale idle completion timestamps that were last advanced only by housekeeping output', async () => {
+  it('preserves stale idle completion timestamps even when event logs contain older output', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -1094,9 +1150,9 @@ describe('SessionManager', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const repaired = db.getBoundSessionById(session.id);
-    expect(repaired?.lastOutputAt).toBe(meaningfulTimestamp);
-    expect(repaired?.lastCompletedAt).toBe(meaningfulTimestamp);
+    const trackedAfterScreen = db.getBoundSessionById(session.id);
+    expect(trackedAfterScreen?.lastOutputAt).toBe(housekeepingTimestamp);
+    expect(trackedAfterScreen?.lastCompletedAt).toBe(housekeepingTimestamp);
     db.close();
   });
 

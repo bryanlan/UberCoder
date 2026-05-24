@@ -531,6 +531,7 @@ export class SessionManager {
       { initialPrompt: input.initialPrompt },
     );
     const now = nowIso();
+    const initialPrompt = input.initialPrompt?.trim();
     const session: BoundSession = {
       id: sessionId,
       provider: input.provider.id,
@@ -543,7 +544,7 @@ export class SessionManager {
       title: input.title,
       startedAt: now,
       updatedAt: now,
-      lastActivityAt: now,
+      lastActivityAt: initialPrompt ? now : undefined,
       lastOutputAt: undefined,
       lastCompletedAt: undefined,
       isWorking: false,
@@ -569,7 +570,6 @@ export class SessionManager {
         pid,
       };
       this.db.upsertBoundSession(boundSession);
-      const initialPrompt = input.initialPrompt?.trim();
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
         const pending = this.db.getPendingConversation(boundSession.conversationRef);
         if (pending) {
@@ -976,11 +976,10 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     this.watchSessionOutput(refreshed);
-    const repaired = this.repairIgnoredIdleOutput(refreshed);
-    if (!this.lastScreenHashes.has(repaired.id)) {
-      await this.emitScreenUpdate(repaired);
+    if (!this.lastScreenHashes.has(refreshed.id)) {
+      await this.emitScreenUpdate(refreshed);
     }
-    return repaired;
+    return refreshed;
   }
 
   private appendEvent(session: BoundSession, event: { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string }): void {
@@ -1175,7 +1174,8 @@ export class SessionManager {
     try {
       const session = this.mustGetSession(sessionId);
       const hasMeaningfulOutput = normalizeRawOutputLines(chunk).length > 0;
-      const updated = hasMeaningfulOutput
+      const shouldTrackOutput = hasMeaningfulOutput && this.shouldTrackRawOutputForRecency(session);
+      const updated = shouldTrackOutput
         ? {
             ...session,
             updatedAt: now,
@@ -1184,7 +1184,7 @@ export class SessionManager {
             isWorking: true,
           }
         : session;
-      if (hasMeaningfulOutput) {
+      if (shouldTrackOutput) {
         this.db.upsertBoundSession(updated);
         this.scheduleWorkingExpiry(sessionId, now);
         this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
@@ -1195,95 +1195,22 @@ export class SessionManager {
     }
   }
 
-  private repairIgnoredIdleOutput(session: BoundSession): BoundSession {
-    if (
-      session.isWorking
-      || !session.lastOutputAt
-      || !session.lastCompletedAt
-      // Legitimate idle sessions generally diverge these timestamps. Equality is the
-      // known corruption shape from housekeeping noise and bad recovery captures.
-      || session.lastCompletedAt !== session.lastOutputAt
-      || !session.eventLogPath
-      || !fs.existsSync(session.eventLogPath)
-    ) {
-      return session;
+  private shouldTrackRawOutputForRecency(session: BoundSession): boolean {
+    if (session.isWorking) {
+      return true;
     }
 
-    try {
-      const events = fs.readFileSync(session.eventLogPath, 'utf8')
-        .split(/\r?\n/)
-        .filter(Boolean);
-      let latestRawOutputAt: string | undefined;
-      let latestMeaningfulOutputAt: string | undefined;
-      let latestRawOutputWasMeaningful = false;
-
-      for (const line of events) {
-        let event: { type?: string; text?: string; timestamp?: string };
-        try {
-          event = JSON.parse(line) as { type?: string; text?: string; timestamp?: string };
-        } catch {
-          continue;
-        }
-        if (event.type !== 'raw-output' || typeof event.text !== 'string' || typeof event.timestamp !== 'string') {
-          continue;
-        }
-        latestRawOutputAt = event.timestamp;
-        latestRawOutputWasMeaningful = normalizeRawOutputLines(event.text).length > 0;
-        if (latestRawOutputWasMeaningful) {
-          latestMeaningfulOutputAt = event.timestamp;
-        }
-      }
-
-      if (!latestRawOutputAt) {
-        return session;
-      }
-
-      if (!latestMeaningfulOutputAt) {
-        if (latestRawOutputAt !== session.lastOutputAt || latestRawOutputWasMeaningful) {
-          return session;
-        }
-        const repairedLastOutputAt = undefined;
-        const repairedLastCompletedAt = session.startedAt;
-        if (
-          repairedLastOutputAt === session.lastOutputAt
-          && repairedLastCompletedAt === session.lastCompletedAt
-        ) {
-          return session;
-        }
-
-        const repaired: BoundSession = {
-          ...session,
-          updatedAt: nowIso(),
-          lastOutputAt: repairedLastOutputAt,
-          lastCompletedAt: repairedLastCompletedAt,
-        };
-        this.db.upsertBoundSession(repaired);
-        this.eventBus.emit({ type: 'session.updated', session: repaired });
-        return repaired;
-      }
-
-      const repairedLastOutputAt = latestMeaningfulOutputAt;
-      const repairedLastCompletedAt = latestMeaningfulOutputAt;
-
-      if (
-        repairedLastOutputAt === session.lastOutputAt
-        && repairedLastCompletedAt === session.lastCompletedAt
-      ) {
-        return session;
-      }
-
-      const repaired: BoundSession = {
-        ...session,
-        updatedAt: nowIso(),
-        lastOutputAt: repairedLastOutputAt,
-        lastCompletedAt: repairedLastCompletedAt,
-      };
-      this.db.upsertBoundSession(repaired);
-      this.eventBus.emit({ type: 'session.updated', session: repaired });
-      return repaired;
-    } catch {
-      return session;
+    const lastActivityMs = Date.parse(session.lastActivityAt ?? '');
+    if (!Number.isFinite(lastActivityMs)) {
+      return false;
     }
+
+    const lastOutputMs = Date.parse(session.lastOutputAt ?? session.lastCompletedAt ?? '');
+    if (!Number.isFinite(lastOutputMs)) {
+      return true;
+    }
+
+    return lastActivityMs > lastOutputMs;
   }
 
   private publishScreenUpdate(
