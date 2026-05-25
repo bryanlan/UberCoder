@@ -1,17 +1,33 @@
 {
   "changed_paths": [
+    "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/lib/pending-conversation-match.ts",
+    "apps/server/src/routes/conversations.ts",
+    "apps/server/src/routes/sessions.ts",
+    "apps/server/src/routes/settings.ts",
+    "apps/server/src/sessions/session-manager.ts",
+    "apps/server/test/conversation-routes.test.ts",
+    "apps/server/test/indexing-service.test.ts",
+    "apps/server/test/session-manager.test.ts",
+    "apps/server/test/settings.test.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src/components/ConversationPane.tsx",
+    "apps/web/src/components/Sidebar.tsx",
+    "apps/web/src/features/conversation/useConversationDataController.ts",
+    "apps/web/src/pages/SettingsPage.tsx",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md"
+    "docs/fileindex.md",
+    "packages/shared/src/index.ts"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "542274559fe10f99377395c543a3d1d8518d55aa",
-      "date": "2026-05-18T02:16:20-07:00",
+      "commit": "d95ac9a00f4f871ea9361b4ac67059e1cf2e563a",
+      "date": "2026-05-21T02:27:15-07:00",
       "files": [
         {
           "paths": [
@@ -50,24 +66,219 @@
           "status": "M"
         }
       ],
-      "short_commit": "5422745",
+      "short_commit": "d95ac9a",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "bc28285a2f72f9f987ceca91888ac961686a6074",
+      "date": "2026-05-23T07:28:58-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "bc28285",
+      "subject": "web: reduce text bypass render latency"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "ca6b8cac0e8b39dabf40b08acae4814e97b741b2",
+      "date": "2026-05-23T11:42:54-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/sessions.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "ca6b8ca",
+      "subject": "web/server: reduce text bypass latency"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "90888c13a9e2287ecc45b2cb71122c7703e49a1a",
+      "date": "2026-05-23T20:02:15-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/pending-conversation-match.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/sessions.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/settings.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/settings.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/pages/SettingsPage.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "90888c1",
+      "subject": "server/web: fix session recency tracking"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "cad4ab6856b2e51545d8d8dc78638b521a3bf9ba",
+      "date": "2026-05-23T20:33:46-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "cad4ab6",
+      "subject": "server: ignore restore noise for session recency"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "55170a6163e7a99c0afb2adb40c27ef363699205",
+      "date": "2026-05-24T08:16:21-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationDataController.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "55170a6",
+      "subject": "Fix live output refresh latency"
     }
   ],
   "docs_current_through": {
-    "commit": "a13b218ddf533a9a5a02b2a842dd2e2155596982",
-    "date": "2026-05-17T17:36:58-07:00"
-  },
-  "from_commit": "a13b218ddf533a9a5a02b2a842dd2e2155596982",
-  "generated_at": "2026-05-21T09:25:56+00:00",
-  "head": {
     "commit": "542274559fe10f99377395c543a3d1d8518d55aa",
-    "date": "2026-05-18T02:16:20-07:00",
-    "short_commit": "5422745"
+    "date": "2026-05-18T02:16:20-07:00"
+  },
+  "from_commit": "542274559fe10f99377395c543a3d1d8518d55aa",
+  "generated_at": "2026-05-25T02:00:37+00:00",
+  "head": {
+    "commit": "55170a6163e7a99c0afb2adb40c27ef363699205",
+    "date": "2026-05-24T08:16:21-07:00",
+    "short_commit": "55170a6"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "542274559fe10f99377395c543a3d1d8518d55aa",
+  "to_commit": "55170a6163e7a99c0afb2adb40c27ef363699205",
   "worktree_dirty": true
 }
