@@ -1,83 +1,42 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 55170a6163e7a99c0afb2adb40c27ef363699205
-current_through_date: 2026-05-24T08:16:21-07:00
+current_through_commit: 8eedf7118f5bd513ebdd2519e8fcbf4779df0c87
+current_through_date: 2026-05-24T19:02:42-07:00
 ---
 
 # File Index
-
 ## Top-Level Layout
-
-- `apps/server/` contains the Fastify backend, provider adapters, SQLite layer, proxy, realtime bus, restart flow, routes, session manager, and tests.
-- `apps/web/` contains the React/Vite PWA UI.
-- `packages/shared/` contains shared types/contracts.
-- `config/` contains the example runtime config.
-- `scripts/` contains host helpers such as password hash generation and Codex smoke validation.
-- `docs/` contains design and managed repo documentation.
-- `test-results/` contains Playwright failure artifacts from recent e2e runs.
+- `apps/` - top-level directory in the current tree.
+- `config/` - top-level directory in the current tree.
+- `docs/` - top-level directory in the current tree.
+- `packages/` - top-level directory in the current tree.
+- `scripts/` - top-level directory in the current tree.
+- `test-results/` - top-level directory in the current tree.
 
 ## Key Directories
-
-- `apps/server/src/config/`: zod schema and config loading/merge behavior.
-- `apps/server/src/projects/`: explicit project listing and path resolution from saved config entries.
-- `apps/server/src/providers/`: provider registry plus Codex/Claude adapters and transcript parsers.
-- `apps/server/src/indexing/`: filesystem-backed conversation indexing and cache refresh behavior.
-- `apps/server/src/realtime/`: server-side event bus used for live UI invalidation.
-- `apps/server/src/routes/`: auth, conversations, events, projects, sessions, and settings API routes.
-- `apps/server/src/sessions/`: live-output capture, tmux integration, and session lifecycle management.
-- `apps/server/src/security/`: auth-service and password handling.
-- `apps/server/src/proxy/`: localhost proxy enforcement.
-- `apps/server/src/runtime/`: controlled backend restart logic after config changes.
-- `apps/web/src/components/`: sidebar, conversation pane, directory picker, and shared UI pieces.
-- `apps/web/src/lib/`: API client and shared browser helpers such as clipboard fallback logic.
-- `apps/web/src/pages/`: login and settings views.
-- `apps/server/test/`: backend, route, provider, indexing, and session tests with fixtures.
-- `apps/web/e2e/`: Playwright end-to-end coverage for settings/project flows.
+- `apps/` - contains `apps/server/package.json`, `apps/server/src/app.ts`, `apps/server/src/config/schema.ts`, `apps/server/src/config/service.ts`, `apps/server/src/db/database.ts`.
+- `config/` - contains `config/agent-console.example.json`.
+- `docs/` - contains `docs/agent_docs/agents_md_status.json`, `docs/agent_docs/commit_dossier.json`, `docs/agent_docs/commit_dossier.md`, `docs/agent_docs/doc_status.json`, `docs/agent_docs/running_tests.md`.
+- `packages/` - contains `packages/shared/package.json`, `packages/shared/src/index.d.ts`, `packages/shared/src/index.js`, `packages/shared/src/index.ts`, `packages/shared/tsconfig.json`.
+- `scripts/` - contains `scripts/generate-password-hash.mjs`, `scripts/smoke-codex-adoption.mjs`.
+- `test-results/` - contains `test-results/.last-run.json`, `test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md`, `test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md`, `test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md`.
 
 ## Key Files
-
-- `AGENTS.md`: repo-root working guidance for coding conventions and command usage.
-- `README.md`: canonical product/setup/ops guide.
-- `readme.md`: lowercase shim that points tooling back to `README.md`.
-- `package.json`: root workspace build/dev/test/typecheck commands.
-- `apps/server/src/index.ts`: backend startup entrypoint.
-- `apps/server/src/app.ts`: Fastify app assembly and route/plugin wiring.
-- `apps/server/src/config/service.ts`: config loading, normalization, and override logic.
-- `apps/server/src/config/schema.ts`: zod schema for global settings, projects, provider commands, and security.
-- `apps/server/src/indexing/indexing-service.ts`: core conversation indexing/cache service,
-  refresh coalescing, tree ordering, pending-conversation filtering, and active-session overlay.
-- `apps/server/src/db/database.ts`: SQLite schema and cache helpers, including conversation
-  deduplication that prefers newer, non-degraded, transcript-backed summaries.
-- `apps/server/src/providers/codex-provider.ts` and `apps/server/src/providers/claude-provider.ts`: vendor adapters.
-- `apps/server/src/sessions/session-manager.ts`: authoritative live-session lifecycle logic.
-- `apps/server/src/sessions/session-screen.ts`: normalized live-screen projection for the UI.
-- `apps/server/src/routes/settings.ts`: operator-facing settings API and config mutation flow.
-- `apps/server/src/proxy/localhost-proxy.ts`: per-project allowlisted localhost proxy.
-- `apps/server/src/runtime/restart-service.ts`: restart scheduling used after global config changes.
-- `apps/web/src/App.tsx`, `apps/web/src/components/Sidebar.tsx`, and `apps/web/src/components/ConversationPane.tsx`: primary client shell and session UI.
-- `apps/web/src/features/conversation/useConversationScrollController.ts`: live/history scroll
-  controller for tailing output, preserving prepend position, and avoiding auto-scroll while text
-  is selected.
-- `apps/web/src/lib/clipboard.ts`: shared clipboard helper used by current web-tree changes.
-- `apps/web/e2e/settings.spec.ts`: Playwright coverage for explicit saved-project settings flows.
-- `scripts/smoke-codex-adoption.mjs`: real host-level Codex adoption smoke test.
+- `README.md` - repository configuration, entrypoint, or operator documentation.
+- `AGENTS.md` - repository configuration, entrypoint, or operator documentation.
+- `CLAUDE.md` - repository configuration, entrypoint, or operator documentation.
+- `package.json` - repository configuration, entrypoint, or operator documentation.
+- `package-lock.json` - repository configuration, entrypoint, or operator documentation.
+- `requirements.txt` - repository configuration, entrypoint, or operator documentation.
+- JS/TS anchors: `apps/server/src/app.ts`, `apps/server/src/config/schema.ts`, `apps/server/src/config/service.ts`, `apps/server/src/db/database.ts`, `apps/server/src/index.ts`, `apps/server/src/indexing/indexing-service.ts`, `apps/server/src/lib/agent-console-path.ts`, `apps/server/src/lib/async.ts`, `apps/server/src/lib/conversation-summary.ts`, `apps/server/src/lib/path-utils.ts`, `apps/server/src/lib/pending-conversation-match.ts`, `apps/server/src/lib/provider-conversation-cache.ts`.
+- Test anchors: `apps/server/test/auth.test.ts`, `apps/server/test/command-and-proxy.test.ts`, `apps/server/test/config.test.ts`, `apps/server/test/conversation-routes.test.ts`, `apps/server/test/conversations.test.ts`, `apps/server/test/database.test.ts`, `apps/server/test/indexing-service.test.ts`, `apps/server/test/indexing.test.ts`, `apps/server/test/live-output.test.ts`, `apps/server/test/projects-routes.test.ts`, `apps/server/test/projects.test.ts`, `apps/server/test/providers.test.ts`.
 
 ## Change Hotspots
-
-- `apps/server/src/providers/`, `apps/server/src/indexing/indexing-service.ts`,
-  `apps/server/src/db/database.ts`, and provider/indexing tests move together when vendor
-  transcript formats, duplicate refs, ordering, or discovery behavior change.
-- `apps/server/src/sessions/`, `apps/server/src/routes/sessions.ts`, session tests,
-  `apps/web/src/components/ConversationPane.tsx`, and
-  `apps/web/src/features/conversation/useConversationScrollController.ts` move together when
-  live-session behavior, pending-session adoption, raw output, or scroll behavior changes.
-- `apps/server/src/config/`, `apps/server/src/routes/settings.ts`, `apps/web/src/pages/SettingsPage.tsx`, and `config/agent-console.example.json` move together when operator-visible settings change.
-- `apps/server/src/projects/project-service.ts`, `apps/server/src/routes/settings.ts`, `apps/web/e2e/settings.spec.ts`, and settings-page UI move together when explicit project-management behavior changes.
-- `apps/web/src/App.tsx`, `apps/web/src/components/Sidebar.tsx`, `apps/web/src/components/ConversationPane.tsx`, and `apps/web/src/lib/clipboard.ts` move together when navigation, mobile session UX, or copy actions change.
+- `apps/` changes should be reviewed with adjacent tests and docs.
+- `scripts/` changes should be reviewed with adjacent tests and docs.
+- `docs/` changes should be reviewed with adjacent tests and docs.
+- When touching manifests or runtime entrypoints, update this file and `docs/architecture.md` in the same change.
 
 ## Deferred or Unclear Areas
-
-- The repo is intentionally MVP-scoped; higher-level task/worktree abstractions are absent by design, so future additions in that direction would need new docs rather than incremental edits here.
-- `node_modules/`, `dist/`, and `test-results/` are operational artifacts, not authored source.
-- There is only one nested git repo under `UberCoder`, so parent-folder naming should not be treated as the deployable project boundary.
+- This automated rollout used live manifests, README content, and tracked file layout; deeper domain semantics should be confirmed in representative source before large behavior changes.
