@@ -879,6 +879,48 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('does not count echoed user input as assistant output for recency', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Ready when you are.',
+      'gpt-5.4 medium · 97% left · ~/demo',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let rawOutputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.raw-output') {
+        rawOutputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-echoed-input-no-recency',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.sendInput(session.id, 'review current changes');
+    await fs.appendFile(session.rawLogPath!, '\n› review current changes\n', 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const afterEcho = db.getBoundSessionById(session.id);
+    expect(afterEcho?.lastOutputAt).toBeUndefined();
+    expect(afterEcho?.lastCompletedAt).toBeUndefined();
+    expect(afterEcho?.isWorking).toBe(false);
+    expect(rawOutputEvents).toBe(0);
+
+    unsubscribe();
+    db.close();
+  });
+
   it('does not reactivate a stale Working screen when the output heartbeat is old', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

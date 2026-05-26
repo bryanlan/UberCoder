@@ -151,6 +151,33 @@ function shouldUseBracketedPasteTransport(text: string): boolean {
   return text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
 }
 
+function readLastUserInput(eventLogPath: string | undefined): string | undefined {
+  if (!eventLogPath) {
+    return undefined;
+  }
+
+  try {
+    const lines = fs.readFileSync(eventLogPath, 'utf8').split(/\r?\n/);
+    for (const line of lines.reverse()) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const event = JSON.parse(line) as { type?: unknown; text?: unknown };
+        if (event.type === 'user-input' && typeof event.text === 'string') {
+          return event.text;
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
 function splitLiteralTextForTmux(text: string): string[] {
   if (!text.length) {
     return [];
@@ -1173,7 +1200,8 @@ export class SessionManager {
     const now = nowIso();
     try {
       const session = this.mustGetSession(sessionId);
-      const hasMeaningfulOutput = normalizeRawOutputLines(chunk).length > 0;
+      const outputLines = normalizeRawOutputLines(chunk, readLastUserInput(session.eventLogPath));
+      const hasMeaningfulOutput = outputLines.length > 0;
       const shouldTrackOutput = hasMeaningfulOutput && this.shouldTrackRawOutputForRecency(session);
       const updated = shouldTrackOutput
         ? {
