@@ -1,5 +1,6 @@
 {
   "changed_paths": [
+    "AGENTS.md",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
@@ -10,8 +11,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "245086a325e22f429bfabe9999e0f212510272db",
-      "date": "2026-05-25T02:03:14-07:00",
+      "commit": "27eb36b5886b594d03ec0a6cb2922558871c1fa4",
+      "date": "2026-05-25T08:47:53-07:00",
       "files": [
         {
           "paths": [
@@ -50,24 +51,51 @@
           "status": "M"
         }
       ],
-      "short_commit": "245086a",
+      "short_commit": "27eb36b",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
+      "date": "2026-05-25T19:39:43-07:00",
+      "files": [
+        {
+          "paths": [
+            "AGENTS.md"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "docs/architecture.md"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "docs/fileindex.md"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "3cefa8c",
+      "subject": "Improve agent documentation navigation"
     }
   ],
   "docs_current_through": {
-    "commit": "8eedf7118f5bd513ebdd2519e8fcbf4779df0c87",
-    "date": "2026-05-24T19:02:42-07:00"
-  },
-  "from_commit": "8eedf7118f5bd513ebdd2519e8fcbf4779df0c87",
-  "generated_at": "2026-05-25T15:47:53+00:00",
-  "head": {
     "commit": "245086a325e22f429bfabe9999e0f212510272db",
-    "date": "2026-05-25T02:03:14-07:00",
-    "short_commit": "245086a"
+    "date": "2026-05-25T02:03:14-07:00"
+  },
+  "from_commit": "245086a325e22f429bfabe9999e0f212510272db",
+  "generated_at": "2026-05-26T02:44:04+00:00",
+  "head": {
+    "commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
+    "date": "2026-05-25T19:39:43-07:00",
+    "short_commit": "3cefa8c"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "245086a325e22f429bfabe9999e0f212510272db",
+  "to_commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
   "worktree_dirty": true
 }
