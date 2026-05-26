@@ -7,6 +7,11 @@ This repo is an npm workspace for a local, server-first Codex/Claude Agent Conso
 - Keep projects explicit and config-backed. Do not reintroduce implicit immediate-child project discovery.
 - Preserve the one-conversation-to-one-hidden-tmux-session model for live sessions.
 - Keep localhost proxy access authenticated and allowlisted per project/port.
+- Do not let session restore, old transcript viewing, screen repaint noise, or an idle status change
+  refresh conversation recency. Recency should move only from new user/agent activity and completed
+  output after the idle window.
+- Live output shown in the conversation pane should come through the event-log normalization path,
+  not directly from raw tmux screen text.
 - Never commit real secrets or local runtime config; use `config/agent-console.example.json` as the template.
 
 ## Build / Test / Verify
