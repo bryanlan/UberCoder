@@ -1,13 +1,13 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 3cefa8cdec786585f937fdf05a80a111ab610632
-current_through_date: 2026-05-25T19:39:43-07:00
+current_through_commit: 2454603b78dee8264174452c851b869f04ff3cbb
+current_through_date: 2026-05-25T21:04:08-07:00
 ---
 
 # File Index
 ## Top-Level Layout
-- `apps/` - JavaScript/TypeScript source.
+- `apps/` - JavaScript/TypeScript source for the Fastify server and React PWA.
 - `config/` - configuration files.
 - `docs/` - repository documentation and managed doc-sync metadata.
 - `packages/` - JavaScript/TypeScript source.
@@ -25,6 +25,7 @@ current_through_date: 2026-05-25T19:39:43-07:00
 - `apps/web/src/features/conversation/` - client-side conversation data fetching and timeline
   refresh controller.
 - `apps/web/src/components/` - sidebar, conversation pane, and app-level UI components.
+- `apps/web/e2e/` - Playwright browser coverage for settings and explicit project workflows.
 - `config/` - runtime config templates and project/proxy/auth settings shape.
 - `packages/` - shared TypeScript contracts.
 - `scripts/` - operator or development scripts.
@@ -44,12 +45,27 @@ current_through_date: 2026-05-25T19:39:43-07:00
 - `apps/server/src/routes/projects.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/sessions.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
+- `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
+- `apps/server/src/config/schema.ts` and `service.ts` - config schema, merge behavior, runtime paths, provider/project settings, and security knobs.
+- `apps/server/src/db/database.ts` - SQLite persistence boundary.
+- `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
+- `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
+- `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor transcript discovery and launch command adapters.
+- `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
+- `apps/server/src/security/auth-service.ts` and `password.ts` - cookie auth, Tailscale identity bootstrap, and password verification.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
   working state, and recency timestamps.
 - `apps/server/src/sessions/live-output.ts` - event-log normalization for user-visible live output.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
+- `apps/server/src/sessions/tmux-client.ts` - tmux command boundary.
 - `apps/web/src/features/conversation/useConversationDataController.ts` - conversation timeline
   fetch/refresh path on the web side.
+- `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation and display surfaces.
+- `apps/web/src/pages/SettingsPage.tsx` - explicit project/config management UI.
+- `apps/web/src/lib/api.ts` - web API client boundary.
+- `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
+- `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
+- `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/command-and-proxy.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/config.test.ts` - key tracked file or entrypoint for this repo.
@@ -96,7 +112,11 @@ Test and verification anchors:
   `apps/server/test/live-output.test.ts`,
   `apps/web/src/features/conversation/useConversationDataController.ts`, and
   `apps/web/src/components/ConversationPane.tsx`.
+- Settings/project-discovery changes should review `apps/server/src/config/service.ts`,
+  `apps/server/src/projects/project-service.ts`, `apps/server/src/routes/settings.ts`,
+  `apps/web/src/pages/SettingsPage.tsx`, and the Playwright settings e2e tests together.
 - When recent commits rename, split, or demote modules, verify whether the old file still owns behavior or only delegates to newer modules.
 
 ## Deferred or Unclear Areas
-- This rollout used live manifests, README content, tracked file layout, and representative source paths. Confirm deeper domain semantics in source before large behavior changes.
+- Playwright e2e artifacts under `test-results/` are generated evidence, not source architecture.
+- Host-level Codex smoke validation requires a running backend plus real Codex/tmux access and is intentionally opt-in.

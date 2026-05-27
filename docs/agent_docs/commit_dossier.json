@@ -1,6 +1,7 @@
 {
   "changed_paths": [
-    "AGENTS.md",
+    "apps/server/src/sessions/session-manager.ts",
+    "apps/server/test/session-manager.test.ts",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
@@ -11,8 +12,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "27eb36b5886b594d03ec0a6cb2922558871c1fa4",
-      "date": "2026-05-25T08:47:53-07:00",
+      "commit": "b063537ce7a4a0cf0bb23d2d905f2a8c116ddb1e",
+      "date": "2026-05-25T19:46:52-07:00",
       "files": [
         {
           "paths": [
@@ -51,51 +52,45 @@
           "status": "M"
         }
       ],
-      "short_commit": "27eb36b",
+      "short_commit": "b063537",
       "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
-      "date": "2026-05-25T19:39:43-07:00",
+      "commit": "2454603b78dee8264174452c851b869f04ff3cbb",
+      "date": "2026-05-25T21:04:08-07:00",
       "files": [
         {
           "paths": [
-            "AGENTS.md"
+            "apps/server/src/sessions/session-manager.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "docs/architecture.md"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "docs/fileindex.md"
+            "apps/server/test/session-manager.test.ts"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "3cefa8c",
-      "subject": "Improve agent documentation navigation"
+      "short_commit": "2454603",
+      "subject": "Fix regression hotspot"
     }
   ],
   "docs_current_through": {
-    "commit": "245086a325e22f429bfabe9999e0f212510272db",
-    "date": "2026-05-25T02:03:14-07:00"
-  },
-  "from_commit": "245086a325e22f429bfabe9999e0f212510272db",
-  "generated_at": "2026-05-26T02:44:04+00:00",
-  "head": {
     "commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
-    "date": "2026-05-25T19:39:43-07:00",
-    "short_commit": "3cefa8c"
+    "date": "2026-05-25T19:39:43-07:00"
+  },
+  "from_commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
+  "generated_at": "2026-05-27T02:48:26+00:00",
+  "head": {
+    "commit": "2454603b78dee8264174452c851b869f04ff3cbb",
+    "date": "2026-05-25T21:04:08-07:00",
+    "short_commit": "2454603"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "3cefa8cdec786585f937fdf05a80a111ab610632",
+  "to_commit": "2454603b78dee8264174452c851b869f04ff3cbb",
   "worktree_dirty": true
 }
