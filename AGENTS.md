@@ -19,7 +19,7 @@ This repo is an npm workspace for a local, server-first Codex/Claude Agent Conso
 - Dev: `npm run dev`
 - Test: `npm test`
 - Verify: `npm run typecheck && npm run build`
-- E2E: `npm test:e2e`
+- E2E: `npm run test:e2e`
 
 ## Repo Map
 - `apps/server/` — Fastify backend, provider adapters, SQLite cache, routes, proxy, auth, indexing, and tmux session management.
@@ -33,6 +33,7 @@ This repo is an npm workspace for a local, server-first Codex/Claude Agent Conso
 - Provider transcript parsing belongs behind the Codex/Claude adapter interfaces; avoid leaking vendor history formats into routes or UI code.
 - Root workspace scripts build `packages/shared/` first; prefer root `npm` commands unless you intentionally need a package-local target.
 - Browser e2e artifacts under `test-results/` can be stale; rerun Playwright before treating them as current failures.
+- Local Playwright runs can reuse an already-running Agent Console server; ensure ports/config are isolated before treating settings e2e failures as product regressions.
 - The Codex smoke test is stateful and needs a running backend plus real Codex/tmux access; keep it opt-in.
 - Call out config schema, auth, proxy, session lifecycle, or localhost exposure changes explicitly in handoffs.
 

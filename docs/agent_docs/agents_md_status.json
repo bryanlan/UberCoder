@@ -1,6 +1,6 @@
 {
-  "agents_md_current_through_commit": "621b5805af3d4222dccc628bb1d6e5816cda8d41",
-  "agents_md_last_synced_at": "2026-05-10T10:04:26.185554+00:00",
+  "agents_md_current_through_commit": "b85e54805e799554387c3361cf7f7069342e7e83",
+  "agents_md_last_synced_at": "2026-06-01T08:49:38.681593+00:00",
   "alias": {
     "exists": true,
     "is_symlink": true,
@@ -15,19 +15,19 @@
     "template_sha256": "08c278e2b4e4a22acd24bf0b43db03813de078515e3efde82c8c7a0a0df30e30"
   },
   "canonical_path": "AGENTS.md",
-  "canonical_sha256": "f981ad83f01739d685e12f7601ea115e7ec108cdd2467d63885b8ed4038745b2",
+  "canonical_sha256": "3c15af318c9458445c4c3c3f7330d0cd1c020d077da1a58a05703251bfbab2ed",
   "git_ignore": {
     "status": null
   },
   "git_status": {
-    "alias": "??",
+    "alias": null,
     "canonical": " M",
-    "status": "??"
+    "status": null
   },
   "managed_by": "roll-agents-md",
   "notes": [
-    "Rebuilt old generic guidelines into the current compact AGENTS template.",
-    "Preserved backend-authoritative state, explicit project config, tmux session model, provider adapter boundary, proxy allowlist, and secrets/config cautions."
+    "Preserved backend-authoritative project/session/proxy/auth model and one conversation to one hidden tmux session rule.",
+    "Preserved conversation recency, event-log live-output, localhost proxy allowlist, and e2e isolation caveats."
   ],
   "referenced_calibration_docs": [
     "docs/architecture.md",
