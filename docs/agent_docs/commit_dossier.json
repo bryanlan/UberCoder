@@ -1,17 +1,21 @@
 {
   "changed_paths": [
+    ".gitignore",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md"
+    "docs/fileindex.md",
+    "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md",
+    "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md",
+    "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
-      "date": "2026-05-26T19:54:31-07:00",
+      "commit": "3113cde5dc649ddfdd9c83009b1ef0dd0d921c53",
+      "date": "2026-05-27T19:13:02-07:00",
       "files": [
         {
           "paths": [
@@ -50,24 +54,57 @@
           "status": "M"
         }
       ],
-      "short_commit": "154c801",
+      "short_commit": "3113cde",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
+      "date": "2026-05-30T06:42:00-07:00",
+      "files": [
+        {
+          "paths": [
+            ".gitignore"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md"
+          ],
+          "status": "D"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md"
+          ],
+          "status": "D"
+        },
+        {
+          "paths": [
+            "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
+          ],
+          "status": "D"
+        }
+      ],
+      "short_commit": "80a4cb4",
+      "subject": "Remove checked-in test artifacts"
     }
   ],
   "docs_current_through": {
-    "commit": "2454603b78dee8264174452c851b869f04ff3cbb",
-    "date": "2026-05-25T21:04:08-07:00"
-  },
-  "from_commit": "2454603b78dee8264174452c851b869f04ff3cbb",
-  "generated_at": "2026-05-28T02:13:02+00:00",
-  "head": {
     "commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
-    "date": "2026-05-26T19:54:31-07:00",
-    "short_commit": "154c801"
+    "date": "2026-05-26T19:54:31-07:00"
+  },
+  "from_commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
+  "generated_at": "2026-06-01T06:00:13+00:00",
+  "head": {
+    "commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
+    "date": "2026-05-30T06:42:00-07:00",
+    "short_commit": "80a4cb4"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
+  "to_commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
   "worktree_dirty": true
 }

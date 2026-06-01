@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 154c8019a1a3c936b6d5ca397120e9b05f2272a3
-current_through_date: 2026-05-26T19:54:31-07:00
+current_through_commit: 80a4cb484a6f10dfbbd2c664ed79657f447627eb
+current_through_date: 2026-05-30T06:42:00-07:00
 ---
 
 # File Index
@@ -12,7 +12,8 @@ current_through_date: 2026-05-26T19:54:31-07:00
 - `docs/` - repository documentation and managed doc-sync metadata.
 - `packages/` - JavaScript/TypeScript source.
 - `scripts/` - operator or development scripts.
-- `test-results/` - tracked repository area; inspect contained files before changing behavior.
+- `test-results/` - ignored/generated Playwright evidence; rerun e2e before treating contents as
+  current failures.
 
 ## Key Directories
 - `apps/server/src/sessions/` - tmux session manager, screen parsing, and event-log live-output
@@ -29,7 +30,7 @@ current_through_date: 2026-05-26T19:54:31-07:00
 - `config/` - runtime config templates and project/proxy/auth settings shape.
 - `packages/` - shared TypeScript contracts.
 - `scripts/` - operator or development scripts.
-- `test-results/` - tracked repository area; inspect contained files before changing behavior.
+- `test-results/` - ignored/generated Playwright failure artifacts, not source architecture.
 
 ## Key Files
 - `README.md` - key tracked file or entrypoint for this repo.
