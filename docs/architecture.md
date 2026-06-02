@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 80a4cb484a6f10dfbbd2c664ed79657f447627eb
-current_through_date: 2026-05-30T06:42:00-07:00
+current_through_commit: 66ea3c1509508d8beaefbee3ac12d10882b2aaf0
+current_through_date: 2026-06-01T01:50:01-07:00
 ---
 
 # Architecture
@@ -37,8 +37,6 @@ captures are parsed by `apps/server/src/sessions/session-screen.ts` for session 
 user-visible incremental output comes through `apps/server/src/sessions/live-output.ts` and the
 event log attached to the bound session. This keeps terminal chrome, repaint fragments, and echoed
 user input out of assistant-visible timeline text.
-
-The latest doc sync reviewed 6 changed path(s) since the previous docs baseline.
 
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.

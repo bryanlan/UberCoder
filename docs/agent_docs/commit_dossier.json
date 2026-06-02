@@ -1,21 +1,19 @@
 {
   "changed_paths": [
-    ".gitignore",
+    "AGENTS.md",
+    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md",
-    "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md",
-    "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md",
-    "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
+    "docs/fileindex.md"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "3113cde5dc649ddfdd9c83009b1ef0dd0d921c53",
-      "date": "2026-05-27T19:13:02-07:00",
+      "commit": "b85e54805e799554387c3361cf7f7069342e7e83",
+      "date": "2026-05-31T23:00:30-07:00",
       "files": [
         {
           "paths": [
@@ -54,57 +52,45 @@
           "status": "M"
         }
       ],
-      "short_commit": "3113cde",
+      "short_commit": "b85e548",
       "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
-      "date": "2026-05-30T06:42:00-07:00",
+      "commit": "66ea3c1509508d8beaefbee3ac12d10882b2aaf0",
+      "date": "2026-06-01T01:50:01-07:00",
       "files": [
         {
           "paths": [
-            ".gitignore"
+            "AGENTS.md"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "test-results/settings-settings-project--14b08-of-the-console-after-reload/error-context.md"
+            "docs/agent_docs/agents_md_status.json"
           ],
-          "status": "D"
-        },
-        {
-          "paths": [
-            "test-results/settings-settings-project--176c0-history-in-the-console-tree/error-context.md"
-          ],
-          "status": "D"
-        },
-        {
-          "paths": [
-            "test-results/settings-settings-project--ec38b-he-old-auto-discovery-model/error-context.md"
-          ],
-          "status": "D"
+          "status": "M"
         }
       ],
-      "short_commit": "80a4cb4",
-      "subject": "Remove checked-in test artifacts"
+      "short_commit": "66ea3c1",
+      "subject": "Refresh AGENTS.md"
     }
   ],
   "docs_current_through": {
-    "commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
-    "date": "2026-05-26T19:54:31-07:00"
-  },
-  "from_commit": "154c8019a1a3c936b6d5ca397120e9b05f2272a3",
-  "generated_at": "2026-06-01T06:00:13+00:00",
-  "head": {
     "commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
-    "date": "2026-05-30T06:42:00-07:00",
-    "short_commit": "80a4cb4"
+    "date": "2026-05-30T06:42:00-07:00"
+  },
+  "from_commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
+  "generated_at": "2026-06-02T05:52:13+00:00",
+  "head": {
+    "commit": "66ea3c1509508d8beaefbee3ac12d10882b2aaf0",
+    "date": "2026-06-01T01:50:01-07:00",
+    "short_commit": "66ea3c1"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "80a4cb484a6f10dfbbd2c664ed79657f447627eb",
+  "to_commit": "66ea3c1509508d8beaefbee3ac12d10882b2aaf0",
   "worktree_dirty": true
 }
