@@ -1,15 +1,15 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 576004b456359505e9789fed26000915edb9a828
-current_through_date: 2026-06-06T23:40:48-07:00
+current_through_commit: ee48f2ebc65fdf5e35e82162b6df71bb43f530ee
+current_through_date: 2026-06-12T23:21:25-07:00
 ---
 
 # Running Tests
 ## Primary Commands
-- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-06-02 with 16 files and 120 tests.
-- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-05-27.
-- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-05-27.
+- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-06-14 with 16 files and 120 tests.
+- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-06-14.
+- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-06-14.
 - `npm run test:e2e` - Playwright settings suite; failed on 2026-05-27 because the test reused an existing local Agent Console server/config and loaded Bryan's real saved projects instead of the isolated e2e fixture.
 
 ## Targeted Test Patterns

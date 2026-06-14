@@ -1,11 +1,11 @@
 # Commit Dossier
 
 - Repository: `/home/bryan/code/UberCoder/agent-console-mvp/agent-console`
-- Generated at: `2026-06-13T06:11:54+00:00`
-- Repo HEAD: `576004b456359505e9789fed26000915edb9a828` (2026-06-06T23:40:48-07:00)
+- Generated at: `2026-06-14T06:40:26+00:00`
+- Repo HEAD: `ee48f2ebc65fdf5e35e82162b6df71bb43f530ee` (2026-06-12T23:21:25-07:00)
 - Worktree dirty: `true`
-- Docs current through: `95fbcf4f7d936f932689cbe7db5d390cdb25fcaa`
-- Docs current through date: `2026-06-04T23:36:04-07:00`
+- Docs current through: `576004b456359505e9789fed26000915edb9a828`
+- Docs current through date: `2026-06-06T23:40:48-07:00`
 
 ## Changed Paths Since Docs Baseline
 
@@ -18,9 +18,9 @@
 
 ## Commits Since Docs Baseline
 
-### 576004b Sync repo docs
+### ee48f2e Sync repo docs
 
-- Date: `2026-06-06T23:40:48-07:00`
+- Date: `2026-06-12T23:21:25-07:00`
 - Author: `bryanlan`
 - Files:
   - `M` `docs/agent_docs/commit_dossier.json`
