@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import type { BoundSession, ConversationSummary } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, SessionInteractionSummary } from '@agent-console/shared';
 
 function parseJson<T>(value: string | null): T | undefined {
   if (!value) return undefined;
@@ -128,6 +128,24 @@ export class AppDatabase {
       create table if not exists ui_preferences (
         key text primary key,
         value text not null
+      );
+
+      create table if not exists session_interaction_summaries (
+        session_id text primary key,
+        project_slug text not null,
+        provider text not null,
+        conversation_ref text not null,
+        status text not null,
+        chat_summary text,
+        recent_changes_summary text,
+        generated_at text,
+        window_start_at text,
+        window_end_at text,
+        last_interaction_at text,
+        failed_at text,
+        last_error text,
+        title_suggestion text,
+        title_suggested_at text
       );
     `);
 
@@ -542,6 +560,83 @@ export class AppDatabase {
     `).run(key, JSON.stringify(value));
   }
 
+  upsertSessionInteractionSummary(input: SessionInteractionSummary & {
+    titleSuggestion?: string;
+    titleSuggestedAt?: string;
+    lastError?: string;
+  }): void {
+    this.sqlite.prepare(`
+      insert into session_interaction_summaries (
+        session_id, project_slug, provider, conversation_ref, status, chat_summary,
+        recent_changes_summary, generated_at, window_start_at, window_end_at,
+        last_interaction_at, failed_at, last_error, title_suggestion, title_suggested_at
+      ) values (
+        @session_id, @project_slug, @provider, @conversation_ref, @status, @chat_summary,
+        @recent_changes_summary, @generated_at, @window_start_at, @window_end_at,
+        @last_interaction_at, @failed_at, @last_error, @title_suggestion, @title_suggested_at
+      )
+      on conflict(session_id) do update set
+        project_slug = excluded.project_slug,
+        provider = excluded.provider,
+        conversation_ref = excluded.conversation_ref,
+        status = excluded.status,
+        chat_summary = excluded.chat_summary,
+        recent_changes_summary = excluded.recent_changes_summary,
+        generated_at = excluded.generated_at,
+        window_start_at = excluded.window_start_at,
+        window_end_at = excluded.window_end_at,
+        last_interaction_at = excluded.last_interaction_at,
+        failed_at = excluded.failed_at,
+        last_error = excluded.last_error,
+        title_suggestion = coalesce(excluded.title_suggestion, session_interaction_summaries.title_suggestion),
+        title_suggested_at = coalesce(excluded.title_suggested_at, session_interaction_summaries.title_suggested_at)
+    `).run({
+      session_id: input.sessionId,
+      project_slug: input.projectSlug,
+      provider: input.provider,
+      conversation_ref: input.conversationRef,
+      status: input.status,
+      chat_summary: input.chatSummary ?? null,
+      recent_changes_summary: input.recentChangesSummary ?? null,
+      generated_at: input.generatedAt ?? null,
+      window_start_at: input.windowStartAt ?? null,
+      window_end_at: input.windowEndAt ?? null,
+      last_interaction_at: input.lastInteractionAt ?? null,
+      failed_at: input.failedAt ?? null,
+      last_error: input.lastError ?? null,
+      title_suggestion: input.titleSuggestion ?? null,
+      title_suggested_at: input.titleSuggestedAt ?? null,
+    });
+  }
+
+  getSessionInteractionSummary(sessionId: string): (SessionInteractionSummary & {
+    titleSuggestion?: string;
+    titleSuggestedAt?: string;
+    lastError?: string;
+  }) | undefined {
+    const row = this.sqlite.prepare(`
+      select * from session_interaction_summaries
+      where session_id = ?
+      limit 1
+    `).get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.mapSessionInteractionSummaryRow(row, true) : undefined;
+  }
+
+  listSessionInteractionSummariesBySessionIds(sessionIds: string[]): Map<string, SessionInteractionSummary> {
+    if (sessionIds.length === 0) {
+      return new Map();
+    }
+    const placeholders = sessionIds.map(() => '?').join(', ');
+    const rows = this.sqlite.prepare(`
+      select * from session_interaction_summaries
+      where session_id in (${placeholders})
+    `).all(...sessionIds) as Array<Record<string, unknown>>;
+    return new Map(rows.map((row) => {
+      const summary = this.mapSessionInteractionSummaryRow(row, false);
+      return [summary.sessionId, summary];
+    }));
+  }
+
   private mapBoundSessionRow = (row: Record<string, unknown>): BoundSession => ({
     id: String(row.id),
     provider: String(row.provider) as BoundSession['provider'],
@@ -562,4 +657,40 @@ export class AppDatabase {
     rawLogPath: row.raw_log_path ? String(row.raw_log_path) : undefined,
     eventLogPath: row.event_log_path ? String(row.event_log_path) : undefined,
   });
+
+  private mapSessionInteractionSummaryRow(
+    row: Record<string, unknown>,
+    includeInternalFields: true,
+  ): SessionInteractionSummary & { titleSuggestion?: string; titleSuggestedAt?: string; lastError?: string };
+  private mapSessionInteractionSummaryRow(
+    row: Record<string, unknown>,
+    includeInternalFields: false,
+  ): SessionInteractionSummary;
+  private mapSessionInteractionSummaryRow(
+    row: Record<string, unknown>,
+    includeInternalFields: boolean,
+  ): SessionInteractionSummary & { titleSuggestion?: string; titleSuggestedAt?: string; lastError?: string } {
+    const summary: SessionInteractionSummary & { titleSuggestion?: string; titleSuggestedAt?: string; lastError?: string } = {
+      sessionId: String(row.session_id),
+      projectSlug: String(row.project_slug),
+      provider: String(row.provider) as SessionInteractionSummary['provider'],
+      conversationRef: String(row.conversation_ref),
+      status: row.status === 'ready' ? 'ready' : 'failed',
+      generatedAt: row.generated_at ? String(row.generated_at) : undefined,
+      windowStartAt: row.window_start_at ? String(row.window_start_at) : undefined,
+      windowEndAt: row.window_end_at ? String(row.window_end_at) : undefined,
+      lastInteractionAt: row.last_interaction_at ? String(row.last_interaction_at) : undefined,
+      chatSummary: row.chat_summary ? String(row.chat_summary) : undefined,
+      recentChangesSummary: row.recent_changes_summary ? String(row.recent_changes_summary) : undefined,
+      failedAt: row.failed_at ? String(row.failed_at) : undefined,
+    };
+
+    if (includeInternalFields) {
+      summary.lastError = row.last_error ? String(row.last_error) : undefined;
+      summary.titleSuggestion = row.title_suggestion ? String(row.title_suggestion) : undefined;
+      summary.titleSuggestedAt = row.title_suggested_at ? String(row.title_suggested_at) : undefined;
+    }
+
+    return summary;
+  }
 }

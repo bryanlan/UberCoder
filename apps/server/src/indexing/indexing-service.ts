@@ -147,6 +147,7 @@ export class IndexingService {
 
   getTree(): TreeResponse {
     const activeSessions = this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
+    const sessionSummaryMap = this.db.listSessionInteractionSummariesBySessionIds(activeSessions.map((session) => session.id));
     const history = this.db.listConversationIndex();
     const pending = this.db.listPendingConversations()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string');
@@ -178,15 +179,23 @@ export class IndexingService {
       const project = projectMap.get(session.projectSlug);
       if (!project) continue;
       const conversations = project.providers[session.provider].conversations;
+      const storedSessionSummary = sessionSummaryMap.get(session.id);
+      const sessionSummary = storedSessionSummary ? {
+        ...storedSessionSummary,
+        projectSlug: session.projectSlug,
+        provider: session.provider,
+        conversationRef: session.conversationRef,
+      } : undefined;
       const existingIndex = conversations.findIndex((conversation) => conversation.ref === session.conversationRef);
       if (existingIndex === -1) {
-        conversations.push(buildSyntheticConversationFromSession(session));
+        conversations.push(buildSyntheticConversationFromSession(session, sessionSummary));
         continue;
       }
       conversations[existingIndex] = {
         ...conversations[existingIndex]!,
         isBound: true,
         boundSessionId: session.id,
+        sessionSummary,
       };
     }
 

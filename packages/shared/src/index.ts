@@ -26,6 +26,21 @@ export interface ProjectSummary {
   providers: Record<ProviderId, ProviderNode>;
 }
 
+export interface SessionInteractionSummary {
+  sessionId: string;
+  projectSlug: string;
+  provider: ProviderId;
+  conversationRef: string;
+  status: 'ready' | 'failed';
+  generatedAt?: string;
+  windowStartAt?: string;
+  windowEndAt?: string;
+  lastInteractionAt?: string;
+  chatSummary?: string;
+  recentChangesSummary?: string;
+  failedAt?: string;
+}
+
 export interface ConversationSummary {
   ref: string;
   kind: ConversationKind;
@@ -43,6 +58,7 @@ export interface ConversationSummary {
   degraded: boolean;
   model?: string;
   rawMetadata?: Record<string, unknown>;
+  sessionSummary?: SessionInteractionSummary;
 }
 
 export interface NormalizedMessage {

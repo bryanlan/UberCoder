@@ -81,6 +81,70 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('attaches session summaries to each bound conversation row', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'conversation-with-summary',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Conversation with summary',
+      updatedAt: '2026-06-17T18:31:00.000Z',
+      isBound: false,
+      degraded: false,
+    }]);
+    db.upsertBoundSession({
+      id: 'session-with-summary',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'conversation-with-summary',
+      tmuxSessionName: 'ac-codex-demo-summary',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Conversation with summary',
+      startedAt: '2026-06-17T18:00:00.000Z',
+      updatedAt: '2026-06-17T18:31:00.000Z',
+      lastActivityAt: '2026-06-17T18:30:00.000Z',
+    });
+    db.upsertSessionInteractionSummary({
+      sessionId: 'session-with-summary',
+      projectSlug: 'demo',
+      provider: 'codex',
+      conversationRef: 'conversation-with-summary',
+      status: 'ready',
+      generatedAt: '2026-06-17T18:35:00.000Z',
+      lastInteractionAt: '2026-06-17T18:30:00.000Z',
+      chatSummary: 'This chat is about the active session.',
+      recentChangesSummary: 'The last hour focused on the latest session activity.',
+    });
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => [] as ConversationSummary[],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.primeProjectMetadata();
+
+    const conversation = indexing.getTree().projects[0]?.providers.codex.conversations[0];
+    expect(conversation?.boundSessionId).toBe('session-with-summary');
+    expect(conversation?.sessionSummary).toMatchObject({
+      sessionId: 'session-with-summary',
+      status: 'ready',
+      chatSummary: 'This chat is about the active session.',
+    });
+    db.close();
+  });
+
   it('adopts pending conversations into real history nodes and hides the pending alias from the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

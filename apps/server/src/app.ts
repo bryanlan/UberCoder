@@ -21,6 +21,7 @@ import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { RestartService } from './runtime/restart-service.js';
+import { SessionSummaryService } from './summaries/session-summary-service.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -39,6 +40,13 @@ export async function buildApp(options: AppOptions = {}) {
     providerRegistry,
   });
   const authService = new AuthService(config, db);
+  const sessionSummaries = new SessionSummaryService(
+    db,
+    projectService,
+    providerRegistry,
+    config.runtimeDir,
+    eventBus,
+  );
 
   const app = fastify({
     logger: true,
@@ -93,8 +101,10 @@ export async function buildApp(options: AppOptions = {}) {
 
   await indexing.start();
   await sessions.observeSessions();
+  sessionSummaries.start();
 
   app.addHook('onClose', async () => {
+    await sessionSummaries.stop();
     await indexing.stop();
     db.close();
   });

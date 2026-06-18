@@ -2,11 +2,15 @@ import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, Menu, Pencil, P
 import { Link, useLocation } from 'react-router-dom';
 import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useEffect, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
+const summaryPanelMargin = 12;
+const summaryRowGap = 8;
+const summaryMinimumHeight = 180;
 
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
@@ -40,6 +44,13 @@ interface SidebarProps {
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
 type BoundSessionItem = NonNullable<TreeResponse['boundSessions']>[number];
+
+interface SummaryPanelLayout {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
 
 function getConversationRecencyTimestamp(
   conversation: ConversationItem,
@@ -76,6 +87,59 @@ function getConversationFreshnessClass(
   return 'bg-emerald-400';
 }
 
+function formatRelativeAge(timestamp: string | undefined, nowMs: number): string {
+  const parsed = timestamp ? Date.parse(timestamp) : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return 'unknown';
+  }
+  const ageSeconds = Math.max(0, Math.floor((nowMs - parsed) / 1000));
+  if (ageSeconds < 60) {
+    return 'just now';
+  }
+  const ageMinutes = Math.floor(ageSeconds / 60);
+  if (ageMinutes < 60) {
+    return `${ageMinutes}m ago`;
+  }
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 48) {
+    return `${ageHours}h ago`;
+  }
+  const ageDays = Math.floor(ageHours / 24);
+  return `${ageDays}d ago`;
+}
+
+function calculateSummaryPanelLayout(rowElement: HTMLElement, panelElement: HTMLElement): SummaryPanelLayout {
+  const rowRect = rowElement.getBoundingClientRect();
+  const panelRect = panelElement.getBoundingClientRect();
+  const panelTop = Math.max(summaryPanelMargin, panelRect.top + summaryPanelMargin);
+  const panelBottom = Math.min(window.innerHeight - summaryPanelMargin, panelRect.bottom - summaryPanelMargin);
+  const left = Math.max(summaryPanelMargin, panelRect.left + summaryPanelMargin);
+  const right = Math.min(window.innerWidth - summaryPanelMargin, panelRect.right - summaryPanelMargin);
+  const width = Math.max(240, right - left);
+  const availableAbove = Math.max(0, rowRect.top - summaryRowGap - panelTop);
+  const availableBelow = Math.max(0, panelBottom - rowRect.bottom - summaryRowGap);
+
+  let top = rowRect.bottom + summaryRowGap;
+  let height = availableBelow;
+  if (availableAbove > availableBelow) {
+    top = panelTop;
+    height = availableAbove;
+  }
+
+  if (height < summaryMinimumHeight) {
+    top = panelTop;
+    height = Math.max(summaryMinimumHeight, panelBottom - panelTop);
+  }
+
+  const bottom = Math.min(panelBottom, top + height);
+  return {
+    top: Math.round(top),
+    left: Math.round(left),
+    width: Math.round(width),
+    height: Math.max(summaryMinimumHeight, Math.round(bottom - top)),
+  };
+}
+
 function ConversationLink({
   project,
   provider,
@@ -90,6 +154,10 @@ function ConversationLink({
   onRenameConversation,
   rebinding,
   renaming,
+  sessionSummary,
+  lastInteractionAt,
+  nowMs,
+  summaryPanelRef,
 }: {
   project: ProjectSummary;
   provider: ProviderId;
@@ -104,19 +172,81 @@ function ConversationLink({
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
   rebinding: boolean;
   renaming: boolean;
+  sessionSummary?: ConversationItem['sessionSummary'];
+  lastInteractionAt?: string;
+  nowMs: number;
+  summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryLayout, setSummaryLayout] = useState<SummaryPanelLayout>();
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const summaryTimerRef = useRef<number | undefined>(undefined);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
+  const summaryTimestamp = sessionSummary?.lastInteractionAt ?? lastInteractionAt;
+  const summaryReady = sessionSummary?.status === 'ready';
+
+  const updateSummaryLayout = useCallback(() => {
+    const rowElement = rowRef.current;
+    const panelElement = summaryPanelRef.current;
+    if (!rowElement || !panelElement) {
+      setSummaryOpen(false);
+      return;
+    }
+    setSummaryLayout(calculateSummaryPanelLayout(rowElement, panelElement));
+  }, [summaryPanelRef]);
 
   useEffect(() => {
     if (!editing) {
       setDraftTitle(title);
     }
   }, [editing, title]);
+
+  useEffect(() => () => {
+    if (summaryTimerRef.current !== undefined) {
+      window.clearTimeout(summaryTimerRef.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!summaryOpen) {
+      return undefined;
+    }
+    updateSummaryLayout();
+    const panelElement = summaryPanelRef.current;
+    window.addEventListener('resize', updateSummaryLayout);
+    panelElement?.addEventListener('scroll', updateSummaryLayout, { passive: true });
+    return () => {
+      window.removeEventListener('resize', updateSummaryLayout);
+      panelElement?.removeEventListener('scroll', updateSummaryLayout);
+    };
+  }, [summaryOpen, summaryPanelRef, updateSummaryLayout]);
+
+  function scheduleSummaryOpen(): void {
+    if (!isBound) {
+      return;
+    }
+    if (summaryTimerRef.current !== undefined) {
+      window.clearTimeout(summaryTimerRef.current);
+    }
+    summaryTimerRef.current = window.setTimeout(() => {
+      updateSummaryLayout();
+      setSummaryOpen(true);
+    }, 1000);
+  }
+
+  function closeSummary(): void {
+    if (summaryTimerRef.current !== undefined) {
+      window.clearTimeout(summaryTimerRef.current);
+      summaryTimerRef.current = undefined;
+    }
+    setSummaryOpen(false);
+    setSummaryLayout(undefined);
+  }
 
   async function submitRename(): Promise<void> {
     const nextTitle = draftTitle.trim();
@@ -183,7 +313,14 @@ function ConversationLink({
   }
 
   return (
-    <div className="group flex items-center gap-1">
+    <div
+      ref={rowRef}
+      className="group relative flex items-center gap-1"
+      onMouseEnter={scheduleSummaryOpen}
+      onMouseLeave={closeSummary}
+      onFocus={scheduleSummaryOpen}
+      onBlur={closeSummary}
+    >
       <Link
         to={href}
         onClick={onClose}
@@ -235,6 +372,33 @@ function ConversationLink({
           </div>
         )}
       </div>
+      {summaryOpen && isBound && summaryLayout ? createPortal(
+        <div
+          role="tooltip"
+          style={{
+            top: summaryLayout.top,
+            left: summaryLayout.left,
+            width: summaryLayout.width,
+            height: summaryLayout.height,
+          }}
+          className="pointer-events-none fixed z-50 overflow-hidden rounded-lg border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 shadow-panel"
+        >
+          <p className="font-medium leading-5 text-slate-100">Last interaction: {formatRelativeAge(summaryTimestamp, nowMs)}</p>
+          {summaryReady ? (
+            <>
+              <p className="mt-3 break-words leading-6">{sessionSummary.chatSummary ?? 'No user or agent conversation summary is available yet.'}</p>
+              <p className="mt-3 break-words border-t border-slate-800 pt-3 leading-6 text-slate-400">
+                {sessionSummary.recentChangesSummary ?? 'No transcript activity in the last hour.'}
+              </p>
+            </>
+          ) : (
+            <p className="mt-3 break-words leading-6 text-slate-400">
+              {sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.'}
+            </p>
+          )}
+        </div>,
+        document.body,
+      ) : null}
     </div>
   );
 }
@@ -265,6 +429,8 @@ function ProjectSection({
   rebindingConversationKey,
   renamingConversationKey,
   tailscaleIpv4,
+  nowMs,
+  summaryPanelRef,
 }: {
   project: ProjectSummary & {
     combinedConversations: Array<{
@@ -292,6 +458,8 @@ function ProjectSection({
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
   tailscaleIpv4?: string;
+  nowMs: number;
+  summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
   const [editingProject, setEditingProject] = useState(false);
@@ -524,7 +692,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, indicatorClassName }) => (
+            {displayedConversations.map(({ provider, conversation, indicatorClassName, freshnessTimestamp }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -540,6 +708,10 @@ function ProjectSection({
                 onRenameConversation={onRenameConversation}
                 rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
+                sessionSummary={conversation.sessionSummary}
+                lastInteractionAt={freshnessTimestamp}
+                nowMs={nowMs}
+                summaryPanelRef={summaryPanelRef}
               />
             ))}
             {hasHiddenConversations ? (
@@ -590,6 +762,7 @@ export function Sidebar({
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
+  const summaryPanelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
@@ -725,7 +898,7 @@ export function Sidebar({
               Recent activity
             </button>
           </div>
-          <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
+          <div ref={summaryPanelRef} className="scrollbar-thin flex-1 overflow-y-auto p-3">
             {visibleProjects.length ? visibleProjects.map((project) => (
               <ProjectSection
                 key={project.slug}
@@ -757,6 +930,8 @@ export function Sidebar({
                 rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
                 tailscaleIpv4={tailscaleIpv4}
+                nowMs={nowMs}
+                summaryPanelRef={summaryPanelRef}
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
