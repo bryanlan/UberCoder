@@ -2,7 +2,7 @@ import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, M
 import { Link, useLocation } from 'react-router-dom';
 import type { ConversationSearchResult, ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
@@ -141,34 +141,6 @@ function renderHighlightedText(text: string, query: string): ReactNode {
   ));
 }
 
-function groupSearchResults(results: ConversationSearchResult[]): Array<{
-  projectSlug: string;
-  projectDisplayName: string;
-  projectPath?: string;
-  results: ConversationSearchResult[];
-}> {
-  const groups = new Map<string, {
-    projectSlug: string;
-    projectDisplayName: string;
-    projectPath?: string;
-    results: ConversationSearchResult[];
-  }>();
-  for (const result of results) {
-    const existing = groups.get(result.projectSlug);
-    if (existing) {
-      existing.results.push(result);
-      continue;
-    }
-    groups.set(result.projectSlug, {
-      projectSlug: result.projectSlug,
-      projectDisplayName: result.projectDisplayName,
-      projectPath: result.projectPath,
-      results: [result],
-    });
-  }
-  return [...groups.values()];
-}
-
 function calculateSummaryPanelLayout(panelElement: HTMLElement): SummaryPanelLayout {
   const panelRect = panelElement.getBoundingClientRect();
   const panelTop = Math.max(summaryPanelMargin, panelRect.top + summaryPanelMargin);
@@ -199,7 +171,6 @@ function SearchResultsPanel({
   onClose: () => void;
   nowMs: number;
 }) {
-  const grouped = useMemo(() => groupSearchResults(results), [results]);
   if (!query.trim()) {
     return null;
   }
@@ -228,23 +199,22 @@ function SearchResultsPanel({
           {error ? error : 'Refreshing results...'}
         </div>
       )}
-      {grouped.map((project) => (
-        <section key={project.projectSlug}>
-          <Link
-            to={`/projects/${encodeURIComponent(project.projectSlug)}`}
-            onClick={onClose}
-            className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-slate-100 transition hover:bg-slate-800/60"
-          >
-            <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
-            <span className="min-w-0 flex-1 truncate font-medium">{project.projectDisplayName}</span>
-          </Link>
-          <div className="ml-7 mt-2 space-y-1 border-l border-slate-800 pl-3">
-            {project.results.map((result) => {
-              const meta = providerMeta(result.provider);
-              const ProviderIcon = meta.icon;
-              return (
+      <div className="space-y-1">
+        {results.map((result) => {
+          const meta = providerMeta(result.provider);
+          const ProviderIcon = meta.icon;
+          return (
+            <section key={`${result.projectSlug}:${result.provider}:${result.conversationRef}:${result.timestamp}`}>
+              <Link
+                to={`/projects/${encodeURIComponent(result.projectSlug)}`}
+                onClick={onClose}
+                className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-slate-100 transition hover:bg-slate-800/60"
+              >
+                <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
+                <span className="min-w-0 flex-1 truncate font-medium">{result.projectDisplayName}</span>
+              </Link>
+              <div className="ml-7 border-l border-slate-800 pl-3">
                 <Link
-                  key={`${result.provider}:${result.conversationRef}:${result.timestamp}`}
                   to={`/projects/${encodeURIComponent(result.projectSlug)}/${result.provider}/${encodeURIComponent(result.conversationRef)}`}
                   onClick={onClose}
                   className="block rounded-xl px-3 py-2 text-sm text-slate-300 transition hover:bg-slate-800/70 hover:text-white"
@@ -261,11 +231,11 @@ function SearchResultsPanel({
                     {renderHighlightedText(result.snippet, query)}
                   </p>
                 </Link>
-              );
-            })}
-          </div>
-        </section>
-      ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
     </div>
   );
 }

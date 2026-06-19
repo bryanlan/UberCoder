@@ -522,6 +522,105 @@ describe('SessionSummaryService', () => {
     db.close();
   });
 
+  it('force-runs only requested session ids when scoped', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-scoped-force-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.upsertBoundSession({
+      id: 'session-target',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'conversation-target',
+      resumeConversationRef: 'conversation-target',
+      tmuxSessionName: 'ac-codex-demo-target',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Target conversation',
+      startedAt: '2026-06-10T10:00:00.000Z',
+      updatedAt: '2026-06-10T10:05:00.000Z',
+      lastActivityAt: '2026-06-10T10:30:00.000Z',
+    });
+    db.upsertBoundSession({
+      id: 'session-keep',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'conversation-keep',
+      resumeConversationRef: 'conversation-keep',
+      tmuxSessionName: 'ac-codex-demo-keep',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Keep conversation',
+      startedAt: '2026-06-10T11:00:00.000Z',
+      updatedAt: '2026-06-10T11:05:00.000Z',
+      lastActivityAt: '2026-06-10T11:30:00.000Z',
+    });
+    db.upsertSessionInteractionSummary({
+      sessionId: 'session-keep',
+      projectSlug: 'demo',
+      provider: 'codex',
+      conversationRef: 'conversation-keep',
+      status: 'ready',
+      generatedAt: '2026-06-10T11:35:00.000Z',
+      windowStartAt: '2026-06-10T10:30:00.000Z',
+      windowEndAt: '2026-06-10T11:30:00.000Z',
+      lastInteractionAt: '2026-06-10T11:30:00.000Z',
+      chatSummary: 'Existing summary.',
+      recentChangesSummary: 'Existing recent summary.',
+    });
+    const runner = vi.fn(async (input: SessionSummaryModelInput) => {
+      expect(input.session.id).toBe('session-target');
+      return {
+        chatSummary: 'Scoped force summary.',
+        recentChangesSummary: 'Scoped force recent summary.',
+        title: null,
+      };
+    });
+    const service = new SessionSummaryService(
+      db,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          getConversation: async (_project: ActiveProject, conversationRef: string) => ({
+            summary: {
+              ref: conversationRef,
+              kind: 'history',
+              projectSlug: 'demo',
+              provider: 'codex',
+              title: conversationRef === 'conversation-target' ? 'Target conversation' : 'Keep conversation',
+              updatedAt: '2026-06-10T11:30:00.000Z',
+              isBound: true,
+              degraded: false,
+            },
+            messages: [
+              message({
+                role: 'user',
+                conversationRef,
+                timestamp: '2026-06-10T11:30:00.000Z',
+                text: `Summarize ${conversationRef}.`,
+              }),
+            ],
+          }),
+        }),
+      } as never,
+      tempDir,
+      new RealtimeEventBus(),
+      runner,
+    );
+
+    await service.runOnce({
+      force: true,
+      sessionIds: ['session-target'],
+      referenceTime: new Date('2026-06-19T18:00:00.000Z'),
+    });
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(db.getSessionInteractionSummary('session-target')?.chatSummary).toBe('Scoped force summary.');
+    expect(db.getSessionInteractionSummary('session-keep')?.chatSummary).toBe('Existing summary.');
+    db.close();
+  });
+
   it('skips system invocation conversations during forced summary runs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-system-skip-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

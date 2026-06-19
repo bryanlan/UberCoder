@@ -57,11 +57,16 @@ async function main() {
       console.log('Dry run only; no summaries generated.');
       return;
     }
+    if (missingLastHour.length === 0) {
+      console.log('No missing summaries; nothing to backfill.');
+      return;
+    }
     console.log('Starting forced Spark summary backfill...');
 
     await service.runOnce({
       bootstrap: true,
       force: true,
+      sessionIds: missingLastHour.map((session) => session.id),
       onProgress: ({ index, total, session, status }) => {
         const title = resolveSessionTitle(db, session);
         if (status === 'summarizing') {

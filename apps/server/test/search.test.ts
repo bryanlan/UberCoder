@@ -171,6 +171,47 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('derives persisted result bound state from current bound sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-bound-state-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationSearchIndex('demo', 'codex', [{
+      projectSlug: 'demo',
+      projectDisplayName: 'Demo Project',
+      projectPath: '/tmp/demo',
+      projectTags: [],
+      provider: 'codex',
+      conversationRef: 'released-result',
+      conversationKind: 'history',
+      conversationTitle: 'Released result',
+      conversationUpdatedAt: '2026-06-18T12:00:00.000Z',
+      isBound: true,
+      messageId: 'released-message',
+      role: 'assistant',
+      timestamp: '2026-06-18T12:00:00.000Z',
+      text: 'stale bound phrase',
+    }]);
+
+    const query = buildFtsQuery('stale bound phrase');
+    expect(query).toBeTruthy();
+    expect(db.searchConversationIndex(query!, 10)[0]?.isBound).toBe(false);
+
+    db.upsertBoundSession({
+      id: 'session-current',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'released-result',
+      tmuxSessionName: 'ac-codex-demo-current',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Released result',
+      startedAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:01:00.000Z',
+    });
+
+    expect(db.searchConversationIndex(query!, 10)[0]?.isBound).toBe(true);
+    db.close();
+  });
+
   it('excludes CLI invocation conversations from search indexing and stale persisted results', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-hidden-cli-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

@@ -57,6 +57,7 @@ export interface SessionSummaryRunOptions {
   bootstrap?: boolean;
   referenceTime?: Date;
   force?: boolean;
+  sessionIds?: string[];
   onProgress?: (progress: SessionSummaryRunProgress) => void;
 }
 
@@ -497,11 +498,13 @@ export class SessionSummaryService {
       return;
     }
     const projectMap = new Map(activeProjects.map((project) => [project.slug, project]));
+    const allowedSessionIds = options.sessionIds ? new Set(options.sessionIds) : undefined;
     const activeSessions = this.db.listBoundSessions()
       .filter((session) => (
         isTreeVisibleBoundSession(session)
         && projectMap.has(session.projectSlug)
         && this.isSessionVisibleInDiscovery(session)
+        && (!allowedSessionIds || allowedSessionIds.has(session.id))
       ));
 
     let index = 0;

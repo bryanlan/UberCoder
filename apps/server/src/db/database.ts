@@ -500,7 +500,7 @@ export class AppDatabase {
       conversationKind: row.conversation_kind === 'pending' ? 'pending' : 'history',
       conversationTitle: String(row.conversation_title),
       conversationUpdatedAt: String(row.conversation_updated_at),
-      isBound: Boolean(row.bound_session_id) || Boolean(Number(row.is_bound)),
+      isBound: Boolean(row.bound_session_id),
       role: row.role === 'user' ? 'user' : 'assistant',
       timestamp: String(row.timestamp),
       snippet: String(row.snippet ?? ''),
