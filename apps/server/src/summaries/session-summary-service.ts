@@ -18,7 +18,6 @@ const SUMMARY_INTERVAL_MS = 60 * 60 * 1000;
 const SUMMARY_WINDOW_MS = 60 * 60 * 1000;
 const MAX_MODEL_INPUT_MESSAGES = 80;
 const MAX_MESSAGE_CHARS = 700;
-const MAX_PARAGRAPH_CHARS = 360;
 const MAX_SUMMARY_SENTENCES = 2;
 const CODEX_SUMMARY_MODEL = 'gpt-5.3-codex-spark';
 const CODEX_SUMMARY_REASONING_EFFORT = 'medium';
@@ -187,7 +186,7 @@ function sanitizeSummaryParagraph(value: unknown, fallback: string): string {
     .join(' ');
   const normalized = normalizeWhitespace(cleaned);
   const limited = normalized ? limitSentences(normalized, MAX_SUMMARY_SENTENCES) : '';
-  return limited ? truncate(limited, MAX_PARAGRAPH_CHARS) : fallback;
+  return limited || fallback;
 }
 
 function sanitizeTitleSuggestion(value: unknown): string | undefined {

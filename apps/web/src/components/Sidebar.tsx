@@ -525,12 +525,12 @@ function ConversationLink({
         >
           <p className="shrink-0 font-medium leading-5 text-slate-100">Last interaction: {formatRelativeAge(summaryTimestamp, nowMs)}</p>
           <p className={clsx(
-            'mt-3 min-h-0 flex-1 overflow-hidden break-words leading-6',
+            'mt-3 min-h-0 shrink overflow-y-auto break-words leading-6',
             !summaryReady && 'text-slate-400',
           )}>
             {mainSummaryText}
           </p>
-          <div className="mt-4 shrink-0 border-t border-slate-800 pt-3">
+          <div className="mt-3 shrink-0 border-t border-slate-800 pt-2">
             <p className="text-[11px] font-semibold uppercase text-slate-500">{lastHourSummaryLabel}</p>
             <p className="mt-1 break-words leading-6 text-slate-400">{lastHourSummaryText}</p>
           </div>
