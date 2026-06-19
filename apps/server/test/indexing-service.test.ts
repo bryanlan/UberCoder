@@ -485,6 +485,66 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('does not synthesize errored pending sessions into the tree', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:errored',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'claude',
+      title: 'Errored pending session',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-errored',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'hash',
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-errored',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:errored',
+      tmuxSessionName: 'ac-claude-demo-errored',
+      status: 'error',
+      shouldRestore: true,
+      title: 'Errored pending session',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          ...providerSettings,
+          id: providerId,
+          enabled: false,
+        }),
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    const tree = indexing.getTree();
+    expect(tree.boundSessions).toEqual([]);
+    expect(tree.projects[0]?.providers.claude.conversations[0]?.isBound).toBe(false);
+    db.close();
+  });
+
   it('keeps provider conversation tree order stationary when a bound session becomes active', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

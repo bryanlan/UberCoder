@@ -18,6 +18,7 @@ import { normalizeRawOutputLines } from './live-output.js';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
+import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 
 interface WatchState {
   offset: number;
@@ -217,18 +218,22 @@ export class SessionManager {
     fs.mkdirSync(this.runtimeDir, { recursive: true });
   }
 
-  listActiveSessions(): BoundSession[] {
+  private listRestorableSessions(): BoundSession[] {
     return this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
   }
 
+  listActiveSessions(): BoundSession[] {
+    return this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
+  }
+
   async recoverSessions(): Promise<void> {
-    for (const session of this.listActiveSessions()) {
+    for (const session of this.listRestorableSessions()) {
       await this.refreshSessionState(session);
     }
   }
 
   async observeSessions(): Promise<void> {
-    for (const session of this.listActiveSessions()) {
+    for (const session of this.listRestorableSessions()) {
       await this.refreshSessionState(session, { restoreMissing: false });
     }
   }
@@ -411,6 +416,49 @@ export class SessionManager {
     return ended;
   }
 
+  private hasRecordedPendingUserInput(session: BoundSession): boolean {
+    if (!session.conversationRef.startsWith('pending:')) {
+      return false;
+    }
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    return typeof pending?.rawMetadata?.lastUserInputHash === 'string';
+  }
+
+  private markPendingSessionNotLive(session: BoundSession): void {
+    if (!session.conversationRef.startsWith('pending:')) {
+      return;
+    }
+
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    const updatedAt = nowIso();
+    if (pending) {
+      this.db.putPendingConversation({
+        ...pending,
+        isBound: false,
+        boundSessionId: undefined,
+        updatedAt: pending.updatedAt,
+      });
+    }
+
+    const failed: BoundSession = {
+      ...session,
+      status: 'error',
+      updatedAt,
+      isWorking: false,
+      pid: undefined,
+    };
+    const shouldEmitFailure = session.status !== 'error';
+    this.db.upsertBoundSession(failed);
+    if (shouldEmitFailure) {
+      this.appendEvent(failed, {
+        type: 'status',
+        text: 'Pending session is no longer live; waiting for provider transcript adoption.',
+        timestamp: updatedAt,
+      });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+    }
+  }
+
   private async restoreSession(session: BoundSession): Promise<BoundSession | undefined> {
     if (!session.shouldRestore || session.status === 'releasing') {
       return undefined;
@@ -446,7 +494,7 @@ export class SessionManager {
       const pending = resolvedSession.conversationRef.startsWith('pending:')
         ? this.db.getPendingConversation(resolvedSession.conversationRef)
         : undefined;
-      const hasRecordedUserInput = typeof pending?.rawMetadata?.lastUserInputHash === 'string';
+      const hasRecordedUserInput = this.hasRecordedPendingUserInput(resolvedSession);
       if (pending && !hasRecordedUserInput) {
         this.clearPendingRestoreBinding(resolvedSession);
         return undefined;
@@ -965,6 +1013,14 @@ export class SessionManager {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
       this.deferredTextReadyUntil.delete(session.id);
+      if (!restoreMissing && session.conversationRef.startsWith('pending:')) {
+        if (this.hasRecordedPendingUserInput(session)) {
+          this.markPendingSessionNotLive(session);
+        } else {
+          this.clearPendingRestoreBinding(session);
+        }
+        return undefined;
+      }
       if (restoreMissing && session.shouldRestore && session.status !== 'releasing') {
         return await this.restoreSession(session);
       }

@@ -107,4 +107,76 @@ describe('AppDatabase', () => {
     ]);
     db.close();
   });
+
+  it('does not mark indexed conversations bound from errored restorable sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.replaceConversationIndex('demo', 'claude', [{
+      ref: 'errored-session',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'claude',
+      title: 'Errored session',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    }]);
+    db.upsertBoundSession({
+      id: 'session-error',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'errored-session',
+      tmuxSessionName: 'ac-claude-demo-error',
+      status: 'error',
+      shouldRestore: true,
+      title: 'Errored session',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+    });
+
+    const conversation = db.listConversationIndex()[0];
+    expect(conversation?.isBound).toBe(false);
+    expect(conversation?.boundSessionId).toBeUndefined();
+    db.close();
+  });
+
+  it('keeps raw pending conversation bindings for errored restorable sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.putPendingConversation({
+      ref: 'pending:errored-session',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Errored pending session',
+      createdAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-error',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'hash',
+      },
+    });
+    db.upsertBoundSession({
+      id: 'session-error',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:errored-session',
+      tmuxSessionName: 'ac-codex-demo-error',
+      status: 'error',
+      shouldRestore: true,
+      title: 'Errored pending session',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+    });
+
+    const conversation = db.listPendingConversations()[0];
+    expect(conversation?.isBound).toBe(true);
+    expect(conversation?.boundSessionId).toBe('session-error');
+    db.close();
+  });
 });

@@ -12,6 +12,7 @@ import { CodexProvider } from '../providers/codex-provider.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
+import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
@@ -146,11 +147,17 @@ export class IndexingService {
   }
 
   getTree(): TreeResponse {
-    const activeSessions = this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
+    const activeSessions = this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
+    const activeSessionIds = new Set(activeSessions.map((session) => session.id));
     const sessionSummaryMap = this.db.listSessionInteractionSummariesBySessionIds(activeSessions.map((session) => session.id));
     const history = this.db.listConversationIndex();
     const pending = this.db.listPendingConversations()
-      .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string');
+      .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string')
+      .map((conversation) => (
+        conversation.boundSessionId && !activeSessionIds.has(conversation.boundSessionId)
+          ? { ...conversation, isBound: false, boundSessionId: undefined }
+          : conversation
+      ));
     const projectMap = new Map<string, ProjectSummary>();
 
     for (const project of this.projectCache) {

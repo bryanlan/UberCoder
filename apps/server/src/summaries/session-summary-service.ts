@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { BoundSession, NormalizedMessage, ProviderId, SessionInteractionSummary } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
+import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { nowIso } from '../lib/time.js';
 import { normalizeWhitespace, truncate } from '../lib/text.js';
 import type { ActiveProject, ProjectService } from '../projects/project-service.js';
@@ -553,7 +554,7 @@ export class SessionSummaryService {
     }
     const projectMap = new Map(activeProjects.map((project) => [project.slug, project]));
     const activeSessions = this.db.listBoundSessions()
-      .filter((session) => session.shouldRestore && session.status !== 'ended' && projectMap.has(session.projectSlug));
+      .filter((session) => isTreeVisibleBoundSession(session) && projectMap.has(session.projectSlug));
 
     for (const session of activeSessions) {
       if (signal.aborted) {

@@ -331,6 +331,90 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('marks dead pending sessions with user input as not live during passive observation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    db.putPendingConversation({
+      ref: 'pending:submitted-dead',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Submitted pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:01:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'submitted-hash',
+      },
+    });
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:submitted-dead',
+      title: 'Submitted pending conversation',
+      kind: 'pending',
+    });
+    tmux.alive.clear();
+
+    await manager.observeSessions();
+
+    const observed = db.getBoundSessionById(session.id);
+    const pending = db.getPendingConversation('pending:submitted-dead');
+    expect(observed?.status).toBe('error');
+    expect(observed?.shouldRestore).toBe(true);
+    expect(pending?.isBound).toBe(false);
+    expect(pending?.updatedAt).toBe('2026-03-14T18:01:00.000Z');
+    expect(tmux.created).toHaveLength(1);
+    db.close();
+  });
+
+  it('abandons dead zero-turn pending sessions during passive observation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    db.putPendingConversation({
+      ref: 'pending:zero-turn-observed',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'Pending conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'placeholder',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+      },
+    });
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:zero-turn-observed',
+      title: 'Pending conversation',
+      kind: 'pending',
+    });
+    tmux.alive.clear();
+
+    await manager.observeSessions();
+
+    expect(db.getBoundSessionById(session.id)?.status).toBe('ended');
+    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(false);
+    expect(db.getPendingConversation('pending:zero-turn-observed')?.isBound).toBe(false);
+    expect(tmux.created).toHaveLength(1);
+    db.close();
+  });
+
   it('abandons dead zero-turn pending sessions instead of keeping them durably bound', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

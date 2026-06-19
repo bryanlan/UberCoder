@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import type { BoundSession, ConversationSummary, SessionInteractionSummary } from '@agent-console/shared';
+import { treeVisibleBoundSessionSql } from '../lib/bound-session-state.js';
 
 function parseJson<T>(value: string | null): T | undefined {
   if (!value) return undefined;
@@ -232,7 +233,7 @@ export class AppDatabase {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.should_restore = 1
+        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and ${treeVisibleBoundSessionSql('bs')}
       order by coalesce(ci.created_at, ci.updated_at) desc, ci.ref asc
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => ({
@@ -261,7 +262,7 @@ export class AppDatabase {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and bs.should_restore = 1
+        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and ${treeVisibleBoundSessionSql('bs')}
       where ci.project_slug = ? and ci.provider = ? and ci.ref = ?
       limit 1
     `).get(projectSlug, provider, ref) as Record<string, unknown> | undefined;
