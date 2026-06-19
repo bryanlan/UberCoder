@@ -5,6 +5,8 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number];
 export declare const SESSION_STATUSES: readonly ["starting", "bound", "releasing", "ended", "error"];
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
 export type ConversationKind = 'history' | 'pending';
+export declare const CONVERSATION_SEARCH_RECENCY_BUCKETS: readonly ["0-5-days", "5-15-days", "15-30-days", "30-60-days", "60-plus-days"];
+export type ConversationSearchRecencyBucket = (typeof CONVERSATION_SEARCH_RECENCY_BUCKETS)[number];
 export interface ProviderNode {
     id: ProviderId;
     label: string;
@@ -63,10 +65,48 @@ export interface NormalizedMessage {
     source: 'history-file' | 'live-output' | 'synthetic-status' | 'user-input';
     rawMetadata?: Record<string, unknown>;
 }
+export interface SessionScreen {
+    content: string;
+    contentAnsi?: string;
+    inputText: string;
+    status: string;
+    statusAnsi?: string;
+    capturedAt: string;
+    model?: string;
+    contextPercent?: number;
+}
+export interface ConversationMessagePage {
+    hasOlder: boolean;
+    olderCursor?: number;
+    total: number;
+}
 export interface ConversationTimeline {
     conversation: ConversationSummary;
     messages: NormalizedMessage[];
+    allMessages?: NormalizedMessage[];
     boundSession?: BoundSession;
+    liveScreen?: SessionScreen;
+    messagePage?: ConversationMessagePage;
+}
+export interface ConversationSearchResult {
+    projectSlug: string;
+    projectDisplayName: string;
+    projectPath?: string;
+    provider: ProviderId;
+    conversationRef: string;
+    conversationKind: ConversationKind;
+    conversationTitle: string;
+    conversationUpdatedAt: string;
+    isBound: boolean;
+    role: 'user' | 'assistant';
+    timestamp: string;
+    snippet: string;
+    score: number;
+    recencyBucket: ConversationSearchRecencyBucket;
+}
+export interface ConversationSearchResponse {
+    query: string;
+    results: ConversationSearchResult[];
 }
 export interface BoundSession {
     id: string;

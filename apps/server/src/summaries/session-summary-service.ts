@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { BoundSession, NormalizedMessage, ProviderId, SessionInteractionSummary } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
+import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
+import { looksLikeCodeLine, stripCodeLikeContent } from '../lib/prose-sanitizer.js';
 import { nowIso } from '../lib/time.js';
 import { normalizeWhitespace, truncate } from '../lib/text.js';
 import type { ActiveProject, ProjectService } from '../projects/project-service.js';
@@ -51,6 +53,20 @@ export type SessionSummaryRunner = (
   input: SessionSummaryModelInput,
   signal?: AbortSignal,
 ) => Promise<SessionSummaryModelOutput>;
+
+export interface SessionSummaryRunOptions {
+  bootstrap?: boolean;
+  referenceTime?: Date;
+  force?: boolean;
+  onProgress?: (progress: SessionSummaryRunProgress) => void;
+}
+
+export interface SessionSummaryRunProgress {
+  index: number;
+  total: number;
+  session: BoundSession;
+  status: 'skipped' | 'summarizing' | 'ready' | 'failed';
+}
 
 interface CodexSummaryCommandInput {
   projectPath: string;
@@ -147,77 +163,6 @@ function createAbortError(): Error {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
-}
-
-function looksLikeDiffMarker(trimmedLine: string): boolean {
-  return /^(?:diff --git|index [0-9a-f]+\.\.|@@|[+-]{3}\s|[*]{3}\s|---\s)/.test(trimmedLine);
-}
-
-function looksLikeCodeLine(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed) return false;
-  if (looksLikeDiffMarker(trimmed)) return true;
-  if (/^(?:import|export|const|let|var|function|class|interface|type|enum|return|if|for|while|switch|case|try|catch|async|await)\b/.test(trimmed)) return true;
-  if (/^(?:[{}()[\];,]|<\/?[A-Za-z][^>]*>)$/.test(trimmed)) return true;
-  if (/^[A-Za-z0-9_$.-]+\([^)]*\)\s*[{:;]?$/.test(trimmed)) return true;
-  if (/^\s*(?:"[^"]+"|'[^']+'|[A-Za-z0-9_$.-]+)\s*:\s*["'{[\d]/.test(line)) return true;
-  if (/[{};][\s)]*$/.test(trimmed) && /[=()[\]{};]/.test(trimmed)) return true;
-  if (/^\s{2,}\S/.test(line) && /[=()[\]{};]/.test(trimmed)) return true;
-  return false;
-}
-
-function stripCodeLikeContent(text: string): string {
-  const withoutFences = text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/~~~[\s\S]*?~~~/g, ' ')
-    .replace(/`[^`\n]{1,120}`/g, ' ');
-  const lines = withoutFences.split(/\r?\n/);
-  const kept: string[] = [];
-  let omittedCodeLines = 0;
-  let insideDiff = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (looksLikeDiffMarker(trimmed)) {
-      insideDiff = true;
-      omittedCodeLines += 1;
-      continue;
-    }
-    if (insideDiff && !trimmed) {
-      insideDiff = false;
-      kept.push(line);
-      continue;
-    }
-    if (insideDiff && /^[+-]/.test(line)) {
-      omittedCodeLines += 1;
-      continue;
-    }
-    if (insideDiff && (line.startsWith(' ') || line.startsWith('\\'))) {
-      omittedCodeLines += 1;
-      continue;
-    }
-    if (insideDiff && trimmed && !line.startsWith(' ')) {
-      insideDiff = false;
-    }
-    if (looksLikeCodeLine(line)) {
-      omittedCodeLines += 1;
-      continue;
-    }
-    kept.push(line);
-  }
-
-  const prose = kept.join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .split(/\n{2,}/)
-    .map((paragraph) => normalizeWhitespace(paragraph))
-    .filter(Boolean)
-    .join('\n');
-
-  if (!prose && omittedCodeLines > 0) {
-    return '';
-  }
-
-  return prose;
 }
 
 function limitSentences(value: string, maxSentences: number): string {
@@ -530,7 +475,7 @@ export class SessionSummaryService {
     await this.runPromise?.catch(() => undefined);
   }
 
-  async runOnce(options: { bootstrap?: boolean; referenceTime?: Date } = {}): Promise<void> {
+  async runOnce(options: SessionSummaryRunOptions = {}): Promise<void> {
     if (this.runPromise) {
       await this.runPromise;
       return;
@@ -546,7 +491,7 @@ export class SessionSummaryService {
     await this.runPromise;
   }
 
-  private async performRun(options: { bootstrap?: boolean; referenceTime?: Date }, signal: AbortSignal): Promise<void> {
+  private async performRun(options: SessionSummaryRunOptions, signal: AbortSignal): Promise<void> {
     const referenceTime = options.referenceTime ?? new Date();
     const activeProjects = await this.projectService.listActiveProjects();
     if (signal.aborted) {
@@ -554,9 +499,15 @@ export class SessionSummaryService {
     }
     const projectMap = new Map(activeProjects.map((project) => [project.slug, project]));
     const activeSessions = this.db.listBoundSessions()
-      .filter((session) => isTreeVisibleBoundSession(session) && projectMap.has(session.projectSlug));
+      .filter((session) => (
+        isTreeVisibleBoundSession(session)
+        && projectMap.has(session.projectSlug)
+        && this.isSessionVisibleInDiscovery(session)
+      ));
 
+    let index = 0;
     for (const session of activeSessions) {
+      index += 1;
       if (signal.aborted) {
         return;
       }
@@ -565,15 +516,22 @@ export class SessionSummaryService {
         continue;
       }
       const existing = this.db.getSessionInteractionSummary(session.id);
-      if (!this.shouldSummarizeSession(session, existing, referenceTime, Boolean(options.bootstrap))) {
+      if (!options.force && !this.shouldSummarizeSession(session, existing, referenceTime, Boolean(options.bootstrap))) {
+        options.onProgress?.({ index, total: activeSessions.length, session, status: 'skipped' });
         continue;
       }
+      options.onProgress?.({ index, total: activeSessions.length, session, status: 'summarizing' });
+      let failed = false;
       await this.summarizeSession(project, session, referenceTime, existing, signal).catch((error) => {
         if (signal.aborted || isAbortError(error)) {
           return;
         }
+        failed = true;
         this.recordFailure(session, referenceTime, error);
       });
+      if (!signal.aborted) {
+        options.onProgress?.({ index, total: activeSessions.length, session, status: failed ? 'failed' : 'ready' });
+      }
     }
   }
 
@@ -608,20 +566,22 @@ export class SessionSummaryService {
     existing: (SessionInteractionSummary & { titleSuggestedAt?: string }) | undefined,
     signal: AbortSignal,
   ): Promise<void> {
-    const windowEndAt = referenceTime.toISOString();
-    const windowStartAt = new Date(referenceTime.getTime() - SUMMARY_WINDOW_MS).toISOString();
     const messages = await this.loadMessages(project, session);
     if (signal.aborted) {
       return;
     }
-    const windowStartMs = referenceTime.getTime() - SUMMARY_WINDOW_MS;
+    const latestMessageAt = messages.at(-1)?.timestamp;
+    const lastInteractionAt = latestMessageAt
+      ?? this.getLastInteractionAt(session)
+      ?? session.startedAt;
+    const windowEndMs = parseTimestampMs(lastInteractionAt) ?? referenceTime.getTime();
+    const windowEndAt = new Date(windowEndMs).toISOString();
+    const windowStartMs = windowEndMs - SUMMARY_WINDOW_MS;
+    const windowStartAt = new Date(windowStartMs).toISOString();
     const recentMessages = messages.filter((message) => {
       const timestampMs = parseTimestampMs(message.timestamp);
-      return timestampMs !== undefined && timestampMs >= windowStartMs && timestampMs <= referenceTime.getTime();
+      return timestampMs !== undefined && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
     });
-    const lastInteractionAt = this.getLastInteractionAt(session)
-      ?? messages.at(-1)?.timestamp
-      ?? session.startedAt;
     const canSuggestTitle = !existing?.titleSuggestedAt
       && !this.db.getConversationTitleOverride(session.projectSlug, session.provider, session.conversationRef);
 
@@ -699,6 +659,13 @@ export class SessionSummaryService {
       session.lastOutputAt,
       session.startedAt,
     );
+  }
+
+  private isSessionVisibleInDiscovery(session: BoundSession): boolean {
+    const title = session.conversationRef.startsWith('pending:')
+      ? this.db.getPendingConversation(session.conversationRef)?.title
+      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef)?.title;
+    return isConversationVisibleInDiscovery({ title: title ?? session.title ?? 'Live session' });
   }
 
   private resolveTitleSuggestionApplication(

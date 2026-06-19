@@ -1,6 +1,7 @@
 import type {
   AuthState,
   BoundSession,
+  ConversationSearchResponse,
   ConversationTimeline,
   CreateDirectoryRequest,
   CreateProjectSettingsRequest,
@@ -55,6 +56,13 @@ export const api = {
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),
+  searchConversations: (query: string, options: { limit?: number } = {}) => {
+    const params = new URLSearchParams({ q: query });
+    if (options.limit !== undefined) {
+      params.set('limit', String(options.limit));
+    }
+    return request<ConversationSearchResponse>(`/api/search/conversations?${params.toString()}`);
+  },
   refreshTree: (csrfToken?: string) => request<TreeResponse>('/api/projects/refresh', { method: 'POST', body: '{}' }, csrfToken),
   timeline: (
     projectSlug: string,

@@ -9,6 +9,15 @@ export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
 
 export type ConversationKind = 'history' | 'pending';
 
+export const CONVERSATION_SEARCH_RECENCY_BUCKETS = [
+  '0-5-days',
+  '5-15-days',
+  '15-30-days',
+  '30-60-days',
+  '60-plus-days',
+] as const;
+export type ConversationSearchRecencyBucket = (typeof CONVERSATION_SEARCH_RECENCY_BUCKETS)[number];
+
 export interface ProviderNode {
   id: ProviderId;
   label: string;
@@ -96,6 +105,28 @@ export interface ConversationTimeline {
   boundSession?: BoundSession;
   liveScreen?: SessionScreen;
   messagePage?: ConversationMessagePage;
+}
+
+export interface ConversationSearchResult {
+  projectSlug: string;
+  projectDisplayName: string;
+  projectPath?: string;
+  provider: ProviderId;
+  conversationRef: string;
+  conversationKind: ConversationKind;
+  conversationTitle: string;
+  conversationUpdatedAt: string;
+  isBound: boolean;
+  role: 'user' | 'assistant';
+  timestamp: string;
+  snippet: string;
+  score: number;
+  recencyBucket: ConversationSearchRecencyBucket;
+}
+
+export interface ConversationSearchResponse {
+  query: string;
+  results: ConversationSearchResult[];
 }
 
 export interface BoundSession {

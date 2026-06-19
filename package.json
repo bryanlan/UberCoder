@@ -13,7 +13,8 @@
     "test:e2e": "npm run build -w @agent-console/shared && playwright test",
     "typecheck": "npm run build -w @agent-console/shared && npm run typecheck -w @agent-console/server && npm run typecheck -w @agent-console/web",
     "auth:hash": "node ./scripts/generate-password-hash.mjs",
-    "smoke:codex": "node ./scripts/smoke-codex-adoption.mjs"
+    "smoke:codex": "node ./scripts/smoke-codex-adoption.mjs",
+    "summaries:backfill-work-mode": "node ./scripts/backfill-work-mode-session-summaries.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",

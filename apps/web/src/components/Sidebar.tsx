@@ -1,16 +1,14 @@
-import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, Menu, Pencil, Plus, RefreshCcw, Sparkles, X } from 'lucide-react';
+import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Plus, RefreshCcw, Search, Sparkles, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import type { ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
+import type { ConversationSearchResult, ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState, type DragEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 const summaryPanelMargin = 12;
-const summaryRowGap = 8;
-const summaryMinimumHeight = 180;
 
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
@@ -108,36 +106,168 @@ function formatRelativeAge(timestamp: string | undefined, nowMs: number): string
   return `${ageDays}d ago`;
 }
 
-function calculateSummaryPanelLayout(rowElement: HTMLElement, panelElement: HTMLElement): SummaryPanelLayout {
-  const rowRect = rowElement.getBoundingClientRect();
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getHighlightTerms(query: string): string[] {
+  const seen = new Set<string>();
+  const terms = query
+    .normalize('NFKC')
+    .match(/[\p{L}\p{N}_]+/gu) ?? [];
+  return terms
+    .filter((term) => term.length > 1 || /^\d$/.test(term))
+    .filter((term) => {
+      const key = term.toLowerCase();
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 12);
+}
+
+function renderHighlightedText(text: string, query: string): ReactNode {
+  const terms = getHighlightTerms(query);
+  if (terms.length === 0) {
+    return text;
+  }
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join('|')})`, 'igu');
+  return text.split(pattern).map((part, index) => (
+    terms.some((term) => term.toLowerCase() === part.toLowerCase())
+      ? <span key={`${part}:${index}`} className="rounded bg-sky-400/20 text-sky-100">{part}</span>
+      : part
+  ));
+}
+
+function groupSearchResults(results: ConversationSearchResult[]): Array<{
+  projectSlug: string;
+  projectDisplayName: string;
+  projectPath?: string;
+  results: ConversationSearchResult[];
+}> {
+  const groups = new Map<string, {
+    projectSlug: string;
+    projectDisplayName: string;
+    projectPath?: string;
+    results: ConversationSearchResult[];
+  }>();
+  for (const result of results) {
+    const existing = groups.get(result.projectSlug);
+    if (existing) {
+      existing.results.push(result);
+      continue;
+    }
+    groups.set(result.projectSlug, {
+      projectSlug: result.projectSlug,
+      projectDisplayName: result.projectDisplayName,
+      projectPath: result.projectPath,
+      results: [result],
+    });
+  }
+  return [...groups.values()];
+}
+
+function calculateSummaryPanelLayout(panelElement: HTMLElement): SummaryPanelLayout {
   const panelRect = panelElement.getBoundingClientRect();
   const panelTop = Math.max(summaryPanelMargin, panelRect.top + summaryPanelMargin);
   const panelBottom = Math.min(window.innerHeight - summaryPanelMargin, panelRect.bottom - summaryPanelMargin);
   const left = Math.max(summaryPanelMargin, panelRect.left + summaryPanelMargin);
   const right = Math.min(window.innerWidth - summaryPanelMargin, panelRect.right - summaryPanelMargin);
   const width = Math.max(240, right - left);
-  const availableAbove = Math.max(0, rowRect.top - summaryRowGap - panelTop);
-  const availableBelow = Math.max(0, panelBottom - rowRect.bottom - summaryRowGap);
-
-  let top = rowRect.bottom + summaryRowGap;
-  let height = availableBelow;
-  if (availableAbove > availableBelow) {
-    top = panelTop;
-    height = availableAbove;
-  }
-
-  if (height < summaryMinimumHeight) {
-    top = panelTop;
-    height = Math.max(summaryMinimumHeight, panelBottom - panelTop);
-  }
-
-  const bottom = Math.min(panelBottom, top + height);
   return {
-    top: Math.round(top),
+    top: Math.round(panelTop),
     left: Math.round(left),
     width: Math.round(width),
-    height: Math.max(summaryMinimumHeight, Math.round(bottom - top)),
+    height: Math.max(0, Math.round(panelBottom - panelTop)),
   };
+}
+
+function SearchResultsPanel({
+  query,
+  results,
+  loading,
+  error,
+  onClose,
+  nowMs,
+}: {
+  query: string;
+  results: ConversationSearchResult[];
+  loading: boolean;
+  error?: string;
+  onClose: () => void;
+  nowMs: number;
+}) {
+  const grouped = useMemo(() => groupSearchResults(results), [results]);
+  if (!query.trim()) {
+    return null;
+  }
+  if (loading && results.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-4 text-sm text-slate-400">
+        <LoaderCircle className="h-4 w-4 animate-spin" />
+        Searching...
+      </div>
+    );
+  }
+  if (error && results.length === 0) {
+    return <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-3 text-sm text-rose-100">{error}</div>;
+  }
+  if (results.length === 0) {
+    return <div className="rounded-xl border border-dashed border-slate-700 px-3 py-4 text-sm text-slate-400">No matching chats.</div>;
+  }
+  return (
+    <div className="space-y-4">
+      {(loading || error) && (
+        <div className={clsx(
+          'flex items-center gap-2 px-2 text-xs',
+          error ? 'text-rose-300' : 'text-slate-500',
+        )}>
+          {loading && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}
+          {error ? error : 'Refreshing results...'}
+        </div>
+      )}
+      {grouped.map((project) => (
+        <section key={project.projectSlug}>
+          <Link
+            to={`/projects/${encodeURIComponent(project.projectSlug)}`}
+            onClick={onClose}
+            className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-slate-100 transition hover:bg-slate-800/60"
+          >
+            <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
+            <span className="min-w-0 flex-1 truncate font-medium">{project.projectDisplayName}</span>
+          </Link>
+          <div className="ml-7 mt-2 space-y-1 border-l border-slate-800 pl-3">
+            {project.results.map((result) => {
+              const meta = providerMeta(result.provider);
+              const ProviderIcon = meta.icon;
+              return (
+                <Link
+                  key={`${result.provider}:${result.conversationRef}:${result.timestamp}`}
+                  to={`/projects/${encodeURIComponent(result.projectSlug)}/${result.provider}/${encodeURIComponent(result.conversationRef)}`}
+                  onClick={onClose}
+                  className="block rounded-xl px-3 py-2 text-sm text-slate-300 transition hover:bg-slate-800/70 hover:text-white"
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', result.isBound ? 'bg-emerald-400' : 'border border-slate-700 bg-transparent')} />
+                    <ProviderIcon className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                    <span className="min-w-0 flex-1 truncate font-medium text-slate-100">
+                      {renderHighlightedText(result.conversationTitle, query)}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs uppercase text-slate-500">{meta.label} · {formatRelativeAge(result.conversationUpdatedAt, nowMs)}</div>
+                  <p className="mt-1 line-clamp-3 break-words text-xs leading-5 text-slate-400">
+                    {renderHighlightedText(result.snippet, query)}
+                  </p>
+                </Link>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
 }
 
 function ConversationLink({
@@ -189,15 +319,25 @@ function ConversationLink({
   const active = location.pathname === href;
   const summaryTimestamp = sessionSummary?.lastInteractionAt ?? lastInteractionAt;
   const summaryReady = sessionSummary?.status === 'ready';
+  const lastHourSummaryTimestamp = sessionSummary?.windowEndAt;
+  const lastHourSummaryAge = lastHourSummaryTimestamp ? formatRelativeAge(lastHourSummaryTimestamp, nowMs) : undefined;
+  const lastHourSummaryLabel = lastHourSummaryAge
+    ? `Last hour summary from ${lastHourSummaryAge}`
+    : 'Last hour summary pending';
+  const mainSummaryText = summaryReady
+    ? sessionSummary.chatSummary ?? 'No user or agent conversation summary is available yet.'
+    : sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.';
+  const lastHourSummaryText = summaryReady
+    ? sessionSummary.recentChangesSummary ?? 'No transcript activity in the last hour.'
+    : sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.';
 
   const updateSummaryLayout = useCallback(() => {
-    const rowElement = rowRef.current;
     const panelElement = summaryPanelRef.current;
-    if (!rowElement || !panelElement) {
+    if (!panelElement) {
       setSummaryOpen(false);
       return;
     }
-    setSummaryLayout(calculateSummaryPanelLayout(rowElement, panelElement));
+    setSummaryLayout(calculateSummaryPanelLayout(panelElement));
   }, [summaryPanelRef]);
 
   useEffect(() => {
@@ -381,21 +521,19 @@ function ConversationLink({
             width: summaryLayout.width,
             height: summaryLayout.height,
           }}
-          className="pointer-events-none fixed z-50 overflow-hidden rounded-lg border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 shadow-panel"
+          className="pointer-events-none fixed z-50 flex flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 shadow-panel"
         >
-          <p className="font-medium leading-5 text-slate-100">Last interaction: {formatRelativeAge(summaryTimestamp, nowMs)}</p>
-          {summaryReady ? (
-            <>
-              <p className="mt-3 break-words leading-6">{sessionSummary.chatSummary ?? 'No user or agent conversation summary is available yet.'}</p>
-              <p className="mt-3 break-words border-t border-slate-800 pt-3 leading-6 text-slate-400">
-                {sessionSummary.recentChangesSummary ?? 'No transcript activity in the last hour.'}
-              </p>
-            </>
-          ) : (
-            <p className="mt-3 break-words leading-6 text-slate-400">
-              {sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.'}
-            </p>
-          )}
+          <p className="shrink-0 font-medium leading-5 text-slate-100">Last interaction: {formatRelativeAge(summaryTimestamp, nowMs)}</p>
+          <p className={clsx(
+            'mt-3 min-h-0 flex-1 overflow-hidden break-words leading-6',
+            !summaryReady && 'text-slate-400',
+          )}>
+            {mainSummaryText}
+          </p>
+          <div className="mt-4 shrink-0 border-t border-slate-800 pt-3">
+            <p className="text-[11px] font-semibold uppercase text-slate-500">{lastHourSummaryLabel}</p>
+            <p className="mt-1 break-words leading-6 text-slate-400">{lastHourSummaryText}</p>
+          </div>
         </div>,
         document.body,
       ) : null}
@@ -762,7 +900,13 @@ export function Sidebar({
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<ConversationSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string>();
+  const [searchRefreshVersion, setSearchRefreshVersion] = useState(0);
   const summaryPanelRef = useRef<HTMLDivElement | null>(null);
+  const trimmedSearchQuery = searchQuery.trim();
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
@@ -786,6 +930,45 @@ export function Sidebar({
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    const query = trimmedSearchQuery;
+    if (!query) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(undefined);
+      return () => {
+        active = false;
+      };
+    }
+
+    setSearchLoading(true);
+    setSearchError(undefined);
+    const timer = window.setTimeout(() => {
+      void api.searchConversations(query, { limit: 24 })
+        .then((response) => {
+          if (!active) return;
+          setSearchResults(response.results);
+          setSearchError(undefined);
+        })
+        .catch((error: unknown) => {
+          if (!active) return;
+          setSearchResults([]);
+          setSearchError(error instanceof Error ? error.message : 'Search failed.');
+        })
+        .finally(() => {
+          if (active) {
+            setSearchLoading(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [trimmedSearchQuery, searchRefreshVersion]);
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
   const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
@@ -897,9 +1080,51 @@ export function Sidebar({
             >
               Recent activity
             </button>
+            <div className="relative min-w-[13rem] flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search all chats"
+                className="h-9 w-full rounded-full border border-slate-700 bg-slate-900/70 pl-9 pr-16 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-sky-400"
+              />
+              {searchQuery ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSearchRefreshVersion((current) => current + 1)}
+                    disabled={searchLoading}
+                    className="absolute right-8 top-1/2 rounded-full p-1 text-slate-500 transition -translate-y-1/2 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-50"
+                    aria-label="Refresh search"
+                    title="Refresh search"
+                  >
+                    <RefreshCcw className={clsx('h-3.5 w-3.5', searchLoading && 'animate-spin')} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2 top-1/2 rounded-full p-1 text-slate-500 transition -translate-y-1/2 hover:bg-slate-800 hover:text-slate-200"
+                    aria-label="Clear search"
+                    title="Clear search"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </>
+              ) : null}
+            </div>
           </div>
           <div ref={summaryPanelRef} className="scrollbar-thin flex-1 overflow-y-auto p-3">
-            {visibleProjects.length ? visibleProjects.map((project) => (
+            {trimmedSearchQuery ? (
+              <SearchResultsPanel
+                query={trimmedSearchQuery}
+                results={searchResults}
+                loading={searchLoading}
+                error={searchError}
+                onClose={onClose}
+                nowMs={nowMs}
+              />
+            ) : visibleProjects.length ? visibleProjects.map((project) => (
               <ProjectSection
                 key={project.slug}
                 project={project}

@@ -127,6 +127,11 @@ describe('SessionSummaryService', () => {
     };
     const transcriptMessages = [
       message({
+        role: 'assistant',
+        timestamp: '2026-06-17T17:20:00.000Z',
+        text: 'This older dashboard detail should stay in the full chat summary only.',
+      }),
+      message({
         role: 'user',
         timestamp: '2026-06-17T18:10:00.000Z',
         text: 'Please summarize the CIO dashboard work.\n- preserve the onboarding checklist\n+ keep allocation notes clear\n- keep risk notes visible\n```ts\nconst shouldNeverAppear = true;\n```',
@@ -143,13 +148,16 @@ describe('SessionSummaryService', () => {
       }),
     ];
     const runner = vi.fn(async (input: SessionSummaryModelInput) => {
-      expect(input.messages.map((item) => item.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+      expect(input.messages.map((item) => item.role)).toEqual(['assistant', 'user', 'assistant', 'user', 'assistant']);
+      expect(input.windowStartAt).toBe('2026-06-17T17:31:00.000Z');
+      expect(input.windowEndAt).toBe('2026-06-17T18:31:00.000Z');
       expect(input.messages.map((item) => item.text).join('\n')).not.toContain('shouldNeverAppear');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('preserve the onboarding checklist');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('keep allocation notes clear');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('keep risk notes visible');
       expect(input.messages.map((item) => item.text).join('\n')).not.toContain('raw command output');
       expect(input.recentMessages.length).toBeGreaterThan(0);
+      expect(input.recentMessages.map((item) => item.text).join('\n')).not.toContain('older dashboard detail');
       expect(input.canSuggestTitle).toBe(true);
       return {
         chatSummary: 'This chat covers CIO dashboard review workflow and clearer session status. It should stay brief.\n```js\nconsole.log("hidden")\n```\nThis third sentence should be dropped.',
@@ -184,6 +192,8 @@ describe('SessionSummaryService', () => {
       sessionId: 'session-1',
       status: 'ready',
       lastInteractionAt: '2026-06-17T18:31:00.000Z',
+      windowStartAt: '2026-06-17T17:31:00.000Z',
+      windowEndAt: '2026-06-17T18:31:00.000Z',
       recentChangesSummary: 'The last hour focused on narrowing the hover summary to transcript-only user and agent prose. It also made the tooltip easier to scan.',
       titleSuggestion: 'CIO dashboard workflow status refinement extra',
     });
@@ -416,6 +426,143 @@ describe('SessionSummaryService', () => {
       recentChangesSummary: undefined,
     }));
     expect(exposed).not.toHaveProperty('lastError');
+    db.close();
+  });
+
+  it('force-runs summaries for existing ready sessions and anchors the window to latest chat prose', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-force-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.upsertBoundSession({
+      id: 'session-force',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'conversation-force',
+      resumeConversationRef: 'conversation-force',
+      tmuxSessionName: 'ac-codex-demo-force',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Force conversation',
+      startedAt: '2026-06-10T10:00:00.000Z',
+      updatedAt: '2026-06-10T10:05:00.000Z',
+      lastActivityAt: '2026-06-10T10:30:00.000Z',
+      lastCompletedAt: '2026-06-10T10:31:00.000Z',
+    });
+    db.upsertSessionInteractionSummary({
+      sessionId: 'session-force',
+      projectSlug: 'demo',
+      provider: 'codex',
+      conversationRef: 'conversation-force',
+      status: 'ready',
+      generatedAt: '2026-06-10T10:35:00.000Z',
+      windowStartAt: '2026-06-10T09:35:00.000Z',
+      windowEndAt: '2026-06-10T10:35:00.000Z',
+      lastInteractionAt: '2026-06-10T10:31:00.000Z',
+      chatSummary: 'Old summary.',
+      recentChangesSummary: 'Old recent summary.',
+    });
+    const runner = vi.fn(async (input: SessionSummaryModelInput) => {
+      expect(input.windowStartAt).toBe('2026-06-10T09:31:00.000Z');
+      expect(input.windowEndAt).toBe('2026-06-10T10:31:00.000Z');
+      expect(input.lastInteractionAt).toBe('2026-06-10T10:31:00.000Z');
+      return {
+        chatSummary: 'Forced summary covers the older active session.',
+        recentChangesSummary: 'The most recent chat hour ended with force-run validation.',
+        title: null,
+      };
+    });
+    const service = new SessionSummaryService(
+      db,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => ({
+            summary: {
+              ref: 'conversation-force',
+              kind: 'history',
+              projectSlug: 'demo',
+              provider: 'codex',
+              title: 'Force conversation',
+              updatedAt: '2026-06-10T10:31:00.000Z',
+              isBound: true,
+              degraded: false,
+            },
+            messages: [
+              message({
+                role: 'user',
+                conversationRef: 'conversation-force',
+                timestamp: '2026-06-10T10:30:00.000Z',
+                text: 'Please force backfill this old conversation.',
+              }),
+              message({
+                role: 'assistant',
+                conversationRef: 'conversation-force',
+                timestamp: '2026-06-10T10:31:00.000Z',
+                text: 'The force backfill should use this latest chat hour.',
+              }),
+            ],
+          }),
+        }),
+      } as never,
+      tempDir,
+      new RealtimeEventBus(),
+      runner,
+    );
+
+    await service.runOnce({ force: true, referenceTime: new Date('2026-06-19T18:00:00.000Z') });
+
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(db.getSessionInteractionSummary('session-force')).toMatchObject({
+      windowStartAt: '2026-06-10T09:31:00.000Z',
+      windowEndAt: '2026-06-10T10:31:00.000Z',
+      recentChangesSummary: 'The most recent chat hour ended with force-run validation.',
+    });
+    db.close();
+  });
+
+  it('skips system invocation conversations during forced summary runs', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-system-skip-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.upsertBoundSession({
+      id: 'session-system',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'conversation-system',
+      tmuxSessionName: 'ac-codex-demo-system',
+      status: 'bound',
+      shouldRestore: true,
+      title: '### CLI invocation',
+      startedAt: '2026-06-17T18:00:00.000Z',
+      updatedAt: '2026-06-17T18:05:00.000Z',
+      lastActivityAt: '2026-06-17T18:30:00.000Z',
+    });
+    const runner = vi.fn(async () => ({
+      chatSummary: 'Should not run.',
+      recentChangesSummary: 'Should not run.',
+      title: null,
+    }));
+    const service = new SessionSummaryService(
+      db,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => undefined,
+        }),
+      } as never,
+      tempDir,
+      new RealtimeEventBus(),
+      runner,
+    );
+
+    await service.runOnce({ force: true, referenceTime: new Date('2026-06-17T18:35:00.000Z') });
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(db.getSessionInteractionSummary('session-system')).toBeUndefined();
     db.close();
   });
 });

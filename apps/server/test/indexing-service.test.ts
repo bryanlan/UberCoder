@@ -145,6 +145,63 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('hides CLI invocation conversations from project trees', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-hidden-cli-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [
+      {
+        ref: 'visible-chat',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Visible planning chat',
+        updatedAt: '2026-06-17T18:31:00.000Z',
+        isBound: false,
+        degraded: false,
+      },
+      {
+        ref: 'hidden-cli',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: '### Review for correctness',
+        updatedAt: '2026-06-17T19:31:00.000Z',
+        isBound: false,
+        degraded: false,
+      },
+    ]);
+    db.putPendingConversation({
+      ref: 'pending:hidden-cli',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: '# Automated prompt',
+      createdAt: '2026-06-17T20:00:00.000Z',
+      updatedAt: '2026-06-17T20:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    });
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => [] as ConversationSummary[],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.primeProjectMetadata();
+
+    expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['visible-chat']);
+    db.close();
+  });
+
   it('adopts pending conversations into real history nodes and hides the pending alias from the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

@@ -1267,7 +1267,8 @@ export function ConversationPane({
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = mobileChromeHidden;
   const historyMessages = timeline?.messages ?? [];
-  const showHistory = !liveMode && historyMessages.length > 0;
+  const hasSavedHistory = historyMessages.length > 0;
+  const showHistory = !liveMode && hasSavedHistory;
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1278,7 +1279,7 @@ export function ConversationPane({
     return '';
   }, [historyMessages]);
   const activeSurface = liveMode
-    ? 'live'
+    ? (hasSavedHistory || hasOlderMessages || loadingOlderMessages ? 'mixed' : 'live')
     : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
@@ -1305,8 +1306,9 @@ export function ConversationPane({
     loading,
   });
   const renderedLiveOutputScreen = liveOutputScreen;
-  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive && !liveMode, conversationKey);
+  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive, conversationKey);
   const renderedShowHistory = !liveMode && renderedHistoryMessages.length > 0;
+  const renderedShowSavedHistory = renderedHistoryMessages.length > 0 || hasOlderMessages || loadingOlderMessages;
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1479,6 +1481,19 @@ export function ConversationPane({
       >
         {liveMode && renderedLiveOutputScreen ? (
           <div className="space-y-4">
+            {renderedShowSavedHistory && (
+              <div className="space-y-4 pb-2">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
+                {(hasOlderMessages || loadingOlderMessages) && (
+                  <div className="text-center text-xs text-slate-500">
+                    {loadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
+                  </div>
+                )}
+                {renderedHistoryMessages.map((message) => (
+                  <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
+                ))}
+              </div>
+            )}
             {(hasOlderLiveOutput || loadingOlderLiveOutput) && (
               <div className="text-center text-xs text-slate-500">
                 {loadingOlderLiveOutput ? 'Loading earlier live output…' : 'Scroll up to load earlier live output'}

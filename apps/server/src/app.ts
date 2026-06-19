@@ -15,6 +15,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerConversationRoutes } from './routes/conversations.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerProjectRoutes } from './routes/projects.js';
+import { registerSearchRoutes } from './routes/search.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
@@ -22,6 +23,7 @@ import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { RestartService } from './runtime/restart-service.js';
 import { SessionSummaryService } from './summaries/session-summary-service.js';
+import { ConversationSearchService } from './search/conversation-search.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -35,6 +37,7 @@ export async function buildApp(options: AppOptions = {}) {
   const projectService = new ProjectService(configService);
   const providerRegistry = new ProviderRegistry();
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus);
+  const search = new ConversationSearchService(db, projectService);
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -79,6 +82,7 @@ export async function buildApp(options: AppOptions = {}) {
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
   await registerProjectRoutes(app, authService, indexing, sessions);
+  await registerSearchRoutes(app, authService, search);
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);

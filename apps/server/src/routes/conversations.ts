@@ -372,6 +372,7 @@ export async function registerConversationRoutes(
     const updatedAt = nowIso();
     const title = parsedBody.data.title.trim();
     db.setConversationTitleOverride(projectSlug, providerId, resolvedConversationRef, title, updatedAt);
+    db.updateConversationSearchTitle(projectSlug, providerId, resolvedConversationRef, title);
 
     const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
     if (boundSession) {

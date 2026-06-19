@@ -1,10 +1,11 @@
 import path from 'node:path';
 import chokidar, { type FSWatcher } from 'chokidar';
-import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import type { BoundSession, ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
 import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService, MergedProviderSettings } from '../config/service.js';
-import { AppDatabase } from '../db/database.js';
+import { AppDatabase, pickPreferredConversation, type ConversationSearchIndexChunk } from '../db/database.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
+import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { nowIso } from '../lib/time.js';
 import { ProjectService, type ActiveProject } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
@@ -13,6 +14,9 @@ import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
+import type { ProviderAdapter } from '../providers/types.js';
+import { buildConversationSearchChunks } from '../search/conversation-search.js';
+import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
@@ -49,6 +53,7 @@ export class IndexingService {
   private watchConfigSignature?: string;
   private refreshPromise?: Promise<void>;
   private refreshQueued = false;
+  private refreshGeneration = 0;
 
   constructor(
     private readonly configService: ConfigService,
@@ -60,6 +65,11 @@ export class IndexingService {
 
   async start(): Promise<void> {
     await this.syncWatchers();
+    if (this.db.hasConversationIndexRows()) {
+      void this.backfillMissingSearchIndexRows().catch(() => {
+        // A failed search backfill should not prevent the cached tree from remaining usable.
+      });
+    }
   }
 
   async stop(): Promise<void> {
@@ -113,6 +123,7 @@ export class IndexingService {
   }
 
   private async performRefreshAll(): Promise<void> {
+    this.refreshGeneration += 1;
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
@@ -128,6 +139,7 @@ export class IndexingService {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         if (!settings.enabled) {
           this.db.replaceConversationIndex(project.slug, providerId, []);
+          this.db.replaceConversationSearchIndex(project.slug, providerId, []);
           continue;
         }
         const conversations = await provider.listConversations(project, settings);
@@ -138,6 +150,7 @@ export class IndexingService {
           pendingConversations,
         );
         this.db.replaceConversationIndex(project.slug, providerId, conversations);
+        await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
       }
     }
     const timestamp = nowIso();
@@ -147,12 +160,14 @@ export class IndexingService {
   }
 
   getTree(): TreeResponse {
-    const activeSessions = this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
+    const activeSessions = this.db.listBoundSessions()
+      .filter((session) => isTreeVisibleBoundSession(session) && this.isSessionVisibleInDiscovery(session));
     const activeSessionIds = new Set(activeSessions.map((session) => session.id));
     const sessionSummaryMap = this.db.listSessionInteractionSummariesBySessionIds(activeSessions.map((session) => session.id));
-    const history = this.db.listConversationIndex();
+    const history = this.db.listConversationIndex().filter(isConversationVisibleInDiscovery);
     const pending = this.db.listPendingConversations()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string')
+      .filter(isConversationVisibleInDiscovery)
       .map((conversation) => (
         conversation.boundSessionId && !activeSessionIds.has(conversation.boundSessionId)
           ? { ...conversation, isBound: false, boundSessionId: undefined }
@@ -233,6 +248,7 @@ export class IndexingService {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
+    await this.backfillMissingSearchIndexRows(projects);
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
   }
 
@@ -410,7 +426,103 @@ export class IndexingService {
         notes: project.notes,
         allowedLocalhostPorts: project.allowedLocalhostPorts,
       }));
+      this.db.updateConversationSearchProjectMetadata({
+        projectSlug: project.slug,
+        displayName: project.displayName,
+        path: project.path,
+        tags: project.tags,
+      });
     }
+  }
+
+  private async replaceSearchIndex(
+    project: ActiveProject,
+    providerId: ConversationSummary['provider'],
+    provider: ProviderAdapter,
+    settings: MergedProviderSettings,
+    conversations: ConversationSummary[],
+    options: { shouldCommit?: () => boolean } = {},
+  ): Promise<void> {
+    const chunks: ConversationSearchIndexChunk[] = [];
+    const deduped = new Map<string, ConversationSummary>();
+    for (const summary of conversations.filter(isConversationVisibleInDiscovery)) {
+      deduped.set(summary.ref, pickPreferredConversation(deduped.get(summary.ref), summary));
+    }
+    for (const summary of deduped.values()) {
+      try {
+        const conversation = await loadProviderConversationFromSummary(summary)
+          ?? await provider.getConversation(project, summary.ref, settings);
+        if (!conversation) {
+          continue;
+        }
+        chunks.push(...buildConversationSearchChunks({
+          project,
+          conversation: {
+            ...conversation.summary,
+            title: summary.title,
+            isBound: summary.isBound,
+            boundSessionId: summary.boundSessionId,
+          },
+          messages: conversation.messages,
+        }));
+      } catch {
+        // Keep the conversation tree usable even if one transcript cannot be indexed for search.
+      }
+    }
+    if (options.shouldCommit && !options.shouldCommit()) {
+      return;
+    }
+    this.db.replaceConversationSearchIndex(project.slug, providerId, chunks);
+  }
+
+  private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {
+    const startedRefreshGeneration = this.refreshGeneration;
+    const shouldCommit = () => !this.refreshPromise && this.refreshGeneration === startedRefreshGeneration;
+    const projects = projectsOverride ?? (this.projectCache.length > 0
+      ? this.projectCache
+      : await this.projectService.listActiveProjects());
+    const conversations = this.db.listConversationIndex();
+    let changed = false;
+
+    for (const project of projects) {
+      for (const providerId of PROVIDERS) {
+        if (!shouldCommit()) {
+          return;
+        }
+        const settings = this.projectService.getMergedProviderSettings(project, providerId);
+        if (!settings.enabled) {
+          if (this.db.hasConversationSearchIndexRowsFor(project.slug, providerId)) {
+            this.db.replaceConversationSearchIndex(project.slug, providerId, []);
+            changed = true;
+          }
+          continue;
+        }
+        const scopedConversations = conversations.filter((conversation) => (
+          conversation.projectSlug === project.slug
+          && conversation.provider === providerId
+        ));
+        if (scopedConversations.length === 0 || this.db.hasConversationSearchIndexRowsFor(project.slug, providerId)) {
+          continue;
+        }
+        const provider = this.providerRegistry.get(providerId);
+        await this.replaceSearchIndex(
+          project,
+          providerId,
+          provider,
+          settings,
+          scopedConversations,
+          { shouldCommit },
+        );
+        changed = true;
+      }
+    }
+
+    if (!changed || !shouldCommit()) {
+      return;
+    }
+    const timestamp = nowIso();
+    this.db.setMeta('lastIndexedAt', timestamp);
+    this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
   }
 
   private async refreshCodexProjects(
@@ -427,6 +539,7 @@ export class IndexingService {
       const settings = this.projectService.getMergedProviderSettings(project, 'codex');
       if (!settings.enabled) {
         this.db.replaceConversationIndex(project.slug, 'codex', []);
+        this.db.replaceConversationSearchIndex(project.slug, 'codex', []);
         continue;
       }
 
@@ -450,7 +563,15 @@ export class IndexingService {
           pendingConversations,
         );
         this.db.replaceConversationIndex(project.slug, 'codex', conversations);
+        await this.replaceSearchIndex(project, 'codex', provider, group.settings, conversations);
       }
     }
+  }
+
+  private isSessionVisibleInDiscovery(session: BoundSession): boolean {
+    const title = session.conversationRef.startsWith('pending:')
+      ? this.db.getPendingConversation(session.conversationRef)?.title
+      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef)?.title;
+    return isConversationVisibleInDiscovery({ title: title ?? session.title ?? 'Live session' });
   }
 }
