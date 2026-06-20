@@ -281,7 +281,10 @@ export class ConversationSearchService {
         ? this.db.getPendingConversation(session.conversationRef)
         : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
       const title = summary?.title ?? session.title ?? 'Live session';
-      if (!isConversationVisibleInDiscovery({ title })) {
+      if (!isConversationVisibleInDiscovery(summary ?? {
+        title,
+        provider: session.provider as ProviderId,
+      })) {
         continue;
       }
       const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;

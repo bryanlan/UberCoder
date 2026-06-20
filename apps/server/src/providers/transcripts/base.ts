@@ -4,7 +4,7 @@ import type { ConversationSummary, MessageRole, NormalizedMessage, ProviderId } 
 import { samePath } from '../../lib/path-utils.js';
 import { coerceText, normalizeComparableText, stableTextHash, truncate } from '../../lib/text.js';
 import { readTextWindowed } from '../file-utils.js';
-import type { ParsedTranscript, TranscriptParseInput } from './types.js';
+import type { ParsedTranscript, TranscriptMetadata, TranscriptParseInput } from './types.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -294,6 +294,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
   projectPaths: Set<string>;
   authoritativeProjectPaths: Set<string>;
   model?: string;
+  metadata?: TranscriptMetadata;
 }): ParsedTranscript {
   const sortedMessages = [...input.messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const displayMessages = [...(input.displayMessages ?? filterUserVisibleMessages(sortedMessages))]
@@ -329,6 +330,9 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
     rawMetadata: {
       projectPaths: [...input.projectPaths],
       authoritativeProjectPaths: [...input.authoritativeProjectPaths],
+      originator: input.metadata?.originator,
+      source: input.metadata?.source,
+      threadSource: input.metadata?.threadSource,
       firstUserTextHash: firstUser ? stableTextHash(normalizeComparableText(firstUser.text)) : undefined,
       lastUserTextHash: lastUser ? stableTextHash(normalizeComparableText(lastUser.text)) : undefined,
     },

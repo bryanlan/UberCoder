@@ -569,9 +569,12 @@ export class IndexingService {
   }
 
   private isSessionVisibleInDiscovery(session: BoundSession): boolean {
-    const title = session.conversationRef.startsWith('pending:')
-      ? this.db.getPendingConversation(session.conversationRef)?.title
-      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef)?.title;
-    return isConversationVisibleInDiscovery({ title: title ?? session.title ?? 'Live session' });
+    const summary = session.conversationRef.startsWith('pending:')
+      ? this.db.getPendingConversation(session.conversationRef)
+      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
+    return isConversationVisibleInDiscovery(summary ?? {
+      title: session.title ?? 'Live session',
+      provider: session.provider as ProviderId,
+    });
   }
 }

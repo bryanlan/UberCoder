@@ -586,6 +586,56 @@ describe('provider history discovery', () => {
     expect(conversation?.summary.excerpt).toBe('Visible assistant reply');
   });
 
+  it('captures Codex exec session metadata for spawned conversations', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '10');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(path.join(sessionsDir, 'rollout-codex-exec.jsonl'), [
+      JSON.stringify({
+        type: 'session_meta',
+        payload: {
+          cwd: '/tmp/demo-project',
+          id: 'codex-exec',
+          originator: 'codex_exec',
+          source: 'exec',
+          thread_source: 'user',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Programmatic prompt' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-10T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Programmatic reply' }],
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+
+    const conversations = await provider.listConversations(project, settings);
+
+    expect(conversations[0]?.rawMetadata?.originator).toBe('codex_exec');
+    expect(conversations[0]?.rawMetadata?.source).toBe('exec');
+    expect(conversations[0]?.rawMetadata?.threadSource).toBe('user');
+  });
+
   it('hides Codex harness instruction and environment wrapper messages from visible history', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
     const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '10');

@@ -233,6 +233,26 @@ describe('conversation search', () => {
       ],
     })).toEqual([]);
 
+    expect(buildConversationSearchChunks({
+      project,
+      conversation: {
+        ...conversation,
+        ref: 'hidden-codex-exec',
+        title: 'Programmatic optimization prompt',
+        rawMetadata: {
+          originator: 'codex_exec',
+          source: 'exec',
+        },
+      },
+      messages: [
+        message({
+          role: 'assistant',
+          timestamp: '2026-06-18T12:00:00.000Z',
+          text: 'This spawned exec phrase should not be searchable.',
+        }),
+      ],
+    })).toEqual([]);
+
     db.replaceConversationSearchIndex('demo', 'codex', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',

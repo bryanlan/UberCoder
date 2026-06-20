@@ -38,6 +38,45 @@ describe('AppDatabase', () => {
     db.close();
   });
 
+  it('filters Codex exec-spawned conversations from the persisted conversation index', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.replaceConversationIndex('demo', 'codex', [
+      {
+        ref: 'interactive',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Interactive transcript',
+        updatedAt: '2026-03-07T00:00:00.000Z',
+        isBound: false,
+        degraded: false,
+        rawMetadata: {
+          originator: 'codex-tui',
+          source: 'cli',
+        },
+      },
+      {
+        ref: 'spawned',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Programmatic transcript',
+        updatedAt: '2026-03-07T01:00:00.000Z',
+        isBound: false,
+        degraded: false,
+        rawMetadata: {
+          originator: 'codex_exec',
+          source: 'exec',
+        },
+      },
+    ]);
+
+    expect(db.listConversationIndex().map((conversation) => conversation.ref)).toEqual(['interactive']);
+    db.close();
+  });
+
   it('lists conversations by creation placement instead of recent activity', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

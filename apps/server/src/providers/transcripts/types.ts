@@ -14,3 +14,9 @@ export interface ParsedTranscript {
   projectPaths: Set<string>;
   authoritativeProjectPaths: Set<string>;
 }
+
+export interface TranscriptMetadata {
+  originator?: string;
+  source?: string;
+  threadSource?: string;
+}

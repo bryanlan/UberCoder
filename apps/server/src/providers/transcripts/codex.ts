@@ -87,10 +87,19 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
+  let originator: string | undefined;
+  let source: string | undefined;
+  let threadSource: string | undefined;
 
   for (const { index, record } of records) {
     collectProjectPaths(record, projectPaths);
     collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
+    if (record.type === 'session_meta') {
+      const payload = asObject(record.payload);
+      originator ??= typeof payload?.originator === 'string' ? payload.originator : undefined;
+      source ??= typeof payload?.source === 'string' ? payload.source : undefined;
+      threadSource ??= typeof payload?.thread_source === 'string' ? payload.thread_source : undefined;
+    }
     const extracted = extractCodexMessage(record);
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
@@ -115,5 +124,10 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
     displayMessages,
     projectPaths,
     authoritativeProjectPaths,
+    metadata: {
+      originator,
+      source,
+      threadSource,
+    },
   });
 }
