@@ -1,17 +1,52 @@
 {
   "changed_paths": [
+    "apps/server/src/app.ts",
+    "apps/server/src/db/database.ts",
+    "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/lib/bound-session-state.ts",
+    "apps/server/src/lib/conversation-summary.ts",
+    "apps/server/src/lib/conversation-visibility.ts",
+    "apps/server/src/lib/prose-sanitizer.ts",
+    "apps/server/src/providers/transcripts/base.ts",
+    "apps/server/src/providers/transcripts/codex.ts",
+    "apps/server/src/providers/transcripts/types.ts",
+    "apps/server/src/routes/conversations.ts",
+    "apps/server/src/routes/search.ts",
+    "apps/server/src/search/conversation-search.ts",
+    "apps/server/src/sessions/live-output.ts",
+    "apps/server/src/sessions/session-manager.ts",
+    "apps/server/src/summaries/session-summary-service.ts",
+    "apps/server/test/conversation-routes.test.ts",
+    "apps/server/test/database.test.ts",
+    "apps/server/test/indexing-service.test.ts",
+    "apps/server/test/live-output.test.ts",
+    "apps/server/test/providers.test.ts",
+    "apps/server/test/search.test.ts",
+    "apps/server/test/session-manager.test.ts",
+    "apps/server/test/session-summary-service.test.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src/components/ConversationPane.tsx",
+    "apps/web/src/components/Sidebar.tsx",
+    "apps/web/src/features/conversation/useConversationDataController.ts",
+    "apps/web/src/features/conversation/useConversationScrollController.ts",
+    "apps/web/src/lib/api.ts",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md"
+    "docs/fileindex.md",
+    "package.json",
+    "packages/shared/src/index.d.ts",
+    "packages/shared/src/index.js",
+    "packages/shared/src/index.ts",
+    "scripts/backfill-work-mode-session-summaries.mjs"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "ee48f2ebc65fdf5e35e82162b6df71bb43f530ee",
-      "date": "2026-06-12T23:21:25-07:00",
+      "commit": "9c134ce5ba398b28bef59f6e04296ea368e17127",
+      "date": "2026-06-13T23:43:02-07:00",
       "files": [
         {
           "paths": [
@@ -50,24 +85,567 @@
           "status": "M"
         }
       ],
-      "short_commit": "ee48f2e",
+      "short_commit": "9c134ce",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "402fbb011001ac5937de1c6233577221f42fd187",
+      "date": "2026-06-17T23:16:17-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/conversation-summary.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-summary-service.test.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.d.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "402fbb0",
+      "subject": "Autocommit: add session interaction summaries"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "79942527eefa00b3a496d5bf7effa75b05da81ce",
+      "date": "2026-06-18T22:59:25-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/bound-session-state.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/database.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-manager.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "7994252",
+      "subject": "Autocommit: hide errored sessions from console tree"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "eabfb3c4a6d0305c30c83100e8296a0793c5ab58",
+      "date": "2026-06-19T12:32:17-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/conversation-visibility.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/prose-sanitizer.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/search.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/search/conversation-search.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-summary-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/lib/api.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "package.json"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.d.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.js"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "scripts/backfill-work-mode-session-summaries.mjs"
+          ],
+          "status": "A"
+        }
+      ],
+      "short_commit": "eabfb3c",
+      "subject": "add chat search and summary backfill"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "406cf3efe3e0d63195a699e8e58c6a3695ea244b",
+      "date": "2026-06-19T13:04:18-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "406cf3e",
+      "subject": "fix summary hover spacing"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "c9ae0f594dd0f896787b9604e34b53bc9d35b0e4",
+      "date": "2026-06-19T13:17:43-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-summary-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "scripts/backfill-work-mode-session-summaries.mjs"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "c9ae0f5",
+      "subject": "address ralph review findings"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "1f7352cbda1440351c696c6feb3b13888caa19e6",
+      "date": "2026-06-19T14:55:10-07:00",
+      "files": [
+        {
+          "paths": [
+            "package.json"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "scripts/backfill-work-mode-session-summaries.mjs"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "1f7352c",
+      "subject": "fix summary backfill workflow"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "6a726745dee5b087132714e7d08a34a9724e0165",
+      "date": "2026-06-19T17:17:31-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/lib/conversation-visibility.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/base.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/codex.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/types.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/search/conversation-search.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/database.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "6a72674",
+      "subject": "filter codex exec conversations"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "d43aae7bbc69379010ab48628a1769ba5f8419ec",
+      "date": "2026-06-20T17:08:29-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/search/conversation-search.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/live-output.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/live-output.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationDataController.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationScrollController.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/lib/api.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "d43aae7",
+      "subject": "fix chat search and live timeline performance"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "8f674be667f798fc07f590d033ca14fc21fbf733",
+      "date": "2026-06-20T18:00:31-07:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/search/conversation-search.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-summary-service.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "8f674be",
+      "subject": "exclude raw live assistant chunks from transcripts"
     }
   ],
   "docs_current_through": {
-    "commit": "576004b456359505e9789fed26000915edb9a828",
-    "date": "2026-06-06T23:40:48-07:00"
-  },
-  "from_commit": "576004b456359505e9789fed26000915edb9a828",
-  "generated_at": "2026-06-14T06:40:26+00:00",
-  "head": {
     "commit": "ee48f2ebc65fdf5e35e82162b6df71bb43f530ee",
-    "date": "2026-06-12T23:21:25-07:00",
-    "short_commit": "ee48f2e"
+    "date": "2026-06-12T23:21:25-07:00"
+  },
+  "from_commit": "ee48f2ebc65fdf5e35e82162b6df71bb43f530ee",
+  "generated_at": "2026-06-21T05:42:48+00:00",
+  "head": {
+    "commit": "8f674be667f798fc07f590d033ca14fc21fbf733",
+    "date": "2026-06-20T18:00:31-07:00",
+    "short_commit": "8f674be"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "ee48f2ebc65fdf5e35e82162b6df71bb43f530ee",
+  "to_commit": "8f674be667f798fc07f590d033ca14fc21fbf733",
   "worktree_dirty": true
 }
