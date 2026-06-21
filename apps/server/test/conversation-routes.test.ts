@@ -860,7 +860,7 @@ describe('conversation routes', () => {
     }
   });
 
-  it('suppresses live-output message tails that are already backed by the provider transcript', async () => {
+  it('keeps raw-output assistant chunks out of transcript-backed timelines', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const transcriptAnswer = [
@@ -1005,7 +1005,7 @@ describe('conversation routes', () => {
       expect(texts).toContain(transcriptAnswer);
       expect(texts).toContain('Continue with the implementation plan.');
       expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(2);
-      expect(texts).toContain('Fresh live-only follow-up.');
+      expect(texts).not.toContain('Fresh live-only follow-up.');
       expect(texts).not.toContain(liveTranscriptTail);
     } finally {
       await app.close();

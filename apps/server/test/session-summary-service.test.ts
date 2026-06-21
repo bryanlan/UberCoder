@@ -148,14 +148,15 @@ describe('SessionSummaryService', () => {
       }),
     ];
     const runner = vi.fn(async (input: SessionSummaryModelInput) => {
-      expect(input.messages.map((item) => item.role)).toEqual(['assistant', 'user', 'assistant', 'user', 'assistant']);
-      expect(input.windowStartAt).toBe('2026-06-17T17:31:00.000Z');
-      expect(input.windowEndAt).toBe('2026-06-17T18:31:00.000Z');
+      expect(input.messages.map((item) => item.role)).toEqual(['assistant', 'user', 'assistant', 'user']);
+      expect(input.windowStartAt).toBe('2026-06-17T17:30:00.000Z');
+      expect(input.windowEndAt).toBe('2026-06-17T18:30:00.000Z');
       expect(input.messages.map((item) => item.text).join('\n')).not.toContain('shouldNeverAppear');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('preserve the onboarding checklist');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('keep allocation notes clear');
       expect(input.messages.map((item) => item.text).join('\n')).toContain('keep risk notes visible');
       expect(input.messages.map((item) => item.text).join('\n')).not.toContain('raw command output');
+      expect(input.messages.map((item) => item.text).join('\n')).not.toContain('workflow summary is now focused');
       expect(input.recentMessages.length).toBeGreaterThan(0);
       expect(input.recentMessages.map((item) => item.text).join('\n')).not.toContain('older dashboard detail');
       expect(input.canSuggestTitle).toBe(true);
@@ -191,9 +192,9 @@ describe('SessionSummaryService', () => {
     expect(stored).toMatchObject({
       sessionId: 'session-1',
       status: 'ready',
-      lastInteractionAt: '2026-06-17T18:31:00.000Z',
-      windowStartAt: '2026-06-17T17:31:00.000Z',
-      windowEndAt: '2026-06-17T18:31:00.000Z',
+      lastInteractionAt: '2026-06-17T18:30:00.000Z',
+      windowStartAt: '2026-06-17T17:30:00.000Z',
+      windowEndAt: '2026-06-17T18:30:00.000Z',
       recentChangesSummary: 'The last hour focused on narrowing the hover summary to transcript-only user and agent prose. It also made the tooltip easier to scan.',
       titleSuggestion: 'CIO dashboard workflow status refinement extra',
     });

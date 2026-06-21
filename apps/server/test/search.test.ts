@@ -346,6 +346,51 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('does not search raw-output assistant chunks for transcript-backed sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-history-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Please inspect indexed live history.', timestamp: '2026-06-18T12:00:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'repaint fragment ghost needle should never be searchable', timestamp: '2026-06-18T12:01:00.000Z' }),
+    ].join('\n'), 'utf8');
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-live',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'History live session',
+      createdAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:01:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-history-live',
+      degraded: false,
+    }]);
+    db.upsertBoundSession({
+      id: 'session-history-live',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-live',
+      tmuxSessionName: 'ac-codex-demo-history-live',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'History live session',
+      startedAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:01:00.000Z',
+      lastActivityAt: '2026-06-18T12:00:00.000Z',
+      lastOutputAt: '2026-06-18T12:01:00.000Z',
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+
+    expect(await search.search('ghost needle', 10)).toEqual([]);
+    expect((await search.search('indexed live history', 10))[0]?.conversationRef).toBe('history-live');
+    db.close();
+  });
+
   it('bounds live-session search to the recent event-log tail', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-tail-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

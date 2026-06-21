@@ -288,12 +288,16 @@ export class ConversationSearchService {
       })) {
         continue;
       }
+      const providerHasTranscript = Boolean(summary) && !session.conversationRef.startsWith('pending:');
       const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;
       const messages = await readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
 
       for (const message of messages) {
+        if (providerHasTranscript && message.role === 'assistant' && message.source === 'live-output') {
+          continue;
+        }
         if (message.role !== 'user' && message.role !== 'assistant') {
           continue;
         }

@@ -338,7 +338,7 @@ export async function registerConversationRoutes(
       [
         ...visibleMessages,
         ...(providerHasTranscript
-          ? liveMessagesNotInTranscript.filter((message) => message.role === 'user' || message.role === 'assistant')
+          ? liveMessagesNotInTranscript.filter((message) => message.role === 'user')
           : filterUserVisibleMessages(liveMessages)),
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,

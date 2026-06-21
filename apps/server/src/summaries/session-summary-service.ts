@@ -651,7 +651,13 @@ export class SessionSummaryService {
       ? (await provider.getConversation(project, session.conversationRef, providerSettings))?.messages ?? []
       : [];
     const liveMessages = await readLiveMessages(session);
-    return prepareMessages([...transcriptMessages, ...liveMessages]);
+    const providerHasTranscript = transcriptMessages.some((message) => message.role === 'user' || message.role === 'assistant');
+    return prepareMessages([
+      ...transcriptMessages,
+      ...(providerHasTranscript
+        ? liveMessages.filter((message) => message.role === 'user')
+        : liveMessages),
+    ]);
   }
 
   private getLastInteractionAt(session: BoundSession): string | undefined {
