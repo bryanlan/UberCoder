@@ -2,6 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 
 describe('parseSessionScreenSnapshot', () => {
+  it('trims boxed Codex startup chrome before the first real live content line', () => {
+    const screen = parseSessionScreenSnapshot([
+      '╭──────────────────────────────────────────────────────╮',
+      '│ OpenAI Codex                                         │',
+      '│ model:     gpt-5                                     │',
+      '│ directory: ~/code/agent-console-mvp/agent-console    │',
+      '│ permissions: YOLO mode                               │',
+      '╰──────────────────────────────────────────────────────╯',
+      '',
+      'Tip: New Use /fast to enable our fastest inference with increased plan usage.',
+      '',
+      '• I’ve adjusted the summary expectations to the corrected chat-prose window.',
+      '  I’m rerunning the affected tests.',
+      'gpt-5.4 xhigh · 65% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.content).toContain('I’ve adjusted the summary expectations');
+    expect(screen.content).not.toContain('directory:');
+    expect(screen.content).not.toContain('permissions:');
+    expect(screen.content).not.toContain('/fast');
+    expect(screen.status).toContain('65% left');
+  });
+
   it('keeps wrapped composer text in inputText and leaves the footer status intact', () => {
     const screen = parseSessionScreenSnapshot([
       'OpenAI Codex',

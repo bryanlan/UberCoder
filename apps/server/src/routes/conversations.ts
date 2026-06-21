@@ -32,6 +32,12 @@ const SHORT_EXACT_DUPLICATE_WINDOW_MS = 30 * 1000;
 const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
 const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 
+interface MessagePaginationOptions<T> {
+  before?: number;
+  limit?: number;
+  samePageRun?: (previous: T, next: T) => boolean;
+}
+
 function parseProvider(raw: string): ProviderId {
   return providerSchema.parse(raw);
 }
@@ -44,7 +50,7 @@ function resolveAdoptedConversationRef(summary: ConversationSummary | undefined)
 
 function paginateMessages<T>(
   messages: T[],
-  options: { before?: number; limit?: number },
+  options: MessagePaginationOptions<T>,
 ): {
   pageMessages: T[];
   pageInfo?: {
@@ -59,7 +65,17 @@ function paginateMessages<T>(
   }
 
   const cappedEnd = before !== undefined ? Math.min(messages.length, Math.max(0, before)) : messages.length;
-  const start = Math.max(0, cappedEnd - limit);
+  let start = Math.max(0, cappedEnd - limit);
+  if (limit > 0 && options.samePageRun) {
+    while (start > 0) {
+      const previous = messages[start - 1];
+      const next = messages[start];
+      if (previous === undefined || next === undefined || !options.samePageRun(previous, next)) {
+        break;
+      }
+      start -= 1;
+    }
+  }
   return {
     pageMessages: messages.slice(start, cappedEnd),
     pageInfo: {
@@ -68,6 +84,11 @@ function paginateMessages<T>(
       total: messages.length,
     },
   };
+}
+
+function messagesShareTimelinePageRun(previous: NormalizedMessage, next: NormalizedMessage): boolean {
+  return previous.role === next.role
+    && (previous.role === 'assistant' || previous.role === 'user');
 }
 
 interface ComparableMessage {
@@ -343,7 +364,10 @@ export async function registerConversationRoutes(
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    const pagedMessages = paginateMessages(mergedMessages, parsedQuery.data);
+    const pagedMessages = paginateMessages(mergedMessages, {
+      ...parsedQuery.data,
+      samePageRun: messagesShareTimelinePageRun,
+    });
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });

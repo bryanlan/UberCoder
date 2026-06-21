@@ -1,5 +1,5 @@
 import { Bot, Bug, Check, ChevronDown, ChevronRight, Copy, FolderTree, Link as LinkIcon, PlugZap, Sparkles, Unplug } from 'lucide-react';
-import type { ConversationTimeline, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
+import type { ConversationTimeline, NormalizedMessage, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -148,6 +148,45 @@ const TranscriptBubble = memo(function TranscriptBubble({ role, text, timestamp 
         <div>{text}</div>
         <div className="mt-2 text-[11px] text-slate-500">{new Date(timestamp).toLocaleString()}</div>
       </div>
+    </div>
+  );
+});
+
+function messagesShareTranscriptBubble(previous: NormalizedMessage, next: NormalizedMessage): boolean {
+  return previous.role === next.role
+    && (previous.role === 'assistant' || previous.role === 'user');
+}
+
+function mergeTranscriptMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  const merged: NormalizedMessage[] = [];
+  for (const message of messages) {
+    const previous = merged.at(-1);
+    if (previous && messagesShareTranscriptBubble(previous, message)) {
+      previous.id = `${previous.id}:${message.id}`;
+      previous.text = [previous.text.trimEnd(), message.text.trimStart()].filter(Boolean).join('\n\n');
+      previous.timestamp = message.timestamp;
+      continue;
+    }
+    merged.push({ ...message });
+  }
+  return merged;
+}
+
+const LiveSessionOutputBlock = memo(function LiveSessionOutputBlock({
+  content,
+  contentAnsi,
+}: {
+  content: string;
+  contentAnsi?: string;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Live terminal</div>
+      <LiveAnsiBlock
+        text={content || 'Waiting for session output…'}
+        ansiText={contentAnsi}
+        className="min-h-80 rounded-lg border border-slate-800 bg-slate-950 p-3 whitespace-pre-wrap break-words font-mono text-[13px] leading-5 text-slate-200"
+      />
     </div>
   );
 });
@@ -1226,7 +1265,6 @@ export function ConversationPane({
   const historyMessages = timeline?.messages ?? [];
   const hasSavedHistory = historyMessages.length > 0;
   const showHistory = !liveMode && hasSavedHistory;
-  const hasTimelineMessages = hasSavedHistory || hasOlderMessages || loadingOlderMessages;
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1237,7 +1275,7 @@ export function ConversationPane({
     return '';
   }, [historyMessages]);
   const activeSurface = liveMode
-    ? (hasTimelineMessages ? 'mixed' : 'live')
+    ? 'live'
     : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
@@ -1254,13 +1292,22 @@ export function ConversationPane({
     tailKey,
     layoutKey,
     historyPrependVersion,
-    hasOlderHistory: hasOlderMessages,
-    loadingOlderHistory: loadingOlderMessages,
+    hasOlderHistory: liveMode ? false : hasOlderMessages,
+    loadingOlderHistory: liveMode ? false : loadingOlderMessages,
     onLoadOlderHistory: onLoadOlderMessages,
     loading,
   });
-  const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive, conversationKey);
-  const renderedShowMessages = renderedHistoryMessages.length > 0;
+  const historyRenderState = useMemo(() => ({
+    messages: historyMessages,
+    hasOlderMessages,
+    loadingOlderMessages,
+  }), [hasOlderMessages, historyMessages, loadingOlderMessages]);
+  const renderedHistoryState = useFrozenValue(historyRenderState, selectionActive, conversationKey);
+  const renderedHistoryMessages = renderedHistoryState.messages;
+  const renderedHasOlderMessages = liveMode ? false : renderedHistoryState.hasOlderMessages;
+  const renderedLoadingOlderMessages = liveMode ? false : renderedHistoryState.loadingOlderMessages;
+  const renderedTranscriptMessages = useMemo(() => mergeTranscriptMessages(renderedHistoryMessages), [renderedHistoryMessages]);
+  const renderedShowMessages = !liveMode && renderedTranscriptMessages.length > 0;
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1431,17 +1478,24 @@ export function ConversationPane({
           !liveMode && 'space-y-4',
         )}
       >
-        {renderedShowMessages || hasOlderMessages || loadingOlderMessages ? (
+        {liveMode && liveScreen ? (
+          <div className="pb-5">
+            <LiveSessionOutputBlock
+              content={liveScreen.content}
+              contentAnsi={liveScreen.contentAnsi}
+            />
+          </div>
+        ) : renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages ? (
           <div className="space-y-4 pb-5">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-              {liveMode ? 'Conversation history' : 'Saved transcript'}
+              Saved transcript
             </div>
-            {(hasOlderMessages || loadingOlderMessages) && (
+            {(renderedHasOlderMessages || renderedLoadingOlderMessages) && (
               <div className="text-center text-xs text-slate-500">
-                {loadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
+                {renderedLoadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
               </div>
             )}
-            {renderedHistoryMessages.map((message) => (
+            {renderedTranscriptMessages.map((message) => (
               <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
             ))}
           </div>

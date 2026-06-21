@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
-import type { TmuxClient } from '../src/sessions/tmux-client.js';
+import type { NewDetachedSessionOptions, TmuxClient } from '../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
@@ -13,6 +13,7 @@ import type { MergedProviderSettings } from '../src/config/service.js';
 class FakeTmux implements TmuxClient {
   created: string[] = [];
   createdCommands: string[] = [];
+  createdOptions: NewDetachedSessionOptions[] = [];
   sent: string[] = [];
   pasted: string[] = [];
   sentKeys: string[][] = [];
@@ -22,10 +23,17 @@ class FakeTmux implements TmuxClient {
   paneText = '';
   captureSequence: string[] = [];
   captureStartLines: Array<number | undefined> = [];
+  options: Array<{ sessionName: string; name: string; value: string }> = [];
 
-  async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
+  async newDetachedSession(
+    sessionName: string,
+    _cwd: string,
+    shellCommand: string,
+    options: NewDetachedSessionOptions = {},
+  ): Promise<void> {
     this.created.push(sessionName);
     this.createdCommands.push(shellCommand);
+    this.createdOptions.push(options);
     this.alive.add(sessionName);
   }
   async pipePaneToFile(): Promise<void> {
@@ -59,7 +67,9 @@ class FakeTmux implements TmuxClient {
   }
   async hasSession(sessionName: string): Promise<boolean> { return this.alive.has(sessionName); }
   async getPanePid(): Promise<number | undefined> { return 4242; }
-  async setUserOption(): Promise<void> {}
+  async setOption(sessionName: string, name: string, value: string): Promise<void> {
+    this.options.push({ sessionName, name, value });
+  }
 }
 
 const project: ActiveProject = {
@@ -136,6 +146,7 @@ describe('SessionManager', () => {
     });
 
     expect(session.status).toBe('bound');
+    expect(tmux.createdOptions).toContainEqual({ historyLimitLines: 20000 });
     await manager.sendInput(session.id, 'Hello agent');
     expect(tmux.sent).toEqual(['Hello agent']);
     expect(tmux.sentKeys).toEqual([['Enter']]);

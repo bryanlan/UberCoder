@@ -877,6 +877,7 @@ export function Sidebar({
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string>();
   const summaryPanelRef = useRef<HTMLDivElement | null>(null);
+  const searchAbortControllerRef = useRef<AbortController | null>(null);
   const trimmedSearchQuery = searchQuery.trim();
   const trimmedSubmittedSearchQuery = submittedSearchQuery.trim();
   const showingSubmittedSearchResults = Boolean(
@@ -920,6 +921,8 @@ export function Sidebar({
     }
 
     const controller = new AbortController();
+    searchAbortControllerRef.current?.abort();
+    searchAbortControllerRef.current = controller;
     setSearchLoading(true);
     setSearchError(undefined);
     setSearchResults([]);
@@ -943,12 +946,25 @@ export function Sidebar({
     return () => {
       active = false;
       controller.abort();
+      if (searchAbortControllerRef.current === controller) {
+        searchAbortControllerRef.current = null;
+      }
     };
   }, [trimmedSubmittedSearchQuery, searchSubmissionVersion]);
 
   function submitSearch(): void {
     setSubmittedSearchQuery(trimmedSearchQuery);
     setSearchSubmissionVersion((current) => current + 1);
+  }
+
+  function updateSearchQuery(value: string): void {
+    setSearchQuery(value);
+    if (value.trim() !== trimmedSubmittedSearchQuery) {
+      searchAbortControllerRef.current?.abort();
+      searchAbortControllerRef.current = null;
+      setSearchLoading(false);
+      setSearchError(undefined);
+    }
   }
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
@@ -1066,7 +1082,7 @@ export function Sidebar({
               <input
                 type="search"
                 value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
+                onChange={(event) => updateSearchQuery(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
@@ -1080,7 +1096,7 @@ export function Sidebar({
                 <button
                   type="button"
                   onClick={() => {
-                    setSearchQuery('');
+                    updateSearchQuery('');
                     setSubmittedSearchQuery('');
                     setSearchSubmissionVersion((current) => current + 1);
                   }}

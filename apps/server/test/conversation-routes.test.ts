@@ -860,6 +860,160 @@ describe('conversation routes', () => {
     }
   });
 
+  it('does not split same-role transcript runs at timeline page boundaries', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-ref',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Paged transcript',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:06.000Z',
+      isBound: false,
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'old-user',
+        provider: 'codex',
+        role: 'user',
+        text: 'Older prompt',
+        timestamp: '2026-03-14T18:00:00.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'old-assistant',
+        provider: 'codex',
+        role: 'assistant',
+        text: 'Older answer',
+        timestamp: '2026-03-14T18:00:01.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'same-turn-first',
+        provider: 'codex',
+        role: 'assistant',
+        text: 'Same turn first chunk',
+        timestamp: '2026-03-14T18:00:02.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'same-turn-second',
+        provider: 'codex',
+        role: 'assistant',
+        text: 'Same turn second chunk',
+        timestamp: '2026-03-14T18:00:03.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'new-user',
+        provider: 'codex',
+        role: 'user',
+        text: 'Next prompt',
+        timestamp: '2026-03-14T18:00:04.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'new-assistant',
+        provider: 'codex',
+        role: 'assistant',
+        text: 'Latest answer',
+        timestamp: '2026-03-14T18:00:05.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+    ];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-ref',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Paged transcript',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:00:06.000Z',
+        isBound: false,
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen: async () => undefined,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-ref/messages?limit=3',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        messagePage: {
+          hasOlder: true,
+          olderCursor: 1,
+          total: 6,
+        },
+      });
+      expect(response.json().messages.map((message: NormalizedMessage) => message.text)).toEqual([
+        'Older answer',
+        'Same turn first chunk',
+        'Same turn second chunk',
+        'Next prompt',
+        'Latest answer',
+      ]);
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('keeps raw-output assistant chunks out of transcript-backed timelines', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

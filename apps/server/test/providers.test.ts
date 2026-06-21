@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
+import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 
@@ -109,6 +110,74 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.degraded).toBe(false);
+  });
+
+  it('deduplicates Codex event and response message pairs in display transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-duplicate-message-pairs.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'user_message',
+          message: 'Plan the auth flow',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.005Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Plan the auth flow' }],
+          metadata: { turn_id: 'turn-user' },
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'agent_message',
+          message: 'Use a server-owned session and cookie flow.',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.006Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Use a server-owned session and cookie flow.' }],
+          metadata: { turn_id: 'turn-assistant' },
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'duplicate-message-pairs',
+    });
+
+    expect(parsed.displayMessages.map((message) => ({
+      role: message.role,
+      text: message.text,
+      rawType: message.rawMetadata?.type,
+    }))).toEqual([
+      {
+        role: 'user',
+        text: 'Plan the auth flow',
+        rawType: 'response_item',
+      },
+      {
+        role: 'assistant',
+        text: 'Use a server-owned session and cookie flow.',
+        rawType: 'response_item',
+      },
+    ]);
+    expect(parsed.messages).toHaveLength(2);
   });
 
   it('extracts Codex project context from "Current working directory" text in older transcripts', async () => {

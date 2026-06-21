@@ -1,9 +1,71 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useInfiniteQuery, useQuery, type QueryClient } from '@tanstack/react-query';
-import type { ConversationTimeline, ProviderId } from '@agent-console/shared';
+import type { ConversationTimeline, ProviderId, SessionScreen } from '@agent-console/shared';
 import { api } from '../../lib/api';
 
 const TIMELINE_MESSAGE_PAGE_SIZE = 80;
+const LIVE_SCREEN_SCROLLBACK_LINES = 20_000;
+
+function timestampMs(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeScreenTailText(scrollbackText: string | undefined, tailText: string | undefined): string | undefined {
+  if (!scrollbackText) {
+    return tailText;
+  }
+  if (!tailText) {
+    return scrollbackText;
+  }
+  if (scrollbackText.endsWith(tailText)) {
+    return scrollbackText;
+  }
+
+  const scrollbackLines = scrollbackText.split('\n');
+  const tailLines = tailText.split('\n');
+  const maxOverlap = Math.min(scrollbackLines.length, tailLines.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    let matches = true;
+    for (let index = 0; index < overlap; index += 1) {
+      if (scrollbackLines[scrollbackLines.length - overlap + index] !== tailLines[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) {
+      return [...scrollbackLines, ...tailLines.slice(overlap)].join('\n');
+    }
+  }
+
+  return `${scrollbackText.replace(/\n*$/, '')}\n${tailText.replace(/^\n*/, '')}`;
+}
+
+function mergeLiveScreenSnapshot(
+  scrollbackScreen: SessionScreen | undefined,
+  latestScreen: SessionScreen | undefined,
+): SessionScreen | undefined {
+  if (!scrollbackScreen) {
+    return latestScreen;
+  }
+  if (!latestScreen || timestampMs(scrollbackScreen.capturedAt) >= timestampMs(latestScreen.capturedAt)) {
+    return scrollbackScreen;
+  }
+
+  const contentAnsi = mergeScreenTailText(
+    scrollbackScreen.contentAnsi ?? scrollbackScreen.content,
+    latestScreen.contentAnsi ?? latestScreen.content,
+  );
+
+  return {
+    ...latestScreen,
+    content: mergeScreenTailText(scrollbackScreen.content, latestScreen.content) ?? latestScreen.content,
+    contentAnsi,
+  };
+}
 
 export function resetTimelineHistoryQuery(
   queryClient: QueryClient,
@@ -97,7 +159,7 @@ export function useConversationDataController({
     [historyPages],
   );
 
-  const timeline = useMemo(
+  const baseTimeline = useMemo(
     () => timelineQuery.data
       ? {
           ...timelineQuery.data,
@@ -108,8 +170,29 @@ export function useConversationDataController({
     [historyPages, pagedTimelineMessages, timelineQuery.data],
   );
 
-  const boundSession = timeline?.boundSession;
-  const liveScreen = timeline?.liveScreen;
+  const baseBoundSession = baseTimeline?.boundSession;
+  const liveScreenQuery = useQuery({
+    queryKey: ['session-screen', baseBoundSession?.id, LIVE_SCREEN_SCROLLBACK_LINES],
+    queryFn: () => api.sessionScreen(baseBoundSession!.id, LIVE_SCREEN_SCROLLBACK_LINES),
+    enabled: Boolean(authenticated && baseBoundSession?.id),
+    refetchInterval: realtimeDegraded && baseBoundSession ? 1000 : false,
+  });
+
+  const boundSession = liveScreenQuery.data?.session ?? baseBoundSession;
+  const liveScreen = useMemo(
+    () => mergeLiveScreenSnapshot(liveScreenQuery.data?.screen, baseTimeline?.liveScreen),
+    [baseTimeline?.liveScreen, liveScreenQuery.data?.screen],
+  );
+  const timeline = useMemo(
+    () => baseTimeline
+      ? {
+          ...baseTimeline,
+          boundSession,
+          liveScreen,
+        }
+      : undefined,
+    [baseTimeline, boundSession, liveScreen],
+  );
   const liveMode = Boolean(boundSession && liveScreen);
 
   const rawOutputQuery = useQuery({
@@ -131,6 +214,9 @@ export function useConversationDataController({
   const tailKey = useMemo(() => {
     const messageCount = timeline?.messages.length ?? 0;
     const lastMessage = timeline?.messages.at(-1);
+    if (liveMode && boundSession && liveScreen) {
+      return `live:${boundSession.id}:${liveScreen.capturedAt}:${liveScreen.content.length}:${lastMessage?.id ?? 'no-history'}:${messageCount}`;
+    }
     if (lastMessage) {
       return `history:${lastMessage.id}:${messageCount}`;
     }
@@ -138,7 +224,7 @@ export function useConversationDataController({
       return `live-status:${boundSession.id}:${liveScreen.capturedAt}`;
     }
     return undefined;
-  }, [boundSession, liveScreen, timeline?.messages]);
+  }, [boundSession, liveMode, liveScreen, timeline?.messages]);
 
   const hasResolvedHistory = Boolean(timelineHistoryQuery.data) || (Boolean(conversationKey) && retainedHistoryState.key === conversationKey);
 

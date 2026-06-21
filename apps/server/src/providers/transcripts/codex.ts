@@ -1,5 +1,5 @@
 import type { NormalizedMessage } from '@agent-console/shared';
-import { stableTextHash } from '../../lib/text.js';
+import { normalizeComparableText, stableTextHash } from '../../lib/text.js';
 import {
   asObject,
   buildParsedTranscript,
@@ -12,6 +12,8 @@ import {
   loadJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
+
+const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
 
 function shouldHideCodexDisplayMessage(message: NormalizedMessage): boolean {
   if (message.role !== 'user' && message.role !== 'assistant') {
@@ -82,6 +84,68 @@ function extractCodexMessage(record: Record<string, unknown>): { role: Normalize
   return directText ? { role: directRole, text: directText } : undefined;
 }
 
+function timestampMs(message: NormalizedMessage): number | undefined {
+  const parsed = Date.parse(message.timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function codexRecordKind(message: NormalizedMessage): 'response-message' | 'event-message' | 'other' {
+  const record = asObject(message.rawMetadata);
+  const payload = asObject(record?.payload);
+  if (record?.type === 'response_item' && payload?.type === 'message') {
+    return 'response-message';
+  }
+  if (
+    record?.type === 'event_msg'
+    && (payload?.type === 'user_message' || payload?.type === 'agent_message')
+  ) {
+    return 'event-message';
+  }
+  return 'other';
+}
+
+function isCodexEventResponseDuplicate(a: NormalizedMessage, b: NormalizedMessage): boolean {
+  if (a.role !== b.role) {
+    return false;
+  }
+
+  const comparableA = normalizeComparableText(a.text);
+  if (!comparableA || comparableA !== normalizeComparableText(b.text)) {
+    return false;
+  }
+
+  const aMs = timestampMs(a);
+  const bMs = timestampMs(b);
+  if (aMs === undefined || bMs === undefined || Math.abs(aMs - bMs) > CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS) {
+    return false;
+  }
+
+  const kinds = new Set([codexRecordKind(a), codexRecordKind(b)]);
+  return kinds.has('event-message') && kinds.has('response-message');
+}
+
+function preferCodexDisplayMessage(existing: NormalizedMessage, candidate: NormalizedMessage): NormalizedMessage {
+  const existingKind = codexRecordKind(existing);
+  const candidateKind = codexRecordKind(candidate);
+  if (existingKind !== 'response-message' && candidateKind === 'response-message') {
+    return candidate;
+  }
+  return existing;
+}
+
+function dedupeCodexEventResponseMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  const deduped: NormalizedMessage[] = [];
+  for (const message of messages) {
+    const duplicateIndex = deduped.findIndex((existing) => isCodexEventResponseDuplicate(existing, message));
+    if (duplicateIndex === -1) {
+      deduped.push(message);
+      continue;
+    }
+    deduped[duplicateIndex] = preferCodexDisplayMessage(deduped[duplicateIndex]!, message);
+  }
+  return deduped;
+}
+
 export async function parseCodexConversationFile(input: TranscriptParseInput): Promise<ParsedTranscript> {
   const { records, fallbackTime } = await loadJsonlRecords(input.filePath);
   const messages: NormalizedMessage[] = [];
@@ -115,12 +179,13 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
     });
   }
 
-  const displayMessages = messages.filter((message) => !shouldHideCodexDisplayMessage(message));
+  const dedupedMessages = dedupeCodexEventResponseMessages(messages);
+  const displayMessages = dedupedMessages.filter((message) => !shouldHideCodexDisplayMessage(message));
 
   return buildParsedTranscript({
     ...input,
     fallbackTime,
-    messages,
+    messages: dedupedMessages,
     displayMessages,
     projectPaths,
     authoritativeProjectPaths,

@@ -17,10 +17,19 @@ function isBoxDrawingOnly(line: string): boolean {
   return /^[\s│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+$/u.test(line);
 }
 
+function normalizeTerminalChromeLine(line: string): string {
+  return normalizeWhitespace(
+    line
+      .replace(/^[\s│┃┆┊╎╏▐▌]+/gu, '')
+      .replace(/[\s│┃┆┊╎╏▐▌]+$/gu, ''),
+  );
+}
+
 function isLeadingTerminalChrome(line: string): boolean {
-  return /(?:^|\s)(?:OpenAI Codex|Claude Code|Use \/model to change|Use \/skills to list available|loading \/model to change)/i.test(line)
-    || /^(?:Model:|Directory:|Approval:|Sandbox:|Context window:)/i.test(line)
-    || /^(?:Use medium effort|with medium effort|We recommend .+ effort|Effort determines|recommend .+ effort for most tasks|and maximize rate limits|Use ultrathink)/i.test(line);
+  const normalized = normalizeTerminalChromeLine(line);
+  return /(?:^|\s)(?:OpenAI Codex|Claude Code|Use \/model to change|Use \/skills to list available|loading \/model to change)/i.test(normalized)
+    || /^(?:Model|Directory|Approval|Sandbox|Context window|Permissions):/i.test(normalized)
+    || /^(?:Tip:|Use medium effort|with medium effort|We recommend .+ effort|Effort determines|recommend .+ effort for most tasks|and maximize rate limits|Use ultrathink)/i.test(normalized);
 }
 
 export function isWorkingStatusLine(line: string): boolean {
@@ -183,6 +192,20 @@ function toScreenLines(snapshot: string): ScreenLine[] {
     });
 }
 
+function trimLeadingTerminalChrome(lines: ScreenLine[]): ScreenLine[] {
+  let start = 0;
+  while (start < lines.length) {
+    const line = lines[start]!;
+    const normalized = normalizeTerminalChromeLine(line.plain);
+    if (!normalized || isBoxDrawingOnly(line.plain) || isLeadingTerminalChrome(normalized)) {
+      start += 1;
+      continue;
+    }
+    break;
+  }
+  return lines.slice(start);
+}
+
 function extractActiveInput(contentLines: ScreenLine[]): {
   contentLines: ScreenLine[];
   inputText: string;
@@ -251,9 +274,8 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const lines = toScreenLines(snapshot);
 
   const visibleLines = collapseBlankRuns(
-    lines.filter((line, index) => {
+    trimLeadingTerminalChrome(lines).filter((line) => {
       if (isBoxDrawingOnly(line.plain)) return false;
-      if (index < 5 && isLeadingTerminalChrome(normalizeWhitespace(line.plain))) return false;
       return true;
     }),
   );
@@ -313,7 +335,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
       }
     }
   }
-  finalModel ??= extractClaudeHeaderModel(visibleLines);
+  finalModel ??= extractClaudeHeaderModel(lines);
 
   return {
     content,

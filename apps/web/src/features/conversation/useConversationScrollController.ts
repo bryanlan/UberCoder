@@ -6,7 +6,7 @@ const TOP_LOAD_THRESHOLD = 160;
 const UNDERFILL_THRESHOLD = 64;
 const SELECTION_RELEASE_GRACE_MS = 500;
 
-type ConversationSurface = 'live' | 'history' | 'mixed' | 'empty';
+type ConversationSurface = 'live' | 'history' | 'empty';
 
 interface UseConversationScrollControllerArgs {
   conversationKey?: string;
@@ -202,7 +202,7 @@ export function useConversationScrollController({
         return;
       }
 
-      if ((activeSurface === 'mixed' || activeSurface === 'history') && hasOlderHistory) {
+      if (activeSurface === 'history' && hasOlderHistory) {
         requestOlderHistory();
       }
     };
@@ -229,7 +229,7 @@ export function useConversationScrollController({
       return;
     }
 
-    if ((activeSurface === 'mixed' || activeSurface === 'history') && hasOlderHistory) {
+    if (activeSurface === 'history' && hasOlderHistory) {
       requestOlderHistory();
     }
   }, [
