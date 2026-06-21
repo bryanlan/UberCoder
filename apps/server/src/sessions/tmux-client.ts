@@ -33,12 +33,8 @@ async function runTmux(args: string[]): Promise<string> {
   });
 }
 
-export interface NewDetachedSessionOptions {
-  historyLimitLines?: number;
-}
-
 export interface TmuxClient {
-  newDetachedSession(sessionName: string, cwd: string, shellCommand: string, options?: NewDetachedSessionOptions): Promise<void>;
+  newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void>;
   pipePaneToFile(sessionName: string, filePath: string): Promise<void>;
   sendLiteralText(sessionName: string, text: string): Promise<void>;
   pasteText(sessionName: string, text: string): Promise<void>;
@@ -53,53 +49,8 @@ export interface TmuxClient {
 }
 
 export class ShellTmuxClient implements TmuxClient {
-  async newDetachedSession(
-    sessionName: string,
-    cwd: string,
-    shellCommand: string,
-    options: NewDetachedSessionOptions = {},
-  ): Promise<void> {
-    const historyLimitLines = options.historyLimitLines;
-    if (!historyLimitLines) {
-      await runTmux(['new-session', '-d', '-s', sessionName, '-c', cwd, shellCommand]);
-      return;
-    }
-
-    let sessionCreated = false;
-    try {
-      const placeholderWindowId = await runTmux([
-        'new-session',
-        '-d',
-        '-P',
-        '-F',
-        '#{window_id}',
-        '-s',
-        sessionName,
-        '-c',
-        cwd,
-      ]);
-      sessionCreated = true;
-      await runTmux(['set-option', '-t', sessionName, '-q', 'history-limit', String(historyLimitLines)]);
-      const agentWindowId = await runTmux([
-        'new-window',
-        '-d',
-        '-P',
-        '-F',
-        '#{window_id}',
-        '-t',
-        sessionName,
-        '-c',
-        cwd,
-        shellCommand,
-      ]);
-      await runTmux(['select-window', '-t', agentWindowId]);
-      await runTmux(['kill-window', '-t', placeholderWindowId]);
-    } catch (error) {
-      if (sessionCreated) {
-        await runTmux(['kill-session', '-t', sessionName]).catch(() => undefined);
-      }
-      throw error;
-    }
+  async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
+    await runTmux(['new-session', '-d', '-s', sessionName, '-c', cwd, shellCommand]);
   }
 
   async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type ProviderId } from '@agent-console/shared';
+import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type ProviderId, type SessionScreen } from '@agent-console/shared';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
@@ -31,6 +31,8 @@ const LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 const SHORT_EXACT_DUPLICATE_WINDOW_MS = 30 * 1000;
 const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
 const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
+const LIVE_SCREEN_DUPLICATE_MIN_LENGTH = 30;
+const LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS = 2_000;
 
 interface MessagePaginationOptions<T> {
   before?: number;
@@ -239,6 +241,113 @@ function filterTranscriptBackedLiveMessages(
   return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
+function normalizeLiveTailText(text: string): string {
+  return normalizeComparableText(text).replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function splitLines(text: string | undefined): string[] {
+  return (text ?? '').replace(/\r\n?/g, '\n').split('\n');
+}
+
+function isDurableLiveTailMessage(message: NormalizedMessage): boolean {
+  return message.role === 'user' || message.role === 'assistant' || message.role === 'tool';
+}
+
+function buildDurableLiveTailText(
+  durableMessages: NormalizedMessage[],
+  screenComparableLength: number,
+): string {
+  const minComparableLength = screenComparableLength + LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS;
+  const selectedTexts: string[] = [];
+  let selectedComparableLength = 0;
+
+  for (let index = durableMessages.length - 1; index >= 0; index -= 1) {
+    const message = durableMessages[index];
+    if (!message || !isDurableLiveTailMessage(message)) {
+      continue;
+    }
+
+    selectedTexts.unshift(message.text);
+    selectedComparableLength += normalizeLiveTailText(message.text).length + 1;
+    if (selectedComparableLength >= minComparableLength) {
+      break;
+    }
+  }
+
+  return normalizeLiveTailText(selectedTexts.join('\n'));
+}
+
+function trimDurableMessagesToScreenContent(
+  durableMessages: NormalizedMessage[],
+  screenContent: string,
+): NormalizedMessage[] {
+  const comparableScreenContent = normalizeLiveTailText(screenContent);
+  let end = durableMessages.length;
+
+  while (end > 0) {
+    const message = durableMessages[end - 1];
+    if (!message || message.role !== 'user' || message.source !== 'user-input') {
+      break;
+    }
+
+    const comparableMessageText = normalizeLiveTailText(message.text);
+    if (
+      comparableMessageText.length >= LIVE_SCREEN_DUPLICATE_MIN_LENGTH
+      && comparableScreenContent.includes(comparableMessageText)
+    ) {
+      break;
+    }
+
+    end -= 1;
+  }
+
+  return end === durableMessages.length ? durableMessages : durableMessages.slice(0, end);
+}
+
+function trimLiveScreenToActiveTail(
+  screen: SessionScreen | undefined,
+  durableMessages: NormalizedMessage[],
+): SessionScreen | undefined {
+  if (!screen) {
+    return undefined;
+  }
+
+  const contentLines = splitLines(screen.content);
+  const ansiLines = splitLines(screen.contentAnsi ?? screen.content);
+  const screenContent = contentLines.join('\n');
+  const screenComparableLength = normalizeLiveTailText(screenContent).length;
+  const durableText = buildDurableLiveTailText(
+    trimDurableMessagesToScreenContent(durableMessages, screenContent),
+    screenComparableLength,
+  );
+  if (!durableText) {
+    return screen;
+  }
+
+  let cutLineCount = 0;
+  for (let lineCount = 1; lineCount <= contentLines.length; lineCount += 1) {
+    const candidate = normalizeLiveTailText(contentLines.slice(0, lineCount).join('\n'));
+    if (candidate.length < LIVE_SCREEN_DUPLICATE_MIN_LENGTH) {
+      continue;
+    }
+    if (durableText.endsWith(candidate)) {
+      cutLineCount = lineCount;
+    }
+  }
+
+  if (cutLineCount === 0) {
+    return screen;
+  }
+
+  const content = contentLines.slice(cutLineCount).join('\n').trim();
+  const contentAnsi = ansiLines.slice(cutLineCount).join('\n').trim();
+  return {
+    ...screen,
+    content,
+    contentAnsi: contentAnsi || content,
+  };
+}
+
 function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
   const updatedAt = nowIso();
   db.putPendingConversation({
@@ -295,25 +404,25 @@ export async function registerConversationRoutes(
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
     const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
     const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
-    const liveScreen = liveSessionState?.screen;
+    const rawLiveScreen = liveSessionState?.screen;
     const resolvedBoundSession = liveSessionState?.session;
 
     if (!summary && resolvedBoundSession) {
       summary = buildSyntheticConversationFromSession(resolvedBoundSession);
     }
 
-    if (metadataOnly && summary) {
+    if (metadataOnly && summary && !resolvedBoundSession) {
       const emptyPage = paginateMessages([], parsedQuery.data);
       return {
         conversation: {
           ...summary,
-          isBound: Boolean(resolvedBoundSession),
-          boundSessionId: resolvedBoundSession?.id,
+          isBound: false,
+          boundSessionId: undefined,
         },
         messages: emptyPage.pageMessages,
         allMessages: [],
         boundSession: resolvedBoundSession,
-        liveScreen,
+        liveScreen: undefined,
         messagePage: emptyPage.pageInfo,
       };
     }
@@ -368,6 +477,7 @@ export async function registerConversationRoutes(
       ...parsedQuery.data,
       samePageRun: messagesShareTimelinePageRun,
     });
+    const liveScreen = trimLiveScreenToActiveTail(rawLiveScreen, mergedMessages);
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });
@@ -381,7 +491,7 @@ export async function registerConversationRoutes(
         boundSessionId: resolvedBoundSession?.id,
       },
       messages: pagedMessages.pageMessages,
-      allMessages: mergedAllMessages,
+      allMessages: metadataOnly ? [] : mergedAllMessages,
       boundSession: resolvedBoundSession,
       liveScreen,
       messagePage: pagedMessages.pageInfo,

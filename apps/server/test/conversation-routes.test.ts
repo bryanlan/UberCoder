@@ -1101,7 +1101,7 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: liveTranscriptTail,
+        content: `${liveTranscriptTail}\nFresh live-only follow-up.`,
         inputText: '',
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
@@ -1161,6 +1161,385 @@ describe('conversation routes', () => {
       expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(2);
       expect(texts).not.toContain('Fresh live-only follow-up.');
       expect(texts).not.toContain(liveTranscriptTail);
+      expect(response.json().liveScreen.content).toBe('Fresh live-only follow-up.');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('trims live screen scrollback that starts before the recent transcript tail', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-long-tail',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Long transcript',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:16:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-long-tail',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const session: BoundSession = {
+      id: 'session-long-tail',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-long-tail',
+      tmuxSessionName: 'ac-codex-demo-long-tail',
+      status: 'bound',
+      title: 'Long transcript',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:16:00.000Z',
+      lastActivityAt: '2026-03-14T18:16:00.000Z',
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = Array.from({ length: 16 }, (_, index) => ({
+      id: `history-assistant-${index}`,
+      provider: 'codex',
+      role: 'assistant',
+      text: `Saved transcript segment ${index + 1} has enough unique content to identify long terminal scrollback ${index + 1}.`,
+      timestamp: `2026-03-14T18:${String(index).padStart(2, '0')}:00.000Z`,
+      conversationRef: 'history-long-tail',
+      source: 'history-file',
+    }));
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-long-tail',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Long transcript',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:16:00.000Z',
+        isBound: true,
+        boundSessionId: 'session-long-tail',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: `${providerMessages.map((message) => message.text).join('\n')}\nFresh live-only follow-up.`,
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:16:01.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-long-tail/messages?limit=0',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().messages).toEqual([]);
+      expect(response.json().liveScreen.content).toBe('Fresh live-only follow-up.');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('trims saved transcript scrollback when newer live input is only in the active input buffer', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const transcriptAnswer = [
+      'The revised design needs to evolve. Use code tables with FKs.',
+      'Typed observations and normalized result tables keep cockpit workflows queryable.',
+      'JSONB remains evidence and detail, not the main query surface.',
+    ].join(' ');
+    const liveTranscriptTail = [
+      'evolve. Use code tables with FKs.',
+      'Typed observations and normalized result tables keep cockpit workflows queryable.',
+      'JSONB remains evidence and detail, not the main query surface.',
+    ].join('\n');
+    const activeInput = 'Switch model from the live bridge without duplicating the saved transcript tail.';
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: activeInput, timestamp: '2026-03-14T18:02:07.000Z' }),
+    ].join('\n'));
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-input-buffer',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Input buffer trim',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:05.000Z',
+      isBound: true,
+      boundSessionId: 'session-input-buffer',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const session: BoundSession = {
+      id: 'session-input-buffer',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-input-buffer',
+      tmuxSessionName: 'ac-codex-demo-input-buffer',
+      status: 'bound',
+      title: 'Input buffer trim',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:07.000Z',
+      lastActivityAt: '2026-03-14T18:02:07.000Z',
+      eventLogPath,
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'history-user',
+        provider: 'codex',
+        role: 'user',
+        text: 'Continue with the implementation plan.',
+        timestamp: '2026-03-14T18:00:00.000Z',
+        conversationRef: 'history-input-buffer',
+        source: 'history-file',
+      },
+      {
+        id: 'history-assistant',
+        provider: 'codex',
+        role: 'assistant',
+        text: transcriptAnswer,
+        timestamp: '2026-03-14T18:02:05.000Z',
+        conversationRef: 'history-input-buffer',
+        source: 'history-file',
+      },
+    ];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-input-buffer',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Input buffer trim',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:02:05.000Z',
+        isBound: true,
+        boundSessionId: 'session-input-buffer',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: `${liveTranscriptTail}\nLive model menu is waiting for a selection.`,
+        inputText: activeInput,
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:08.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-input-buffer/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
+      expect(texts).toContain(activeInput);
+      expect(response.json().liveScreen.content).toBe('Live model menu is waiting for a selection.');
+      expect(response.json().liveScreen.inputText).toBe(activeInput);
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('trims live screen scrollback against event-log-only pending history', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const eventOnlyAnswer = 'Event-only assistant answer has enough unique content to identify duplicated pending terminal output.';
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Draft an event-only implementation plan.', timestamp: '2026-03-14T18:02:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: eventOnlyAnswer, timestamp: '2026-03-14T18:02:05.000Z' }),
+    ].join('\n'));
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:event-tail',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:05.000Z',
+      isBound: true,
+      boundSessionId: 'session-event-tail',
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+
+    const session: BoundSession = {
+      id: 'session-event-tail',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:event-tail',
+      tmuxSessionName: 'ac-codex-demo-event-tail',
+      status: 'bound',
+      title: 'New Codex conversation',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:05.000Z',
+      lastActivityAt: '2026-03-14T18:02:05.000Z',
+      eventLogPath,
+    };
+    db.upsertBoundSession(session);
+
+    const getConversation = vi.fn(async () => null);
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: `${eventOnlyAnswer}\nFresh active terminal line.`,
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:08.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/pending%3Aevent-tail/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
+      expect(texts).toContain('Draft an event-only implementation plan.');
+      expect(texts).toContain(eventOnlyAnswer);
+      expect(response.json().liveScreen.content).toBe('Fresh active terminal line.');
+      expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();

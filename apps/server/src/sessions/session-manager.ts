@@ -36,7 +36,6 @@ const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
-const TMUX_HISTORY_LIMIT_LINES = 20_000;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -208,7 +207,6 @@ export class SessionManager {
   private readonly lastScreenHashes = new Map<string, string>();
   private readonly deferredTextReadyUntil = new Map<string, number>();
   private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
-  private readonly configuredTmuxSessions = new Set<string>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -529,12 +527,7 @@ export class SessionManager {
 
     let tmuxCreated = false;
     try {
-      await this.tmuxClient.newDetachedSession(
-        restoring.tmuxSessionName,
-        launch.cwd,
-        commandToShell(launch.argv, launch.env),
-        { historyLimitLines: TMUX_HISTORY_LIMIT_LINES },
-      );
+      await this.tmuxClient.newDetachedSession(restoring.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
       await this.tmuxClient.pipePaneToFile(restoring.tmuxSessionName, restoring.rawLogPath!);
       await this.configureTmuxSessionOptions(restoring.tmuxSessionName, {
@@ -639,12 +632,7 @@ export class SessionManager {
 
     let tmuxCreated = false;
     try {
-      await this.tmuxClient.newDetachedSession(
-        tmuxSessionName,
-        launch.cwd,
-        commandToShell(launch.argv, launch.env),
-        { historyLimitLines: TMUX_HISTORY_LIMIT_LINES },
-      );
+      await this.tmuxClient.newDetachedSession(tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
       await this.tmuxClient.pipePaneToFile(tmuxSessionName, rawLogPath);
       await this.configureTmuxSessionOptions(tmuxSessionName, {
@@ -1018,18 +1006,6 @@ export class SessionManager {
     await this.tmuxClient.setOption(sessionName, '@agent_console_session_id', options.sessionId);
     await this.tmuxClient.setOption(sessionName, '@agent_console_conversation_ref', options.conversationRef);
     await this.tmuxClient.setOption(sessionName, '@agent_console_provider', options.provider);
-    this.configuredTmuxSessions.add(sessionName);
-  }
-
-  private async ensureTmuxSessionOptions(session: BoundSession): Promise<void> {
-    if (this.configuredTmuxSessions.has(session.tmuxSessionName)) {
-      return;
-    }
-    await this.configureTmuxSessionOptions(session.tmuxSessionName, {
-      sessionId: session.id,
-      conversationRef: session.conversationRef,
-      provider: session.provider,
-    });
   }
 
   private mustGetSession(sessionId: string): BoundSession {
@@ -1082,8 +1058,6 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: ended });
       return undefined;
     }
-
-    await this.ensureTmuxSessionOptions(session);
 
     const nextStatus = session.status === 'starting' || session.status === 'error' ? 'bound' : session.status;
     const refreshed: BoundSession = nextStatus === session.status

@@ -382,11 +382,9 @@ function AppShell() {
               && parsed.conversationRef === selectedConversationRef
             );
           if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
-            queryClient.setQueryData<ConversationTimeline | undefined>(
-              ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-              (current) => current ? { ...current, liveScreen: parsed.screen } : current,
-            );
-            void queryClient.invalidateQueries({ queryKey: ['session-screen', parsed.sessionId] });
+            void queryClient.invalidateQueries({
+              queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+            });
           }
           return;
         }
@@ -768,7 +766,6 @@ function AppShell() {
     try {
       const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
       applyUpdatedSessionToSelection(sessionId, updatedSession);
-      void queryClient.invalidateQueries({ queryKey: ['session-screen', sessionId] });
       if (refreshTimelineMessages) {
         scheduleSelectedTimelineMessageRefresh();
       }
@@ -797,7 +794,6 @@ function AppShell() {
             }
             const retriedSession = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
             applyUpdatedSessionToSelection(reboundSession.id, retriedSession);
-            void queryClient.invalidateQueries({ queryKey: ['session-screen', reboundSession.id] });
             if (refreshTimelineMessages) {
               scheduleSelectedTimelineMessageRefresh();
             }

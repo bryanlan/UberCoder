@@ -10,7 +10,6 @@ import type {
   RenameConversationRequest,
   SettingsSummary,
   UiPreferences,
-  SessionScreen,
   SessionKeystrokeRequest,
   TreeResponse,
   UpdateGlobalSettingsRequest,
@@ -111,8 +110,6 @@ export const api = {
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
-  sessionScreen: (sessionId: string, lines: number) =>
-    request<{ session: BoundSession; screen: SessionScreen }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen?lines=${encodeURIComponent(String(lines))}`),
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
   networkInfo: () => request<{ tailscaleIpv4?: string }>('/api/settings/network'),

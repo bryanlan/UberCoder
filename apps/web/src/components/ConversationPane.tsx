@@ -180,12 +180,11 @@ const LiveSessionOutputBlock = memo(function LiveSessionOutputBlock({
   contentAnsi?: string;
 }) {
   return (
-    <div className="space-y-2">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Live terminal</div>
+    <div>
       <LiveAnsiBlock
         text={content || 'Waiting for session output…'}
         ansiText={contentAnsi}
-        className="min-h-80 rounded-lg border border-slate-800 bg-slate-950 p-3 whitespace-pre-wrap break-words font-mono text-[13px] leading-5 text-slate-200"
+        className="rounded-lg border border-slate-800 bg-slate-950 p-3 whitespace-pre-wrap break-words font-mono text-[13px] leading-5 text-slate-200"
       />
     </div>
   );
@@ -1264,7 +1263,13 @@ export function ConversationPane({
   const hideTopPanel = mobileChromeHidden;
   const historyMessages = timeline?.messages ?? [];
   const hasSavedHistory = historyMessages.length > 0;
-  const showHistory = !liveMode && hasSavedHistory;
+  const showHistory = hasSavedHistory;
+  const showLiveTail = Boolean(
+    liveMode
+    && liveScreen
+    && liveScreen.content.trim()
+    && liveScreen.content.trim() !== 'Waiting for session output…',
+  );
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1274,9 +1279,9 @@ export function ConversationPane({
     }
     return '';
   }, [historyMessages]);
-  const activeSurface = liveMode
-    ? 'live'
-    : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
+  const activeSurface = showHistory || hasOlderMessages || loadingOlderMessages
+    ? 'history'
+    : (liveMode ? 'live' : 'empty');
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
     debugOpen ? 'debug:open' : 'debug:closed',
@@ -1292,8 +1297,8 @@ export function ConversationPane({
     tailKey,
     layoutKey,
     historyPrependVersion,
-    hasOlderHistory: liveMode ? false : hasOlderMessages,
-    loadingOlderHistory: liveMode ? false : loadingOlderMessages,
+    hasOlderHistory: hasOlderMessages,
+    loadingOlderHistory: loadingOlderMessages,
     onLoadOlderHistory: onLoadOlderMessages,
     loading,
   });
@@ -1304,10 +1309,10 @@ export function ConversationPane({
   }), [hasOlderMessages, historyMessages, loadingOlderMessages]);
   const renderedHistoryState = useFrozenValue(historyRenderState, selectionActive, conversationKey);
   const renderedHistoryMessages = renderedHistoryState.messages;
-  const renderedHasOlderMessages = liveMode ? false : renderedHistoryState.hasOlderMessages;
-  const renderedLoadingOlderMessages = liveMode ? false : renderedHistoryState.loadingOlderMessages;
+  const renderedHasOlderMessages = renderedHistoryState.hasOlderMessages;
+  const renderedLoadingOlderMessages = renderedHistoryState.loadingOlderMessages;
   const renderedTranscriptMessages = useMemo(() => mergeTranscriptMessages(renderedHistoryMessages), [renderedHistoryMessages]);
-  const renderedShowMessages = !liveMode && renderedTranscriptMessages.length > 0;
+  const renderedShowMessages = renderedTranscriptMessages.length > 0;
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1473,23 +1478,10 @@ export function ConversationPane({
 
       <div
         ref={scrollRef}
-        className={clsx(
-          'scrollbar-thin flex-1 min-h-0 overflow-y-auto px-4 py-5',
-          !liveMode && 'space-y-4',
-        )}
+        className="scrollbar-thin flex-1 min-h-0 overflow-y-auto px-4 py-5"
       >
-        {liveMode && liveScreen ? (
-          <div className="pb-5">
-            <LiveSessionOutputBlock
-              content={liveScreen.content}
-              contentAnsi={liveScreen.contentAnsi}
-            />
-          </div>
-        ) : renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages ? (
+        {renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages || showLiveTail ? (
           <div className="space-y-4 pb-5">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
-              Saved transcript
-            </div>
             {(renderedHasOlderMessages || renderedLoadingOlderMessages) && (
               <div className="text-center text-xs text-slate-500">
                 {renderedLoadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
@@ -1498,6 +1490,12 @@ export function ConversationPane({
             {renderedTranscriptMessages.map((message) => (
               <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
             ))}
+            {showLiveTail && liveScreen ? (
+              <LiveSessionOutputBlock
+                content={liveScreen.content}
+                contentAnsi={liveScreen.contentAnsi}
+              />
+            ) : null}
           </div>
         ) : boundSession ? (
           <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
