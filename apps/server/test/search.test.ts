@@ -346,6 +346,58 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('bounds live-session search to the recent event-log tail', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-tail-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: `old-tail-needle ${'outside-tail '.repeat(60_000)}`,
+        timestamp: '2026-06-18T12:00:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Only recent live output should be searched.',
+        timestamp: '2026-06-18T12:01:00.000Z',
+      }),
+    ].join('\n'), 'utf8');
+    db.putPendingConversation({
+      ref: 'pending:tail',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Tail bounded pending',
+      createdAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:01:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-tail',
+      degraded: false,
+    });
+    db.upsertBoundSession({
+      id: 'session-tail',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:tail',
+      tmuxSessionName: 'ac-codex-demo-tail',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Tail bounded pending',
+      startedAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:01:00.000Z',
+      lastOutputAt: '2026-06-18T12:01:00.000Z',
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+
+    expect(await search.search('old-tail-needle', 10)).toEqual([]);
+    expect(await search.search('recent live output', 10)).toHaveLength(1);
+    db.close();
+  });
+
   it('does not return live results that only match project metadata', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-metadata-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

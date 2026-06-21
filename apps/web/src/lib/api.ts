@@ -56,12 +56,14 @@ export const api = {
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),
-  searchConversations: (query: string, options: { limit?: number } = {}) => {
+  searchConversations: (query: string, options: { limit?: number; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams({ q: query });
     if (options.limit !== undefined) {
       params.set('limit', String(options.limit));
     }
-    return request<ConversationSearchResponse>(`/api/search/conversations?${params.toString()}`);
+    return request<ConversationSearchResponse>(`/api/search/conversations?${params.toString()}`, {
+      signal: options.signal,
+    });
   },
   refreshTree: (csrfToken?: string) => request<TreeResponse>('/api/projects/refresh', { method: 'POST', body: '{}' }, csrfToken),
   timeline: (
@@ -108,14 +110,6 @@ export const api = {
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<BoundSession>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
-  sessionScreen: (sessionId: string, options: { lines?: number } = {}) => {
-    const params = new URLSearchParams();
-    if (options.lines !== undefined) {
-      params.set('lines', String(options.lines));
-    }
-    const query = params.size > 0 ? `?${params.toString()}` : '';
-    return request<{ session: BoundSession; screen: ConversationTimeline['liveScreen'] }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen${query}`);
-  },
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
   networkInfo: () => request<{ tailscaleIpv4?: string }>('/api/settings/network'),

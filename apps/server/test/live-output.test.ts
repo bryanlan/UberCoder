@@ -61,4 +61,72 @@ describe('readLiveMessages', () => {
     expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual(['smoke-ok']);
     expect(messages.some((message) => /Tip:|Starting MCP servers/.test(message.text) && message.role !== 'status')).toBe(false);
   });
+
+  it('reads a bounded event-log tail from the next complete JSONL row', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: `This old live output should be outside the bounded tail. old-tail-needle ${'x'.repeat(4000)}`,
+        timestamp: '2026-03-07T00:00:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Only the recent complete user row should remain.',
+        timestamp: '2026-03-07T00:01:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'recent bounded tail answer',
+        timestamp: '2026-03-07T00:01:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-3',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:test-3',
+      tmuxSessionName: 'ac-codex-demo-3',
+      status: 'bound',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:01:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session, { maxBytesFromEnd: 512 });
+    expect(messages.map((message) => message.text)).toEqual([
+      'Only the recent complete user row should remain.',
+      'recent bounded tail answer',
+    ]);
+    expect(messages.some((message) => message.text.includes('old-tail-needle'))).toBe(false);
+  });
+
+  it('keeps the latest complete JSONL row when it starts before the bounded tail', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const oversizedRecentText = `recent oversized needle ${'payloadword '.repeat(300)}`;
+    await fs.writeFile(eventLogPath, `${JSON.stringify({
+      type: 'raw-output',
+      text: oversizedRecentText,
+      timestamp: '2026-03-07T00:02:00.000Z',
+    })}\n`);
+
+    const session: BoundSession = {
+      id: 'session-4',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:test-4',
+      tmuxSessionName: 'ac-codex-demo-4',
+      status: 'bound',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-03-07T00:02:00.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session, { maxBytesFromEnd: 512 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toContain('recent oversized needle');
+  });
 });

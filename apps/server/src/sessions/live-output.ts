@@ -97,10 +97,115 @@ interface SessionEventLine {
   timestamp: string;
 }
 
-export async function readLiveMessages(session: BoundSession): Promise<NormalizedMessage[]> {
+interface ReadLiveMessagesOptions {
+  maxBytesFromEnd?: number;
+}
+
+interface CachedLiveMessages {
+  messages: NormalizedMessage[];
+}
+
+const liveMessageCache = new Map<string, CachedLiveMessages>();
+const MAX_LIVE_MESSAGE_CACHE_ENTRIES = 64;
+const MAX_EVENT_LOG_ROW_BACKTRACK_BYTES = 4 * 1024 * 1024;
+
+function cloneMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  return messages.map((message) => ({ ...message }));
+}
+
+function rememberLiveMessages(cacheKey: string, messages: NormalizedMessage[]): void {
+  liveMessageCache.set(cacheKey, { messages: cloneMessages(messages) });
+  if (liveMessageCache.size <= MAX_LIVE_MESSAGE_CACHE_ENTRIES) {
+    return;
+  }
+
+  const oldestKey = liveMessageCache.keys().next().value as string | undefined;
+  if (oldestKey) {
+    liveMessageCache.delete(oldestKey);
+  }
+}
+
+async function getEventLogReadPlan(
+  filePath: string,
+  options: ReadLiveMessagesOptions,
+): Promise<{ cacheKey: string; size: number; maxBytes?: number }> {
+  const stat = await fs.stat(filePath);
+  const maxBytes = options.maxBytesFromEnd;
+  const cacheKey = [
+    filePath,
+    stat.size,
+    stat.mtimeMs,
+    maxBytes ?? 'all',
+  ].join(':');
+  return { cacheKey, size: stat.size, maxBytes };
+}
+
+async function readEventLogText(
+  filePath: string,
+  plan: { size: number; maxBytes?: number },
+): Promise<string> {
+  if (!plan.maxBytes || plan.size <= plan.maxBytes) {
+    return fs.readFile(filePath, 'utf8');
+  }
+
+  const start = Math.max(0, plan.size - plan.maxBytes);
+  const length = plan.size - start;
+  const text = await readFileSlice(filePath, start, length);
+  if (start === 0) {
+    return text;
+  }
+
+  const firstNewline = text.indexOf('\n');
+  if (firstNewline !== -1) {
+    const completeTail = text.slice(firstNewline + 1);
+    if (completeTail.trim()) {
+      return completeTail;
+    }
+  }
+
+  const rowStart = await findBoundedRowStart(filePath, start);
+  return rowStart === undefined ? '' : readFileSlice(filePath, rowStart, plan.size - rowStart);
+}
+
+async function readFileSlice(filePath: string, start: number, length: number): Promise<string> {
+  const buffer = Buffer.alloc(length);
+  const handle = await fs.open(filePath, 'r');
+  try {
+    let offset = 0;
+    while (offset < length) {
+      const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset);
+      if (bytesRead === 0) {
+        break;
+      }
+      offset += bytesRead;
+    }
+    return buffer.subarray(0, offset).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function findBoundedRowStart(filePath: string, offset: number): Promise<number | undefined> {
+  const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
+  const prefix = await readFileSlice(filePath, backtrackStart, offset - backtrackStart);
+  const previousNewline = prefix.lastIndexOf('\n');
+  if (previousNewline !== -1) {
+    return backtrackStart + previousNewline + 1;
+  }
+  return backtrackStart === 0 ? 0 : undefined;
+}
+
+export async function readLiveMessages(session: BoundSession, options: ReadLiveMessagesOptions = {}): Promise<NormalizedMessage[]> {
   if (!session.eventLogPath) return [];
   try {
-    const text = await fs.readFile(session.eventLogPath, 'utf8');
+    const plan = await getEventLogReadPlan(session.eventLogPath, options);
+    const { cacheKey } = plan;
+    const cached = liveMessageCache.get(cacheKey);
+    if (cached) {
+      return cloneMessages(cached.messages);
+    }
+    const text = await readEventLogText(session.eventLogPath, plan);
+
     const events = text.split(/\r?\n/).filter(Boolean).flatMap((line) => {
       try {
         return [JSON.parse(line) as SessionEventLine];
@@ -154,7 +259,8 @@ export async function readLiveMessages(session: BoundSession): Promise<Normalize
         });
       }
     }
-    return grouped;
+    rememberLiveMessages(cacheKey, grouped);
+    return cloneMessages(grouped);
   } catch {
     return [];
   }

@@ -14,13 +14,9 @@ interface UseConversationScrollControllerArgs {
   tailKey?: string;
   layoutKey: string;
   historyPrependVersion: number;
-  liveOutputPrependVersion: number;
   hasOlderHistory: boolean;
   loadingOlderHistory: boolean;
   onLoadOlderHistory: () => Promise<void>;
-  hasOlderLiveOutput: boolean;
-  loadingOlderLiveOutput: boolean;
-  onLoadOlderLiveOutput: () => Promise<void>;
   loading: boolean;
 }
 
@@ -49,13 +45,9 @@ export function useConversationScrollController({
   tailKey,
   layoutKey,
   historyPrependVersion,
-  liveOutputPrependVersion,
   hasOlderHistory,
   loadingOlderHistory,
   onLoadOlderHistory,
-  hasOlderLiveOutput,
-  loadingOlderLiveOutput,
-  onLoadOlderLiveOutput,
   loading,
 }: UseConversationScrollControllerArgs) {
   const scrollElementRef = useRef<HTMLDivElement | null>(null);
@@ -67,10 +59,8 @@ export function useConversationScrollController({
   const stickToBottomRef = useRef(true);
   const prependScrollHeightRef = useRef<number | null>(null);
   const historyLoadInFlightRef = useRef(false);
-  const liveOutputLoadInFlightRef = useRef(false);
   const previousConversationKeyRef = useRef<string | undefined>(undefined);
   const previousHistoryPrependVersionRef = useRef(historyPrependVersion);
-  const previousLiveOutputPrependVersionRef = useRef(liveOutputPrependVersion);
   const previousTailKeyRef = useRef<string | undefined>(tailKey);
   const previousLayoutKeyRef = useRef(layoutKey);
   const pointerDownInsideScrollerRef = useRef(false);
@@ -112,22 +102,6 @@ export function useConversationScrollController({
       })
       .finally(() => {
         historyLoadInFlightRef.current = false;
-      });
-  }
-
-  function requestOlderLiveOutput(): void {
-    if (!hasOlderLiveOutput || loadingOlderLiveOutput || liveOutputLoadInFlightRef.current) {
-      return;
-    }
-
-    prependScrollHeightRef.current = scrollElementRef.current?.scrollHeight ?? null;
-    liveOutputLoadInFlightRef.current = true;
-    void onLoadOlderLiveOutput()
-      .catch(() => {
-        prependScrollHeightRef.current = null;
-      })
-      .finally(() => {
-        liveOutputLoadInFlightRef.current = false;
       });
   }
 
@@ -228,11 +202,7 @@ export function useConversationScrollController({
         return;
       }
 
-      if (activeSurface === 'mixed' && hasOlderHistory) {
-        requestOlderHistory();
-      } else if (activeSurface === 'live' || activeSurface === 'mixed') {
-        requestOlderLiveOutput();
-      } else if (activeSurface === 'history') {
+      if ((activeSurface === 'mixed' || activeSurface === 'history') && hasOlderHistory) {
         requestOlderHistory();
       }
     };
@@ -243,13 +213,10 @@ export function useConversationScrollController({
   }, [
     activeSurface,
     hasOlderHistory,
-    hasOlderLiveOutput,
     scrollNode,
     loading,
     loadingOlderHistory,
-    loadingOlderLiveOutput,
     onLoadOlderHistory,
-    onLoadOlderLiveOutput,
   ]);
 
   useEffect(() => {
@@ -262,25 +229,17 @@ export function useConversationScrollController({
       return;
     }
 
-    if (activeSurface === 'mixed' && hasOlderHistory) {
-      requestOlderHistory();
-    } else if (activeSurface === 'live' || activeSurface === 'mixed') {
-      requestOlderLiveOutput();
-    } else if (activeSurface === 'history') {
+    if ((activeSurface === 'mixed' || activeSurface === 'history') && hasOlderHistory) {
       requestOlderHistory();
     }
   }, [
     activeSurface,
     hasOlderHistory,
-    hasOlderLiveOutput,
     historyPrependVersion,
-    liveOutputPrependVersion,
     scrollNode,
     loading,
     loadingOlderHistory,
-    loadingOlderLiveOutput,
     onLoadOlderHistory,
-    onLoadOlderLiveOutput,
   ]);
 
   useEffect(() => {
@@ -337,14 +296,11 @@ export function useConversationScrollController({
       return;
     }
 
-    const historyChanged = historyPrependVersion !== previousHistoryPrependVersionRef.current;
-    const liveChanged = liveOutputPrependVersion !== previousLiveOutputPrependVersionRef.current;
-    if (!historyChanged && !liveChanged) {
+    if (historyPrependVersion === previousHistoryPrependVersionRef.current) {
       return;
     }
 
     previousHistoryPrependVersionRef.current = historyPrependVersion;
-    previousLiveOutputPrependVersionRef.current = liveOutputPrependVersion;
 
     const scroller = scrollNode;
     if (!scroller) {
@@ -361,7 +317,7 @@ export function useConversationScrollController({
       scroller.scrollTop += scroller.scrollHeight - previousScrollHeight;
       prependScrollHeightRef.current = null;
     }
-  }, [historyPrependVersion, liveOutputPrependVersion, loading, scrollNode]);
+  }, [historyPrependVersion, loading, scrollNode]);
 
   useLayoutEffect(() => {
     if (loading) {

@@ -152,39 +152,6 @@ const TranscriptBubble = memo(function TranscriptBubble({ role, text, timestamp 
   );
 });
 
-const LiveSessionOutputBlock = memo(function LiveSessionOutputBlock({
-  content,
-  contentAnsi,
-  compact,
-}: {
-  content: string;
-  contentAnsi?: string;
-  compact: boolean;
-}) {
-  if (compact) {
-    return (
-      <div className="rounded-[1.25rem] border border-slate-800 bg-slate-950/80 shadow-panel">
-        <LiveAnsiBlock
-          text={content.trim() || 'Waiting for session output…'}
-          ansiText={contentAnsi}
-          className="whitespace-pre-wrap break-words bg-slate-950/80 px-4 py-4 font-mono text-[13px] leading-6 text-slate-300"
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-[1.75rem] border border-slate-800 bg-slate-950/80 p-4 shadow-panel">
-      <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-slate-500">Live session output</div>
-      <LiveAnsiBlock
-        text={content.trim() || 'Waiting for session output…'}
-        ansiText={contentAnsi}
-        className="whitespace-pre-wrap break-words rounded-[1.25rem] border border-slate-800 bg-slate-900/90 p-4 font-mono text-[13px] leading-6 text-slate-300"
-      />
-    </div>
-  );
-});
-
 function LiveSessionStatus({
   status,
   statusAnsi,
@@ -1199,7 +1166,6 @@ interface ConversationPaneProps {
   selectedProvider?: ProviderId;
   timeline?: ConversationTimeline;
   liveMode: boolean;
-  liveOutputScreen?: ConversationTimeline['liveScreen'];
   loading: boolean;
   workMode: boolean;
   mobileChromeHidden: boolean;
@@ -1218,12 +1184,8 @@ interface ConversationPaneProps {
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   onLoadOlderMessages: () => Promise<void>;
-  hasOlderLiveOutput: boolean;
-  loadingOlderLiveOutput: boolean;
-  onLoadOlderLiveOutput: () => Promise<void>;
   conversationKey?: string;
   historyPrependVersion: number;
-  liveOutputPrependVersion: number;
   tailKey?: string;
 }
 
@@ -1233,7 +1195,6 @@ export function ConversationPane({
   selectedProvider,
   timeline,
   liveMode,
-  liveOutputScreen,
   loading,
   workMode,
   mobileChromeHidden,
@@ -1252,12 +1213,8 @@ export function ConversationPane({
   hasOlderMessages,
   loadingOlderMessages,
   onLoadOlderMessages,
-  hasOlderLiveOutput,
-  loadingOlderLiveOutput,
-  onLoadOlderLiveOutput,
   conversationKey,
   historyPrependVersion,
-  liveOutputPrependVersion,
   tailKey,
 }: ConversationPaneProps) {
   const isMobile = useMediaQuery('(max-width: 767px)');
@@ -1269,6 +1226,7 @@ export function ConversationPane({
   const historyMessages = timeline?.messages ?? [];
   const hasSavedHistory = historyMessages.length > 0;
   const showHistory = !liveMode && hasSavedHistory;
+  const hasTimelineMessages = hasSavedHistory || hasOlderMessages || loadingOlderMessages;
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1279,7 +1237,7 @@ export function ConversationPane({
     return '';
   }, [historyMessages]);
   const activeSurface = liveMode
-    ? (hasSavedHistory || hasOlderMessages || loadingOlderMessages ? 'mixed' : 'live')
+    ? (hasTimelineMessages ? 'mixed' : 'live')
     : (showHistory || hasOlderMessages || loadingOlderMessages ? 'history' : 'empty');
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
@@ -1296,19 +1254,13 @@ export function ConversationPane({
     tailKey,
     layoutKey,
     historyPrependVersion,
-    liveOutputPrependVersion,
     hasOlderHistory: hasOlderMessages,
     loadingOlderHistory: loadingOlderMessages,
     onLoadOlderHistory: onLoadOlderMessages,
-    hasOlderLiveOutput,
-    loadingOlderLiveOutput,
-    onLoadOlderLiveOutput,
     loading,
   });
-  const renderedLiveOutputScreen = liveOutputScreen;
   const renderedHistoryMessages = useFrozenValue(historyMessages, selectionActive, conversationKey);
-  const renderedShowHistory = !liveMode && renderedHistoryMessages.length > 0;
-  const renderedShowSavedHistory = renderedHistoryMessages.length > 0 || hasOlderMessages || loadingOlderMessages;
+  const renderedShowMessages = renderedHistoryMessages.length > 0;
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1479,31 +1431,7 @@ export function ConversationPane({
           !liveMode && 'space-y-4',
         )}
       >
-        {liveMode && renderedLiveOutputScreen ? (
-          <div className="space-y-4">
-            {renderedShowSavedHistory && (
-              <div className="space-y-4 pb-2">
-                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Saved transcript</div>
-                {(hasOlderMessages || loadingOlderMessages) && (
-                  <div className="text-center text-xs text-slate-500">
-                    {loadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
-                  </div>
-                )}
-                {renderedHistoryMessages.map((message) => (
-                  <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
-                ))}
-              </div>
-            )}
-            {(hasOlderLiveOutput || loadingOlderLiveOutput) && (
-              <div className="text-center text-xs text-slate-500">
-                {loadingOlderLiveOutput ? 'Loading earlier live output…' : 'Scroll up to load earlier live output'}
-              </div>
-            )}
-            {compactLiveLayout
-              ? <LiveSessionOutputBlock content={renderedLiveOutputScreen.content} contentAnsi={renderedLiveOutputScreen.contentAnsi} compact />
-              : <LiveSessionOutputBlock content={renderedLiveOutputScreen.content} contentAnsi={renderedLiveOutputScreen.contentAnsi} compact={false} />}
-          </div>
-        ) : renderedShowHistory || hasOlderMessages || loadingOlderMessages ? (
+        {renderedShowMessages || hasOlderMessages || loadingOlderMessages ? (
           <div className="space-y-4 pb-5">
             <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
               {liveMode ? 'Conversation history' : 'Saved transcript'}
@@ -1518,11 +1446,9 @@ export function ConversationPane({
             ))}
           </div>
         ) : boundSession ? (
-          liveMode ? null : (
-            <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
-              Waiting for the live session surface to populate.
-            </div>
-          )
+          <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
+            Waiting for session output…
+          </div>
         ) : (
           <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
             No saved transcript yet. Bind this conversation and use the composer below to drive the live session.
@@ -1576,12 +1502,12 @@ export function ConversationPane({
         </div>
       )}
 
-      {liveMode && liveOutputScreen && !mobileControlsHidden && (
+      {liveMode && liveScreen && !mobileControlsHidden && (
         <LiveSessionStatus
-          status={liveOutputScreen.status}
-          statusAnsi={liveOutputScreen.statusAnsi}
-          model={liveOutputScreen.model ?? timeline?.conversation.model}
-          contextPercent={liveOutputScreen.contextPercent}
+          status={liveScreen.status}
+          statusAnsi={liveScreen.statusAnsi}
+          model={liveScreen.model ?? timeline?.conversation.model}
+          contextPercent={liveScreen.contextPercent}
           mobileCompact={isMobile}
         />
       )}

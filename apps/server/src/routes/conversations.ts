@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { PROVIDERS, type BoundSession, type ConversationSummary, type ProviderId } from '@agent-console/shared';
+import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type ProviderId } from '@agent-console/shared';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
-import { uniqueBy } from '../lib/text.js';
+import { normalizeComparableText, uniqueBy } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
@@ -27,6 +27,10 @@ const timelineQuerySchema = z.object({
   before: z.coerce.number().int().nonnegative().optional(),
   limit: z.coerce.number().int().min(0).max(200).optional(),
 });
+const LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+const SHORT_EXACT_DUPLICATE_WINDOW_MS = 30 * 1000;
+const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
+const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 
 function parseProvider(raw: string): ProviderId {
   return providerSchema.parse(raw);
@@ -64,6 +68,154 @@ function paginateMessages<T>(
       total: messages.length,
     },
   };
+}
+
+interface ComparableMessage {
+  role: NormalizedMessage['role'];
+  timestampMs?: number;
+  comparable: string;
+  compact: string;
+}
+
+interface TranscriptMessageIndex {
+  bucketedByRole: Map<NormalizedMessage['role'], Map<number, ComparableMessage[]>>;
+  untimedByRole: Map<NormalizedMessage['role'], ComparableMessage[]>;
+}
+
+function toComparableMessage(message: NormalizedMessage): ComparableMessage | undefined {
+  const comparable = normalizeComparableText(message.text);
+  if (!comparable) {
+    return undefined;
+  }
+
+  const timestampMs = Date.parse(message.timestamp);
+  return {
+    role: message.role,
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : undefined,
+    comparable,
+    compact: comparable.replace(/[^a-z0-9]+/g, ''),
+  };
+}
+
+function timestampBucket(timestampMs: number): number {
+  return Math.floor(timestampMs / LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS);
+}
+
+function appendComparableMessage(
+  map: Map<NormalizedMessage['role'], ComparableMessage[]>,
+  message: ComparableMessage,
+): void {
+  const existing = map.get(message.role);
+  if (existing) {
+    existing.push(message);
+    return;
+  }
+  map.set(message.role, [message]);
+}
+
+function buildTranscriptMessageIndex(messages: NormalizedMessage[]): TranscriptMessageIndex {
+  const bucketedByRole = new Map<NormalizedMessage['role'], Map<number, ComparableMessage[]>>();
+  const untimedByRole = new Map<NormalizedMessage['role'], ComparableMessage[]>();
+
+  for (const message of messages) {
+    const comparable = toComparableMessage(message);
+    if (!comparable) {
+      continue;
+    }
+
+    if (comparable.timestampMs === undefined) {
+      appendComparableMessage(untimedByRole, comparable);
+      continue;
+    }
+
+    const bucket = timestampBucket(comparable.timestampMs);
+    let roleBuckets = bucketedByRole.get(comparable.role);
+    if (!roleBuckets) {
+      roleBuckets = new Map<number, ComparableMessage[]>();
+      bucketedByRole.set(comparable.role, roleBuckets);
+    }
+    const bucketMessages = roleBuckets.get(bucket);
+    if (bucketMessages) {
+      bucketMessages.push(comparable);
+    } else {
+      roleBuckets.set(bucket, [comparable]);
+    }
+  }
+
+  return { bucketedByRole, untimedByRole };
+}
+
+function comparableTextsMatch(a: ComparableMessage, b: ComparableMessage): boolean {
+  const minLength = Math.min(a.comparable.length, b.comparable.length);
+  if (a.comparable === b.comparable) {
+    if (minLength >= CONTAINMENT_DUPLICATE_MIN_LENGTH) {
+      return true;
+    }
+    return a.timestampMs !== undefined
+      && b.timestampMs !== undefined
+      && Math.abs(a.timestampMs - b.timestampMs) <= SHORT_EXACT_DUPLICATE_WINDOW_MS;
+  }
+
+  if (minLength < CONTAINMENT_DUPLICATE_MIN_LENGTH) {
+    return false;
+  }
+
+  return a.compact.includes(b.compact) || b.compact.includes(a.compact);
+}
+
+function comparableTimestampsAreNear(a: ComparableMessage, b: ComparableMessage): boolean {
+  if (a.timestampMs === undefined || b.timestampMs === undefined) {
+    return true;
+  }
+
+  return Math.abs(a.timestampMs - b.timestampMs) <= LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS;
+}
+
+function getTranscriptCandidates(
+  index: TranscriptMessageIndex,
+  liveMessage: ComparableMessage,
+): ComparableMessage[] {
+  const untimed = index.untimedByRole.get(liveMessage.role) ?? [];
+  if (liveMessage.timestampMs === undefined) {
+    return untimed;
+  }
+
+  const roleBuckets = index.bucketedByRole.get(liveMessage.role);
+  if (!roleBuckets) {
+    return untimed;
+  }
+
+  const bucket = timestampBucket(liveMessage.timestampMs);
+  return [
+    ...(roleBuckets.get(bucket - 1) ?? []),
+    ...(roleBuckets.get(bucket) ?? []),
+    ...(roleBuckets.get(bucket + 1) ?? []),
+    ...untimed,
+  ];
+}
+
+function liveMessageIsInTranscript(
+  liveMessage: NormalizedMessage,
+  index: TranscriptMessageIndex,
+): boolean {
+  const comparableLiveMessage = toComparableMessage(liveMessage);
+  if (!comparableLiveMessage) {
+    return false;
+  }
+
+  return getTranscriptCandidates(index, comparableLiveMessage)
+    .some((transcriptMessage) => (
+      comparableTimestampsAreNear(comparableLiveMessage, transcriptMessage)
+      && comparableTextsMatch(comparableLiveMessage, transcriptMessage)
+    ));
+}
+
+function filterTranscriptBackedLiveMessages(
+  liveMessages: NormalizedMessage[],
+  transcriptMessages: NormalizedMessage[],
+): NormalizedMessage[] {
+  const transcriptIndex = buildTranscriptMessageIndex(transcriptMessages);
+  return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
 function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
@@ -106,6 +258,7 @@ export async function registerConversationRoutes(
       return;
     }
     const providerId = parseProvider(providerRaw);
+    const metadataOnly = parsedQuery.data.limit === 0;
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
       reply.code(404).send({ error: 'Project not found.' });
@@ -119,7 +272,31 @@ export async function registerConversationRoutes(
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
     const cachedSummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
-    let messages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
+    const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+    const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
+    const liveScreen = liveSessionState?.screen;
+    const resolvedBoundSession = liveSessionState?.session;
+
+    if (!summary && resolvedBoundSession) {
+      summary = buildSyntheticConversationFromSession(resolvedBoundSession);
+    }
+
+    if (metadataOnly && summary) {
+      const emptyPage = paginateMessages([], parsedQuery.data);
+      return {
+        conversation: {
+          ...summary,
+          isBound: Boolean(resolvedBoundSession),
+          boundSessionId: resolvedBoundSession?.id,
+        },
+        messages: emptyPage.pageMessages,
+        allMessages: [],
+        boundSession: resolvedBoundSession,
+        liveScreen,
+        messagePage: emptyPage.pageInfo,
+      };
+    }
+
     let visibleMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
     let allMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
 
@@ -139,12 +316,13 @@ export async function registerConversationRoutes(
       }
     }
 
-    const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
-    const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
-    const liveScreen = liveSessionState?.screen;
-    const resolvedBoundSession = liveSessionState?.session;
-    const liveMessages = resolvedBoundSession ? await readLiveMessages(resolvedBoundSession) : [];
     const providerHasTranscript = allMessages.some((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool');
+    const liveMessages = resolvedBoundSession
+      ? await readLiveMessages(
+        resolvedBoundSession,
+        providerHasTranscript ? { maxBytesFromEnd: TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES } : {},
+      )
+      : [];
     const mergedAllMessages = uniqueBy(
       [
         ...allMessages,
@@ -155,22 +333,17 @@ export async function registerConversationRoutes(
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const liveMessagesNotInTranscript = filterTranscriptBackedLiveMessages(liveMessages, visibleMessages);
     const mergedMessages = uniqueBy(
       [
         ...visibleMessages,
         ...(providerHasTranscript
-          ? liveMessages.filter((message) => message.role === 'user' || message.role === 'assistant')
+          ? liveMessagesNotInTranscript.filter((message) => message.role === 'user' || message.role === 'assistant')
           : filterUserVisibleMessages(liveMessages)),
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const pagedMessages = paginateMessages(mergedMessages, parsedQuery.data);
-
-    if (!summary) {
-      if (resolvedBoundSession) {
-        summary = buildSyntheticConversationFromSession(resolvedBoundSession);
-      }
-    }
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });

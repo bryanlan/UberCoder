@@ -4,9 +4,6 @@ import type { ConversationTimeline, ProviderId } from '@agent-console/shared';
 import { api } from '../../lib/api';
 
 const TIMELINE_MESSAGE_PAGE_SIZE = 80;
-const DEFAULT_LIVE_OUTPUT_LINES = 240;
-const LIVE_OUTPUT_LINE_INCREMENT = 360;
-const MAX_LIVE_OUTPUT_LINES = 20_000;
 
 export function resetTimelineHistoryQuery(
   queryClient: QueryClient,
@@ -22,31 +19,6 @@ export function resetTimelineHistoryQuery(
     queryKey: ['timeline-history', projectSlug, provider, conversationRef],
     exact: true,
   });
-}
-
-function renderScreenText(screen?: ConversationTimeline['liveScreen']): string {
-  if (!screen) {
-    return '';
-  }
-
-  return `${screen.contentAnsi ?? screen.content}\n${screen.statusAnsi ?? screen.status}`;
-}
-
-function screenIsAtLeastAsFresh(
-  candidate: ConversationTimeline['liveScreen'],
-  latest: ConversationTimeline['liveScreen'],
-): boolean {
-  if (!candidate || !latest) {
-    return false;
-  }
-
-  const candidateMs = Date.parse(candidate.capturedAt);
-  const latestMs = Date.parse(latest.capturedAt);
-  if (!Number.isFinite(candidateMs) || !Number.isFinite(latestMs)) {
-    return candidate.capturedAt >= latest.capturedAt;
-  }
-
-  return candidateMs >= latestMs;
 }
 
 interface UseConversationDataControllerArgs {
@@ -66,12 +38,7 @@ export function useConversationDataController({
   debugOpen,
   realtimeDegraded,
 }: UseConversationDataControllerArgs) {
-  const [liveOutputLines, setLiveOutputLines] = useState(DEFAULT_LIVE_OUTPUT_LINES);
-  const [expandedLiveScreen, setExpandedLiveScreen] = useState<ConversationTimeline['liveScreen']>();
-  const [loadingOlderLiveOutput, setLoadingOlderLiveOutput] = useState(false);
-  const [hasOlderLiveOutput, setHasOlderLiveOutput] = useState(true);
   const [historyPrependVersion, setHistoryPrependVersion] = useState(0);
-  const [liveOutputPrependVersion, setLiveOutputPrependVersion] = useState(0);
   const [retainedHistoryState, setRetainedHistoryState] = useState<{
     key?: string;
     pages: ConversationTimeline[];
@@ -145,48 +112,6 @@ export function useConversationDataController({
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
 
-  useEffect(() => {
-    setLiveOutputLines(DEFAULT_LIVE_OUTPUT_LINES);
-    setExpandedLiveScreen(undefined);
-    setLoadingOlderLiveOutput(false);
-    setHasOlderLiveOutput(true);
-  }, [conversationKey]);
-
-  const effectiveLiveScreen = liveMode && liveOutputLines > DEFAULT_LIVE_OUTPUT_LINES
-    ? (screenIsAtLeastAsFresh(expandedLiveScreen, liveScreen) ? expandedLiveScreen : liveScreen)
-    : liveScreen;
-
-  useEffect(() => {
-    if (!boundSession || !liveMode || liveOutputLines <= DEFAULT_LIVE_OUTPUT_LINES) {
-      return;
-    }
-
-    let cancelled = false;
-    const timeoutId = globalThis.setTimeout(() => {
-      void api.sessionScreen(boundSession.id, { lines: liveOutputLines })
-        .then((response) => {
-          if (cancelled) {
-            return;
-          }
-          setExpandedLiveScreen(response.screen ?? undefined);
-        })
-        .catch(() => undefined);
-    }, 250);
-
-    return () => {
-      cancelled = true;
-      globalThis.clearTimeout(timeoutId);
-    };
-  }, [boundSession?.id, liveMode, liveOutputLines, liveScreen?.capturedAt]);
-
-  useEffect(() => {
-    if (!liveMode || liveOutputLines <= DEFAULT_LIVE_OUTPUT_LINES) {
-      return;
-    }
-
-    setHasOlderLiveOutput(true);
-  }, [liveMode, liveOutputLines, liveScreen?.capturedAt]);
-
   const rawOutputQuery = useQuery({
     queryKey: ['raw-output', boundSession?.id],
     queryFn: () => api.rawOutput(boundSession!.id),
@@ -203,61 +128,31 @@ export function useConversationDataController({
     setHistoryPrependVersion((current) => current + 1);
   }, [timelineHistoryQuery.fetchNextPage, timelineHistoryQuery.hasNextPage]);
 
-  const loadOlderLiveOutput = useCallback(async (): Promise<void> => {
-    if (!boundSession || !liveMode || loadingOlderLiveOutput || !hasOlderLiveOutput) {
-      return;
-    }
-
-    const nextLines = Math.min(MAX_LIVE_OUTPUT_LINES, liveOutputLines + LIVE_OUTPUT_LINE_INCREMENT);
-    if (nextLines <= liveOutputLines) {
-      setHasOlderLiveOutput(false);
-      return;
-    }
-
-    setLoadingOlderLiveOutput(true);
-    try {
-      const previousRenderedText = renderScreenText(effectiveLiveScreen);
-      const response = await api.sessionScreen(boundSession.id, { lines: nextLines });
-      const nextScreen = response.screen;
-      const nextRenderedText = renderScreenText(nextScreen ?? undefined);
-
-      setExpandedLiveScreen(nextScreen ?? undefined);
-      setLiveOutputLines(nextLines);
-      setHasOlderLiveOutput(nextLines < MAX_LIVE_OUTPUT_LINES && nextRenderedText !== previousRenderedText);
-      setLiveOutputPrependVersion((current) => current + 1);
-    } finally {
-      setLoadingOlderLiveOutput(false);
-    }
-  }, [boundSession, effectiveLiveScreen, hasOlderLiveOutput, liveMode, liveOutputLines, loadingOlderLiveOutput]);
-
   const tailKey = useMemo(() => {
-    if (boundSession && effectiveLiveScreen) {
-      return `live:${boundSession.id}:${effectiveLiveScreen.capturedAt}`;
-    }
-
     const messageCount = timeline?.messages.length ?? 0;
     const lastMessage = timeline?.messages.at(-1);
-    return lastMessage ? `history:${lastMessage.id}:${messageCount}` : undefined;
-  }, [boundSession, effectiveLiveScreen, timeline?.messages]);
+    if (lastMessage) {
+      return `history:${lastMessage.id}:${messageCount}`;
+    }
+    if (boundSession && liveScreen) {
+      return `live-status:${boundSession.id}:${liveScreen.capturedAt}`;
+    }
+    return undefined;
+  }, [boundSession, liveScreen, timeline?.messages]);
 
   const hasResolvedHistory = Boolean(timelineHistoryQuery.data) || (Boolean(conversationKey) && retainedHistoryState.key === conversationKey);
 
   return {
     timeline,
     liveMode,
-    effectiveLiveScreen,
     loading: timelineQuery.isLoading || (timelineHistoryQuery.isLoading && !hasResolvedHistory),
     rawOutput: rawOutputQuery.data?.text,
     rawLoading: rawOutputQuery.isLoading,
     hasOlderMessages: Boolean(timelineHistoryQuery.hasNextPage),
     loadingOlderMessages: timelineHistoryQuery.isFetchingNextPage,
     loadOlderMessages,
-    hasOlderLiveOutput: liveMode && hasOlderLiveOutput,
-    loadingOlderLiveOutput,
-    loadOlderLiveOutput,
     conversationKey,
     historyPrependVersion,
-    liveOutputPrependVersion,
     tailKey,
   };
 }

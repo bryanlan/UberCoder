@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
@@ -249,6 +249,7 @@ function AppShell() {
   const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
   const [rebindingConversationKey, setRebindingConversationKey] = useState<string>();
   const [renamingConversationKey, setRenamingConversationKey] = useState<string>();
+  const liveMessageRefreshTimersRef = useRef(new Map<string, number>());
   const realtimeDegraded = Boolean(eventError);
 
   const authQuery = useQuery({ queryKey: ['auth'], queryFn: api.authState, retry: false });
@@ -279,19 +280,14 @@ function AppShell() {
   const {
     timeline,
     liveMode,
-    effectiveLiveScreen,
     loading: timelineLoading,
     rawOutput,
     rawLoading,
     hasOlderMessages,
     loadingOlderMessages,
     loadOlderMessages,
-    hasOlderLiveOutput,
-    loadingOlderLiveOutput,
-    loadOlderLiveOutput,
     conversationKey,
     historyPrependVersion,
-    liveOutputPrependVersion,
     tailKey,
   } = useConversationDataController({
     authenticated: authQuery.data?.authenticated,
@@ -333,6 +329,41 @@ function AppShell() {
     }
   }
 
+  const scheduleTimelineMessageRefresh = useCallback((projectSlug: string, provider: ProviderId, conversationRef: string): void => {
+    const key = `${projectSlug}:${provider}:${conversationRef}`;
+    const existingTimer = liveMessageRefreshTimersRef.current.get(key);
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+    }
+
+    const timer = window.setTimeout(() => {
+      liveMessageRefreshTimersRef.current.delete(key);
+      void queryClient.invalidateQueries({
+        queryKey: ['timeline-history', projectSlug, provider, conversationRef],
+        exact: true,
+      });
+    }, 300);
+    liveMessageRefreshTimersRef.current.set(key, timer);
+  }, [queryClient]);
+
+  function scheduleSelectedTimelineMessageRefresh(): void {
+    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
+      return;
+    }
+    scheduleTimelineMessageRefresh(selectedProjectSlug, selectedProvider, selectedConversationRef);
+  }
+
+  function shouldRefreshTimelineAfterKeystrokes(body: SessionKeystrokeRequest): boolean {
+    return Boolean(body.keys?.includes('Enter'));
+  }
+
+  useEffect(() => () => {
+    for (const timer of liveMessageRefreshTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    liveMessageRefreshTimersRef.current.clear();
+  }, []);
+
   useEffect(() => {
     if (!authQuery.data?.authenticated) return;
     const source = new EventSource('/api/events', { withCredentials: true });
@@ -359,6 +390,12 @@ function AppShell() {
           return;
         }
         if (parsed.type === 'session.raw-output') {
+          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
+            || (
+              parsed.projectSlug === selectedProjectSlug
+              && parsed.provider === selectedProvider
+              && parsed.conversationRef === selectedConversationRef
+            );
           queryClient.setQueryData<TreeResponse | undefined>(
             ['tree'],
             (current) => applySessionActivityToTree(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
@@ -369,6 +406,9 @@ function AppShell() {
           );
           if (parsed.sessionId === timeline?.boundSession?.id && debugOpen) {
             queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
+          }
+          if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
+            scheduleTimelineMessageRefresh(selectedProjectSlug, selectedProvider, selectedConversationRef);
           }
           return;
         }
@@ -439,7 +479,7 @@ function AppShell() {
       setEventError('Realtime connection dropped. The page is still usable and polling the project tree and selected conversation.');
     };
     return () => source.close();
-  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, queryClient, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.boundSession?.id]);
+  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, debugOpen, queryClient, scheduleTimelineMessageRefresh, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.boundSession?.id]);
 
   function describeError(error: unknown, fallback: string): string {
     return error instanceof ApiError ? error.message : fallback;
@@ -723,9 +763,13 @@ function AppShell() {
 
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
     setActionError(undefined);
+    const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
     try {
       const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
       applyUpdatedSessionToSelection(sessionId, updatedSession);
+      if (refreshTimelineMessages) {
+        scheduleSelectedTimelineMessageRefresh();
+      }
       return true;
     } catch (error) {
       if (
@@ -751,6 +795,9 @@ function AppShell() {
             }
             const retriedSession = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
             applyUpdatedSessionToSelection(reboundSession.id, retriedSession);
+            if (refreshTimelineMessages) {
+              scheduleSelectedTimelineMessageRefresh();
+            }
             setActionError(undefined);
             return true;
           }
@@ -1005,7 +1052,6 @@ function AppShell() {
               selectedProvider={selectedProvider}
               timeline={timeline}
               liveMode={liveMode}
-              liveOutputScreen={effectiveLiveScreen}
               loading={timelineLoading}
               workMode={workMode}
               mobileChromeHidden={mobileChromeHidden}
@@ -1024,12 +1070,8 @@ function AppShell() {
               hasOlderMessages={hasOlderMessages}
               loadingOlderMessages={loadingOlderMessages}
               onLoadOlderMessages={loadOlderMessages}
-              hasOlderLiveOutput={hasOlderLiveOutput}
-              loadingOlderLiveOutput={loadingOlderLiveOutput}
-              onLoadOlderLiveOutput={loadOlderLiveOutput}
               conversationKey={conversationKey}
               historyPrependVersion={historyPrependVersion}
-              liveOutputPrependVersion={liveOutputPrependVersion}
               tailKey={tailKey}
             />
           )}

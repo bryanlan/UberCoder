@@ -11,6 +11,7 @@ const MAX_SEARCH_CHUNK_CHARS = 1200;
 const SEARCH_RESULT_MULTIPLIER = 4;
 const MAX_QUERY_TERMS = 12;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const LIVE_SEARCH_EVENT_LOG_TAIL_BYTES = 512 * 1024;
 
 export function getConversationSearchRecencyBucket(timestamp: string, nowMs = Date.now()): ConversationSearchRecencyBucket {
   const timestampMs = Date.parse(timestamp);
@@ -288,7 +289,9 @@ export class ConversationSearchService {
         continue;
       }
       const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;
-      const messages = await readLiveMessages(session);
+      const messages = await readLiveMessages(session, {
+        maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
+      });
 
       for (const message of messages) {
         if (message.role !== 'user' && message.role !== 'assistant') {

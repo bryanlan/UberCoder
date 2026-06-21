@@ -871,12 +871,18 @@ export function Sidebar({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
   const [searchQuery, setSearchQuery] = useState('');
+  const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
+  const [searchSubmissionVersion, setSearchSubmissionVersion] = useState(0);
   const [searchResults, setSearchResults] = useState<ConversationSearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string>();
-  const [searchRefreshVersion, setSearchRefreshVersion] = useState(0);
   const summaryPanelRef = useRef<HTMLDivElement | null>(null);
   const trimmedSearchQuery = searchQuery.trim();
+  const trimmedSubmittedSearchQuery = submittedSearchQuery.trim();
+  const showingSubmittedSearchResults = Boolean(
+    trimmedSubmittedSearchQuery
+    && trimmedSearchQuery === trimmedSubmittedSearchQuery,
+  );
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
@@ -903,7 +909,7 @@ export function Sidebar({
 
   useEffect(() => {
     let active = true;
-    const query = trimmedSearchQuery;
+    const query = trimmedSubmittedSearchQuery;
     if (!query) {
       setSearchResults([]);
       setSearchLoading(false);
@@ -913,32 +919,37 @@ export function Sidebar({
       };
     }
 
+    const controller = new AbortController();
     setSearchLoading(true);
     setSearchError(undefined);
-    const timer = window.setTimeout(() => {
-      void api.searchConversations(query, { limit: 24 })
-        .then((response) => {
-          if (!active) return;
-          setSearchResults(response.results);
-          setSearchError(undefined);
-        })
-        .catch((error: unknown) => {
-          if (!active) return;
-          setSearchResults([]);
-          setSearchError(error instanceof Error ? error.message : 'Search failed.');
-        })
-        .finally(() => {
-          if (active) {
-            setSearchLoading(false);
-          }
-        });
-    }, 180);
+    setSearchResults([]);
+    void api.searchConversations(query, { limit: 24, signal: controller.signal })
+      .then((response) => {
+        if (!active) return;
+        setSearchResults(response.results);
+        setSearchError(undefined);
+      })
+      .catch((error: unknown) => {
+        if (!active || controller.signal.aborted) return;
+        setSearchResults([]);
+        setSearchError(error instanceof Error ? error.message : 'Search failed.');
+      })
+      .finally(() => {
+        if (active) {
+          setSearchLoading(false);
+        }
+      });
 
     return () => {
       active = false;
-      window.clearTimeout(timer);
+      controller.abort();
     };
-  }, [trimmedSearchQuery, searchRefreshVersion]);
+  }, [trimmedSubmittedSearchQuery, searchSubmissionVersion]);
+
+  function submitSearch(): void {
+    setSubmittedSearchQuery(trimmedSearchQuery);
+    setSearchSubmissionVersion((current) => current + 1);
+  }
 
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
   const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
@@ -1056,38 +1067,36 @@ export function Sidebar({
                 type="search"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    submitSearch();
+                  }
+                }}
                 placeholder="Search all chats"
-                className="h-9 w-full rounded-full border border-slate-700 bg-slate-900/70 pl-9 pr-16 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-sky-400"
+                className="h-9 w-full rounded-full border border-slate-700 bg-slate-900/70 pl-9 pr-9 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-sky-400"
               />
               {searchQuery ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setSearchRefreshVersion((current) => current + 1)}
-                    disabled={searchLoading}
-                    className="absolute right-8 top-1/2 rounded-full p-1 text-slate-500 transition -translate-y-1/2 hover:bg-slate-800 hover:text-slate-200 disabled:opacity-50"
-                    aria-label="Refresh search"
-                    title="Refresh search"
-                  >
-                    <RefreshCcw className={clsx('h-3.5 w-3.5', searchLoading && 'animate-spin')} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-2 top-1/2 rounded-full p-1 text-slate-500 transition -translate-y-1/2 hover:bg-slate-800 hover:text-slate-200"
-                    aria-label="Clear search"
-                    title="Clear search"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSubmittedSearchQuery('');
+                    setSearchSubmissionVersion((current) => current + 1);
+                  }}
+                  className="absolute right-2 top-1/2 rounded-full p-1 text-slate-500 transition -translate-y-1/2 hover:bg-slate-800 hover:text-slate-200"
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               ) : null}
             </div>
           </div>
           <div ref={summaryPanelRef} className="scrollbar-thin flex-1 overflow-y-auto p-3">
-            {trimmedSearchQuery ? (
+            {showingSubmittedSearchResults ? (
               <SearchResultsPanel
-                query={trimmedSearchQuery}
+                query={trimmedSubmittedSearchQuery}
                 results={searchResults}
                 loading={searchLoading}
                 error={searchError}

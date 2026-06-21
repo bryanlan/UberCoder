@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
-import type { BoundSession, ConversationSummary, SessionScreen } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, NormalizedMessage, SessionScreen } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { registerConversationRoutes } from '../src/routes/conversations.js';
@@ -766,6 +766,247 @@ describe('conversation routes', () => {
         ],
       });
       expect(getConversation).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('serves metadata-only message requests from the index without reading transcript files', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'cached-history',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Indexed conversation title',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:05.000Z',
+      transcriptPath: path.join(tempDir, 'missing-large-transcript.jsonl'),
+      providerConversationId: 'cached-history',
+      isBound: false,
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const getConversation = vi.fn(async () => {
+      throw new Error('provider.getConversation should not run for metadata-only requests');
+    });
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen: async () => undefined,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/cached-history/messages?limit=0',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        conversation: {
+          ref: 'cached-history',
+          title: 'Indexed conversation title',
+          isBound: false,
+        },
+        messages: [],
+        allMessages: [],
+        messagePage: {
+          hasOlder: false,
+          total: 0,
+        },
+      });
+      expect(getConversation).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('suppresses live-output message tails that are already backed by the provider transcript', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const transcriptAnswer = [
+      'The revised design needs to evolve. Use code tables with FKs.',
+      'Typed observations and normalized result tables keep cockpit workflows queryable.',
+      'JSONB remains evidence and detail, not the main query surface.',
+    ].join(' ');
+    const liveTranscriptTail = [
+      'evolve. Use code tables with FKs.',
+      'Typed observations and normalized result tables keep cockpit workflows queryable.',
+      'JSONB remains evidence and detail, not the main query surface.',
+    ].join('\n');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Continue with the implementation plan.', timestamp: '2026-03-14T18:02:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: liveTranscriptTail, timestamp: '2026-03-14T18:02:05.000Z' }),
+      JSON.stringify({ type: 'status', text: 'Still working.', timestamp: '2026-03-14T18:02:06.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Fresh live-only follow-up.', timestamp: '2026-03-14T18:02:07.000Z' }),
+    ].join('\n'));
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-ref',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Planning schema',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:05.000Z',
+      isBound: true,
+      boundSessionId: 'session-live',
+      degraded: false,
+    } satisfies ConversationSummary]);
+    const session: BoundSession = {
+      id: 'session-live',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-ref',
+      tmuxSessionName: 'ac-codex-demo-live',
+      status: 'bound',
+      title: 'Planning schema',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:07.000Z',
+      lastActivityAt: '2026-03-14T18:02:07.000Z',
+      eventLogPath,
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'history-user',
+        provider: 'codex',
+        role: 'user',
+        text: 'Continue with the implementation plan.',
+        timestamp: '2026-03-14T18:00:00.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+      {
+        id: 'history-assistant',
+        provider: 'codex',
+        role: 'assistant',
+        text: transcriptAnswer,
+        timestamp: '2026-03-14T18:02:05.000Z',
+        conversationRef: 'history-ref',
+        source: 'history-file',
+      },
+    ];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-ref',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Planning schema',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:02:05.000Z',
+        isBound: true,
+        boundSessionId: 'session-live',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: liveTranscriptTail,
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:08.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-ref/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
+      expect(texts).toContain(transcriptAnswer);
+      expect(texts).toContain('Continue with the implementation plan.');
+      expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(2);
+      expect(texts).toContain('Fresh live-only follow-up.');
+      expect(texts).not.toContain(liveTranscriptTail);
     } finally {
       await app.close();
       db.close();
