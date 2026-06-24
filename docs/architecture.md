@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 8f674be667f798fc07f590d033ca14fc21fbf733
-current_through_date: 2026-06-20T18:00:31-07:00
+current_through_commit: 91a86c73f17307fe743accdb5b7cfb5a8053d9b4
+current_through_date: 2026-06-21T13:24:59-07:00
 ---
 
 # Architecture
@@ -11,6 +11,10 @@ current_through_date: 2026-06-20T18:00:31-07:00
 
 First-class runtime surfaces:
 - Node/JavaScript package described by `package.json`.
+- Fastify conversation/timeline API: `apps/server/src/routes/conversations.ts`.
+- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-screen.ts`, `live-output.ts`, and `tmux-client.ts`.
+- Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
+- React conversation timeline controller: `apps/web/src/features/conversation/useConversationDataController.ts` and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`.
 
 ## Main Components
@@ -32,11 +36,21 @@ The server is authoritative for project configuration, conversation indexes, bou
 provider transcript loading, proxy access, and auth. The web app requests server APIs and renders
 the resulting conversation/session model; it should not become a raw terminal controller.
 
-Conversation timelines merge provider transcripts with live session event logs. Raw tmux screen
-captures are parsed by `apps/server/src/sessions/session-screen.ts` for session state, while
-user-visible incremental output comes through `apps/server/src/sessions/live-output.ts` and the
-event log attached to the bound session. This keeps terminal chrome, repaint fragments, and echoed
-user input out of assistant-visible timeline text.
+Conversation timelines merge provider transcripts with live session event logs. The conversation
+route owns pagination through `limit` and `before`, supports metadata-only polling with `limit=0`,
+and keeps bound live-session metadata available without forcing the web app to carry the full
+history payload on every refresh. Provider-backed live messages are compared against transcript
+messages by role, timestamp buckets, exact short-window matches, and longer containment matches so
+duplicate event-log content does not reappear after the durable provider transcript catches up.
+
+Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
+state, while user-visible incremental output comes through
+`apps/server/src/sessions/live-output.ts` and the event log attached to the bound session. The
+conversation route trims the live screen against the durable transcript/event-log tail before
+returning it, so already-rendered scrollback stays in history bubbles and only the active live tail
+renders as terminal output. Codex transcript parsing prefers response-backed display messages over
+near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
+from the visible transcript while keeping the full parsed message set available for indexing.
 
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.
@@ -56,10 +70,15 @@ user input out of assistant-visible timeline text.
   `apps/server/src/sessions/session-manager.ts` and `apps/server/test/session-manager.test.ts`
   before changing `lastActivityAt`, `lastOutputAt`, `lastCompletedAt`, `isWorking`, restore, or
   recovery behavior.
-- Live-output latency and correctness belong in the event-log normalization path. Review
-  `apps/server/src/sessions/live-output.ts`, `apps/server/test/live-output.test.ts`, and
+- Live-output latency and correctness belong in the server timeline boundary, not only the web
+  renderer. Review `apps/server/src/routes/conversations.ts`,
+  `apps/server/src/sessions/live-output.ts`, `apps/server/test/conversation-routes.test.ts`,
+  `apps/server/test/live-output.test.ts`, and
   `apps/web/src/features/conversation/useConversationDataController.ts` before changing timeline
-  merge or refresh behavior.
+  merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
+- The web app keeps paged history separately from metadata polling. `limit=0` refreshes live
+  metadata and screen state, while the infinite history query loads durable messages in pages and
+  retains prior pages during transient refreshes.
 - Playwright e2e can accidentally reuse an existing local Agent Console server because `playwright.config.ts`
   sets `reuseExistingServer` outside CI. When validating isolation-sensitive settings behavior, make sure the
   test server is not pointed at Bryan's real `~/.config/agent-console/config.json`.

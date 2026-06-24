@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 8f674be667f798fc07f590d033ca14fc21fbf733
-current_through_date: 2026-06-20T18:00:31-07:00
+current_through_commit: 91a86c73f17307fe743accdb5b7cfb5a8053d9b4
+current_through_date: 2026-06-21T13:24:59-07:00
 ---
 
 # File Index
@@ -41,7 +41,6 @@ current_through_date: 2026-06-20T18:00:31-07:00
 - `package-lock.json` - key tracked file or entrypoint for this repo.
 - `playwright.config.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/auth.ts` - key tracked file or entrypoint for this repo.
-- `apps/server/src/routes/conversations.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/sessions.ts` - key tracked file or entrypoint for this repo.
@@ -54,13 +53,20 @@ current_through_date: 2026-06-20T18:00:31-07:00
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor transcript discovery and launch command adapters.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
 - `apps/server/src/security/auth-service.ts` and `password.ts` - cookie auth, Tailscale identity bootstrap, and password verification.
+- `apps/server/src/routes/conversations.ts` - provider/live timeline merge, message pagination,
+  metadata-only refreshes, transcript-backed live-message duplicate filtering, and live-screen
+  tail trimming.
+- `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
+  filtering for instruction/environment wrapper records, and event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
-  working state, and recency timestamps.
+  working state, event-log observation, text entry, and recency timestamps.
 - `apps/server/src/sessions/live-output.ts` - event-log normalization for user-visible live output.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
-- `apps/server/src/sessions/tmux-client.ts` - tmux command boundary.
+- `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
+  default pane capture, interrupts, session kill, and session metadata options.
 - `apps/web/src/features/conversation/useConversationDataController.ts` - conversation timeline
-  fetch/refresh path on the web side.
+  fetch/refresh path, metadata polling, infinite history pages, retained history, and live tail
+  keys on the web side.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation and display surfaces.
 - `apps/web/src/pages/SettingsPage.tsx` - explicit project/config management UI.
 - `apps/web/src/lib/api.ts` - web API client boundary.
@@ -109,8 +115,11 @@ Test and verification anchors:
 - Session recency, restore, recovery, or idle-completion changes should review
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-manager.test.ts`,
   `apps/web/src/components/Sidebar.tsx`, and any API response shape consumed by the sidebar.
-- Live output or text latency changes should review `apps/server/src/sessions/live-output.ts`,
+- Live output, history pagination, duplicate filtering, or text latency changes should review
+  `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/live-output.ts`,
+  `apps/server/src/providers/transcripts/codex.ts`,
   `apps/server/test/live-output.test.ts`,
+  `apps/server/test/conversation-routes.test.ts`,
   `apps/web/src/features/conversation/useConversationDataController.ts`, and
   `apps/web/src/components/ConversationPane.tsx`.
 - Settings/project-discovery changes should review `apps/server/src/config/service.ts`,
