@@ -542,6 +542,51 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('does not use maintenance updates as synthetic conversation recency', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.upsertBoundSession({
+      id: 'session-restored-live-only',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'restored-live-only',
+      tmuxSessionName: 'ac-claude-demo-restored-live-only',
+      status: 'bound',
+      title: 'Restored live-only session',
+      startedAt: '2026-03-07T00:00:00.000Z',
+      updatedAt: '2026-06-17T18:31:00.000Z',
+      eventLogPath: path.join(tempDir, 'events.jsonl'),
+    });
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => '/tmp/projects' } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          ...providerSettings,
+          id: providerId,
+          enabled: false,
+        }),
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => [],
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    const conversation = indexing.getTree().projects[0]?.providers.claude.conversations[0];
+    expect(conversation).toMatchObject({
+      ref: 'restored-live-only',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+    });
+    db.close();
+  });
+
   it('does not synthesize errored pending sessions into the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

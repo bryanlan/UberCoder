@@ -1,5 +1,16 @@
 import type { BoundSession, ConversationSummary, SessionInteractionSummary } from '@agent-console/shared';
 
+export function getBoundSessionConversationUpdatedAt(
+  session: BoundSession,
+  conversation?: Pick<ConversationSummary, 'updatedAt'>,
+): string {
+  return session.lastCompletedAt
+    ?? session.lastOutputAt
+    ?? session.lastActivityAt
+    ?? conversation?.updatedAt
+    ?? session.startedAt;
+}
+
 export function buildSyntheticConversationFromSession(
   session: BoundSession,
   sessionSummary?: SessionInteractionSummary,
@@ -11,7 +22,7 @@ export function buildSyntheticConversationFromSession(
     provider: session.provider,
     title: session.title ?? 'Live session',
     createdAt: session.startedAt,
-    updatedAt: session.updatedAt,
+    updatedAt: getBoundSessionConversationUpdatedAt(session),
     isBound: true,
     boundSessionId: session.id,
     degraded: false,

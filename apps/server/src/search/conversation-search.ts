@@ -1,6 +1,7 @@
 import { CONVERSATION_SEARCH_RECENCY_BUCKETS, type ConversationSearchRecencyBucket, type ConversationSearchResult, type ConversationSummary, type NormalizedMessage, type ProviderId } from '@agent-console/shared';
 import type { ConversationSearchIndexChunk, AppDatabase } from '../db/database.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
+import { getBoundSessionConversationUpdatedAt } from '../lib/conversation-summary.js';
 import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import { sanitizeSearchableProse } from '../lib/prose-sanitizer.js';
 import { normalizeWhitespace } from '../lib/text.js';
@@ -289,7 +290,7 @@ export class ConversationSearchService {
         continue;
       }
       const providerHasTranscript = Boolean(summary) && !session.conversationRef.startsWith('pending:');
-      const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;
+      const conversationUpdatedAt = getBoundSessionConversationUpdatedAt(session, summary);
       const messages = await readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
