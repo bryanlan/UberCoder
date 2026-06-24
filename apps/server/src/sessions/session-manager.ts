@@ -103,6 +103,21 @@ function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: s
   return numberedChoices.length >= 2;
 }
 
+function screenShowsInteractiveSelectionHint(screen: SessionScreen): boolean {
+  return `${screen.content}\n${screen.status}`
+    .split('\n')
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean)
+    .slice(-8)
+    .some((line) => /Enter to confirm · Esc to exit/i.test(line)
+      || /Esc to cancel · Tab to amend/i.test(line)
+      || /Enter to select · .*Esc to cancel/i.test(line));
+}
+
+function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
+  return Boolean(text?.trim().match(/^\d{1,8}$/)) && screenShowsInteractiveSelectionHint(screen);
+}
+
 function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
   let latest: string | undefined;
   let latestMs = Number.NEGATIVE_INFINITY;
@@ -757,6 +772,8 @@ export class SessionManager {
         }
       }
       const transportText = payload.text;
+      const shouldRecordTextAsUserInput = !preparedScreen
+        || !screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, transportText);
       if (shouldUseBracketedPasteTransport(transportText)) {
         await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
       } else {
@@ -769,7 +786,7 @@ export class SessionManager {
         lastActivityAt: nowIso(),
       };
       this.db.upsertBoundSession(updated);
-      if (updated.conversationRef.startsWith('pending:')) {
+      if (shouldRecordTextAsUserInput && updated.conversationRef.startsWith('pending:')) {
         const pending = this.db.getPendingConversation(updated.conversationRef);
         if (pending) {
           const inputAt = nowIso();
@@ -786,7 +803,9 @@ export class SessionManager {
           });
         }
       }
-      this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
+      if (shouldRecordTextAsUserInput) {
+        this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
+      }
       this.deferredTextReadyUntil.set(updated.id, Date.now() + DEFERRED_TEXT_READY_TTL_MS);
       if (!payload.deferScreenUpdate) {
         await this.emitScreenUpdate(updated);
@@ -797,10 +816,12 @@ export class SessionManager {
     const beforeScreen = await this.captureSessionScreen(liveSession);
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
+    let shouldRecordTextAsUserInput = false;
 
     if (payload.text) {
       const transportText = payload.text;
       const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
+      shouldRecordTextAsUserInput = !screenAllowsLiteralSelectionTokenWithoutInput(latestObservedScreen, transportText);
       const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
       if ((payload.keys?.length || useBracketedPasteTransport) && expectsVisibleInputChange) {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
@@ -846,7 +867,7 @@ export class SessionManager {
       lastActivityAt: nowIso(),
     };
     this.db.upsertBoundSession(updated);
-    if (payload.text && updated.conversationRef.startsWith('pending:')) {
+    if (shouldRecordTextAsUserInput && payload.text && updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
         const inputAt = nowIso();
@@ -863,7 +884,7 @@ export class SessionManager {
         });
       }
     }
-    if (payload.text) {
+    if (shouldRecordTextAsUserInput && payload.text) {
       this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
     }
     await this.emitScreenUpdate(updated, {
@@ -969,6 +990,23 @@ export class SessionManager {
 
   getSessionByConversation(projectSlug: string, provider: ProviderId, conversationRef: string): BoundSession | undefined {
     return this.db.getRestorableSessionByConversation(projectSlug, provider, conversationRef);
+  }
+
+  async allowsLiteralSelectionKeystroke(sessionId: string, text: string): Promise<boolean> {
+    const session = this.db.getBoundSessionById(sessionId);
+    if (!session) {
+      return false;
+    }
+    const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
+    if (!alive) {
+      return false;
+    }
+    const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
+    if (!snapshot) {
+      return false;
+    }
+    const screen = this.decorateScreenForSession(session, parseSessionScreenSnapshot(snapshot, nowIso()));
+    return screenAllowsLiteralSelectionTokenWithoutInput(screen, text);
   }
 
   async ensureSession(sessionId: string): Promise<BoundSession | undefined> {

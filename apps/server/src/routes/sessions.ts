@@ -9,6 +9,7 @@ import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../sessions/session-manager.js';
+import type { BoundSession } from '@agent-console/shared';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 
@@ -26,6 +27,58 @@ const keystrokeBodySchema = z.object({
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
 });
+
+type PendingCodexFirstTurnRestartResult =
+  | { kind: 'not-applicable' }
+  | { kind: 'restarted'; session: BoundSession }
+  | { kind: 'project-not-found' };
+
+async function restartFirstPendingCodexTurnIfNeeded(input: {
+  db: AppDatabase;
+  projectService: ProjectService;
+  providerRegistry: ProviderRegistry;
+  sessions: SessionManager;
+  session: BoundSession;
+  text: string;
+}): Promise<PendingCodexFirstTurnRestartResult> {
+  const pendingConversation = input.session.conversationRef.startsWith('pending:')
+    ? input.db.getPendingConversation(input.session.conversationRef)
+    : undefined;
+  const isFirstPendingCodexTurn =
+    input.session.provider === 'codex'
+    && Boolean(pendingConversation)
+    && typeof pendingConversation?.rawMetadata?.lastUserInputHash !== 'string';
+  if (!isFirstPendingCodexTurn) {
+    return { kind: 'not-applicable' };
+  }
+
+  const project = await input.projectService.getProjectBySlug(input.session.projectSlug);
+  if (!project) {
+    return { kind: 'project-not-found' };
+  }
+  const provider = input.providerRegistry.get(input.session.provider);
+  const providerSettings = input.projectService.getMergedProviderSettings(project, input.session.provider);
+  const restarted = await input.sessions.restartPendingSessionWithInitialPrompt({
+    sessionId: input.session.id,
+    project,
+    provider,
+    providerSettings,
+    initialPrompt: input.text,
+  });
+  const inputAt = nowIso();
+  const rawMetadata = { ...(pendingConversation?.rawMetadata ?? {}) } as Record<string, unknown>;
+  rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(input.text));
+  rawMetadata.lastUserInputPreview = truncate(input.text, 120);
+  rawMetadata.lastUserInputAt = inputAt;
+  input.db.putPendingConversation({
+    ...pendingConversation!,
+    updatedAt: inputAt,
+    isBound: true,
+    boundSessionId: restarted.id,
+    rawMetadata,
+  });
+  return { kind: 'restarted', session: restarted };
+}
 
 export async function registerSessionRoutes(
   app: FastifyInstance,
@@ -52,41 +105,20 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
-    const pendingConversation = session.conversationRef.startsWith('pending:')
-      ? db.getPendingConversation(session.conversationRef)
-      : undefined;
-    const isFirstPendingCodexTurn =
-      session.provider === 'codex'
-      && Boolean(pendingConversation)
-      && typeof pendingConversation?.rawMetadata?.lastUserInputHash !== 'string';
-    if (isFirstPendingCodexTurn) {
-      const project = await projectService.getProjectBySlug(session.projectSlug);
-      if (!project) {
-        reply.code(404).send({ error: 'Project not found.' });
-        return;
-      }
-      const provider = providerRegistry.get(session.provider);
-      const providerSettings = projectService.getMergedProviderSettings(project, session.provider);
-      const restarted = await sessions.restartPendingSessionWithInitialPrompt({
-        sessionId,
-        project,
-        provider,
-        providerSettings,
-        initialPrompt: parsed.data.text,
-      });
-      const inputAt = nowIso();
-      const rawMetadata = { ...(pendingConversation?.rawMetadata ?? {}) } as Record<string, unknown>;
-      rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(parsed.data.text));
-      rawMetadata.lastUserInputPreview = truncate(parsed.data.text, 120);
-      rawMetadata.lastUserInputAt = inputAt;
-      db.putPendingConversation({
-        ...pendingConversation!,
-        updatedAt: inputAt,
-        isBound: true,
-        boundSessionId: restarted.id,
-        rawMetadata,
-      });
-      return restarted;
+    const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
+      db,
+      projectService,
+      providerRegistry,
+      sessions,
+      session,
+      text: parsed.data.text,
+    });
+    if (pendingRestart.kind === 'project-not-found') {
+      reply.code(404).send({ error: 'Project not found.' });
+      return;
+    }
+    if (pendingRestart.kind === 'restarted') {
+      return pendingRestart.session;
     }
     return await sessions.sendInput(sessionId, parsed.data.text);
   });
@@ -172,6 +204,31 @@ export async function registerSessionRoutes(
       return;
     }
     const sessionId = (request.params as { sessionId: string }).sessionId;
+    const session = sessions.getSessionById(sessionId);
+    if (!session) {
+      reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    const isLiteralSelectionKeystroke = parsed.data.text && parsed.data.keys?.includes('Enter')
+      ? await sessions.allowsLiteralSelectionKeystroke(sessionId, parsed.data.text)
+      : false;
+    if (parsed.data.text && parsed.data.keys?.includes('Enter') && !isLiteralSelectionKeystroke) {
+      const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
+        db,
+        projectService,
+        providerRegistry,
+        sessions,
+        session,
+        text: parsed.data.text,
+      });
+      if (pendingRestart.kind === 'project-not-found') {
+        reply.code(404).send({ error: 'Project not found.' });
+        return;
+      }
+      if (pendingRestart.kind === 'restarted') {
+        return pendingRestart.session;
+      }
+    }
     try {
       return await sessions.sendKeystrokes(sessionId, parsed.data);
     } catch (error) {

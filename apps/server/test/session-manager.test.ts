@@ -1313,6 +1313,131 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('does not record pending first input for literal selection keystrokes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:selection-keystroke',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Select model',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:selection-keystroke',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    expect(await manager.allowsLiteralSelectionKeystroke(session.id, '1')).toBe(true);
+    expect(await manager.allowsLiteralSelectionKeystroke(session.id, 'help')).toBe(false);
+
+    await manager.sendKeystrokes(session.id, { text: '1', keys: ['Enter'] });
+
+    const pending = db.getPendingConversation('pending:selection-keystroke');
+    expect(tmux.sent).toEqual(['1']);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+    db.close();
+  });
+
+  it('does not record pending first input for text-only literal selection chunks', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:text-only-selection',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Select model',
+      'Enter to confirm · Esc to exit',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:text-only-selection',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '1', deferScreenUpdate: true });
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'] });
+
+    const pending = db.getPendingConversation('pending:text-only-selection');
+    expect(tmux.sent).toEqual(['1']);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+    db.close();
+  });
+
+  it('records numeric user replies when previous output contains numbered choices', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Choose the next step:',
+      '1. Run the targeted tests',
+      '2. Inspect the debug logs',
+      'gpt-5.4 xhigh · 65% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-short-reply',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    expect(await manager.allowsLiteralSelectionKeystroke(session.id, '2')).toBe(false);
+
+    await manager.sendKeystrokes(session.id, { text: '2', keys: ['Enter'] });
+
+    expect(tmux.sent).toEqual(['2']);
+    expect(tmux.sentKeys).toContainEqual(['Enter']);
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    expect(eventLog).toContain('"type":"user-input"');
+    expect(eventLog).toContain('"text":"2"');
+    db.close();
+  });
+
   it('avoids extra pane captures for text-only keystroke sends', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
