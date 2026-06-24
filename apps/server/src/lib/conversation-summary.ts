@@ -1,14 +1,33 @@
 import type { BoundSession, ConversationSummary, SessionInteractionSummary } from '@agent-console/shared';
 
+function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const timestamp of timestamps) {
+    if (!timestamp) {
+      continue;
+    }
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed) || parsed <= latestMs) {
+      continue;
+    }
+    latest = timestamp;
+    latestMs = parsed;
+  }
+  return latest;
+}
+
 export function getBoundSessionConversationUpdatedAt(
   session: BoundSession,
   conversation?: Pick<ConversationSummary, 'updatedAt'>,
 ): string {
-  return session.lastCompletedAt
-    ?? session.lastOutputAt
-    ?? session.lastActivityAt
-    ?? conversation?.updatedAt
-    ?? session.startedAt;
+  return latestTimestamp(
+    session.lastCompletedAt,
+    session.lastOutputAt,
+    session.lastActivityAt,
+    conversation?.updatedAt,
+    session.startedAt,
+  ) ?? session.startedAt;
 }
 
 export function buildSyntheticConversationFromSession(
