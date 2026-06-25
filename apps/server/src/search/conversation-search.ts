@@ -167,6 +167,23 @@ function termsMatch(haystack: string, terms: string[]): boolean {
   return terms.every((term) => haystack.includes(term));
 }
 
+function latestSearchableMessageTimestamp(messages: NormalizedMessage[]): string | undefined {
+  let latest: string | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') {
+      continue;
+    }
+    const timestampMs = Date.parse(message.timestamp);
+    if (!Number.isFinite(timestampMs) || timestampMs <= latestMs) {
+      continue;
+    }
+    latest = message.timestamp;
+    latestMs = timestampMs;
+  }
+  return latest;
+}
+
 function buildPlainSnippet(text: string, terms: string[]): string {
   const normalized = normalizedHaystack(text);
   const firstIndex = terms
@@ -281,6 +298,7 @@ export class ConversationSearchService {
       const summary = session.conversationRef.startsWith('pending:')
         ? this.db.getPendingConversation(session.conversationRef)
         : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
+      const isPendingConversation = session.conversationRef.startsWith('pending:');
       const title = summary?.title ?? session.title ?? 'Live session';
       if (!isConversationVisibleInDiscovery(summary ?? {
         title,
@@ -288,11 +306,16 @@ export class ConversationSearchService {
       })) {
         continue;
       }
-      const providerHasTranscript = Boolean(summary) && !session.conversationRef.startsWith('pending:');
-      const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;
+      const providerHasTranscript = Boolean(summary) && !isPendingConversation;
       const messages = await readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
+      const liveMessageUpdatedAt = latestSearchableMessageTimestamp(messages);
+      const conversationUpdatedAt = session.lastCompletedAt
+        ?? session.lastOutputAt
+        ?? session.lastActivityAt
+        ?? summary?.updatedAt
+        ?? (isPendingConversation ? session.updatedAt : liveMessageUpdatedAt ?? session.startedAt);
 
       for (const message of messages) {
         if (providerHasTranscript && message.role === 'assistant' && message.source === 'live-output') {
@@ -315,7 +338,7 @@ export class ConversationSearchService {
           projectPath: project.path,
           provider: session.provider as ProviderId,
           conversationRef: session.conversationRef,
-          conversationKind: session.conversationRef.startsWith('pending:') ? 'pending' : 'history',
+          conversationKind: isPendingConversation ? 'pending' : 'history',
           conversationTitle: title,
           conversationUpdatedAt,
           isBound: true,
