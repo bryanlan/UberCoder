@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 91a86c73f17307fe743accdb5b7cfb5a8053d9b4
-current_through_date: 2026-06-21T13:24:59-07:00
+current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
+current_through_date: 2026-06-24T05:16:40-04:00
 ---
 
 # File Index
@@ -43,7 +43,8 @@ current_through_date: 2026-06-21T13:24:59-07:00
 - `apps/server/src/routes/auth.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - key tracked file or entrypoint for this repo.
-- `apps/server/src/routes/sessions.ts` - key tracked file or entrypoint for this repo.
+- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output routes, including
+  first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
 - `apps/server/src/config/schema.ts` and `service.ts` - config schema, merge behavior, runtime paths, provider/project settings, and security knobs.
@@ -59,7 +60,8 @@ current_through_date: 2026-06-21T13:24:59-07:00
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper records, and event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
-  working state, event-log observation, text entry, and recency timestamps.
+  working state, event-log observation, text entry, literal selection-keystroke detection, and
+  recency timestamps.
 - `apps/server/src/sessions/live-output.ts` - event-log normalization for user-visible live output.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
@@ -115,6 +117,10 @@ Test and verification anchors:
 - Session recency, restore, recovery, or idle-completion changes should review
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-manager.test.ts`,
   `apps/web/src/components/Sidebar.tsx`, and any API response shape consumed by the sidebar.
+- Pending Codex first-turn input or live keystroke changes should review
+  `apps/server/src/routes/sessions.ts`, `apps/server/src/sessions/session-manager.ts`,
+  `apps/server/test/session-routes.test.ts`, and `apps/server/test/session-manager.test.ts`
+  together so prompt restarts and literal selection passthrough stay distinct.
 - Live output, history pagination, duplicate filtering, or text latency changes should review
   `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/live-output.ts`,
   `apps/server/src/providers/transcripts/codex.ts`,

@@ -1,8 +1,8 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 91a86c73f17307fe743accdb5b7cfb5a8053d9b4
-current_through_date: 2026-06-21T13:24:59-07:00
+current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
+current_through_date: 2026-06-24T05:16:40-04:00
 ---
 
 # Running Tests
@@ -14,6 +14,7 @@ current_through_date: 2026-06-21T13:24:59-07:00
 
 ## Targeted Test Patterns
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager`.
+- Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
 - Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`, after ensuring Playwright does not reuse a live local server with the real user config.
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.

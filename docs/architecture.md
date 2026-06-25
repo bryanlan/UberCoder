@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 91a86c73f17307fe743accdb5b7cfb5a8053d9b4
-current_through_date: 2026-06-21T13:24:59-07:00
+current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
+current_through_date: 2026-06-24T05:16:40-04:00
 ---
 
 # Architecture
@@ -12,6 +12,7 @@ current_through_date: 2026-06-21T13:24:59-07:00
 First-class runtime surfaces:
 - Node/JavaScript package described by `package.json`.
 - Fastify conversation/timeline API: `apps/server/src/routes/conversations.ts`.
+- Fastify session input API: `apps/server/src/routes/sessions.ts`.
 - Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-screen.ts`, `live-output.ts`, and `tmux-client.ts`.
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
 - React conversation timeline controller: `apps/web/src/features/conversation/useConversationDataController.ts` and `apps/web/src/components/ConversationPane.tsx`.
@@ -52,6 +53,15 @@ renders as terminal output. Codex transcript parsing prefers response-backed dis
 near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
 from the visible transcript while keeping the full parsed message set available for indexing.
 
+Session text entry has two paths. Normal `/input` submissions send the text to the bound tmux
+session, but the first user prompt for a pending Codex conversation restarts the placeholder
+session with that prompt as the provider's initial command and records the input hash/preview on
+the pending conversation. `/keys` handles literal bridge input; when text plus Enter arrives for a
+first-turn pending Codex session, `sessions.ts` asks `SessionManager.allowsLiteralSelectionKeystroke`
+whether the current screen is an interactive selection UI. Selection tokens stay on the live tmux
+bridge, while non-selection prompt text restarts the pending Codex session instead of typing into a
+stuck composer.
+
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.
 - tmux is the session execution boundary; the backend captures pane state and logs normalized events.
@@ -66,6 +76,11 @@ from the visible transcript while keeping the full parsed message set available 
 - Session recency is not a generic "screen changed" timestamp. Opening an old session, restoring a
   tmux binding, viewing an old transcript, raw restore output, or the screen merely leaving
   `Working` must not make a conversation look fresh.
+- First-turn pending Codex input must keep prompt submission separate from literal selection
+  keystrokes. Review `apps/server/src/routes/sessions.ts`,
+  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and
+  `apps/server/test/session-manager.test.ts` before changing pending conversation restart,
+  selection detection, or text+Enter passthrough behavior.
 - Completion recency moves after new trackable output has idled past the completion window. Review
   `apps/server/src/sessions/session-manager.ts` and `apps/server/test/session-manager.test.ts`
   before changing `lastActivityAt`, `lastOutputAt`, `lastCompletedAt`, `isWorking`, restore, or
