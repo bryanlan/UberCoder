@@ -441,6 +441,44 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('uses live event recency when a history live session has no cached index entry', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-history-no-index-recency-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Find the missing index recency invariant.',
+        timestamp: '2026-01-01T12:00:00.000Z',
+      }),
+    ].join('\n'), 'utf8');
+    db.upsertBoundSession({
+      id: 'session-missing-index-history-live',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'missing-index-history-live',
+      tmuxSessionName: 'ac-codex-demo-missing-index-history-live',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Missing index history live session',
+      startedAt: '2026-01-01T12:00:00.000Z',
+      updatedAt: new Date().toISOString(),
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+
+    const result = (await search.search('missing index recency invariant', 10))[0];
+    expect(result).toMatchObject({
+      conversationRef: 'missing-index-history-live',
+      conversationUpdatedAt: '2026-01-01T12:00:00.000Z',
+      recencyBucket: '60-plus-days',
+    });
+    db.close();
+  });
+
   it('bounds live-session search to the recent event-log tail', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-tail-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
