@@ -289,7 +289,7 @@ export class ConversationSearchService {
         continue;
       }
       const providerHasTranscript = Boolean(summary) && !session.conversationRef.startsWith('pending:');
-      const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? session.updatedAt;
+      const conversationUpdatedAt = session.lastCompletedAt ?? session.lastOutputAt ?? session.lastActivityAt ?? summary?.updatedAt ?? session.updatedAt;
       const messages = await readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
