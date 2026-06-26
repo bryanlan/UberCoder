@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
-current_through_date: 2026-06-24T05:16:40-04:00
+current_through_commit: 930340a400c62c5f32fc2c266f1a06a8fb64e8af
+current_through_date: 2026-06-25T03:40:49-07:00
 ---
 
 # File Index
@@ -57,6 +57,15 @@ current_through_date: 2026-06-24T05:16:40-04:00
 - `apps/server/src/routes/conversations.ts` - provider/live timeline merge, message pagination,
   metadata-only refreshes, transcript-backed live-message duplicate filtering, and live-screen
   tail trimming.
+- `apps/server/src/routes/search.ts` - authenticated `/api/search/conversations` route and query
+  validation.
+- `apps/server/src/search/conversation-search.ts` - FTS query construction, sanitized message
+  chunking, persisted/live result merge, recency buckets, ranking, hidden conversation filtering,
+  live pending-session search, and transcript-backed live-output exclusions.
+- `apps/server/src/indexing/indexing-service.ts` - provider conversation indexing plus missing
+  search-index row backfill from cached conversation summaries on startup or metadata priming.
+- `apps/server/src/db/database.ts` - SQLite schema and persistence methods for
+  `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper records, and event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
@@ -101,6 +110,8 @@ Test and verification anchors:
 - `apps/server/test/indexing-service.test.ts` - representative test or verification file.
 - `apps/server/test/indexing.test.ts` - representative test or verification file.
 - `apps/server/test/live-output.test.ts` - representative test or verification file.
+- `apps/server/test/search.test.ts` - conversation search, live-session search, recency/ranking,
+  hidden-conversation filtering, and cached-index backfill coverage.
 - `apps/server/test/session-manager.test.ts` - representative test or verification file.
 - `apps/server/test/projects-routes.test.ts` - representative test or verification file.
 - `apps/server/test/projects.test.ts` - representative test or verification file.
@@ -128,6 +139,10 @@ Test and verification anchors:
   `apps/server/test/conversation-routes.test.ts`,
   `apps/web/src/features/conversation/useConversationDataController.ts`, and
   `apps/web/src/components/ConversationPane.tsx`.
+- Conversation search, FTS indexing, live-session search, hidden-conversation filtering, or cached
+  search backfill changes should review `apps/server/src/routes/search.ts`,
+  `apps/server/src/search/conversation-search.ts`, `apps/server/src/indexing/indexing-service.ts`,
+  `apps/server/src/db/database.ts`, and `apps/server/test/search.test.ts`.
 - Settings/project-discovery changes should review `apps/server/src/config/service.ts`,
   `apps/server/src/projects/project-service.ts`, `apps/server/src/routes/settings.ts`,
   `apps/web/src/pages/SettingsPage.tsx`, and the Playwright settings e2e tests together.

@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
-current_through_date: 2026-06-24T05:16:40-04:00
+current_through_commit: 930340a400c62c5f32fc2c266f1a06a8fb64e8af
+current_through_date: 2026-06-25T03:40:49-07:00
 ---
 
 # Architecture
@@ -12,6 +12,10 @@ current_through_date: 2026-06-24T05:16:40-04:00
 First-class runtime surfaces:
 - Node/JavaScript package described by `package.json`.
 - Fastify conversation/timeline API: `apps/server/src/routes/conversations.ts`.
+- Fastify conversation search API and index: `apps/server/src/routes/search.ts`,
+  `apps/server/src/search/conversation-search.ts`,
+  `apps/server/src/indexing/indexing-service.ts`, and the SQLite `conversation_search_fts` table in
+  `apps/server/src/db/database.ts`.
 - Fastify session input API: `apps/server/src/routes/sessions.ts`.
 - Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-screen.ts`, `live-output.ts`, and `tmux-client.ts`.
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
@@ -20,7 +24,8 @@ First-class runtime surfaces:
 
 ## Main Components
 - `apps/server/` - Fastify backend, project/config/auth routes, provider adapters, SQLite state,
-  indexing, tmux session management, live-output normalization, restart handling, and localhost proxying.
+  indexing, conversation search, tmux session management, live-output normalization, restart
+  handling, and localhost proxying.
 - `apps/web/` - React/Vite PWA for project navigation, conversation timelines, live session
   display, settings, and auth flows.
 - `packages/shared/` - shared TypeScript contracts for sessions, conversations, projects, and
@@ -52,6 +57,19 @@ returning it, so already-rendered scrollback stays in history bubbles and only t
 renders as terminal output. Codex transcript parsing prefers response-backed display messages over
 near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
 from the visible transcript while keeping the full parsed message set available for indexing.
+
+Conversation search is a server-owned API at `/api/search/conversations`. The search service builds
+FTS rows from sanitized user/assistant prose, excludes hidden system-invocation conversations, and
+deduplicates chunks down to one best result per conversation after applying recency-bucket and score
+ordering. Persisted search rows live in SQLite `conversation_search_fts`; live pending sessions are
+searched from the recent event-log tail so new conversations can appear before a provider transcript
+exists. Transcript-backed live sessions intentionally ignore assistant `live-output` fragments for
+search, because the durable transcript is the source for those conversations.
+
+`IndexingService` owns search-index refresh and repair. Normal indexing replaces FTS rows from
+provider conversations, while `backfillMissingSearchIndexRows()` fills missing FTS rows from the
+cached conversation index on startup or when cached projects become active without re-listing the
+provider tree. A failed individual transcript load should not break the conversation tree.
 
 Session text entry has two paths. Normal `/input` submissions send the text to the bound tmux
 session, but the first user prompt for a pending Codex conversation restarts the placeholder
@@ -91,6 +109,11 @@ stuck composer.
   `apps/server/test/live-output.test.ts`, and
   `apps/web/src/features/conversation/useConversationDataController.ts` before changing timeline
   merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
+- Conversation search belongs in the server search/index boundary. Review
+  `apps/server/src/routes/search.ts`, `apps/server/src/search/conversation-search.ts`,
+  `apps/server/src/indexing/indexing-service.ts`, `apps/server/src/db/database.ts`, and
+  `apps/server/test/search.test.ts` before changing FTS query construction, result ranking,
+  live-session search, hidden-conversation filtering, or cached-index backfill.
 - The web app keeps paged history separately from metadata polling. `limit=0` refreshes live
   metadata and screen state, while the infinite history query loads durable messages in pages and
   retains prior pages during transient refreshes.

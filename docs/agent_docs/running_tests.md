@@ -1,13 +1,14 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 7db0c4a84aa5236791014e3678c20c39a5b35a84
-current_through_date: 2026-06-24T05:16:40-04:00
+current_through_commit: 930340a400c62c5f32fc2c266f1a06a8fb64e8af
+current_through_date: 2026-06-25T03:40:49-07:00
 ---
 
 # Running Tests
 ## Primary Commands
 - `npm test` - builds shared package and runs server Vitest suite; passed on 2026-06-14 with 16 files and 120 tests.
+- `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search` - focused conversation search, live-session search, result ranking, hidden-conversation filtering, and cached-index backfill coverage; passed on 2026-06-26 with 17 tests.
 - `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-06-14.
 - `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-06-14.
 - `npm run test:e2e` - Playwright settings suite; failed on 2026-05-27 because the test reused an existing local Agent Console server/config and loaded Bryan's real saved projects instead of the isolated e2e fixture.
@@ -16,6 +17,7 @@ current_through_date: 2026-06-24T05:16:40-04:00
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
+- Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
 - Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`, after ensuring Playwright does not reuse a live local server with the real user config.
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.
 

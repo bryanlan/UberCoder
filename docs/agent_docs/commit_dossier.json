@@ -1,9 +1,7 @@
 {
   "changed_paths": [
-    "apps/server/src/routes/sessions.ts",
-    "apps/server/src/sessions/session-manager.ts",
-    "apps/server/test/session-manager.test.ts",
-    "apps/server/test/session-routes.test.ts",
+    "apps/server/src/search/conversation-search.ts",
+    "apps/server/test/search.test.ts",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
@@ -14,8 +12,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "7e24d1002bc60f120ba1e2d584630e38fe1036f6",
-      "date": "2026-06-24T04:03:04-04:00",
+      "commit": "7d48f213390c555154aed4c6be0945cddde19aae",
+      "date": "2026-06-25T01:54:32-04:00",
       "files": [
         {
           "paths": [
@@ -54,57 +52,74 @@
           "status": "M"
         }
       ],
-      "short_commit": "7e24d10",
+      "short_commit": "7d48f21",
       "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "7db0c4a84aa5236791014e3678c20c39a5b35a84",
-      "date": "2026-06-24T05:16:40-04:00",
+      "commit": "e636e988db6316e631c002fe24a9af4bf7695919",
+      "date": "2026-06-25T06:27:07-04:00",
       "files": [
         {
           "paths": [
-            "apps/server/src/routes/sessions.ts"
+            "apps/server/src/search/conversation-search.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-routes.test.ts"
+            "apps/server/test/search.test.ts"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "7db0c4a",
-      "subject": "Autocommit: handle pending Codex keystroke starts"
+      "short_commit": "e636e98",
+      "subject": "Fix regression hotspot"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "4497442d37b3086d0d064a6503697a0143ee7de6",
+      "date": "2026-06-25T06:37:18-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/search/conversation-search.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/search.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "4497442",
+      "subject": "Address Ralph review findings"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "930340a400c62c5f32fc2c266f1a06a8fb64e8af",
+      "date": "2026-06-25T03:40:49-07:00",
+      "files": [],
+      "short_commit": "930340a",
+      "subject": "Merge pull request #2 from bryanlan/automation/regression-hotspot-sentinel-coding/agent-console/4497442d37b3"
     }
   ],
   "docs_current_through": {
-    "commit": "91a86c73f17307fe743accdb5b7cfb5a8053d9b4",
-    "date": "2026-06-21T13:24:59-07:00"
-  },
-  "from_commit": "91a86c73f17307fe743accdb5b7cfb5a8053d9b4",
-  "generated_at": "2026-06-25T05:52:12+00:00",
-  "head": {
     "commit": "7db0c4a84aa5236791014e3678c20c39a5b35a84",
-    "date": "2026-06-24T05:16:40-04:00",
-    "short_commit": "7db0c4a"
+    "date": "2026-06-24T05:16:40-04:00"
+  },
+  "from_commit": "7db0c4a84aa5236791014e3678c20c39a5b35a84",
+  "generated_at": "2026-06-26T04:57:11+00:00",
+  "head": {
+    "commit": "930340a400c62c5f32fc2c266f1a06a8fb64e8af",
+    "date": "2026-06-25T03:40:49-07:00",
+    "short_commit": "930340a"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "7db0c4a84aa5236791014e3678c20c39a5b35a84",
+  "to_commit": "930340a400c62c5f32fc2c266f1a06a8fb64e8af",
   "worktree_dirty": true
 }
