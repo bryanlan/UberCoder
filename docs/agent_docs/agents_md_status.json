@@ -1,6 +1,6 @@
 {
-  "agents_md_current_through_commit": "b85e54805e799554387c3361cf7f7069342e7e83",
-  "agents_md_last_synced_at": "2026-06-01T08:49:38.681593+00:00",
+  "agents_md_current_through_commit": "2a7c837b145c7d9d1c5056ecc7292e9cbaafda1b",
+  "agents_md_last_synced_at": "2026-06-29T06:09:25.433685+00:00",
   "alias": {
     "exists": true,
     "is_symlink": true,
@@ -21,13 +21,12 @@
   },
   "git_status": {
     "alias": null,
-    "canonical": " M",
+    "canonical": null,
     "status": null
   },
   "managed_by": "roll-agents-md",
   "notes": [
-    "Preserved backend-authoritative project/session/proxy/auth model and one conversation to one hidden tmux session rule.",
-    "Preserved conversation recency, event-log live-output, localhost proxy allowlist, and e2e isolation caveats."
+    "Preserved server-first ownership, hidden tmux session model, authenticated localhost proxy, and recency semantics."
   ],
   "referenced_calibration_docs": [
     "docs/architecture.md",
