@@ -19,7 +19,6 @@ import { buildConversationSearchChunks } from '../search/conversation-search.js'
 import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
-const PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS = 10_000;
 
 function compareConversationTreeOrder(a: ConversationSummary, b: ConversationSummary): number {
   const aPlacedAt = a.createdAt ?? a.updatedAt;
@@ -29,17 +28,8 @@ function compareConversationTreeOrder(a: ConversationSummary, b: ConversationSum
 }
 
 function getProviderRootRefreshDelay(eventName: string, changedPath: string): number | undefined {
-  if (eventName === 'add' || eventName === 'unlink' || eventName === 'addDir' || eventName === 'unlinkDir') {
+  if ((eventName === 'add' || eventName === 'unlink') && changedPath.endsWith('.jsonl')) {
     return PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS;
-  }
-
-  if (eventName !== 'change') {
-    return undefined;
-  }
-
-  const baseName = path.basename(changedPath);
-  if (baseName === 'history.jsonl' || changedPath.endsWith('.jsonl')) {
-    return PROVIDER_ROOT_CHANGE_REFRESH_DELAY_MS;
   }
 
   return undefined;
@@ -252,22 +242,18 @@ export class IndexingService {
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
   }
 
-  private async collectWatchConfig(): Promise<{ projectsRoot: string; projectPaths: string[]; providerRoots: string[] }> {
+  private async collectWatchConfig(): Promise<{ providerRoots: string[] }> {
     const providerRoots = new Set<string>();
-    const projectPaths = new Set<string>();
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
     for (const project of projects) {
-      projectPaths.add(project.path);
       for (const providerId of PROVIDERS) {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         providerRoots.add(settings.discoveryRoot);
       }
     }
     return {
-      projectsRoot: this.configService.getProjectsRoot(),
-      projectPaths: [...projectPaths],
       providerRoots: [...providerRoots],
     };
   }
@@ -275,8 +261,6 @@ export class IndexingService {
   private async syncWatchers(): Promise<void> {
     const config = await this.collectWatchConfig();
     const signature = JSON.stringify({
-      projectsRoot: config.projectsRoot,
-      projectPaths: [...config.projectPaths].sort(),
       providerRoots: [...config.providerRoots].sort(),
     });
     if (signature === this.watchConfigSignature) {
@@ -288,16 +272,6 @@ export class IndexingService {
     this.watchConfigSignature = signature;
 
     this.watchers = [
-      chokidar.watch(config.projectsRoot, {
-        ignoreInitial: true,
-        depth: 1,
-        ignored: ['**/node_modules/**', '**/.git/**'],
-      }),
-      chokidar.watch(config.projectPaths, {
-        ignoreInitial: true,
-        depth: 0,
-        ignored: ['**/node_modules/**', '**/.git/**'],
-      }),
       chokidar.watch(config.providerRoots, {
         ignoreInitial: true,
         depth: 8,
@@ -305,13 +279,7 @@ export class IndexingService {
       }),
     ];
 
-    this.watchers[0]?.on('all', () => {
-      this.scheduleRefresh(200);
-    });
-    this.watchers[1]?.on('all', () => {
-      this.scheduleRefresh(200);
-    });
-    this.watchers[2]?.on('all', (eventName, changedPath) => {
+    this.watchers[0]?.on('all', (eventName, changedPath) => {
       const delayMs = getProviderRootRefreshDelay(eventName, changedPath);
       if (delayMs !== undefined) {
         this.scheduleRefresh(delayMs);
@@ -417,7 +385,8 @@ export class IndexingService {
 
   private persistProjectMetadata(projects: Awaited<ReturnType<ProjectService['listActiveProjects']>>): void {
     for (const project of projects) {
-      this.db.setMeta(`project:${project.slug}`, JSON.stringify({
+      const metaKey = `project:${project.slug}`;
+      const nextMetadata = JSON.stringify({
         slug: project.slug,
         directoryName: project.directoryName,
         displayName: project.displayName,
@@ -425,7 +394,12 @@ export class IndexingService {
         tags: project.tags,
         notes: project.notes,
         allowedLocalhostPorts: project.allowedLocalhostPorts,
-      }));
+      });
+      if (this.db.getMeta(metaKey) === nextMetadata) {
+        continue;
+      }
+
+      this.db.setMeta(metaKey, nextMetadata);
       this.db.updateConversationSearchProjectMetadata({
         projectSlug: project.slug,
         displayName: project.displayName,

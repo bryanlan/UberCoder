@@ -47,6 +47,7 @@ const defaultUiPreferences: UiPreferences = {
     redMinutes: 24 * 60,
   },
 };
+const LIVE_MESSAGE_REFRESH_THROTTLE_MS = 3000;
 
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
@@ -331,18 +332,17 @@ function AppShell() {
 
   const scheduleTimelineMessageRefresh = useCallback((projectSlug: string, provider: ProviderId, conversationRef: string): void => {
     const key = `${projectSlug}:${provider}:${conversationRef}`;
-    const existingTimer = liveMessageRefreshTimersRef.current.get(key);
-    if (existingTimer !== undefined) {
-      window.clearTimeout(existingTimer);
+    if (liveMessageRefreshTimersRef.current.has(key)) {
+      return;
     }
 
     const timer = window.setTimeout(() => {
       liveMessageRefreshTimersRef.current.delete(key);
-      void queryClient.invalidateQueries({
+      void queryClient.resetQueries({
         queryKey: ['timeline-history', projectSlug, provider, conversationRef],
         exact: true,
       });
-    }, 300);
+    }, LIVE_MESSAGE_REFRESH_THROTTLE_MS);
     liveMessageRefreshTimersRef.current.set(key, timer);
   }, [queryClient]);
 

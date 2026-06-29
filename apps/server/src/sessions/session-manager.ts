@@ -36,6 +36,7 @@ const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
+const RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS = 500;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -222,6 +223,7 @@ export class SessionManager {
   private readonly lastScreenHashes = new Map<string, string>();
   private readonly deferredTextReadyUntil = new Map<string, number>();
   private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
+  private readonly rawOutputScreenUpdateTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -1215,6 +1217,7 @@ export class SessionManager {
     state?.watcher?.close();
     this.watchers.delete(sessionId);
     this.clearWorkingExpiry(sessionId);
+    this.clearRawOutputScreenUpdate(sessionId);
   }
 
   private clearWorkingExpiry(sessionId: string): void {
@@ -1223,6 +1226,26 @@ export class SessionManager {
       clearTimeout(timer);
       this.workingIdleTimers.delete(sessionId);
     }
+  }
+
+  private clearRawOutputScreenUpdate(sessionId: string): void {
+    const timer = this.rawOutputScreenUpdateTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.rawOutputScreenUpdateTimers.delete(sessionId);
+    }
+  }
+
+  private scheduleRawOutputScreenUpdate(session: BoundSession): void {
+    if (this.rawOutputScreenUpdateTimers.has(session.id)) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.rawOutputScreenUpdateTimers.delete(session.id);
+      void this.emitScreenUpdate(session);
+    }, RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS);
+    this.rawOutputScreenUpdateTimers.set(session.id, timer);
   }
 
   private scheduleWorkingExpiry(sessionId: string, heartbeatAt: string): void {
@@ -1324,7 +1347,7 @@ export class SessionManager {
         this.scheduleWorkingExpiry(sessionId, now);
         this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       }
-      void this.emitScreenUpdate(updated);
+      this.scheduleRawOutputScreenUpdate(updated);
     } catch {
       // Session may have ended while the debounce timer was pending.
     }

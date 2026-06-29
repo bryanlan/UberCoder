@@ -33,6 +33,9 @@ const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
 const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const LIVE_SCREEN_DUPLICATE_MIN_LENGTH = 30;
 const LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS = 2_000;
+const LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS = 1_000;
+const LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS = 5_000;
+const LIVE_TIMELINE_RESPONSE_CACHE_MAX_ENTRIES = 200;
 
 interface MessagePaginationOptions<T> {
   before?: number;
@@ -86,6 +89,74 @@ function paginateMessages<T>(
       total: messages.length,
     },
   };
+}
+
+type MessagePageInfo = ReturnType<typeof paginateMessages<NormalizedMessage>>['pageInfo'];
+
+interface TimelineResponse {
+  conversation: ConversationSummary;
+  messages: NormalizedMessage[];
+  allMessages: NormalizedMessage[];
+  boundSession: BoundSession | undefined;
+  liveScreen: SessionScreen | undefined;
+  messagePage: MessagePageInfo;
+}
+
+const liveTimelineResponseCache = new Map<string, { expiresAt: number; response: TimelineResponse }>();
+
+function getLiveTimelineResponseCacheKey(input: {
+  projectSlug: string;
+  provider: ProviderId;
+  conversationRef: string;
+  before?: number;
+  limit?: number;
+}): string {
+  return [
+    input.projectSlug,
+    input.provider,
+    input.conversationRef,
+    input.before ?? '',
+    input.limit ?? '',
+  ].join('\u0000');
+}
+
+function getCachedLiveTimelineResponse(cacheKey: string | undefined): TimelineResponse | undefined {
+  if (!cacheKey) {
+    return undefined;
+  }
+
+  const cached = liveTimelineResponseCache.get(cacheKey);
+  if (!cached) {
+    return undefined;
+  }
+
+  if (cached.expiresAt <= Date.now()) {
+    liveTimelineResponseCache.delete(cacheKey);
+    return undefined;
+  }
+
+  return cached.response;
+}
+
+function rememberLiveTimelineResponse(cacheKey: string | undefined, response: TimelineResponse, ttlMs: number): TimelineResponse {
+  if (!cacheKey) {
+    return response;
+  }
+
+  if (liveTimelineResponseCache.size >= LIVE_TIMELINE_RESPONSE_CACHE_MAX_ENTRIES) {
+    const now = Date.now();
+    for (const [key, cached] of liveTimelineResponseCache) {
+      if (cached.expiresAt <= now || liveTimelineResponseCache.size >= LIVE_TIMELINE_RESPONSE_CACHE_MAX_ENTRIES) {
+        liveTimelineResponseCache.delete(key);
+      }
+    }
+  }
+
+  liveTimelineResponseCache.set(cacheKey, {
+    expiresAt: Date.now() + ttlMs,
+    response,
+  });
+  return response;
 }
 
 function messagesShareTimelinePageRun(previous: NormalizedMessage, next: NormalizedMessage): boolean {
@@ -375,7 +446,7 @@ export async function registerConversationRoutes(
   sessions: SessionManager,
   eventBus: RealtimeEventBus,
 ): Promise<void> {
-  app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', async (request, reply) => {
+  app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply, false);
     } catch {
@@ -403,6 +474,20 @@ export async function registerConversationRoutes(
     const cachedSummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
     const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+    const liveTimelineResponseCacheKey = boundSession
+      ? getLiveTimelineResponseCacheKey({
+        projectSlug,
+        provider: providerId,
+        conversationRef: resolvedConversationRef,
+        before: parsedQuery.data.before,
+        limit: parsedQuery.data.limit,
+      })
+      : undefined;
+    const cachedLiveTimelineResponse = getCachedLiveTimelineResponse(liveTimelineResponseCacheKey);
+    if (cachedLiveTimelineResponse) {
+      return cachedLiveTimelineResponse;
+    }
+
     const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
     const rawLiveScreen = liveSessionState?.screen;
     const resolvedBoundSession = liveSessionState?.session;
@@ -411,20 +496,23 @@ export async function registerConversationRoutes(
       summary = buildSyntheticConversationFromSession(resolvedBoundSession);
     }
 
-    if (metadataOnly && summary && !resolvedBoundSession) {
+    if (metadataOnly && summary) {
       const emptyPage = paginateMessages([], parsedQuery.data);
-      return {
+      const liveScreen = resolvedBoundSession
+        ? trimLiveScreenToActiveTail(rawLiveScreen, [])
+        : undefined;
+      return rememberLiveTimelineResponse(liveTimelineResponseCacheKey, {
         conversation: {
           ...summary,
-          isBound: false,
-          boundSessionId: undefined,
+          isBound: Boolean(resolvedBoundSession),
+          boundSessionId: resolvedBoundSession?.id,
         },
         messages: emptyPage.pageMessages,
         allMessages: [],
         boundSession: resolvedBoundSession,
-        liveScreen: undefined,
+        liveScreen,
         messagePage: emptyPage.pageInfo,
-      };
+      }, LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS);
     }
 
     let visibleMessages = [] as Awaited<ReturnType<typeof readLiveMessages>>;
@@ -484,18 +572,18 @@ export async function registerConversationRoutes(
       return;
     }
 
-    return {
+    return rememberLiveTimelineResponse(liveTimelineResponseCacheKey, {
       conversation: {
         ...summary,
         isBound: Boolean(resolvedBoundSession),
         boundSessionId: resolvedBoundSession?.id,
       },
       messages: pagedMessages.pageMessages,
-      allMessages: metadataOnly ? [] : mergedAllMessages,
+      allMessages: [],
       boundSession: resolvedBoundSession,
       liveScreen,
       messagePage: pagedMessages.pageInfo,
-    };
+    }, LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS);
   });
 
   app.post('/api/conversations/:projectSlug/:provider/new/bind', async (request, reply) => {
