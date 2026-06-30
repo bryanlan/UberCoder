@@ -1415,6 +1415,155 @@ describe('conversation routes', () => {
     }
   });
 
+  it('trims markdown transcript tail from wrapped Claude screen output', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('waltiumweb', 'claude', [{
+      ref: 'claude-markdown-tail',
+      kind: 'history',
+      projectSlug: 'waltiumweb',
+      provider: 'claude',
+      title: 'Claude markdown tail',
+      createdAt: '2026-06-30T12:30:00.000Z',
+      updatedAt: '2026-06-30T12:35:41.995Z',
+      isBound: true,
+      boundSessionId: 'session-claude-markdown-tail',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const session: BoundSession = {
+      id: 'session-claude-markdown-tail',
+      provider: 'claude',
+      projectSlug: 'waltiumweb',
+      conversationRef: 'claude-markdown-tail',
+      tmuxSessionName: 'ac-claude-waltiumweb-markdown-tail',
+      status: 'bound',
+      title: 'Claude markdown tail',
+      startedAt: '2026-06-30T12:30:00.000Z',
+      updatedAt: '2026-06-30T12:35:41.995Z',
+      lastActivityAt: '2026-06-30T12:35:41.995Z',
+    };
+    db.upsertBoundSession(session);
+
+    const assistantText = [
+      'Plus nits: advisory lock against overlapping runs, reconciliation indexes, `NOT NULL`s, treat `balance` cash-flow rows as snapshots not events.',
+      '',
+      '---',
+      '',
+      '**Where this leaves us:** the design is converging — the open items are now precise refinements I can fold into a v3, except **key-stability (#4), which is a data check requiring a second weekly export**, not more review.',
+      '',
+      'My recommendation: I write **v3** with 1–3, 5–6 fully incorporated, flag #4 as a pre-implementation validation gate (diff two consecutive exports the first time we have them), and run **one more focused Codex pass** to confirm the fixes are correct — then we\'d be at GO.',
+      '',
+      'Want me to produce v3 and run that final review, or stop the review loop here and have me turn v3 into the implementation plan directly?',
+    ].join('\n');
+    const providerMessages: NormalizedMessage[] = [{
+      id: 'history-assistant-markdown',
+      provider: 'claude',
+      role: 'assistant',
+      text: assistantText,
+      timestamp: '2026-06-30T12:35:41.995Z',
+      conversationRef: 'claude-markdown-tail',
+      source: 'history-file',
+    }];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'claude-markdown-tail',
+        kind: 'history',
+        projectSlug: 'waltiumweb',
+        provider: 'claude',
+        title: 'Claude markdown tail',
+        createdAt: '2026-06-30T12:30:00.000Z',
+        updatedAt: '2026-06-30T12:35:41.995Z',
+        isBound: true,
+        boundSessionId: 'session-claude-markdown-tail',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: [
+          'reconciliation indexes, NOT NULLs, treat balance cash-flow rows as snapshots',
+          '  not events.',
+          '',
+          '  ---',
+          '  Where this leaves us: the design is converging — the open items are now',
+          '  precise refinements I can fold into a v3, except key-stability (#4), which is',
+          '  a data check requiring a second weekly export, not more review.',
+          '',
+          '  My recommendation: I write v3 with 1–3, 5–6 fully incorporated, flag #4 as a',
+          '  pre-implementation validation gate (diff two consecutive exports the first',
+          '  time we have them), and run one more focused Codex pass to confirm the fixes',
+          '  are correct — then we\'d be at GO.',
+          '',
+          '  Want me to produce v3 and run that final review, or stop the review loop here',
+          '  and have me turn v3 into the implementation plan directly?',
+          '',
+          '✻ Cooked for 1m 17s',
+        ].join('\n'),
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-06-30T12:35:42.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'waltiumweb'
+            ? {
+                slug: 'waltiumweb',
+                displayName: 'Waltium Web',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'claude',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/waltiumweb/claude/claude-markdown-tail/messages?limit=0',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().messages).toEqual([]);
+      expect(response.json().liveScreen.content).toBe('');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('trims saved transcript scrollback when newer live input is only in the active input buffer', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

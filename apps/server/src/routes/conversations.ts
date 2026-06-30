@@ -32,6 +32,7 @@ const SHORT_EXACT_DUPLICATE_WINDOW_MS = 30 * 1000;
 const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
 const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const LIVE_SCREEN_DUPLICATE_MIN_LENGTH = 30;
+const LIVE_SCREEN_DUPLICATE_COMPACT_MIN_LENGTH = 40;
 const LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS = 2_000;
 const LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS = 1_000;
 const LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS = 5_000;
@@ -316,6 +317,10 @@ function normalizeLiveTailText(text: string): string {
   return normalizeComparableText(text).replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+function normalizeLiveTailCompactText(text: string): string {
+  return normalizeLiveTailText(text).replace(/[^a-z0-9]+/g, '');
+}
+
 function splitLines(text: string | undefined): string[] {
   return (text ?? '').replace(/\r\n?/g, '\n').split('\n');
 }
@@ -324,29 +329,40 @@ function isLiveScreenTrimFillerLine(line: string): boolean {
   const trimmed = line.trim();
   return !trimmed
     || /^[⎿✻●]/u.test(trimmed)
+    || /^[-*_]{3,}$/.test(trimmed)
     || /^[\s│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+$/u.test(line);
 }
 
-function screenLineIsDurableDuplicate(line: string, durableText: string): boolean {
-  const comparableLine = normalizeLiveTailText(line);
-  return comparableLine.length >= LIVE_SCREEN_DUPLICATE_MIN_LENGTH
-    && durableText.includes(comparableLine);
-}
-
 function countDurableDuplicatePrefixLines(lines: string[], durableText: string): number {
+  const durableCompactText = normalizeLiveTailCompactText(durableText);
+  let candidateCompactText = '';
   let trimLineCount = 0;
   let sawDuplicateLine = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? '';
-    if (screenLineIsDurableDuplicate(line, durableText)) {
-      sawDuplicateLine = true;
-      trimLineCount = index + 1;
-      continue;
-    }
+    const compactLine = normalizeLiveTailCompactText(line);
     if (isLiveScreenTrimFillerLine(line)) {
+      if (sawDuplicateLine) {
+        trimLineCount = index + 1;
+      }
+      continue;
+    }
+
+    const nextCandidateCompactText = `${candidateCompactText}${compactLine}`;
+    if (nextCandidateCompactText.length < LIVE_SCREEN_DUPLICATE_COMPACT_MIN_LENGTH) {
+      candidateCompactText = nextCandidateCompactText;
+      continue;
+    }
+
+    if (
+      durableCompactText.includes(nextCandidateCompactText)
+    ) {
+      sawDuplicateLine = true;
+      candidateCompactText = nextCandidateCompactText;
       trimLineCount = index + 1;
       continue;
     }
+
     break;
   }
 
