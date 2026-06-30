@@ -1288,6 +1288,133 @@ describe('conversation routes', () => {
     }
   });
 
+  it('trims transcript-backed live screen scrollback with interleaved terminal chrome', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-chrome-tail',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Terminal chrome tail',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-chrome-tail',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const session: BoundSession = {
+      id: 'session-chrome-tail',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-chrome-tail',
+      tmuxSessionName: 'ac-codex-demo-chrome-tail',
+      status: 'bound',
+      title: 'Terminal chrome tail',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+      lastActivityAt: '2026-03-14T18:02:00.000Z',
+    };
+    db.upsertBoundSession(session);
+
+    const transcriptLineA = 'The data availability update now derives its real data window from the source rows instead of a fixed mock constant.';
+    const transcriptLineB = 'The managed accounts client shows a quiet caption and warns only when the requested start predates available history.';
+    const providerMessages: NormalizedMessage[] = [{
+      id: 'history-assistant',
+      provider: 'codex',
+      role: 'assistant',
+      text: `${transcriptLineA}\n\n${transcriptLineB}`,
+      timestamp: '2026-03-14T18:02:00.000Z',
+      conversationRef: 'history-chrome-tail',
+      source: 'history-file',
+    }];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-chrome-tail',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Terminal chrome tail',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:02:00.000Z',
+        isBound: true,
+        boundSessionId: 'session-chrome-tail',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: [
+          transcriptLineA,
+          '⎿ Updated apps/web/src/ManagedAccountsClient.tsx',
+          transcriptLineB,
+          'Fresh active terminal line.',
+        ].join('\n'),
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:01.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-chrome-tail/messages?limit=0',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().messages).toEqual([]);
+      expect(response.json().liveScreen.content).toBe('Fresh active terminal line.');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('trims saved transcript scrollback when newer live input is only in the active input buffer', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

@@ -320,6 +320,39 @@ function splitLines(text: string | undefined): string[] {
   return (text ?? '').replace(/\r\n?/g, '\n').split('\n');
 }
 
+function isLiveScreenTrimFillerLine(line: string): boolean {
+  const trimmed = line.trim();
+  return !trimmed
+    || /^[⎿✻●]/u.test(trimmed)
+    || /^[\s│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+$/u.test(line);
+}
+
+function screenLineIsDurableDuplicate(line: string, durableText: string): boolean {
+  const comparableLine = normalizeLiveTailText(line);
+  return comparableLine.length >= LIVE_SCREEN_DUPLICATE_MIN_LENGTH
+    && durableText.includes(comparableLine);
+}
+
+function countDurableDuplicatePrefixLines(lines: string[], durableText: string): number {
+  let trimLineCount = 0;
+  let sawDuplicateLine = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (screenLineIsDurableDuplicate(line, durableText)) {
+      sawDuplicateLine = true;
+      trimLineCount = index + 1;
+      continue;
+    }
+    if (isLiveScreenTrimFillerLine(line)) {
+      trimLineCount = index + 1;
+      continue;
+    }
+    break;
+  }
+
+  return sawDuplicateLine ? trimLineCount : 0;
+}
+
 function isDurableLiveTailMessage(message: NormalizedMessage): boolean {
   return message.role === 'user' || message.role === 'assistant' || message.role === 'tool';
 }
@@ -405,6 +438,7 @@ function trimLiveScreenToActiveTail(
       cutLineCount = lineCount;
     }
   }
+  cutLineCount += countDurableDuplicatePrefixLines(contentLines.slice(cutLineCount), durableText);
 
   if (cutLineCount === 0) {
     return screen;
@@ -496,21 +530,18 @@ export async function registerConversationRoutes(
       summary = buildSyntheticConversationFromSession(resolvedBoundSession);
     }
 
-    if (metadataOnly && summary) {
+    if (metadataOnly && summary && !resolvedBoundSession) {
       const emptyPage = paginateMessages([], parsedQuery.data);
-      const liveScreen = resolvedBoundSession
-        ? trimLiveScreenToActiveTail(rawLiveScreen, [])
-        : undefined;
       return rememberLiveTimelineResponse(liveTimelineResponseCacheKey, {
         conversation: {
           ...summary,
-          isBound: Boolean(resolvedBoundSession),
-          boundSessionId: resolvedBoundSession?.id,
+          isBound: false,
+          boundSessionId: undefined,
         },
         messages: emptyPage.pageMessages,
         allMessages: [],
-        boundSession: resolvedBoundSession,
-        liveScreen,
+        boundSession: undefined,
+        liveScreen: undefined,
         messagePage: emptyPage.pageInfo,
       }, LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS);
     }
@@ -561,10 +592,12 @@ export async function registerConversationRoutes(
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
     ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    const pagedMessages = paginateMessages(mergedMessages, {
-      ...parsedQuery.data,
-      samePageRun: messagesShareTimelinePageRun,
-    });
+    const pagedMessages = metadataOnly
+      ? paginateMessages([], parsedQuery.data)
+      : paginateMessages(mergedMessages, {
+        ...parsedQuery.data,
+        samePageRun: messagesShareTimelinePageRun,
+      });
     const liveScreen = trimLiveScreenToActiveTail(rawLiveScreen, mergedMessages);
 
     if (!summary) {
@@ -583,7 +616,7 @@ export async function registerConversationRoutes(
       boundSession: resolvedBoundSession,
       liveScreen,
       messagePage: pagedMessages.pageInfo,
-    }, LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS);
+    }, metadataOnly ? LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS : LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS);
   });
 
   app.post('/api/conversations/:projectSlug/:provider/new/bind', async (request, reply) => {

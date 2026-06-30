@@ -110,6 +110,7 @@ export async function buildApp(options: AppOptions = {}) {
   app.addHook('onClose', async () => {
     await sessionSummaries.stop();
     await indexing.stop();
+    sessions.stop();
     db.close();
   });
 

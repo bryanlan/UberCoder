@@ -224,6 +224,7 @@ export class SessionManager {
   private readonly deferredTextReadyUntil = new Map<string, number>();
   private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
   private readonly rawOutputScreenUpdateTimers = new Map<string, NodeJS.Timeout>();
+  private stopped = false;
 
   constructor(
     private readonly db: AppDatabase,
@@ -246,6 +247,21 @@ export class SessionManager {
   async recoverSessions(): Promise<void> {
     for (const session of this.listRestorableSessions()) {
       await this.refreshSessionState(session);
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    for (const sessionId of [...this.watchers.keys()]) {
+      this.stopWatching(sessionId);
+    }
+    for (const [sessionId, timer] of this.workingIdleTimers) {
+      clearTimeout(timer);
+      this.workingIdleTimers.delete(sessionId);
+    }
+    for (const [sessionId, timer] of this.rawOutputScreenUpdateTimers) {
+      clearTimeout(timer);
+      this.rawOutputScreenUpdateTimers.delete(sessionId);
     }
   }
 
@@ -1243,7 +1259,15 @@ export class SessionManager {
 
     const timer = setTimeout(() => {
       this.rawOutputScreenUpdateTimers.delete(session.id);
-      void this.emitScreenUpdate(session);
+      if (this.stopped || !this.db.isOpen()) {
+        return;
+      }
+      void this.emitScreenUpdate(session).catch((error: unknown) => {
+        if (this.stopped || !this.db.isOpen()) {
+          return;
+        }
+        console.error('Failed to publish deferred session screen update.', error);
+      });
     }, RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS);
     this.rawOutputScreenUpdateTimers.set(session.id, timer);
   }

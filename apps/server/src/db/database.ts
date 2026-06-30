@@ -74,6 +74,10 @@ export class AppDatabase {
     this.sqlite.close();
   }
 
+  isOpen(): boolean {
+    return this.sqlite.open;
+  }
+
   private migrate(): void {
     this.sqlite.exec(`
       create table if not exists meta (
