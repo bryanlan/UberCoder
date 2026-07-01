@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } from '@agent-console/shared';
@@ -41,18 +40,10 @@ import {
   TMUX_LITERAL_TEXT_CHUNK_SIZE,
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
+import { OutputWatcherRegistry } from './output-watcher.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
-
-interface WatchState {
-  offset: number;
-  watcher?: fs.FSWatcher;
-  processing: boolean;
-  queued: boolean;
-  pendingChunk: string;
-  flushTimer?: NodeJS.Timeout;
-}
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -148,7 +139,7 @@ function splitLiteralTextForTmux(text: string): string[] {
 }
 
 export class SessionManager {
-  private readonly watchers = new Map<string, WatchState>();
+  private readonly outputWatchers = new OutputWatcherRegistry();
   private readonly lastScreenHashes = new Map<string, string>();
   private readonly deferredTextReadyUntil = new Map<string, number>();
   private readonly deferredSelectionInputs = new Map<string, { text: string; expiresAt: number }>();
@@ -177,7 +168,7 @@ export class SessionManager {
 
   stop(): void {
     this.stopped = true;
-    for (const sessionId of [...this.watchers.keys()]) {
+    for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
     }
     for (const [sessionId, timer] of this.workingIdleTimers) {
@@ -1057,61 +1048,21 @@ export class SessionManager {
 
   private watchSessionOutput(session: BoundSession): void {
     if (!session.rawLogPath) return;
-    if (this.watchers.has(session.id)) return;
+    if (this.outputWatchers.has(session.id)) return;
 
     const initialOffset = session.eventLogPath && fs.existsSync(session.eventLogPath) && fs.statSync(session.eventLogPath).size > 0 && fs.existsSync(session.rawLogPath)
       ? fs.statSync(session.rawLogPath).size
       : 0;
-    const state: WatchState = { offset: initialOffset, processing: false, queued: false, pendingChunk: '' };
-    this.watchers.set(session.id, state);
-    const pump = async (): Promise<void> => {
-      if (state.processing) {
-        state.queued = true;
-        return;
-      }
-      state.processing = true;
-      try {
-        const stat = await fsPromises.stat(session.rawLogPath!);
-        if (stat.size <= state.offset) return;
-        const handle = await fsPromises.open(session.rawLogPath!, 'r');
-        try {
-          const length = stat.size - state.offset;
-          const buffer = Buffer.alloc(length);
-          await handle.read(buffer, 0, length, state.offset);
-          state.offset = stat.size;
-          const chunk = buffer.toString('utf8');
-          if (chunk.trim()) {
-            state.pendingChunk += chunk;
-            this.scheduleRawOutputFlush(session.id, state);
-          }
-        } finally {
-          await handle.close();
-        }
-      } catch {
-        // keep watcher alive even if file is briefly unavailable
-      } finally {
-        state.processing = false;
-        if (state.queued) {
-          state.queued = false;
-          void pump();
-        }
-      }
-    };
-
-    state.watcher = fs.watch(session.rawLogPath, { persistent: false }, () => {
-      void pump();
+    this.outputWatchers.watch({
+      sessionId: session.id,
+      rawLogPath: session.rawLogPath,
+      initialOffset,
+      onChunk: (chunk) => this.flushPendingChunk(session.id, chunk),
     });
-    void pump();
   }
 
   private stopWatching(sessionId: string): void {
-    const state = this.watchers.get(sessionId);
-    if (state?.flushTimer) {
-      clearTimeout(state.flushTimer);
-      this.flushPendingChunk(sessionId, state);
-    }
-    state?.watcher?.close();
-    this.watchers.delete(sessionId);
+    this.outputWatchers.stop(sessionId, { flush: true }, (chunk) => this.flushPendingChunk(sessionId, chunk));
     this.clearWorkingExpiry(sessionId);
     this.clearRawOutputScreenUpdate(sessionId);
   }
@@ -1193,19 +1144,7 @@ export class SessionManager {
     }
   }
 
-  private scheduleRawOutputFlush(sessionId: string, state: WatchState): void {
-    if (state.flushTimer) {
-      clearTimeout(state.flushTimer);
-    }
-    state.flushTimer = setTimeout(() => {
-      state.flushTimer = undefined;
-      this.flushPendingChunk(sessionId, state);
-    }, 120);
-  }
-
-  private flushPendingChunk(sessionId: string, state: WatchState): void {
-    const chunk = state.pendingChunk;
-    state.pendingChunk = '';
+  private flushPendingChunk(sessionId: string, chunk: string): void {
     if (!chunk.trim()) return;
     const now = nowIso();
     try {
