@@ -40,6 +40,7 @@ import {
   submittedTextShouldCreateUserTurn,
   TMUX_LITERAL_TEXT_CHUNK_SIZE,
 } from './screen-heuristics.js';
+import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -94,37 +95,6 @@ function readTextTailSync(filePath: string | undefined, maxBytes: number): strin
   } catch {
     return '';
   }
-}
-
-function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
-  let latest: string | undefined;
-  let latestMs = Number.NEGATIVE_INFINITY;
-  for (const timestamp of timestamps) {
-    if (!timestamp) {
-      continue;
-    }
-    const parsed = Date.parse(timestamp);
-    if (!Number.isFinite(parsed) || parsed <= latestMs) {
-      continue;
-    }
-    latest = timestamp;
-    latestMs = parsed;
-  }
-  return latest;
-}
-
-function isRecentTimestamp(timestamp: string | undefined, referenceTimestamp: string, maxAgeMs: number): boolean {
-  if (!timestamp) {
-    return false;
-  }
-
-  const referenceMs = Date.parse(referenceTimestamp);
-  const valueMs = Date.parse(timestamp);
-  if (!Number.isFinite(referenceMs) || !Number.isFinite(valueMs)) {
-    return false;
-  }
-
-  return referenceMs - valueMs <= maxAgeMs;
 }
 
 function readLastUserInput(eventLogPath: string | undefined): string | undefined {
@@ -1204,44 +1174,20 @@ export class SessionManager {
   private async handleWorkingIdleExpiry(sessionId: string, expectedHeartbeatAt: string): Promise<void> {
     try {
       const session = this.mustGetSession(sessionId);
-      if (!session.isWorking) {
-        this.clearWorkingExpiry(sessionId);
+      const decision = nextIdleExpiryDecision(session, {
+        expectedHeartbeatAt,
+        now: nowIso(),
+        idleMs: SESSION_COMPLETION_IDLE_MS,
+      });
+      if (decision.action === 'reschedule') {
+        this.scheduleWorkingExpiry(sessionId, decision.heartbeatAt);
         return;
       }
-
-      const latestHeartbeatAt = session.lastOutputAt;
-      if (latestHeartbeatAt && latestHeartbeatAt !== expectedHeartbeatAt) {
-        this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
-        return;
-      }
-
-      if (isRecentTimestamp(latestHeartbeatAt, nowIso(), SESSION_COMPLETION_IDLE_MS)) {
-        if (latestHeartbeatAt) {
-          this.scheduleWorkingExpiry(sessionId, latestHeartbeatAt);
-        }
-        return;
-      }
-
       this.clearWorkingExpiry(sessionId);
-      const completedAt = session.lastOutputAt;
-      if (!completedAt) {
-        const updated: BoundSession = {
-          ...session,
-          updatedAt: nowIso(),
-          isWorking: false,
-        };
-        this.db.upsertBoundSession(updated);
-        this.eventBus.emit({ type: 'session.updated', session: updated });
-        return;
+      if (decision.action === 'update') {
+        this.db.upsertBoundSession(decision.updatedSession);
+        this.eventBus.emit({ type: 'session.updated', session: decision.updatedSession });
       }
-      const updated: BoundSession = {
-        ...session,
-        updatedAt: nowIso(),
-        isWorking: false,
-        lastCompletedAt: completedAt,
-      };
-      this.db.upsertBoundSession(updated);
-      this.eventBus.emit({ type: 'session.updated', session: updated });
     } catch {
       this.clearWorkingExpiry(sessionId);
     }
@@ -1492,38 +1438,24 @@ export class SessionManager {
     session: BoundSession,
     screen: SessionScreen,
   ): void {
-    const screenShowsWorking = sessionScreenShowsWorking(screen);
-    const workingHeartbeatAt = latestTimestamp(
-      session.lastOutputAt,
-      screenShowsWorking ? session.lastActivityAt : undefined,
-    );
-    const outputIsCoolingDown = isRecentTimestamp(session.lastOutputAt, screen.capturedAt, SESSION_COMPLETION_IDLE_MS);
-    const nextIsWorking = outputIsCoolingDown
-      || (screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, screen.capturedAt, SESSION_COMPLETION_IDLE_MS));
+    const next = nextScreenWorkingState(session, {
+      screenShowsWorking: sessionScreenShowsWorking(screen),
+      capturedAt: screen.capturedAt,
+      idleMs: SESSION_COMPLETION_IDLE_MS,
+    });
 
-    if (nextIsWorking) {
-      const expiryHeartbeatAt = session.lastOutputAt ?? workingHeartbeatAt;
-      if (expiryHeartbeatAt) {
-        this.scheduleWorkingExpiry(session.id, expiryHeartbeatAt);
-      }
-    } else {
+    if (next.expiryHeartbeatAt) {
+      this.scheduleWorkingExpiry(session.id, next.expiryHeartbeatAt);
+    }
+    if (next.clearExpiry) {
       this.clearWorkingExpiry(session.id);
     }
 
-    const nextLastCompletedAt = session.lastCompletedAt;
-
-    if (session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt) {
+    if (!next.updatedSession) {
       return;
     }
-
-    const tracked: BoundSession = {
-      ...session,
-      updatedAt: screen.capturedAt,
-      isWorking: nextIsWorking,
-      lastCompletedAt: nextLastCompletedAt,
-    };
-    this.db.upsertBoundSession(tracked);
-    this.eventBus.emit({ type: 'session.updated', session: tracked });
+    this.db.upsertBoundSession(next.updatedSession);
+    this.eventBus.emit({ type: 'session.updated', session: next.updatedSession });
   }
 
   private async waitForStartupOutput(session: BoundSession): Promise<void> {
