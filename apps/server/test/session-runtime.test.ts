@@ -88,4 +88,60 @@ describe('Session runtime queue', () => {
       db.close();
     }
   });
+
+  it('keeps screen reads off the mutating queue while observation waits its turn', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-runtime-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const firstWrite = deferred();
+    const firstStarted = deferred();
+    class BlockingTmux extends FakeTmux {
+      override paneText = 'Session ready\n> ';
+
+      override async sendLiteralText(sessionName: string, text: string): Promise<void> {
+        if (text === 'blocked') {
+          firstStarted.resolve();
+          await firstWrite.promise;
+        }
+        await super.sendLiteralText(sessionName, text);
+      }
+    }
+    const tmux = new BlockingTmux();
+    const manager = createRecoveryManager(db, tmux, tempDir, new RealtimeEventBus());
+
+    try {
+      const session = await manager.bindConversation({
+        project,
+        provider,
+        providerSettings,
+        conversationRef: 'runtime-screen-read',
+        title: 'Runtime screen read',
+        kind: 'history',
+      });
+
+      const send = manager.sendKeystrokes(session.id, { text: 'blocked', deferScreenUpdate: true });
+      await firstStarted.promise;
+
+      const screenRead = manager.getSessionScreen(session.id);
+      await expect(Promise.race([
+        screenRead.then((state) => state?.screen.content),
+        new Promise((resolve) => setTimeout(() => resolve('blocked-by-send'), 100)),
+      ])).resolves.not.toBe('blocked-by-send');
+
+      const observation = manager.observeSessions();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const duringSend = db.getBoundSessionById(session.id);
+      expect(duringSend?.status).toBe('bound');
+
+      firstWrite.resolve();
+      await send;
+      await observation;
+
+      const finalSession = db.getBoundSessionById(session.id);
+      expect(finalSession?.status).toBe('bound');
+      expect(finalSession?.lastActivityAt).toBeDefined();
+    } finally {
+      manager.stop();
+      db.close();
+    }
+  });
 });
