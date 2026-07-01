@@ -27,9 +27,7 @@ import {
   extractLastClaudeModelFromText,
   hashScreen,
   screenAllowsLiteralSelectionTokenWithoutInput,
-  screenAllowsLiteralSelectionWithoutInput,
   screenInputChanged,
-  screenInputMatchesText,
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
@@ -42,6 +40,7 @@ import {
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
+import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -615,54 +614,50 @@ export class SessionManager {
     return updated;
   }
 
-  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean; submittedText?: string }): Promise<BoundSession> {
+  async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<BoundSession> {
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
 
-  private async sendKeystrokesInternal(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean; submittedText?: string }): Promise<BoundSession> {
+  private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<BoundSession> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
       throw new Error('Session is no longer running.');
     }
 
-    const hasSpecialKeys = Boolean(payload.keys?.length);
-    if (hasSpecialKeys) {
+    let plan = planKeystrokeSend(undefined, payload, liveSession.provider, {
+      deferredTextReady: payload.deferScreenUpdate === true
+        && (this.runtimeState(liveSession.id).deferredTextReadyUntil ?? 0) > Date.now(),
+    });
+    if (plan.hasSpecialKeys) {
       this.runtimeState(liveSession.id).deferredTextReadyUntil = undefined;
     }
 
-    if (payload.text && !hasSpecialKeys) {
+    if (plan.isTextOnlySend && plan.transportText) {
       let preparedScreen: SessionScreen | undefined;
-      const trimmedTransportText = payload.text.trim();
-      const shouldProbeDeferredSelection = payload.deferScreenUpdate === true && /^\d{1,8}$/.test(trimmedTransportText);
-      const shouldProbeClaudeResumePrompt = payload.deferScreenUpdate === true
-        && liveSession.provider === 'claude';
-      const canUseDeferredTextReadyCache = payload.deferScreenUpdate === true
-        && (this.runtimeState(liveSession.id).deferredTextReadyUntil ?? 0) > Date.now();
-      if ((liveSession.provider === 'codex' || shouldProbeDeferredSelection || shouldProbeClaudeResumePrompt) && !canUseDeferredTextReadyCache) {
+      if (plan.shouldCapturePreparedScreenBeforeText) {
         preparedScreen = await this.captureSessionScreen(liveSession);
         if (
           screenIsStartingUp(preparedScreen)
           || screenShowsQueuedMessageHint(preparedScreen)
-          || (shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen))
+          || (plan.shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen))
         ) {
           preparedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
         }
-        if (shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen)) {
+        if (plan.shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen)) {
           throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
         }
       }
-      if (shouldProbeDeferredSelection && preparedScreen && screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, trimmedTransportText)) {
+      if (plan.shouldProbeDeferredSelection && preparedScreen && screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, plan.trimmedTransportText)) {
         this.runtimeState(liveSession.id).deferredSelectionInput = {
-          text: trimmedTransportText,
+          text: plan.trimmedTransportText,
           expiresAt: Date.now() + DEFERRED_TEXT_READY_TTL_MS,
         };
       }
-      const transportText = payload.text;
-      if (shouldUseBracketedPasteTransport(transportText)) {
-        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
+      if (plan.useBracketedPasteTransport) {
+        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, plan.transportText);
       } else {
-        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
+        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, plan.transportText);
       }
 
       const activityAt = nowIso();
@@ -681,45 +676,44 @@ export class SessionManager {
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
     let shouldRecordTextAsUserInput = false;
-    const submittedText = payload.keys?.includes('Enter') ? payload.submittedText?.trim() : undefined;
+    plan = planKeystrokeSend(beforeScreen, payload, liveSession.provider);
+    const submittedText = plan.submittedText;
     const rememberedSelection = submittedText ? this.runtimeState(liveSession.id).deferredSelectionInput : undefined;
     const submittedDeferredSelection = Boolean(
       rememberedSelection
         && rememberedSelection.expiresAt > Date.now()
         && rememberedSelection.text === submittedText,
     );
-    if (hasSpecialKeys) {
+    if (plan.hasSpecialKeys) {
       this.runtimeState(liveSession.id).deferredSelectionInput = undefined;
     }
 
-    if (payload.text) {
-      const transportText = payload.text;
-      let expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
-      shouldRecordTextAsUserInput = !screenAllowsLiteralSelectionTokenWithoutInput(latestObservedScreen, transportText);
-      const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
-      const shouldPrepareClaudeResumePrompt = liveSession.provider === 'claude'
-        && screenShowsClaudeResumeSessionChoice(latestObservedScreen);
-      if ((payload.keys?.length || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt)) {
+    if (plan.transportText) {
+      const transportText = plan.transportText;
+      let expectsVisibleInputChange = plan.expectsVisibleInputChange;
+      shouldRecordTextAsUserInput = plan.shouldRecordTextAsUserInput;
+      const useBracketedPasteTransport = plan.useBracketedPasteTransport;
+      const shouldPrepareClaudeResumePrompt = plan.shouldPrepareClaudeResumePrompt;
+      if ((plan.hasSpecialKeys || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt)) {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
         latestObservedHash = hashScreen(latestObservedScreen);
         if (shouldPrepareClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(latestObservedScreen)) {
           throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
         }
-        expectsVisibleInputChange = shouldPrepareClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(latestObservedScreen)
-          ? true
-          : !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
-        shouldRecordTextAsUserInput = !screenAllowsLiteralSelectionTokenWithoutInput(latestObservedScreen, transportText);
+        plan = planKeystrokeSend(latestObservedScreen, payload, liveSession.provider);
+        expectsVisibleInputChange = plan.expectsVisibleInputChange;
+        shouldRecordTextAsUserInput = plan.shouldRecordTextAsUserInput;
       }
-      const textAlreadyVisible = Boolean(payload.keys?.length) && screenInputMatchesText(latestObservedScreen, transportText);
+      const textAlreadyVisible = plan.textAlreadyVisible;
       const textEntryScreen = latestObservedScreen;
-      const transportTextShouldCreateUserTurn = submittedTextShouldCreateUserTurn(textEntryScreen, transportText);
+      const transportTextShouldCreateUserTurn = plan.transportTextShouldCreateUserTurn;
       if (!textAlreadyVisible) {
         if (useBracketedPasteTransport) {
           await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
         } else {
           await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
         }
-        if (payload.keys?.length || useBracketedPasteTransport) {
+        if (plan.hasSpecialKeys || useBracketedPasteTransport) {
           const textSettledScreen = await this.waitForInputTextChange(
             liveSession,
             latestObservedHash,
@@ -744,8 +738,8 @@ export class SessionManager {
         }
       }
     }
-    if (payload.keys?.length) {
-      await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
+    if (plan.hasSpecialKeys) {
+      await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys ?? []);
     }
 
     const activityAt = nowIso();
