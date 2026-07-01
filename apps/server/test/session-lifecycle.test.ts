@@ -81,6 +81,31 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('leaves a bound session unchanged when tmux liveness is unknown', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-transient-liveness',
+      title: 'Conversation',
+      kind: 'history',
+    });
+    tmux.hasSessionResults.push(new Error('tmux timed out'));
+
+    const checked = await manager.ensureSession(session.id);
+
+    expect(checked?.id).toBe(session.id);
+    expect(checked?.status).toBe('bound');
+    expect(db.getBoundSessionById(session.id)?.status).toBe('bound');
+    expect(tmux.created).toHaveLength(1);
+    db.close();
+  });
+
   it('resolves and restores pending sessions after provider adoption can be matched', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

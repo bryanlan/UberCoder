@@ -478,7 +478,6 @@ describe('conversation routes', () => {
     };
     db.upsertBoundSession(session);
 
-    const recoverSessions = vi.fn(async () => undefined);
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
@@ -524,7 +523,6 @@ describe('conversation routes', () => {
         }),
       } as never,
       {
-        recoverSessions,
         getSessionScreen,
       } as never,
       new RealtimeEventBus(),
@@ -555,7 +553,6 @@ describe('conversation routes', () => {
       });
       expect(getSessionScreen).toHaveBeenCalledWith('session-live-adopted');
       expect(getConversation).toHaveBeenCalledTimes(1);
-      expect(recoverSessions).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();

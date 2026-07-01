@@ -19,6 +19,7 @@ export class FakeTmux implements TmuxClient {
   captureSequence: string[] = [];
   captureStartLines: Array<number | undefined> = [];
   options: Array<{ sessionName: string; name: string; value: string }> = [];
+  hasSessionResults: Array<boolean | Error> = [];
 
   async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
     this.created.push(sessionName);
@@ -36,7 +37,6 @@ export class FakeTmux implements TmuxClient {
     this.sent.push(text);
   }
   async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
-  async sendLiteralInput(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
   async capturePane(_sessionName?: string, startLine?: number): Promise<string> {
     this.captureStartLines.push(startLine);
     if (this.captureSequence.length > 0) {
@@ -54,7 +54,16 @@ export class FakeTmux implements TmuxClient {
     }
     this.alive.delete(sessionName);
   }
-  async hasSession(sessionName: string): Promise<boolean> { return this.alive.has(sessionName); }
+  async hasSession(sessionName: string): Promise<boolean> {
+    const next = this.hasSessionResults.shift();
+    if (next instanceof Error) {
+      throw next;
+    }
+    if (next !== undefined) {
+      return next;
+    }
+    return this.alive.has(sessionName);
+  }
   async getPanePid(): Promise<number | undefined> { return 4242; }
   async setOption(sessionName: string, name: string, value: string): Promise<void> {
     this.options.push({ sessionName, name, value });

@@ -16,6 +16,7 @@ import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output.js';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
+import { checkTmuxLiveness } from './tmux-health.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -347,12 +348,6 @@ export class SessionManager {
 
   listActiveSessions(): BoundSession[] {
     return this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
-  }
-
-  async recoverSessions(): Promise<void> {
-    for (const session of this.listRestorableSessions()) {
-      await this.refreshSessionState(session);
-    }
   }
 
   stop(): void {
@@ -1094,8 +1089,16 @@ export class SessionManager {
     this.eventBus.emit({ type: 'session.updated', session: releasing });
     this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
 
-    const wasAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
-    if (wasAlive) {
+    const initialLiveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (initialLiveness === 'unknown') {
+      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
+      this.db.upsertBoundSession(failed);
+      this.appendEvent(failed, { type: 'status', text: 'Failed to verify tmux session before release.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      throw new Error(`Failed to verify tmux session ${session.tmuxSessionName}`);
+    }
+
+    if (initialLiveness === 'alive') {
       try {
         await this.tmuxClient.interrupt(session.tmuxSessionName);
         await sleep(300);
@@ -1110,11 +1113,19 @@ export class SessionManager {
       }
     }
 
-    const stillAlive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => true);
-    if (stillAlive) {
+    const finalLiveness = initialLiveness === 'dead'
+      ? 'dead'
+      : await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (finalLiveness !== 'dead') {
       const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
       this.db.upsertBoundSession(failed);
-      this.appendEvent(failed, { type: 'status', text: 'Failed to release tmux session cleanly.', timestamp: nowIso() });
+      this.appendEvent(failed, {
+        type: 'status',
+        text: finalLiveness === 'unknown'
+          ? 'Failed to verify tmux session release.'
+          : 'Failed to release tmux session cleanly.',
+        timestamp: nowIso(),
+      });
       this.eventBus.emit({ type: 'session.updated', session: failed });
       throw new Error(`Failed to release tmux session ${session.tmuxSessionName}`);
     }
@@ -1154,8 +1165,8 @@ export class SessionManager {
     if (!session) {
       return false;
     }
-    const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
-    if (!alive) {
+    const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (liveness !== 'alive') {
       return false;
     }
     const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
@@ -1216,8 +1227,11 @@ export class SessionManager {
     options: { restoreMissing?: boolean } = {},
   ): Promise<BoundSession | undefined> {
     const restoreMissing = options.restoreMissing ?? true;
-    const alive = await this.tmuxClient.hasSession(session.tmuxSessionName).catch(() => false);
-    if (!alive) {
+    const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (liveness === 'unknown') {
+      return session;
+    }
+    if (liveness === 'dead') {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
       this.deferredTextReadyUntil.delete(session.id);

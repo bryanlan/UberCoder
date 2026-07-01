@@ -6,6 +6,26 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { shellEscape } from '../lib/shell.js';
 
+export class TmuxError extends Error {
+  constructor(
+    message: string,
+    readonly args: string[],
+    readonly exitCode: number | undefined,
+    readonly stderr: string,
+    options: { cause?: unknown } = {},
+  ) {
+    super(message, options);
+    this.name = 'TmuxError';
+  }
+}
+
+export function isTmuxSessionMissingError(error: unknown): boolean {
+  if (!(error instanceof TmuxError) || error.exitCode !== 1) {
+    return false;
+  }
+  return /(?:can't find session|no server running)/i.test(error.stderr);
+}
+
 async function runTmux(args: string[]): Promise<string> {
   return await new Promise((resolve, reject) => {
     const child = spawn('tmux', args, {
@@ -15,6 +35,7 @@ async function runTmux(args: string[]): Promise<string> {
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
@@ -22,13 +43,31 @@ async function runTmux(args: string[]): Promise<string> {
     child.stderr.on('data', (chunk) => {
       stderr += chunk.toString();
     });
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(new TmuxError(
+        error instanceof Error ? error.message : 'Failed to run tmux.',
+        args,
+        undefined,
+        stderr.trim(),
+        { cause: error },
+      ));
+    });
     child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       if (code === 0) {
         resolve(stdout.trim());
         return;
       }
-      reject(new Error(stderr.trim() || `tmux exited with code ${code}`));
+      const trimmedStderr = stderr.trim();
+      reject(new TmuxError(
+        trimmedStderr || `tmux exited with code ${code ?? 'unknown'}`,
+        args,
+        code ?? undefined,
+        trimmedStderr,
+      ));
     });
   });
 }
@@ -39,7 +78,6 @@ export interface TmuxClient {
   sendLiteralText(sessionName: string, text: string): Promise<void>;
   pasteText(sessionName: string, text: string): Promise<void>;
   sendKeys(sessionName: string, keys: string[]): Promise<void>;
-  sendLiteralInput(sessionName: string, text: string): Promise<void>;
   capturePane(sessionName: string, startLine?: number): Promise<string>;
   interrupt(sessionName: string): Promise<void>;
   killSession(sessionName: string): Promise<void>;
@@ -96,16 +134,6 @@ export class ShellTmuxClient implements TmuxClient {
     await runTmux(['send-keys', '-t', sessionName, ...keys]);
   }
 
-  async sendLiteralInput(sessionName: string, text: string): Promise<void> {
-    const lines = text.split(/\r?\n/);
-    for (const line of lines) {
-      if (line.length > 0) {
-        await this.sendLiteralText(sessionName, line);
-      }
-      await this.sendKeys(sessionName, ['Enter']);
-    }
-  }
-
   async capturePane(sessionName: string, startLine = -240): Promise<string> {
     const args = ['capture-pane', '-e', '-p', '-J', '-t', sessionName];
     if (Number.isFinite(startLine)) {
@@ -126,8 +154,11 @@ export class ShellTmuxClient implements TmuxClient {
     try {
       await runTmux(['has-session', '-t', sessionName]);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (isTmuxSessionMissingError(error)) {
+        return false;
+      }
+      throw error;
     }
   }
 
