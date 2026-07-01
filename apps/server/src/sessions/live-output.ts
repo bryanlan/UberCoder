@@ -488,6 +488,7 @@ export async function readLiveMessages(session: BoundSession, options: ReadLiveM
 
     const grouped: NormalizedMessage[] = [];
     let lastUserInput = readResult.lastUserInputBeforeText;
+    let hasTrackedUserTurn = Boolean(readResult.lastUserInputBeforeText?.trim());
     const priorUserInputEchoes = readResult.lastUserInputBeforeText ? [readResult.lastUserInputBeforeText] : [];
     for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
       const event = events[eventIndex]!;
@@ -501,6 +502,7 @@ export async function readLiveMessages(session: BoundSession, options: ReadLiveM
           grouped.pop();
         }
         lastUserInput = text;
+        hasTrackedUserTurn = true;
         priorUserInputEchoes.push(text);
         grouped.push({
           id: stableTextHash(`${session.id}:${event.timestamp}:user:${text}`),
@@ -512,6 +514,10 @@ export async function readLiveMessages(session: BoundSession, options: ReadLiveM
           conversationRef: session.conversationRef,
           source: 'user-input',
         });
+        continue;
+      }
+
+      if (event.type === 'raw-output' && !hasTrackedUserTurn) {
         continue;
       }
 

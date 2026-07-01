@@ -39,6 +39,7 @@ describe('readLiveMessages', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-03-07T00:00:00.000Z' }),
+      JSON.stringify({ type: 'user-input', text: 'Run the startup smoke check.', timestamp: '2026-03-07T00:00:00.500Z' }),
       JSON.stringify({ type: 'raw-output', text: '\u001b[2mTip:\u001b[22m When the composer is empty, press Esc to step back and edit your last', timestamp: '2026-03-07T00:00:01.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'message; Enter confirms. Starting MCP servers (0/3): chrome-devtools, codex_apps, playwright (0s esc to interrupt)', timestamp: '2026-03-07T00:00:02.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'St\nta\nart\nti\nSin\nng\nMCP\nsers', timestamp: '2026-03-07T00:00:03.000Z' }),
@@ -62,10 +63,47 @@ describe('readLiveMessages', () => {
     expect(messages.some((message) => /Tip:|Starting MCP servers/.test(message.text) && message.role !== 'status')).toBe(false);
   });
 
+  it('suppresses restored terminal repaint output before a tracked user turn exists', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'status', text: 'Bound codex session in Waltiumweb.', timestamp: '2026-07-01T12:32:15.000Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '› recap where we left things',
+          'We left the usage-tracking work implemented and committed.',
+          'Ran git status --short && git log -3 --oneline --decorate',
+          'g 10s esc to interupt)',
+          'kiin ng',
+          'Woorrk',
+        ].join('\n'),
+        timestamp: '2026-07-01T12:32:28.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-restored-repaint',
+      provider: 'codex',
+      projectSlug: 'waltiumweb',
+      conversationRef: '019f19aa-433d-72c3-a42c-a9a01d659377',
+      tmuxSessionName: 'ac-codex-waltiumweb-restored',
+      status: 'bound',
+      startedAt: '2026-07-01T12:32:15.000Z',
+      updatedAt: '2026-07-01T12:32:28.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => message.role)).toEqual(['status']);
+    expect(messages.some((message) => /recap where we left things|usage-tracking|Ran git status|kiin|Woorrk/.test(message.text))).toBe(false);
+  });
+
   it('keeps prefixed Claude terminal status lines out of assistant messages', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Give me the actual result only.', timestamp: '2026-06-30T19:14:01.000Z' }),
       JSON.stringify({
         type: 'raw-output',
         text: [
@@ -105,6 +143,7 @@ describe('readLiveMessages', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Explain token counting briefly.', timestamp: '2026-07-01T03:19:59.000Z' }),
       JSON.stringify({
         type: 'raw-output',
         text: [
@@ -138,6 +177,11 @@ describe('readLiveMessages', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({
+        type: 'user-input',
+        text: 'Reply with the answer number only.',
+        timestamp: '2026-07-01T03:20:59.000Z',
+      }),
+      JSON.stringify({
         type: 'raw-output',
         text: '42',
         timestamp: '2026-07-01T03:21:00.000Z',
@@ -164,6 +208,11 @@ describe('readLiveMessages', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'What command should I run?',
+        timestamp: '2026-07-01T03:24:59.000Z',
+      }),
       JSON.stringify({
         type: 'raw-output',
         text: 'Run npm test',
@@ -281,6 +330,11 @@ describe('readLiveMessages', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({
+        type: 'user-input',
+        text: 'Suggest the test command.',
+        timestamp: '2026-07-01T03:25:59.000Z',
+      }),
+      JSON.stringify({
         type: 'raw-output',
         text: 'Run npm test',
         timestamp: '2026-07-01T03:26:00.000Z',
@@ -311,6 +365,7 @@ describe('readLiveMessages', () => {
 
     const messages = await readLiveMessages(session);
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Suggest the test command.' },
       { role: 'assistant', source: 'live-output', text: 'Run npm test' },
       { role: 'user', source: 'user-input', text: 'Run npm test' },
       { role: 'assistant', source: 'live-output', text: 'Test run started.' },
@@ -444,11 +499,18 @@ describe('readLiveMessages', () => {
   it('keeps assistant prose that mentions portfolio data configuration', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, JSON.stringify({
-      type: 'raw-output',
-      text: 'I fixed the portfolio data configuration bug.',
-      timestamp: '2026-07-01T02:17:00.000Z',
-    }));
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'What did you fix?',
+        timestamp: '2026-07-01T02:16:59.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'I fixed the portfolio data configuration bug.',
+        timestamp: '2026-07-01T02:17:00.000Z',
+      }),
+    ].join('\n'));
 
     const session: BoundSession = {
       id: 'session-portfolio-prose',
@@ -464,6 +526,7 @@ describe('readLiveMessages', () => {
 
     const messages = await readLiveMessages(session);
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'What did you fix?' },
       { role: 'assistant', source: 'live-output', text: 'I fixed the portfolio data configuration bug.' },
     ]);
   });
@@ -471,14 +534,21 @@ describe('readLiveMessages', () => {
   it('keeps assistant prose that mentions Codex starter prompt text', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, JSON.stringify({
-      type: 'raw-output',
-      text: [
-        'I can explain this codebase by walking through the server.',
-        'Use Write tests for @filename as an example prompt.',
-      ].join('\n'),
-      timestamp: '2026-07-01T02:17:30.000Z',
-    }));
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'How should I start?',
+        timestamp: '2026-07-01T02:17:29.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'I can explain this codebase by walking through the server.',
+          'Use Write tests for @filename as an example prompt.',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:17:30.000Z',
+      }),
+    ].join('\n'));
 
     const session: BoundSession = {
       id: 'session-starter-prose',
@@ -494,6 +564,7 @@ describe('readLiveMessages', () => {
 
     const messages = await readLiveMessages(session);
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'How should I start?' },
       {
         role: 'assistant',
         source: 'live-output',
@@ -701,6 +772,11 @@ describe('readLiveMessages', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({
+        type: 'user-input',
+        text: 'Give me numbered options.',
+        timestamp: '2026-07-01T02:54:59.000Z',
+      }),
+      JSON.stringify({
         type: 'raw-output',
         text: [
           'Choose the next step:',
@@ -735,6 +811,7 @@ describe('readLiveMessages', () => {
 
     const messages = await readLiveMessages(session);
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Give me numbered options.' },
       { role: 'assistant', source: 'live-output', text: 'Choose the next step:\n1. Run the targeted tests\n2. Inspect the debug logs' },
       { role: 'user', source: 'user-input', text: '2' },
       { role: 'assistant', source: 'live-output', text: 'I will inspect the debug logs.' },
@@ -1080,11 +1157,18 @@ describe('readLiveMessages', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const oversizedRecentText = `recent oversized needle ${'payloadword '.repeat(300)}`;
-    await fs.writeFile(eventLogPath, `${JSON.stringify({
-      type: 'raw-output',
-      text: oversizedRecentText,
-      timestamp: '2026-03-07T00:02:00.000Z',
-    })}\n`);
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Give me the oversized recent answer.',
+        timestamp: '2026-03-07T00:01:59.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: oversizedRecentText,
+        timestamp: '2026-03-07T00:02:00.000Z',
+      }),
+    ].join('\n'));
 
     const session: BoundSession = {
       id: 'session-4',

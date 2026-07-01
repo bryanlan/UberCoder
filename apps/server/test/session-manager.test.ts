@@ -1715,47 +1715,44 @@ describe('SessionManager', () => {
     db.close();
   });
 
-  it('rejects Enter-only submitted text when no matching live draft is visible', async () => {
+  it('records Enter-only submitted text on restored history sessions when the screen repaint is stale', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
-      ref: 'pending:stale-bypass-submit',
-      kind: 'pending',
-      projectSlug: project.slug,
-      provider: 'codex',
-      title: 'New conversation',
-      updatedAt: '2026-03-07T00:00:00.000Z',
-      isBound: false,
-      degraded: false,
-      rawMetadata: { pending: true },
-    });
     const tmux = new FakeTmux();
     tmux.paneText = [
       'OpenAI Codex',
       '',
-      'Ready.',
+      'We left the usage-tracking work implemented and committed.',
+      'Ran git status --short && git log -3 --oneline --decorate',
       '❯ ',
       'gpt-5.4 xhigh · 65% left · ~/demo',
     ].join('\n');
-    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
 
     const session = await manager.bindConversation({
       project,
       provider,
       providerSettings,
-      conversationRef: 'pending:stale-bypass-submit',
-      title: 'New conversation',
-      kind: 'pending',
+      conversationRef: 'session-stale-bypass-submit',
+      title: 'Existing conversation',
+      kind: 'history',
     });
 
-    await expect(manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'hello' }))
-      .rejects.toThrow(SessionKeystrokeRejectedError);
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'recap where we left things' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    const pending = db.getPendingConversation('pending:stale-bypass-submit');
-    expect(tmux.sentKeys).toEqual([]);
-    expect(eventLog).not.toContain('"type":"user-input"');
-    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(userInputEvents).toBe(1);
+    expect(eventLog).toContain('"type":"user-input"');
+    expect(eventLog).toContain('"text":"recap where we left things"');
+    unsubscribe();
     db.close();
   });
 

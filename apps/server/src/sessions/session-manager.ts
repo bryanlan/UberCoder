@@ -71,16 +71,6 @@ function screenInputMatchesText(screen: SessionScreen, text: string | undefined)
   return normalizeComparableText(screen.inputText) === normalizeComparableText(text);
 }
 
-function screenInputHasSubmittedTextEvidence(screen: SessionScreen, text: string | undefined): boolean {
-  if (screenInputMatchesText(screen, text)) {
-    return true;
-  }
-  if (!text?.trim() || !shouldUseBracketedPasteTransport(text)) {
-    return false;
-  }
-  return /\[Pasted text #\d+(?: \+\d+ lines)?\]/i.test(screen.inputText);
-}
-
 function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {
   return `${screen.content}\n${screen.status}\n${screen.statusAnsi ?? ''}`
     .split('\n')
@@ -961,33 +951,6 @@ export class SessionManager {
           }
         }
       }
-    }
-    const submittedTextRequiresInputEvidence = Boolean(
-      submittedText
-        && !payload.text
-        && !submittedDeferredSelection
-        && submittedTextShouldCreateUserTurn(beforeScreen, submittedText),
-    );
-    if (submittedTextRequiresInputEvidence && submittedText && !screenInputHasSubmittedTextEvidence(latestObservedScreen, submittedText)) {
-      const evidenceScreen = await this.waitForScreenMatch(
-        liveSession,
-        latestObservedHash,
-        combinedTextKeySettleWaitMs(submittedText),
-        (screen) => screenInputHasSubmittedTextEvidence(screen, submittedText),
-      );
-      if (!evidenceScreen || !screenInputHasSubmittedTextEvidence(evidenceScreen, submittedText)) {
-        this.appendDebugTrace(liveSession, {
-          action: 'send-keystrokes-rejected',
-          text: submittedText,
-          keys: payload.keys,
-          before: beforeScreen,
-          after: evidenceScreen ?? latestObservedScreen,
-        });
-        throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
-      }
-      latestObservedScreen = evidenceScreen;
-      latestObservedHash = hashScreen(evidenceScreen);
-      this.publishScreenUpdate(liveSession, evidenceScreen);
     }
     if (payload.keys?.length) {
       await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
