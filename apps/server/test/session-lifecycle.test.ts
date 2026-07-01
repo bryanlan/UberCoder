@@ -30,7 +30,7 @@ describe('SessionManager lifecycle', () => {
     expect(tmux.sentKeys).toEqual([['Enter']]);
 
     await manager.releaseSession(session.id);
-    const ended = db.getBoundSessionById(session.id);
+    const ended = db.boundSessions.getById(session.id);
     expect(ended?.status).toBe('ended');
     db.close();
   });
@@ -51,8 +51,8 @@ describe('SessionManager lifecycle', () => {
       kind: 'history',
     })).rejects.toThrow(/pipe-pane failed/);
 
-    expect(db.listBoundSessions()).toHaveLength(1);
-    expect(db.listBoundSessions()[0]?.status).toBe('error');
+    expect(db.boundSessions.list()).toHaveLength(1);
+    expect(db.boundSessions.list()[0]?.status).toBe('error');
     expect(tmux.alive.size).toBe(0);
     db.close();
   });
@@ -101,7 +101,7 @@ describe('SessionManager lifecycle', () => {
 
     expect(checked?.id).toBe(session.id);
     expect(checked?.status).toBe('bound');
-    expect(db.getBoundSessionById(session.id)?.status).toBe('bound');
+    expect(db.boundSessions.getById(session.id)?.status).toBe('bound');
     expect(tmux.created).toHaveLength(1);
     db.close();
   });
@@ -138,7 +138,7 @@ describe('SessionManager lifecycle', () => {
       },
     };
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), recoveryProvider);
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:restore-me',
       kind: 'pending',
       projectSlug: project.slug,
@@ -170,7 +170,7 @@ describe('SessionManager lifecycle', () => {
     expect(restored?.id).toBe(session.id);
     expect(restored?.conversationRef).toBe('real-restored');
     expect(restored?.resumeConversationRef).toBe('real-restored');
-    expect(db.getPendingConversation('pending:restore-me')?.rawMetadata?.adoptedConversationRef).toBe('real-restored');
+    expect(db.pendingConversations.get('pending:restore-me')?.rawMetadata?.adoptedConversationRef).toBe('real-restored');
     expect(tmux.createdCommands.at(-1)).toContain("'codex' 'resume' 'real-restored'");
     db.close();
   });
@@ -180,7 +180,7 @@ describe('SessionManager lifecycle', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:unresolved',
       kind: 'pending',
       projectSlug: project.slug,
@@ -211,8 +211,8 @@ describe('SessionManager lifecycle', () => {
 
     expect(restored).toBeUndefined();
     expect(tmux.created).toHaveLength(1);
-    expect(db.getBoundSessionById(session.id)?.status).toBe('error');
-    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('error');
+    expect(db.boundSessions.getById(session.id)?.shouldRestore).toBe(true);
     db.close();
   });
 
@@ -235,8 +235,8 @@ describe('SessionManager lifecycle', () => {
     await manager.observeSessions();
 
     expect(tmux.created).toHaveLength(1);
-    expect(db.getBoundSessionById(session.id)?.status).toBe('bound');
-    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('bound');
+    expect(db.boundSessions.getById(session.id)?.shouldRestore).toBe(true);
 
     const restored = await manager.ensureSession(session.id);
 
@@ -250,7 +250,7 @@ describe('SessionManager lifecycle', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:submitted-dead',
       kind: 'pending',
       projectSlug: project.slug,
@@ -279,8 +279,8 @@ describe('SessionManager lifecycle', () => {
 
     await manager.observeSessions();
 
-    const observed = db.getBoundSessionById(session.id);
-    const pending = db.getPendingConversation('pending:submitted-dead');
+    const observed = db.boundSessions.getById(session.id);
+    const pending = db.pendingConversations.get('pending:submitted-dead');
     expect(observed?.status).toBe('error');
     expect(observed?.shouldRestore).toBe(true);
     expect(pending?.isBound).toBe(false);
@@ -294,7 +294,7 @@ describe('SessionManager lifecycle', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:zero-turn-observed',
       kind: 'pending',
       projectSlug: project.slug,
@@ -322,9 +322,9 @@ describe('SessionManager lifecycle', () => {
 
     await manager.observeSessions();
 
-    expect(db.getBoundSessionById(session.id)?.status).toBe('ended');
-    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(false);
-    expect(db.getPendingConversation('pending:zero-turn-observed')?.isBound).toBe(false);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('ended');
+    expect(db.boundSessions.getById(session.id)?.shouldRestore).toBe(false);
+    expect(db.pendingConversations.get('pending:zero-turn-observed')?.isBound).toBe(false);
     expect(tmux.created).toHaveLength(1);
     db.close();
   });
@@ -334,7 +334,7 @@ describe('SessionManager lifecycle', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:zero-turn',
       kind: 'pending',
       projectSlug: project.slug,
@@ -363,9 +363,9 @@ describe('SessionManager lifecycle', () => {
     const restored = await manager.ensureSession(session.id);
 
     expect(restored).toBeUndefined();
-    expect(db.getBoundSessionById(session.id)?.status).toBe('ended');
-    expect(db.getBoundSessionById(session.id)?.shouldRestore).toBe(false);
-    expect(db.getPendingConversation('pending:zero-turn')?.isBound).toBe(false);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('ended');
+    expect(db.boundSessions.getById(session.id)?.shouldRestore).toBe(false);
+    expect(db.pendingConversations.get('pending:zero-turn')?.isBound).toBe(false);
     db.close();
   });
 
@@ -386,7 +386,7 @@ describe('SessionManager lifecycle', () => {
 
     tmux.failKill = true;
     await expect(manager.releaseSession(session.id)).rejects.toThrow(/Failed to release/);
-    expect(db.getBoundSessionById(session.id)?.status).toBe('error');
+    expect(db.boundSessions.getById(session.id)?.status).toBe('error');
     db.close();
   });
 

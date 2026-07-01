@@ -116,7 +116,7 @@ describe('SessionManager screen state', () => {
       title: 'Conversation',
       kind: 'pending',
     });
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:claude-model-from-log',
       kind: 'pending',
       projectSlug: project.slug,
@@ -134,7 +134,7 @@ describe('SessionManager screen state', () => {
     const liveScreen = await manager.getSessionScreen(session.id);
     expect(liveScreen?.screen.model).toBe('Haiku 4.5');
     expect(liveScreen?.screen.status).toContain('bypass permissions on');
-    expect(db.getPendingConversation('pending:claude-model-from-log')?.rawMetadata?.lastLiveModel).toBe('Haiku 4.5');
+    expect(db.pendingConversations.get('pending:claude-model-from-log')?.rawMetadata?.lastLiveModel).toBe('Haiku 4.5');
 
     await fs.writeFile(session.rawLogPath!, '');
     const restoredFromMetadata = await manager.getSessionScreen(session.id);

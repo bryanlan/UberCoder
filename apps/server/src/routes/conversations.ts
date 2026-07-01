@@ -105,13 +105,13 @@ function hideReadableScreenContent(screen: SessionScreen | undefined): SessionSc
 
 function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
   const updatedAt = nowIso();
-  db.putPendingConversation({
+  db.pendingConversations.put({
     ...pending,
     isBound: false,
     boundSessionId: undefined,
     updatedAt,
   });
-  db.upsertBoundSession({
+  db.boundSessions.upsert({
     ...session,
     status: 'ended',
     shouldRestore: false,
@@ -153,12 +153,12 @@ export async function registerConversationRoutes(
     const providerSettings = projectService.getMergedProviderSettings(project, providerId);
     const provider = providerRegistry.get(providerId);
 
-    const pendingSummary = db.getPendingConversation(conversationRef);
+    const pendingSummary = db.pendingConversations.get(conversationRef);
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
-    const cachedSummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+    const cachedSummary = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
-    const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+    const boundSession = db.boundSessions.getRestorableByConversation(projectSlug, providerId, resolvedConversationRef);
 
     const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
     const rawLiveScreen = liveSessionState?.screen;
@@ -259,7 +259,7 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Provider is disabled for this project.' });
       return;
     }
-    const existingPending = db.listPendingConversations()
+    const existingPending = db.pendingConversations.list()
       .find((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId && conversation.isBound);
     if (existingPending?.boundSessionId) {
       const existingSession = sessions.getSessionById(existingPending.boundSessionId);
@@ -301,10 +301,10 @@ export async function registerConversationRoutes(
         title: pendingConversation.title,
         kind: 'pending',
       });
-      db.putPendingConversation({ ...pendingConversation, boundSessionId: session.id, isBound: true });
+      db.pendingConversations.put({ ...pendingConversation, boundSessionId: session.id, isBound: true });
       return { session, conversationRef: pendingRef };
     } catch (error) {
-      db.deletePendingConversation(pendingRef);
+      db.pendingConversations.delete(pendingRef);
       throw error;
     }
   });
@@ -333,10 +333,10 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Provider is disabled for this project.' });
       return;
     }
-    const pendingSummary = db.getPendingConversation(conversationRef);
+    const pendingSummary = db.pendingConversations.get(conversationRef);
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
-    const cached = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+    const cached = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
     if (!cached) {
       if (pendingSummary && !parsedBody.data.force) {
         const existingSession = pendingSummary.boundSessionId
@@ -408,10 +408,10 @@ export async function registerConversationRoutes(
       return;
     }
 
-    const pendingSummary = db.getPendingConversation(conversationRef);
+    const pendingSummary = db.pendingConversations.get(conversationRef);
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
-    const historySummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+    const historySummary = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
     const summary = adoptedConversationRef ? (historySummary ?? pendingSummary) : (pendingSummary ?? historySummary);
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });
@@ -420,12 +420,12 @@ export async function registerConversationRoutes(
 
     const updatedAt = nowIso();
     const title = parsedBody.data.title.trim();
-    db.setConversationTitleOverride(projectSlug, providerId, resolvedConversationRef, title, updatedAt);
-    db.updateConversationSearchTitle(projectSlug, providerId, resolvedConversationRef, title);
+    db.titleOverrides.set(projectSlug, providerId, resolvedConversationRef, title, updatedAt);
+    db.searchIndex.updateTitle(projectSlug, providerId, resolvedConversationRef, title);
 
-    const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+    const boundSession = db.boundSessions.getRestorableByConversation(projectSlug, providerId, resolvedConversationRef);
     if (boundSession) {
-      db.upsertBoundSession({
+      db.boundSessions.upsert({
         ...boundSession,
         title,
         updatedAt,
@@ -433,8 +433,8 @@ export async function registerConversationRoutes(
     }
 
     const updatedConversation = resolvedConversationRef.startsWith('pending:')
-      ? db.getPendingConversation(resolvedConversationRef)
-      : db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
+      ? db.pendingConversations.get(resolvedConversationRef)
+      : db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
 
     if (!updatedConversation) {
       reply.code(500).send({ error: 'Updated conversation could not be loaded.' });

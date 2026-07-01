@@ -203,11 +203,11 @@ export class SessionManager {
   }
 
   private listRestorableSessions(): BoundSession[] {
-    return this.db.listBoundSessions().filter((session) => session.shouldRestore && session.status !== 'ended');
+    return this.db.boundSessions.list().filter((session) => session.shouldRestore && session.status !== 'ended');
   }
 
   listActiveSessions(): BoundSession[] {
-    return this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
+    return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
   stop(): void {
@@ -274,7 +274,7 @@ export class SessionManager {
       rawLogPath,
       eventLogPath,
     };
-    this.db.upsertBoundSession(updated);
+    this.db.boundSessions.upsert(updated);
     return updated;
   }
 
@@ -302,7 +302,7 @@ export class SessionManager {
       return session;
     }
 
-    const pending = this.db.getPendingConversation(session.conversationRef);
+    const pending = this.db.pendingConversations.get(session.conversationRef);
     if (!pending) {
       return session;
     }
@@ -323,14 +323,14 @@ export class SessionManager {
     if (adoption.reboundSession) {
       this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
     }
-    return this.db.getBoundSessionById(session.id) ?? session;
+    return this.db.boundSessions.getById(session.id) ?? session;
   }
 
   private hasRecordedPendingUserInput(session: BoundSession): boolean {
     if (!session.conversationRef.startsWith('pending:')) {
       return false;
     }
-    const pending = this.db.getPendingConversation(session.conversationRef);
+    const pending = this.db.pendingConversations.get(session.conversationRef);
     return pendingConversationHasRecordedUserInput(pending);
   }
 
@@ -368,7 +368,7 @@ export class SessionManager {
     const project = await dependencies.projectService.getProjectBySlug(session.projectSlug);
     if (!project) {
       const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: project not found.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
       return undefined;
@@ -378,7 +378,7 @@ export class SessionManager {
     const providerSettings = dependencies.projectService.getMergedProviderSettings(project, session.provider);
     if (!providerSettings.enabled) {
       const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: provider is disabled.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
       return undefined;
@@ -388,7 +388,7 @@ export class SessionManager {
     const launch = this.buildRecoveryLaunchCommand(resolvedSession, project, provider, providerSettings);
     if (!launch) {
       const pending = resolvedSession.conversationRef.startsWith('pending:')
-        ? this.db.getPendingConversation(resolvedSession.conversationRef)
+        ? this.db.pendingConversations.get(resolvedSession.conversationRef)
         : undefined;
       const hasRecordedUserInput = this.hasRecordedPendingUserInput(resolvedSession);
       if (pending && !hasRecordedUserInput) {
@@ -406,7 +406,7 @@ export class SessionManager {
       }
       const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
       const shouldEmitFailure = resolvedSession.status !== 'error';
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       if (shouldEmitFailure) {
         this.appendEvent(failed, {
           type: 'status',
@@ -426,7 +426,7 @@ export class SessionManager {
       isWorking: false,
       pid: undefined,
     };
-    this.db.upsertBoundSession(restoring);
+    this.db.boundSessions.upsert(restoring);
     this.eventBus.emit({ type: 'session.updated', session: restoring });
     this.appendEvent(restoring, { type: 'status', text: 'Restoring bound session.', timestamp: nowIso() });
 
@@ -447,7 +447,7 @@ export class SessionManager {
         updatedAt: nowIso(),
         pid,
       };
-      this.db.upsertBoundSession(rebound);
+      this.db.boundSessions.upsert(rebound);
       this.appendEvent(rebound, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: rebound });
       this.watchSessionOutput(rebound);
@@ -468,7 +468,7 @@ export class SessionManager {
         updatedAt: nowIso(),
         isWorking: false,
       };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, {
         type: 'status',
         text: `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
@@ -488,7 +488,7 @@ export class SessionManager {
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
   }): Promise<BoundSession> {
-    const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
+    const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
     const sessionId = existing?.id ?? randomUUID();
     const result = await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
     return result.session;
@@ -503,7 +503,7 @@ export class SessionManager {
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
   }, sessionId: string): Promise<SessionCommandResult> {
-    const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
+    const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
       const liveSession = await this.refreshSessionState(existing);
       if (liveSession) {
@@ -547,7 +547,7 @@ export class SessionManager {
       rawLogPath,
       eventLogPath,
     };
-    this.db.upsertBoundSession(session);
+    this.db.boundSessions.upsert(session);
 
     let tmuxCreated = false;
     try {
@@ -567,7 +567,7 @@ export class SessionManager {
         updatedAt: nowIso(),
         pid,
       };
-      this.db.upsertBoundSession(boundSession);
+      this.db.boundSessions.upsert(boundSession);
       let recordedInitialUserInput: RecordedUserInput | undefined;
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
         const inputAt = nowIso();
@@ -603,7 +603,7 @@ export class SessionManager {
         updatedAt: nowIso(),
         isWorking: false,
       };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, {
         type: 'status',
         text: `Failed to bind session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
@@ -652,7 +652,7 @@ export class SessionManager {
       ...current,
       ...patch,
     };
-    this.db.upsertBoundSession(updated);
+    this.db.boundSessions.upsert(updated);
     return updated;
   }
 
@@ -874,14 +874,14 @@ export class SessionManager {
       updatedAt: nowIso(),
       isWorking: false,
     };
-    this.db.upsertBoundSession(releasing);
+    this.db.boundSessions.upsert(releasing);
     this.eventBus.emit({ type: 'session.updated', session: releasing });
     this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
 
     const initialLiveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (initialLiveness === 'unknown') {
       const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, { type: 'status', text: 'Failed to verify tmux session before release.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: failed });
       throw new Error(`Failed to verify tmux session ${session.tmuxSessionName}`);
@@ -907,7 +907,7 @@ export class SessionManager {
       : await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (finalLiveness !== 'dead') {
       const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.upsertBoundSession(failed);
+      this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, {
         type: 'status',
         text: finalLiveness === 'unknown'
@@ -922,11 +922,11 @@ export class SessionManager {
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
     const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
-    this.db.upsertBoundSession(ended);
+    this.db.boundSessions.upsert(ended);
     if (session.conversationRef.startsWith('pending:')) {
-      const pending = this.db.getPendingConversation(session.conversationRef);
+      const pending = this.db.pendingConversations.get(session.conversationRef);
       if (pending) {
-        this.db.putPendingConversation({
+        this.db.pendingConversations.put({
           ...pending,
           isBound: false,
           boundSessionId: undefined,
@@ -939,15 +939,15 @@ export class SessionManager {
   }
 
   getSessionById(sessionId: string): BoundSession | undefined {
-    return this.db.getBoundSessionById(sessionId);
+    return this.db.boundSessions.getById(sessionId);
   }
 
   getSessionByConversation(projectSlug: string, provider: ProviderId, conversationRef: string): BoundSession | undefined {
-    return this.db.getRestorableSessionByConversation(projectSlug, provider, conversationRef);
+    return this.db.boundSessions.getRestorableByConversation(projectSlug, provider, conversationRef);
   }
 
   async allowsLiteralSelectionKeystroke(sessionId: string, text: string): Promise<boolean> {
-    const session = this.db.getBoundSessionById(sessionId);
+    const session = this.db.boundSessions.getById(sessionId);
     if (!session) {
       return false;
     }
@@ -1005,7 +1005,7 @@ export class SessionManager {
   }
 
   private mustGetSession(sessionId: string): BoundSession {
-    const session = this.db.getBoundSessionById(sessionId);
+    const session = this.db.boundSessions.getById(sessionId);
     if (!session) {
       throw new Error(`Unknown session ${sessionId}`);
     }
@@ -1046,7 +1046,7 @@ export class SessionManager {
         updatedAt: nowIso(),
         isWorking: false,
       };
-      this.db.upsertBoundSession(ended);
+      this.db.boundSessions.upsert(ended);
       if (terminalStatus === 'error') {
         this.appendEvent(ended, {
           type: 'status',
@@ -1067,7 +1067,7 @@ export class SessionManager {
           updatedAt: nowIso(),
         };
     if (refreshed !== session) {
-      this.db.upsertBoundSession(refreshed);
+      this.db.boundSessions.upsert(refreshed);
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     this.watchSessionOutput(refreshed);
@@ -1227,7 +1227,7 @@ export class SessionManager {
       }
       this.clearWorkingExpiry(sessionId);
       if (decision.action === 'update') {
-        this.db.upsertBoundSession(decision.updatedSession);
+        this.db.boundSessions.upsert(decision.updatedSession);
         this.eventBus.emit({ type: 'session.updated', session: decision.updatedSession });
       }
     } catch {
@@ -1253,7 +1253,7 @@ export class SessionManager {
           }
         : session;
       if (shouldTrackOutput) {
-        this.db.upsertBoundSession(updated);
+        this.db.boundSessions.upsert(updated);
         this.scheduleWorkingExpiry(sessionId, now);
         this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       }
@@ -1485,7 +1485,7 @@ export class SessionManager {
     if (!next.updatedSession) {
       return;
     }
-    this.db.upsertBoundSession(next.updatedSession);
+    this.db.boundSessions.upsert(next.updatedSession);
     this.eventBus.emit({ type: 'session.updated', session: next.updatedSession });
   }
 
@@ -1554,7 +1554,7 @@ export class SessionManager {
     if (!session.conversationRef.startsWith('pending:')) {
       return undefined;
     }
-    const pending = this.db.getPendingConversation(session.conversationRef);
+    const pending = this.db.pendingConversations.get(session.conversationRef);
     const model = pending?.rawMetadata?.[SESSION_MODEL_METADATA_KEY];
     return typeof model === 'string' && model.trim() ? model.trim() : undefined;
   }
@@ -1564,14 +1564,14 @@ export class SessionManager {
     if (!session.conversationRef.startsWith('pending:')) {
       return;
     }
-    const pending = this.db.getPendingConversation(session.conversationRef);
+    const pending = this.db.pendingConversations.get(session.conversationRef);
     if (!pending) {
       return;
     }
     if (pending.rawMetadata?.[SESSION_MODEL_METADATA_KEY] === model) {
       return;
     }
-    this.db.putPendingConversation({
+    this.db.pendingConversations.put({
       ...pending,
       rawMetadata: {
         ...(pending.rawMetadata ?? {}),

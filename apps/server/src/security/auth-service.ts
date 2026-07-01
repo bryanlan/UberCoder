@@ -74,7 +74,7 @@ export class AuthService {
   async logout(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     const sessionId = this.resolveCookieSessionId(request.cookies?.[this.cookieName]);
     if (sessionId) {
-      this.db.deleteAuthSession(sessionId);
+      this.db.authSessions.delete(sessionId);
     }
     reply.clearCookie(this.cookieName, {
       path: '/',
@@ -89,7 +89,7 @@ export class AuthService {
     const cookies = parseCookieHeader(cookieHeader);
     const sessionId = this.resolveCookieSessionId(cookies[this.cookieName]);
     if (sessionId) {
-      const session = this.db.getAuthSession(sessionId);
+      const session = this.db.authSessions.get(sessionId);
       if (session && session.expiresAt > nowIso()) return true;
     }
     if (!this.canTrustTailscaleHeaders(remoteAddress)) return false;
@@ -117,7 +117,7 @@ export class AuthService {
   }
 
   private createSession(input: { via: 'password' | 'tailscale'; userLogin?: string; displayName?: string }): AuthSessionRow {
-    this.db.deleteExpiredAuthSessions(nowIso());
+    this.db.authSessions.deleteExpired(nowIso());
     const createdAt = nowIso();
     const expiresAt = new Date(Date.now() + this.config.security.sessionTtlHours * 60 * 60 * 1000).toISOString();
     const session: AuthSessionRow = {
@@ -130,22 +130,22 @@ export class AuthService {
       createdAt,
       lastSeenAt: createdAt,
     };
-    this.db.upsertAuthSession(session);
+    this.db.authSessions.upsert(session);
     return session;
   }
 
   private getSessionFromCookie(cookieValue: string | undefined): AuthSessionRow | undefined {
-    this.db.deleteExpiredAuthSessions(nowIso());
+    this.db.authSessions.deleteExpired(nowIso());
     const sessionId = this.resolveCookieSessionId(cookieValue);
     if (!sessionId) return undefined;
-    const session = this.db.getAuthSession(sessionId);
+    const session = this.db.authSessions.get(sessionId);
     if (!session) return undefined;
     if (session.expiresAt <= nowIso()) {
-      this.db.deleteAuthSession(session.id);
+      this.db.authSessions.delete(session.id);
       return undefined;
     }
     const touched: AuthSessionRow = { ...session, lastSeenAt: nowIso() };
-    this.db.upsertAuthSession(touched);
+    this.db.authSessions.upsert(touched);
     return touched;
   }
 

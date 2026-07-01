@@ -12,7 +12,7 @@ describe('SessionManager pending first turn', () => {
   it('launches pending sessions with an initial prompt argument when requested', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:launch-arg',
       kind: 'pending',
       projectSlug: project.slug,
@@ -37,7 +37,7 @@ describe('SessionManager pending first turn', () => {
     });
 
     expect(tmux.createdCommands[0]).toContain('Reply with exactly: smoke-token');
-    expect(db.getPendingConversation('pending:launch-arg')?.rawMetadata?.lastUserInputHash).toBeTruthy();
+    expect(db.pendingConversations.get('pending:launch-arg')?.rawMetadata?.lastUserInputHash).toBeTruthy();
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('"type":"user-input"');
     db.close();
   });
@@ -86,7 +86,7 @@ describe('SessionManager pending first turn', () => {
 
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:keystroke-first-turn',
       kind: 'pending',
       projectSlug: project.slug,
@@ -113,8 +113,8 @@ describe('SessionManager pending first turn', () => {
 
     expect(tmux.sent).toEqual(['yes i trust it']);
     expect(tmux.sentKeys).toContainEqual(['Enter']);
-    expect(db.getPendingConversation('pending:keystroke-first-turn')?.rawMetadata?.lastUserInputHash).toBeTruthy();
-    expect(db.getPendingConversation('pending:keystroke-first-turn')?.rawMetadata?.lastUserInputPreview).toBe('yes i trust it');
+    expect(db.pendingConversations.get('pending:keystroke-first-turn')?.rawMetadata?.lastUserInputHash).toBeTruthy();
+    expect(db.pendingConversations.get('pending:keystroke-first-turn')?.rawMetadata?.lastUserInputPreview).toBe('yes i trust it');
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('"type":"user-input"');
     db.close();
   });

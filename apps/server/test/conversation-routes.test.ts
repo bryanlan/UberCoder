@@ -12,7 +12,7 @@ describe('conversation routes', () => {
   it('force rebind releases an existing live session before creating a replacement', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-ref',
       kind: 'history',
       projectSlug: 'demo',
@@ -117,7 +117,7 @@ describe('conversation routes', () => {
   it('binds an adopted pending alias through its indexed history conversation', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'real-history',
       kind: 'history',
       projectSlug: 'demo',
@@ -128,7 +128,7 @@ describe('conversation routes', () => {
       isBound: false,
       degraded: false,
     } satisfies ConversationSummary]);
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:adopted',
       kind: 'pending',
       projectSlug: 'demo',
@@ -228,7 +228,7 @@ describe('conversation routes', () => {
   it('creates a new pending conversation when the old zero-turn pending bind cannot be restored and gets cleared', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:stale',
       kind: 'pending',
       projectSlug: 'demo',
@@ -254,7 +254,7 @@ describe('conversation routes', () => {
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:01:00.000Z',
     };
-    db.upsertBoundSession(staleSession);
+    db.boundSessions.upsert(staleSession);
 
     const freshSession: BoundSession = {
       id: 'session-new',
@@ -350,7 +350,7 @@ describe('conversation routes', () => {
   it('clears an unrestorable pending bind with recorded input before starting a replacement', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:stale',
       kind: 'pending',
       projectSlug: 'demo',
@@ -380,7 +380,7 @@ describe('conversation routes', () => {
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:01:00.000Z',
     };
-    db.upsertBoundSession(staleSession);
+    db.boundSessions.upsert(staleSession);
 
     const freshSession: BoundSession = {
       id: 'session-new',
@@ -449,8 +449,8 @@ describe('conversation routes', () => {
       expect(response.statusCode).toBe(200);
       expect(ensureSession).toHaveBeenCalledWith('session-stale');
       expect(bindConversation).toHaveBeenCalledOnce();
-      expect(db.getPendingConversation('pending:stale')?.isBound).toBe(false);
-      expect(db.getBoundSessionById('session-stale')).toMatchObject({
+      expect(db.pendingConversations.get('pending:stale')?.isBound).toBe(false);
+      expect(db.boundSessions.getById('session-stale')).toMatchObject({
         status: 'ended',
         shouldRestore: false,
       });
@@ -476,7 +476,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T17:02:00.000Z',
       isWorking: true,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const getSessionScreen = vi.fn(async () => ({
       session,
@@ -562,7 +562,7 @@ describe('conversation routes', () => {
   it('returns 409 when a history conversation is still durably bound but cannot be restored', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-ref',
       kind: 'history',
       projectSlug: 'demo',
@@ -677,7 +677,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'cached-history',
       kind: 'history',
       projectSlug: 'demo',
@@ -772,7 +772,7 @@ describe('conversation routes', () => {
   it('serves metadata-only message requests from the index without reading transcript files', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'cached-history',
       kind: 'history',
       projectSlug: 'demo',
@@ -859,7 +859,7 @@ describe('conversation routes', () => {
   it('does not split same-role transcript runs at timeline page boundaries', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-ref',
       kind: 'history',
       projectSlug: 'demo',
@@ -1038,7 +1038,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-ref',
       kind: 'history',
       projectSlug: 'demo',
@@ -1063,7 +1063,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T18:02:07.000Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -1190,7 +1190,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-pending-live',
       kind: 'history',
       projectSlug: 'demo',
@@ -1215,7 +1215,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T18:02:01.000Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -1354,7 +1354,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-stale-short-scrollback',
       kind: 'history',
       projectSlug: 'demo',
@@ -1379,7 +1379,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T18:02:02.000Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -1560,7 +1560,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-usage-prod',
       kind: 'history',
       projectSlug: 'demo',
@@ -1585,7 +1585,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-07-01T18:37:20.268Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -1698,7 +1698,7 @@ describe('conversation routes', () => {
   it('does not expose raw live screen scrollback in transcript-backed timelines', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-long-tail',
       kind: 'history',
       projectSlug: 'demo',
@@ -1723,7 +1723,7 @@ describe('conversation routes', () => {
       updatedAt: '2026-03-14T18:16:00.000Z',
       lastActivityAt: '2026-03-14T18:16:00.000Z',
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = Array.from({ length: 16 }, (_, index) => ({
       id: `history-assistant-${index}`,
@@ -1820,7 +1820,7 @@ describe('conversation routes', () => {
   it('does not expose raw live screen scrollback with interleaved terminal chrome', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-chrome-tail',
       kind: 'history',
       projectSlug: 'demo',
@@ -1845,7 +1845,7 @@ describe('conversation routes', () => {
       updatedAt: '2026-03-14T18:02:00.000Z',
       lastActivityAt: '2026-03-14T18:02:00.000Z',
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const transcriptLineA = 'The data availability update now derives its real data window from the source rows instead of a fixed mock constant.';
     const transcriptLineB = 'The managed accounts client shows a quiet caption and warns only when the requested start predates available history.';
@@ -1949,7 +1949,7 @@ describe('conversation routes', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('waltiumweb', 'claude', [{
+    db.conversationIndex.replace('waltiumweb', 'claude', [{
       ref: 'claude-duplicate-tail',
       kind: 'history',
       projectSlug: 'waltiumweb',
@@ -1994,7 +1994,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-06-30T12:35:41.995Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -2112,7 +2112,7 @@ describe('conversation routes', () => {
   it('trims Claude status-only live output and saved prompt echoes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('waltiumweb', 'claude', [{
+    db.conversationIndex.replace('waltiumweb', 'claude', [{
       ref: 'claude-status-tail',
       kind: 'history',
       projectSlug: 'waltiumweb',
@@ -2137,7 +2137,7 @@ describe('conversation routes', () => {
       updatedAt: '2026-06-30T19:14:01.072Z',
       lastActivityAt: '2026-06-30T19:14:01.072Z',
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [{
       id: 'history-user-short-prompt',
@@ -2259,7 +2259,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-input-buffer',
       kind: 'history',
       projectSlug: 'demo',
@@ -2285,7 +2285,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T18:02:07.000Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const providerMessages: NormalizedMessage[] = [
       {
@@ -2402,7 +2402,7 @@ describe('conversation routes', () => {
     ].join('\n'));
 
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:event-tail',
       kind: 'pending',
       projectSlug: 'demo',
@@ -2429,7 +2429,7 @@ describe('conversation routes', () => {
       lastActivityAt: '2026-03-14T18:02:05.000Z',
       eventLogPath,
     };
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const getConversation = vi.fn(async () => null);
     const getSessionScreen = vi.fn(async () => ({

@@ -48,7 +48,7 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
   text: string;
 }): Promise<PendingCodexFirstTurnRestartResult> {
   const pendingConversation = input.session.conversationRef.startsWith('pending:')
-    ? input.db.getPendingConversation(input.session.conversationRef)
+    ? input.db.pendingConversations.get(input.session.conversationRef)
     : undefined;
   const isFirstPendingCodexTurn =
     input.session.provider === 'codex'

@@ -49,8 +49,8 @@ describe('IndexingService', () => {
   it('adopts pending refs into already indexed vendor conversations on a later refresh', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [conversation]);
-    db.putPendingConversation({
+    db.conversationIndex.replace('demo', 'codex', [conversation]);
+    db.pendingConversations.put({
       ref: 'pending:test',
       kind: 'pending',
       projectSlug: 'demo',
@@ -66,7 +66,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'match-hash',
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-1',
       provider: 'codex',
       projectSlug: 'demo',
@@ -95,9 +95,9 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getPendingConversation('pending:test')?.rawMetadata?.adoptedConversationRef).toBe('real-session');
-    expect(db.getPendingConversation('pending:test')?.isBound).toBe(false);
-    expect(db.getBoundSessionById('session-1')?.conversationRef).toBe('real-session');
+    expect(db.pendingConversations.get('pending:test')?.rawMetadata?.adoptedConversationRef).toBe('real-session');
+    expect(db.pendingConversations.get('pending:test')?.isBound).toBe(false);
+    expect(db.boundSessions.getById('session-1')?.conversationRef).toBe('real-session');
     db.close();
   });
 });

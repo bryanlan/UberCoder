@@ -47,7 +47,7 @@ describe('IndexingService', () => {
     await fs.mkdir(projectPath, { recursive: true });
     await fs.mkdir(providerRoot, { recursive: true });
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'cached-conversation',
       kind: 'history',
       projectSlug: 'demo',
@@ -84,7 +84,7 @@ describe('IndexingService', () => {
   it('attaches session summaries to each bound conversation row', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'conversation-with-summary',
       kind: 'history',
       projectSlug: 'demo',
@@ -94,7 +94,7 @@ describe('IndexingService', () => {
       isBound: false,
       degraded: false,
     }]);
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-with-summary',
       provider: 'codex',
       projectSlug: 'demo',
@@ -107,7 +107,7 @@ describe('IndexingService', () => {
       updatedAt: '2026-06-17T18:31:00.000Z',
       lastActivityAt: '2026-06-17T18:30:00.000Z',
     });
-    db.upsertSessionInteractionSummary({
+    db.interactionSummaries.upsert({
       sessionId: 'session-with-summary',
       projectSlug: 'demo',
       provider: 'codex',
@@ -148,7 +148,7 @@ describe('IndexingService', () => {
   it('hides CLI invocation conversations from project trees', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-hidden-cli-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [
+    db.conversationIndex.replace('demo', 'codex', [
       {
         ref: 'visible-chat',
         kind: 'history',
@@ -170,7 +170,7 @@ describe('IndexingService', () => {
         degraded: false,
       },
     ]);
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:hidden-cli',
       kind: 'pending',
       projectSlug: 'demo',
@@ -205,7 +205,7 @@ describe('IndexingService', () => {
   it('adopts pending conversations into real history nodes and hides the pending alias from the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:test',
       kind: 'pending',
       projectSlug: 'demo',
@@ -221,7 +221,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'match-hash',
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-1',
       provider: 'codex',
       projectSlug: 'demo',
@@ -269,9 +269,9 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getBoundSessionById('session-1')?.conversationRef).toBe('real-conversation');
-    expect(db.getPendingConversation('pending:test')?.rawMetadata?.adoptedConversationRef).toBe('real-conversation');
-    expect(db.getPendingConversation('pending:test')?.boundSessionId).toBeUndefined();
+    expect(db.boundSessions.getById('session-1')?.conversationRef).toBe('real-conversation');
+    expect(db.pendingConversations.get('pending:test')?.rawMetadata?.adoptedConversationRef).toBe('real-conversation');
+    expect(db.pendingConversations.get('pending:test')?.boundSessionId).toBeUndefined();
 
     const tree = indexing.getTree();
     expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref)).toEqual(['real-conversation']);
@@ -281,7 +281,7 @@ describe('IndexingService', () => {
   it('does not adopt a pending conversation into an unrelated history node when the user hash does not match', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:mismatch',
       kind: 'pending',
       projectSlug: 'demo',
@@ -297,7 +297,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'expected-hash',
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-mismatch',
       provider: 'codex',
       projectSlug: 'demo',
@@ -345,8 +345,8 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getBoundSessionById('session-mismatch')?.conversationRef).toBe('pending:mismatch');
-    expect(db.getPendingConversation('pending:mismatch')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
+    expect(db.boundSessions.getById('session-mismatch')?.conversationRef).toBe('pending:mismatch');
+    expect(db.pendingConversations.get('pending:mismatch')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
 
     const tree = indexing.getTree();
     expect(tree.projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref).sort()).toEqual(['pending:mismatch', 'real-but-wrong']);
@@ -356,7 +356,7 @@ describe('IndexingService', () => {
   it('rebinds an adopted live session even if the pending snapshot lost its boundSessionId', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:stale-snapshot',
       kind: 'pending',
       projectSlug: 'demo',
@@ -371,7 +371,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'match-hash',
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-stale',
       provider: 'codex',
       projectSlug: 'demo',
@@ -419,7 +419,7 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getBoundSessionById('session-stale')?.conversationRef).toBe('real-stale-fallback');
+    expect(db.boundSessions.getById('session-stale')?.conversationRef).toBe('real-stale-fallback');
     expect(indexing.getTree().projects[0]?.providers.codex.conversations[0]?.isBound).toBe(true);
     db.close();
   });
@@ -427,7 +427,7 @@ describe('IndexingService', () => {
   it('does not adopt a blank pending conversation before the first prompt hash is known', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:no-hash-yet',
       kind: 'pending',
       projectSlug: 'demo',
@@ -442,7 +442,7 @@ describe('IndexingService', () => {
         pending: true,
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-no-hash',
       provider: 'codex',
       projectSlug: 'demo',
@@ -489,15 +489,15 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getBoundSessionById('session-no-hash')?.conversationRef).toBe('pending:no-hash-yet');
-    expect(db.getPendingConversation('pending:no-hash-yet')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
+    expect(db.boundSessions.getById('session-no-hash')?.conversationRef).toBe('pending:no-hash-yet');
+    expect(db.pendingConversations.get('pending:no-hash-yet')?.rawMetadata?.adoptedConversationRef).toBeUndefined();
     db.close();
   });
 
   it('synthesizes missing bound conversations into the tree before indexing catches up', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-live-only',
       provider: 'claude',
       projectSlug: 'demo',
@@ -545,7 +545,7 @@ describe('IndexingService', () => {
   it('does not synthesize errored pending sessions into the tree', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:errored',
       kind: 'pending',
       projectSlug: 'demo',
@@ -561,7 +561,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'hash',
       },
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-errored',
       provider: 'claude',
       projectSlug: 'demo',
@@ -605,7 +605,7 @@ describe('IndexingService', () => {
   it('keeps provider conversation tree order stationary when a bound session becomes active', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [
+    db.conversationIndex.replace('demo', 'codex', [
       {
         ref: 'older-created',
         kind: 'history',
@@ -629,7 +629,7 @@ describe('IndexingService', () => {
         degraded: false,
       },
     ]);
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-active',
       provider: 'codex',
       projectSlug: 'demo',
@@ -669,7 +669,7 @@ describe('IndexingService', () => {
   it('carries a manual pending title override onto the adopted real conversation', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:renamed',
       kind: 'pending',
       projectSlug: 'demo',
@@ -685,7 +685,7 @@ describe('IndexingService', () => {
         lastUserInputHash: 'match-hash',
       },
     });
-    db.setConversationTitleOverride('demo', 'codex', 'pending:renamed', 'My renamed pending title', '2026-03-07T00:00:10.000Z');
+    db.titleOverrides.set('demo', 'codex', 'pending:renamed', 'My renamed pending title', '2026-03-07T00:00:10.000Z');
 
     const conversations: ConversationSummary[] = [{
       ref: 'real-renamed',
@@ -722,8 +722,8 @@ describe('IndexingService', () => {
 
     await indexing.refreshAll();
 
-    expect(db.getConversationIndexEntry('demo', 'codex', 'real-renamed')?.title).toBe('My renamed pending title');
-    expect(db.getConversationTitleOverride('demo', 'codex', 'pending:renamed')).toBeUndefined();
+    expect(db.conversationIndex.get('demo', 'codex', 'real-renamed')?.title).toBe('My renamed pending title');
+    expect(db.titleOverrides.get('demo', 'codex', 'pending:renamed')).toBeUndefined();
     db.close();
   });
 
@@ -784,8 +784,8 @@ describe('IndexingService', () => {
 
     expect(provider.batchedCalls).toBe(1);
     expect(provider.singleCalls).toBe(0);
-    expect(db.getConversationIndexEntry('demo', 'codex', 'demo-conversation')).toBeTruthy();
-    expect(db.getConversationIndexEntry('demo-two', 'codex', 'demo-two-conversation')).toBeTruthy();
+    expect(db.conversationIndex.get('demo', 'codex', 'demo-conversation')).toBeTruthy();
+    expect(db.conversationIndex.get('demo-two', 'codex', 'demo-two-conversation')).toBeTruthy();
     await indexing.stop();
     db.close();
   });

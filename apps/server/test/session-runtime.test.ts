@@ -129,14 +129,14 @@ describe('Session runtime queue', () => {
 
       const observation = manager.observeSessions();
       await new Promise((resolve) => setTimeout(resolve, 50));
-      const duringSend = db.getBoundSessionById(session.id);
+      const duringSend = db.boundSessions.getById(session.id);
       expect(duringSend?.status).toBe('bound');
 
       firstWrite.resolve();
       await send;
       await observation;
 
-      const finalSession = db.getBoundSessionById(session.id);
+      const finalSession = db.boundSessions.getById(session.id);
       expect(finalSession?.status).toBe('bound');
       expect(finalSession?.lastActivityAt).toBeDefined();
     } finally {

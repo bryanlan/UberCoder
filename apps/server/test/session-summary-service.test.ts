@@ -114,7 +114,7 @@ describe('SessionSummaryService', () => {
       JSON.stringify({ type: 'user-input', text: 'Can you tighten the CIO workflow without showing code?', timestamp: '2026-06-17T18:30:00.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'The workflow summary is now focused on review status and next actions.', timestamp: '2026-06-17T18:31:00.000Z' }),
     ].join('\n'), 'utf8');
-    db.upsertBoundSession(session);
+    db.boundSessions.upsert(session);
 
     const conversationSummary: ConversationSummary = {
       ref: 'conversation-1',
@@ -189,7 +189,7 @@ describe('SessionSummaryService', () => {
     await service.runOnce({ bootstrap: true, referenceTime: new Date('2026-06-17T18:35:00.000Z') });
 
     expect(runner).toHaveBeenCalledTimes(1);
-    const stored = db.getSessionInteractionSummary('session-1');
+    const stored = db.interactionSummaries.get('session-1');
     expect(stored).toMatchObject({
       sessionId: 'session-1',
       status: 'ready',
@@ -200,15 +200,15 @@ describe('SessionSummaryService', () => {
       titleSuggestion: 'CIO dashboard workflow status refinement extra',
     });
     expect(stored?.chatSummary).toBe('This chat covers CIO dashboard review workflow and clearer session status. It should stay brief.');
-    expect(db.getConversationTitleOverride('demo', 'codex', 'conversation-1')?.title).toBe('CIO dashboard workflow status refinement extra');
-    expect(db.getBoundSessionById('session-1')?.title).toBe('CIO dashboard workflow status refinement extra');
+    expect(db.titleOverrides.get('demo', 'codex', 'conversation-1')?.title).toBe('CIO dashboard workflow status refinement extra');
+    expect(db.boundSessions.getById('session-1')?.title).toBe('CIO dashboard workflow status refinement extra');
     db.close();
   });
 
   it('does not overwrite a user title override created while a summary is running', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-title-race-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-title-race',
       provider: 'codex',
       projectSlug: 'demo',
@@ -256,10 +256,10 @@ describe('SessionSummaryService', () => {
       new RealtimeEventBus(),
       async () => {
         const renamedAt = '2026-06-17T18:34:00.000Z';
-        db.setConversationTitleOverride('demo', 'codex', 'conversation-title-race', 'User chosen title', renamedAt);
-        const latestSession = db.getBoundSessionById('session-title-race');
+        db.titleOverrides.set('demo', 'codex', 'conversation-title-race', 'User chosen title', renamedAt);
+        const latestSession = db.boundSessions.getById('session-title-race');
         if (latestSession) {
-          db.upsertBoundSession({
+          db.boundSessions.upsert({
             ...latestSession,
             title: 'User chosen title',
             updatedAt: renamedAt,
@@ -275,16 +275,16 @@ describe('SessionSummaryService', () => {
 
     await service.runOnce({ bootstrap: true, referenceTime: new Date('2026-06-17T18:35:00.000Z') });
 
-    expect(db.getConversationTitleOverride('demo', 'codex', 'conversation-title-race')?.title).toBe('User chosen title');
-    expect(db.getBoundSessionById('session-title-race')?.title).toBe('User chosen title');
-    expect(db.getSessionInteractionSummary('session-title-race')?.titleSuggestion).toBeUndefined();
+    expect(db.titleOverrides.get('demo', 'codex', 'conversation-title-race')?.title).toBe('User chosen title');
+    expect(db.boundSessions.getById('session-title-race')?.title).toBe('User chosen title');
+    expect(db.interactionSummaries.get('session-title-race')?.titleSuggestion).toBeUndefined();
     db.close();
   });
 
   it('aborts an in-flight summary during stop without storing a failure', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-abort-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-abort',
       provider: 'codex',
       projectSlug: 'demo',
@@ -360,14 +360,14 @@ describe('SessionSummaryService', () => {
     await runPromise;
 
     expect(abortObserved).toBe(true);
-    expect(db.getSessionInteractionSummary('session-abort')).toBeUndefined();
+    expect(db.interactionSummaries.get('session-abort')).toBeUndefined();
     db.close();
   });
 
   it('stores model failures without exposing diagnostic text through tree summaries', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-failure-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-failed',
       provider: 'codex',
       projectSlug: 'demo',
@@ -419,8 +419,8 @@ describe('SessionSummaryService', () => {
 
     await service.runOnce({ bootstrap: true, referenceTime: new Date('2026-06-17T18:35:00.000Z') });
 
-    expect(db.getSessionInteractionSummary('session-failed')?.lastError).toContain('sensitive');
-    const exposed = db.listSessionInteractionSummariesBySessionIds(['session-failed']).get('session-failed');
+    expect(db.interactionSummaries.get('session-failed')?.lastError).toContain('sensitive');
+    const exposed = db.interactionSummaries.listBySessionIds(['session-failed']).get('session-failed');
     expect(exposed).toEqual(expect.objectContaining({
       sessionId: 'session-failed',
       status: 'failed',
@@ -434,7 +434,7 @@ describe('SessionSummaryService', () => {
   it('force-runs summaries for existing ready sessions and anchors the window to latest chat prose', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-force-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-force',
       provider: 'codex',
       projectSlug: 'demo',
@@ -449,7 +449,7 @@ describe('SessionSummaryService', () => {
       lastActivityAt: '2026-06-10T10:30:00.000Z',
       lastCompletedAt: '2026-06-10T10:31:00.000Z',
     });
-    db.upsertSessionInteractionSummary({
+    db.interactionSummaries.upsert({
       sessionId: 'session-force',
       projectSlug: 'demo',
       provider: 'codex',
@@ -516,7 +516,7 @@ describe('SessionSummaryService', () => {
     await service.runOnce({ force: true, referenceTime: new Date('2026-06-19T18:00:00.000Z') });
 
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(db.getSessionInteractionSummary('session-force')).toMatchObject({
+    expect(db.interactionSummaries.get('session-force')).toMatchObject({
       windowStartAt: '2026-06-10T09:31:00.000Z',
       windowEndAt: '2026-06-10T10:31:00.000Z',
       recentChangesSummary: 'The most recent chat hour ended with force-run validation.',
@@ -527,7 +527,7 @@ describe('SessionSummaryService', () => {
   it('force-runs only requested session ids when scoped', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-scoped-force-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-target',
       provider: 'codex',
       projectSlug: 'demo',
@@ -541,7 +541,7 @@ describe('SessionSummaryService', () => {
       updatedAt: '2026-06-10T10:05:00.000Z',
       lastActivityAt: '2026-06-10T10:30:00.000Z',
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-keep',
       provider: 'codex',
       projectSlug: 'demo',
@@ -555,7 +555,7 @@ describe('SessionSummaryService', () => {
       updatedAt: '2026-06-10T11:05:00.000Z',
       lastActivityAt: '2026-06-10T11:30:00.000Z',
     });
-    db.upsertSessionInteractionSummary({
+    db.interactionSummaries.upsert({
       sessionId: 'session-keep',
       projectSlug: 'demo',
       provider: 'codex',
@@ -618,15 +618,15 @@ describe('SessionSummaryService', () => {
     });
 
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(db.getSessionInteractionSummary('session-target')?.chatSummary).toBe('Scoped force summary.');
-    expect(db.getSessionInteractionSummary('session-keep')?.chatSummary).toBe('Existing summary.');
+    expect(db.interactionSummaries.get('session-target')?.chatSummary).toBe('Scoped force summary.');
+    expect(db.interactionSummaries.get('session-keep')?.chatSummary).toBe('Existing summary.');
     db.close();
   });
 
   it('skips system invocation conversations during forced summary runs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-system-skip-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-system',
       provider: 'codex',
       projectSlug: 'demo',
@@ -663,7 +663,7 @@ describe('SessionSummaryService', () => {
     await service.runOnce({ force: true, referenceTime: new Date('2026-06-17T18:35:00.000Z') });
 
     expect(runner).not.toHaveBeenCalled();
-    expect(db.getSessionInteractionSummary('session-system')).toBeUndefined();
+    expect(db.interactionSummaries.get('session-system')).toBeUndefined();
     db.close();
   });
 });

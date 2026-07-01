@@ -316,7 +316,7 @@ export async function registerSettingsRoutes(
 
     const availableProjectSlugs = (await projectService.listActiveProjects()).map((project) => project.slug);
     return normalizeUiPreferences(
-      db.getUiPreference<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
+      db.uiPreferences.get<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
       availableProjectSlugs,
     );
   });
@@ -336,7 +336,7 @@ export async function registerSettingsRoutes(
 
     const availableProjectSlugs = (await projectService.listActiveProjects()).map((project) => project.slug);
     const current = normalizeUiPreferences(
-      db.getUiPreference<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
+      db.uiPreferences.get<UiPreferences>(SIDEBAR_UI_PREFERENCES_KEY),
       availableProjectSlugs,
     );
     const next = normalizeUiPreferences(
@@ -346,7 +346,7 @@ export async function registerSettingsRoutes(
       },
       availableProjectSlugs,
     );
-    db.setUiPreference(SIDEBAR_UI_PREFERENCES_KEY, next);
+    db.uiPreferences.set(SIDEBAR_UI_PREFERENCES_KEY, next);
     return { preferences: next };
   });
 

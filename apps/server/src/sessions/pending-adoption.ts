@@ -18,7 +18,7 @@ export function recordPendingUserInput(input: {
   inputAt?: string;
 }): ConversationSummary | undefined {
   return input.db.transaction(() => {
-    const pending = input.db.getPendingConversation(input.pendingRef);
+    const pending = input.db.pendingConversations.get(input.pendingRef);
     if (!pending) {
       return undefined;
     }
@@ -34,7 +34,7 @@ export function recordPendingUserInput(input: {
       boundSessionId: input.boundSessionId,
       rawMetadata,
     };
-    input.db.putPendingConversation(updated);
+    input.db.pendingConversations.put(updated);
     return updated;
   });
 }
@@ -89,27 +89,27 @@ export function adoptPendingConversation(input: {
   adoptedAt?: string;
 }): { adopted: boolean; reboundSession?: BoundSession } {
   return input.db.transaction(() => {
-    const pending = input.db.getPendingConversation(input.pendingRef);
+    const pending = input.db.pendingConversations.get(input.pendingRef);
     if (!pending || typeof pending.rawMetadata?.adoptedConversationRef === 'string') {
       return { adopted: false };
     }
 
     const adoptedAt = input.adoptedAt ?? nowIso();
-    const titleOverride = input.db.getConversationTitleOverride(input.projectSlug, input.providerId, pending.ref);
+    const titleOverride = input.db.titleOverrides.get(input.projectSlug, input.providerId, pending.ref);
     if (titleOverride) {
-      input.db.setConversationTitleOverride(
+      input.db.titleOverrides.set(
         input.projectSlug,
         input.providerId,
         input.matchedConversation.ref,
         titleOverride.title,
         adoptedAt,
       );
-      input.db.deleteConversationTitleOverride(input.projectSlug, input.providerId, pending.ref);
+      input.db.titleOverrides.delete(input.projectSlug, input.providerId, pending.ref);
     }
 
     const session = pending.boundSessionId
-      ? input.db.getBoundSessionById(pending.boundSessionId)
-      : input.db.getBoundSessionByConversation(input.projectSlug, input.providerId, pending.ref);
+      ? input.db.boundSessions.getById(pending.boundSessionId)
+      : input.db.boundSessions.getRestorableByConversation(input.projectSlug, input.providerId, pending.ref);
     const reboundSession = session && session.shouldRestore && session.conversationRef === pending.ref
       ? {
           ...session,
@@ -120,10 +120,10 @@ export function adoptPendingConversation(input: {
         }
       : undefined;
     if (reboundSession) {
-      input.db.upsertBoundSession(reboundSession);
+      input.db.boundSessions.upsert(reboundSession);
     }
 
-    input.db.putPendingConversation({
+    input.db.pendingConversations.put({
       ...pending,
       isBound: false,
       boundSessionId: undefined,
@@ -149,10 +149,10 @@ export function clearPendingRestoreBinding(input: {
   const updatedAt = input.updatedAt ?? nowIso();
   return input.db.transaction(() => {
     const pending = input.session.conversationRef.startsWith('pending:')
-      ? input.db.getPendingConversation(input.session.conversationRef)
+      ? input.db.pendingConversations.get(input.session.conversationRef)
       : undefined;
     if (pending) {
-      input.db.putPendingConversation({
+      input.db.pendingConversations.put({
         ...pending,
         isBound: false,
         boundSessionId: undefined,
@@ -167,7 +167,7 @@ export function clearPendingRestoreBinding(input: {
       updatedAt,
       isWorking: false,
     };
-    input.db.upsertBoundSession(ended);
+    input.db.boundSessions.upsert(ended);
     return ended;
   });
 }
@@ -180,10 +180,10 @@ export function markPendingSessionNotLive(input: {
   const updatedAt = input.updatedAt ?? nowIso();
   return input.db.transaction(() => {
     const pending = input.session.conversationRef.startsWith('pending:')
-      ? input.db.getPendingConversation(input.session.conversationRef)
+      ? input.db.pendingConversations.get(input.session.conversationRef)
       : undefined;
     if (pending) {
-      input.db.putPendingConversation({
+      input.db.pendingConversations.put({
         ...pending,
         isBound: false,
         boundSessionId: undefined,
@@ -199,7 +199,7 @@ export function markPendingSessionNotLive(input: {
       pid: undefined,
     };
     const shouldEmitFailure = input.session.status !== 'error';
-    input.db.upsertBoundSession(failed);
+    input.db.boundSessions.upsert(failed);
     return { failed, shouldEmitFailure };
   });
 }

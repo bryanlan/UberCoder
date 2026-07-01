@@ -55,7 +55,7 @@ export class IndexingService {
 
   async start(): Promise<void> {
     await this.syncWatchers();
-    if (this.db.hasConversationIndexRows()) {
+    if (this.db.conversationIndex.hasRows()) {
       void this.backfillMissingSearchIndexRows().catch(() => {
         // A failed search backfill should not prevent the cached tree from remaining usable.
       });
@@ -117,7 +117,7 @@ export class IndexingService {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
-    const pendingConversations = this.db.listPendingConversations();
+    const pendingConversations = this.db.pendingConversations.list();
     for (const providerId of PROVIDERS) {
       const provider = this.providerRegistry.get(providerId);
       if (providerId === 'codex' && provider instanceof CodexProvider) {
@@ -128,8 +128,8 @@ export class IndexingService {
       for (const project of projects) {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         if (!settings.enabled) {
-          this.db.replaceConversationIndex(project.slug, providerId, []);
-          this.db.replaceConversationSearchIndex(project.slug, providerId, []);
+          this.db.conversationIndex.replace(project.slug, providerId, []);
+          this.db.searchIndex.replace(project.slug, providerId, []);
           continue;
         }
         const conversations = await provider.listConversations(project, settings);
@@ -139,23 +139,23 @@ export class IndexingService {
           conversations,
           pendingConversations,
         );
-        this.db.replaceConversationIndex(project.slug, providerId, conversations);
+        this.db.conversationIndex.replace(project.slug, providerId, conversations);
         await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
       }
     }
     const timestamp = nowIso();
-    this.db.setMeta('lastIndexedAt', timestamp);
+    this.db.meta.set('lastIndexedAt', timestamp);
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
     await this.syncWatchers();
   }
 
   getTree(): TreeResponse {
-    const activeSessions = this.db.listBoundSessions()
+    const activeSessions = this.db.boundSessions.list()
       .filter((session) => isTreeVisibleBoundSession(session) && this.isSessionVisibleInDiscovery(session));
     const activeSessionIds = new Set(activeSessions.map((session) => session.id));
-    const sessionSummaryMap = this.db.listSessionInteractionSummariesBySessionIds(activeSessions.map((session) => session.id));
-    const history = this.db.listConversationIndex().filter(isConversationVisibleInDiscovery);
-    const pending = this.db.listPendingConversations()
+    const sessionSummaryMap = this.db.interactionSummaries.listBySessionIds(activeSessions.map((session) => session.id));
+    const history = this.db.conversationIndex.list().filter(isConversationVisibleInDiscovery);
+    const pending = this.db.pendingConversations.list()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string')
       .filter(isConversationVisibleInDiscovery)
       .map((conversation) => (
@@ -230,7 +230,7 @@ export class IndexingService {
     return {
       projects,
       boundSessions: activeSessions,
-      lastIndexedAt: this.db.getMeta('lastIndexedAt'),
+      lastIndexedAt: this.db.meta.get('lastIndexedAt'),
     };
   }
 
@@ -344,12 +344,12 @@ export class IndexingService {
         notes: project.notes,
         allowedLocalhostPorts: project.allowedLocalhostPorts,
       });
-      if (this.db.getMeta(metaKey) === nextMetadata) {
+      if (this.db.meta.get(metaKey) === nextMetadata) {
         continue;
       }
 
-      this.db.setMeta(metaKey, nextMetadata);
-      this.db.updateConversationSearchProjectMetadata({
+      this.db.meta.set(metaKey, nextMetadata);
+      this.db.searchIndex.updateProjectMetadata({
         projectSlug: project.slug,
         displayName: project.displayName,
         path: project.path,
@@ -395,7 +395,7 @@ export class IndexingService {
     if (options.shouldCommit && !options.shouldCommit()) {
       return;
     }
-    this.db.replaceConversationSearchIndex(project.slug, providerId, chunks);
+    this.db.searchIndex.replace(project.slug, providerId, chunks);
   }
 
   private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {
@@ -404,7 +404,7 @@ export class IndexingService {
     const projects = projectsOverride ?? (this.projectCache.length > 0
       ? this.projectCache
       : await this.projectService.listActiveProjects());
-    const conversations = this.db.listConversationIndex();
+    const conversations = this.db.conversationIndex.list();
     let changed = false;
 
     for (const project of projects) {
@@ -414,8 +414,8 @@ export class IndexingService {
         }
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
         if (!settings.enabled) {
-          if (this.db.hasConversationSearchIndexRowsFor(project.slug, providerId)) {
-            this.db.replaceConversationSearchIndex(project.slug, providerId, []);
+          if (this.db.searchIndex.hasRowsFor(project.slug, providerId)) {
+            this.db.searchIndex.replace(project.slug, providerId, []);
             changed = true;
           }
           continue;
@@ -424,7 +424,7 @@ export class IndexingService {
           conversation.projectSlug === project.slug
           && conversation.provider === providerId
         ));
-        if (scopedConversations.length === 0 || this.db.hasConversationSearchIndexRowsFor(project.slug, providerId)) {
+        if (scopedConversations.length === 0 || this.db.searchIndex.hasRowsFor(project.slug, providerId)) {
           continue;
         }
         const provider = this.providerRegistry.get(providerId);
@@ -444,7 +444,7 @@ export class IndexingService {
       return;
     }
     const timestamp = nowIso();
-    this.db.setMeta('lastIndexedAt', timestamp);
+    this.db.meta.set('lastIndexedAt', timestamp);
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
   }
 
@@ -461,8 +461,8 @@ export class IndexingService {
     for (const project of projects) {
       const settings = this.projectService.getMergedProviderSettings(project, 'codex');
       if (!settings.enabled) {
-        this.db.replaceConversationIndex(project.slug, 'codex', []);
-        this.db.replaceConversationSearchIndex(project.slug, 'codex', []);
+        this.db.conversationIndex.replace(project.slug, 'codex', []);
+        this.db.searchIndex.replace(project.slug, 'codex', []);
         continue;
       }
 
@@ -485,7 +485,7 @@ export class IndexingService {
           conversations,
           pendingConversations,
         );
-        this.db.replaceConversationIndex(project.slug, 'codex', conversations);
+        this.db.conversationIndex.replace(project.slug, 'codex', conversations);
         await this.replaceSearchIndex(project, 'codex', provider, group.settings, conversations);
       }
     }
@@ -493,8 +493,8 @@ export class IndexingService {
 
   private isSessionVisibleInDiscovery(session: BoundSession): boolean {
     const summary = session.conversationRef.startsWith('pending:')
-      ? this.db.getPendingConversation(session.conversationRef)
-      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
+      ? this.db.pendingConversations.get(session.conversationRef)
+      : this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
     return isConversationVisibleInDiscovery(summary ?? {
       title: session.title ?? 'Live session',
       provider: session.provider as ProviderId,

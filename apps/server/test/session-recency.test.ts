@@ -40,8 +40,8 @@ describe('SessionManager recency', () => {
       kind: 'history',
     });
 
-    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(false);
-    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBeUndefined();
+    expect(db.boundSessions.getById(session.id)?.isWorking).toBe(false);
+    expect(db.boundSessions.getById(session.id)?.lastCompletedAt).toBeUndefined();
 
     tmux.paneText = [
       'OpenAI Codex',
@@ -50,7 +50,7 @@ describe('SessionManager recency', () => {
       '• Working (20s • esc to interrupt)',
     ].join('\n');
     await manager.sendInput(session.id, 'continue');
-    expect(db.getBoundSessionById(session.id)?.isWorking).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.isWorking).toBe(true);
 
     tmux.captureSequence = [[
       'OpenAI Codex',
@@ -61,7 +61,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBeUndefined();
     expect(workingStates.some((state) => state.isWorking === true && !state.lastCompletedAt)).toBe(true);
@@ -93,7 +93,7 @@ describe('SessionManager recency', () => {
 
     const staleCompletion = new Date(Date.now() - 10 * 60_000).toISOString();
     const newerOutput = new Date(Date.now() - 30_000).toISOString();
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastCompletedAt: staleCompletion,
@@ -102,7 +102,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    expect(db.getBoundSessionById(session.id)?.lastCompletedAt).toBe(staleCompletion);
+    expect(db.boundSessions.getById(session.id)?.lastCompletedAt).toBe(staleCompletion);
     db.close();
   });
 
@@ -135,7 +135,7 @@ describe('SessionManager recency', () => {
       'utf8',
     );
 
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastOutputAt: overwrittenAt,
@@ -144,7 +144,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const tracked = db.getBoundSessionById(session.id);
+    const tracked = db.boundSessions.getById(session.id);
     expect(tracked?.lastOutputAt).toBe(overwrittenAt);
     expect(tracked?.lastCompletedAt).toBe(overwrittenAt);
     db.close();
@@ -179,7 +179,7 @@ describe('SessionManager recency', () => {
       'utf8',
     );
 
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastOutputAt: outputAt,
@@ -188,7 +188,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const repaired = db.getBoundSessionById(session.id);
+    const repaired = db.boundSessions.getById(session.id);
     expect(repaired?.lastOutputAt).toBe(outputAt);
     expect(repaired?.lastCompletedAt).toBe(completedAt);
     db.close();
@@ -230,7 +230,7 @@ describe('SessionManager recency', () => {
       'utf8',
     );
 
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastOutputAt: overwrittenAt,
@@ -278,7 +278,7 @@ describe('SessionManager recency', () => {
       'utf8',
     );
 
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastOutputAt: overwrittenAt,
@@ -287,7 +287,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const tracked = db.getBoundSessionById(session.id);
+    const tracked = db.boundSessions.getById(session.id);
     expect(tracked?.lastOutputAt).toBe(overwrittenAt);
     expect(tracked?.lastCompletedAt).toBe(overwrittenAt);
     db.close();
@@ -314,7 +314,7 @@ describe('SessionManager recency', () => {
       kind: 'history',
     });
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBeUndefined();
     db.close();
@@ -351,7 +351,7 @@ describe('SessionManager recency', () => {
     await fs.appendFile(session.rawLogPath!, '\nRestored session startup output.\n', 'utf8');
     await new Promise((resolve) => setTimeout(resolve, 250));
 
-    const afterRestoreOutput = db.getBoundSessionById(session.id);
+    const afterRestoreOutput = db.boundSessions.getById(session.id);
     expect(afterRestoreOutput?.lastOutputAt).toBeUndefined();
     expect(afterRestoreOutput?.lastCompletedAt).toBeUndefined();
     expect(afterRestoreOutput?.isWorking).toBe(false);
@@ -361,7 +361,7 @@ describe('SessionManager recency', () => {
     await fs.appendFile(session.rawLogPath!, '\nReal response after user input.\n', 'utf8');
     await new Promise((resolve) => setTimeout(resolve, 250));
 
-    const afterUserOutput = db.getBoundSessionById(session.id);
+    const afterUserOutput = db.boundSessions.getById(session.id);
     expect(afterUserOutput?.lastOutputAt).toBeTruthy();
     expect(afterUserOutput?.lastCompletedAt).toBeUndefined();
     expect(afterUserOutput?.isWorking).toBe(true);
@@ -403,7 +403,7 @@ describe('SessionManager recency', () => {
     await fs.appendFile(session.rawLogPath!, '\n› review current changes\n', 'utf8');
     await new Promise((resolve) => setTimeout(resolve, 250));
 
-    const afterEcho = db.getBoundSessionById(session.id);
+    const afterEcho = db.boundSessions.getById(session.id);
     expect(afterEcho?.lastOutputAt).toBeUndefined();
     expect(afterEcho?.lastCompletedAt).toBeUndefined();
     expect(afterEcho?.isWorking).toBe(false);
@@ -435,7 +435,7 @@ describe('SessionManager recency', () => {
     });
 
     const staleTimestamp = new Date(Date.now() - 10 * 60_000).toISOString();
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: false,
       lastOutputAt: staleTimestamp,
@@ -454,7 +454,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBe(staleTimestamp);
     db.close();
@@ -483,7 +483,7 @@ describe('SessionManager recency', () => {
 
     const staleOutputAt = new Date(Date.now() - 15 * 60_000).toISOString();
     const staleCompletedAt = new Date(Date.now() - 16 * 60_000).toISOString();
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: true,
       lastActivityAt: staleOutputAt,
@@ -494,7 +494,7 @@ describe('SessionManager recency', () => {
     const recoveredManager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
     await recoveredManager.ensureSession(session.id);
 
-    const recovered = db.getBoundSessionById(session.id);
+    const recovered = db.boundSessions.getById(session.id);
     expect(recovered?.isWorking).toBe(false);
     expect(recovered?.lastCompletedAt).toBe(staleCompletedAt);
     db.close();
@@ -525,7 +525,7 @@ describe('SessionManager recency', () => {
     });
 
     const staleHeartbeatAt = new Date(Date.now() - 61_000).toISOString();
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: true,
       lastActivityAt: staleHeartbeatAt,
@@ -544,7 +544,7 @@ describe('SessionManager recency', () => {
     ].join('\n');
     await manager.getSessionScreen(session.id);
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBeUndefined();
     db.close();
@@ -572,7 +572,7 @@ describe('SessionManager recency', () => {
     });
 
     const outputAt = new Date(Date.now() - 61_000).toISOString();
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...session,
       isWorking: true,
       lastOutputAt: outputAt,
@@ -583,7 +583,7 @@ describe('SessionManager recency', () => {
       handleWorkingIdleExpiry: (sessionId: string, expectedHeartbeatAt: string) => Promise<void>;
     }).handleWorkingIdleExpiry(session.id, outputAt);
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.isWorking).toBe(false);
     expect(updated?.lastCompletedAt).toBe(outputAt);
     db.close();
@@ -612,8 +612,8 @@ describe('SessionManager recency', () => {
     });
 
     const previousTimestamp = '2026-03-14T21:00:00.000Z';
-    const tracked = db.getBoundSessionById(session.id)!;
-    db.upsertBoundSession({
+    const tracked = db.boundSessions.getById(session.id)!;
+    db.boundSessions.upsert({
       ...tracked,
       updatedAt: previousTimestamp,
       lastActivityAt: previousTimestamp,
@@ -632,7 +632,7 @@ describe('SessionManager recency', () => {
     await fs.appendFile(tracked.rawLogPath!, 'Checking for updates\n');
     await new Promise((resolve) => setTimeout(resolve, 350));
 
-    const updated = db.getBoundSessionById(session.id);
+    const updated = db.boundSessions.getById(session.id);
     expect(updated?.lastOutputAt).toBeUndefined();
     expect(updated?.lastCompletedAt).toBe(previousTimestamp);
     db.close();
@@ -662,7 +662,7 @@ describe('SessionManager recency', () => {
 
     const meaningfulTimestamp = '2026-03-14T21:37:41.960Z';
     const housekeepingTimestamp = '2026-03-14T21:59:15.684Z';
-    const tracked = db.getBoundSessionById(session.id)!;
+    const tracked = db.boundSessions.getById(session.id)!;
     await fs.appendFile(tracked.eventLogPath!, `${JSON.stringify({
       type: 'raw-output',
       text: 'Real assistant output',
@@ -673,7 +673,7 @@ describe('SessionManager recency', () => {
       text: 'Checking for updates',
       timestamp: housekeepingTimestamp,
     })}\n`);
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       ...tracked,
       updatedAt: housekeepingTimestamp,
       lastActivityAt: housekeepingTimestamp,
@@ -684,7 +684,7 @@ describe('SessionManager recency', () => {
 
     await manager.getSessionScreen(session.id);
 
-    const trackedAfterScreen = db.getBoundSessionById(session.id);
+    const trackedAfterScreen = db.boundSessions.getById(session.id);
     expect(trackedAfterScreen?.lastOutputAt).toBe(housekeepingTimestamp);
     expect(trackedAfterScreen?.lastCompletedAt).toBe(housekeepingTimestamp);
     db.close();

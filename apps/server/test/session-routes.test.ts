@@ -155,7 +155,7 @@ describe('session routes', () => {
   it('restarts a first-turn pending Codex session from combined text and Enter keystrokes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:first-turn',
       kind: 'pending',
       projectSlug: 'demo',
@@ -187,7 +187,7 @@ describe('session routes', () => {
       lastActivityAt: '2026-03-14T18:01:00.000Z',
     };
     const restartPendingSessionWithInitialPrompt = vi.fn(async () => {
-      db.upsertBoundSession(restartedSession);
+      db.boundSessions.upsert(restartedSession);
       return commandResult(restartedSession);
     });
     const sendKeystrokes = vi.fn(async () => commandResult(session));
@@ -245,7 +245,7 @@ describe('session routes', () => {
   it('restarts a first-turn pending Codex session from the full submittedText when Enter also carries transport text', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:first-turn-submitted',
       kind: 'pending',
       projectSlug: 'demo',
@@ -277,7 +277,7 @@ describe('session routes', () => {
       lastActivityAt: '2026-03-14T18:01:00.000Z',
     };
     const restartPendingSessionWithInitialPrompt = vi.fn(async () => {
-      db.upsertBoundSession(restartedSession);
+      db.boundSessions.upsert(restartedSession);
       return commandResult(restartedSession);
     });
     const sendKeystrokes = vi.fn(async () => commandResult(session));
@@ -335,7 +335,7 @@ describe('session routes', () => {
   it('keeps first-turn pending Codex slash commands on the live session bridge', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:slash-command',
       kind: 'pending',
       projectSlug: 'demo',
@@ -386,7 +386,7 @@ describe('session routes', () => {
       expect(response.statusCode).toBe(200);
       expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
       expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { keys: ['Enter'], submittedText: '/model' });
-      expect(db.getPendingConversation('pending:slash-command')?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+      expect(db.pendingConversations.get('pending:slash-command')?.rawMetadata?.lastUserInputPreview).toBeUndefined();
     } finally {
       await app.close();
       db.close();
@@ -396,7 +396,7 @@ describe('session routes', () => {
   it('keeps first-turn pending Codex selection keystrokes on the live session bridge', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:selection',
       kind: 'pending',
       projectSlug: 'demo',
@@ -419,7 +419,7 @@ describe('session routes', () => {
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:00:00.000Z',
     };
-    db.upsertBoundSession({ ...session, shouldRestore: true });
+    db.boundSessions.upsert({ ...session, shouldRestore: true });
     const allowsLiteralSelectionKeystroke = vi.fn(async () => true);
     const restartPendingSessionWithInitialPrompt = vi.fn(async () => commandResult(session));
     const sendKeystrokes = vi.fn(async () => commandResult(session));
@@ -450,7 +450,7 @@ describe('session routes', () => {
       expect(allowsLiteralSelectionKeystroke).toHaveBeenCalledWith('session-pending', '1');
       expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
       expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: '1', keys: ['Enter'] });
-      expect(db.getPendingConversation('pending:selection')?.boundSessionId).toBe('session-pending');
+      expect(db.pendingConversations.get('pending:selection')?.boundSessionId).toBe('session-pending');
     } finally {
       await app.close();
       db.close();
@@ -460,7 +460,7 @@ describe('session routes', () => {
   it('keeps text-only pending Codex keystrokes on the live session bridge', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:text-only',
       kind: 'pending',
       projectSlug: 'demo',

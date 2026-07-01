@@ -500,7 +500,7 @@ export class SessionSummaryService {
     }
     const projectMap = new Map(activeProjects.map((project) => [project.slug, project]));
     const allowedSessionIds = options.sessionIds ? new Set(options.sessionIds) : undefined;
-    const activeSessions = this.db.listBoundSessions()
+    const activeSessions = this.db.boundSessions.list()
       .filter((session) => (
         isTreeVisibleBoundSession(session)
         && projectMap.has(session.projectSlug)
@@ -518,7 +518,7 @@ export class SessionSummaryService {
       if (!project) {
         continue;
       }
-      const existing = this.db.getSessionInteractionSummary(session.id);
+      const existing = this.db.interactionSummaries.get(session.id);
       if (!options.force && !this.shouldSummarizeSession(session, existing, referenceTime, Boolean(options.bootstrap))) {
         options.onProgress?.({ index, total: activeSessions.length, session, status: 'skipped' });
         continue;
@@ -586,7 +586,7 @@ export class SessionSummaryService {
       return timestampMs !== undefined && timestampMs >= windowStartMs && timestampMs <= windowEndMs;
     });
     const canSuggestTitle = !existing?.titleSuggestedAt
-      && !this.db.getConversationTitleOverride(session.projectSlug, session.provider, session.conversationRef);
+      && !this.db.titleOverrides.get(session.projectSlug, session.provider, session.conversationRef);
 
     const output = messages.length === 0
       ? {
@@ -614,7 +614,7 @@ export class SessionSummaryService {
     const titleApplication = this.resolveTitleSuggestionApplication(session, output.title, canSuggestTitle);
     const titleSuggestion = titleApplication?.title;
     const titleSuggestedAt = titleSuggestion ? generatedAt : undefined;
-    this.db.upsertSessionInteractionSummary({
+    this.db.interactionSummaries.upsert({
       sessionId: session.id,
       projectSlug: session.projectSlug,
       provider: session.provider,
@@ -672,8 +672,8 @@ export class SessionSummaryService {
 
   private isSessionVisibleInDiscovery(session: BoundSession): boolean {
     const summary = session.conversationRef.startsWith('pending:')
-      ? this.db.getPendingConversation(session.conversationRef)
-      : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
+      ? this.db.pendingConversations.get(session.conversationRef)
+      : this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
     return isConversationVisibleInDiscovery(summary ?? {
       title: session.title ?? 'Live session',
       provider: session.provider as ProviderId,
@@ -692,7 +692,7 @@ export class SessionSummaryService {
     if (!title) {
       return undefined;
     }
-    const latestSession = this.db.getBoundSessionById(session.id);
+    const latestSession = this.db.boundSessions.getById(session.id);
     if (
       !latestSession
       || latestSession.projectSlug !== session.projectSlug
@@ -703,7 +703,7 @@ export class SessionSummaryService {
     ) {
       return undefined;
     }
-    const currentOverride = this.db.getConversationTitleOverride(
+    const currentOverride = this.db.titleOverrides.get(
       latestSession.projectSlug,
       latestSession.provider,
       latestSession.conversationRef,
@@ -712,19 +712,19 @@ export class SessionSummaryService {
   }
 
   private applyTitleSuggestion(session: BoundSession, title: string, updatedAt: string): void {
-    this.db.setConversationTitleOverride(session.projectSlug, session.provider, session.conversationRef, title, updatedAt);
+    this.db.titleOverrides.set(session.projectSlug, session.provider, session.conversationRef, title, updatedAt);
     const updatedSession = {
       ...session,
       title,
       updatedAt,
     };
-    this.db.upsertBoundSession(updatedSession);
+    this.db.boundSessions.upsert(updatedSession);
     this.eventBus.emit({ type: 'session.updated', session: updatedSession });
   }
 
   private recordFailure(session: BoundSession, referenceTime: Date, error: unknown): void {
     const timestamp = nowIso();
-    this.db.upsertSessionInteractionSummary({
+    this.db.interactionSummaries.upsert({
       sessionId: session.id,
       projectSlug: session.projectSlug,
       provider: session.provider,

@@ -52,15 +52,15 @@ function daysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-async function waitForSearchResults(db: AppDatabase, query: string): Promise<ReturnType<AppDatabase['searchConversationIndex']>> {
+async function waitForSearchResults(db: AppDatabase, query: string): Promise<ReturnType<AppDatabase["searchIndex"]["search"]>> {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    const results = db.searchConversationIndex(query, 10, { projectSlugs: ['demo'] });
+    const results = db.searchIndex.search(query, 10, { projectSlugs: ['demo'] });
     if (results.length > 0) {
       return results;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  return db.searchConversationIndex(query, 10, { projectSlugs: ['demo'] });
+  return db.searchIndex.search(query, 10, { projectSlugs: ['demo'] });
 }
 
 describe('conversation search', () => {
@@ -126,11 +126,11 @@ describe('conversation search', () => {
       ],
     });
 
-    db.replaceConversationSearchIndex('demo', 'codex', chunks);
+    db.searchIndex.replace('demo', 'codex', chunks);
 
     const allocationQuery = buildFtsQuery('allocation review');
     expect(allocationQuery).toBeTruthy();
-    const allocationResults = db.searchConversationIndex(allocationQuery!, 10);
+    const allocationResults = db.searchIndex.search(allocationQuery!, 10);
     expect(allocationResults[0]).toMatchObject({
       projectSlug: 'demo',
       conversationRef: 'conversation-1',
@@ -139,17 +139,17 @@ describe('conversation search', () => {
     expect(allocationResults[0]?.snippet).toContain('allocation');
 
     const codeQuery = buildFtsQuery('shouldNeverAppear');
-    expect(db.searchConversationIndex(codeQuery!, 10)).toEqual([]);
+    expect(db.searchIndex.search(codeQuery!, 10)).toEqual([]);
 
-    db.updateConversationSearchTitle('demo', 'codex', 'conversation-1', 'Renamed allocation session');
-    expect(db.searchConversationIndex(allocationQuery!, 10)[0]?.conversationTitle).toBe('Renamed allocation session');
+    db.searchIndex.updateTitle('demo', 'codex', 'conversation-1', 'Renamed allocation session');
+    expect(db.searchIndex.search(allocationQuery!, 10)[0]?.conversationTitle).toBe('Renamed allocation session');
     db.close();
   });
 
   it('does not return metadata-only matches without searchable message prose', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-metadata-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationSearchIndex('demo', 'codex', [{
+    db.searchIndex.replace('demo', 'codex', [{
       projectSlug: 'demo',
       projectDisplayName: 'Operations Project',
       projectPath: '/tmp/demo',
@@ -168,14 +168,14 @@ describe('conversation search', () => {
 
     const metadataQuery = buildFtsQuery('ops');
     expect(metadataQuery).toBeTruthy();
-    expect(db.searchConversationIndex(metadataQuery!, 10)).toEqual([]);
+    expect(db.searchIndex.search(metadataQuery!, 10)).toEqual([]);
     db.close();
   });
 
   it('derives persisted result bound state from current bound sessions', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-bound-state-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationSearchIndex('demo', 'codex', [{
+    db.searchIndex.replace('demo', 'codex', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',
       projectPath: '/tmp/demo',
@@ -194,9 +194,9 @@ describe('conversation search', () => {
 
     const query = buildFtsQuery('stale bound phrase');
     expect(query).toBeTruthy();
-    expect(db.searchConversationIndex(query!, 10)[0]?.isBound).toBe(false);
+    expect(db.searchIndex.search(query!, 10)[0]?.isBound).toBe(false);
 
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-current',
       provider: 'codex',
       projectSlug: 'demo',
@@ -209,7 +209,7 @@ describe('conversation search', () => {
       updatedAt: '2026-06-18T12:01:00.000Z',
     });
 
-    expect(db.searchConversationIndex(query!, 10)[0]?.isBound).toBe(true);
+    expect(db.searchIndex.search(query!, 10)[0]?.isBound).toBe(true);
     db.close();
   });
 
@@ -254,7 +254,7 @@ describe('conversation search', () => {
       ],
     })).toEqual([]);
 
-    db.replaceConversationSearchIndex('demo', 'codex', [{
+    db.searchIndex.replace('demo', 'codex', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',
       projectPath: '/tmp/demo',
@@ -287,7 +287,7 @@ describe('conversation search', () => {
       JSON.stringify({ type: 'user-input', text: 'Please make search cover pending activity.', timestamp: '2026-06-18T12:00:00.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'Sidebar search covers pending activity from normalized logs.', timestamp: '2026-06-18T12:01:00.000Z' }),
     ].join('\n'), 'utf8');
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:search',
       kind: 'pending',
       projectSlug: 'demo',
@@ -299,7 +299,7 @@ describe('conversation search', () => {
       boundSessionId: 'session-1',
       degraded: false,
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-1',
       provider: 'codex',
       projectSlug: 'demo',
@@ -314,7 +314,7 @@ describe('conversation search', () => {
       lastOutputAt: '2026-06-18T12:01:00.000Z',
       eventLogPath,
     });
-    db.replaceConversationSearchIndex('demo', 'claude', [{
+    db.searchIndex.replace('demo', 'claude', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',
       projectPath: '/tmp/demo',
@@ -355,7 +355,7 @@ describe('conversation search', () => {
       JSON.stringify({ type: 'user-input', text: 'Please inspect indexed live history.', timestamp: '2026-06-18T12:00:00.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'repaint fragment ghost needle should never be searchable', timestamp: '2026-06-18T12:01:00.000Z' }),
     ].join('\n'), 'utf8');
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'history-live',
       kind: 'history',
       projectSlug: 'demo',
@@ -367,7 +367,7 @@ describe('conversation search', () => {
       boundSessionId: 'session-history-live',
       degraded: false,
     }]);
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-history-live',
       provider: 'codex',
       projectSlug: 'demo',
@@ -403,7 +403,7 @@ describe('conversation search', () => {
         timestamp: '2026-01-01T12:00:00.000Z',
       }),
     ].join('\n'), 'utf8');
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'old-history-live',
       kind: 'history',
       projectSlug: 'demo',
@@ -415,7 +415,7 @@ describe('conversation search', () => {
       boundSessionId: 'session-old-history-live',
       degraded: false,
     }]);
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-old-history-live',
       provider: 'codex',
       projectSlug: 'demo',
@@ -453,7 +453,7 @@ describe('conversation search', () => {
         timestamp: '2026-01-01T12:00:00.000Z',
       }),
     ].join('\n'), 'utf8');
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-missing-index-history-live',
       provider: 'codex',
       projectSlug: 'demo',
@@ -501,7 +501,7 @@ describe('conversation search', () => {
         timestamp: '2026-06-18T12:01:00.000Z',
       }),
     ].join('\n'), 'utf8');
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:tail',
       kind: 'pending',
       projectSlug: 'demo',
@@ -513,7 +513,7 @@ describe('conversation search', () => {
       boundSessionId: 'session-tail',
       degraded: false,
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-tail',
       provider: 'codex',
       projectSlug: 'demo',
@@ -544,7 +544,7 @@ describe('conversation search', () => {
     await fs.writeFile(eventLogPath, [
       JSON.stringify({ type: 'raw-output', text: 'The assistant discussed unrelated planning details.', timestamp: '2026-06-18T12:01:00.000Z' }),
     ].join('\n'), 'utf8');
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:metadata',
       kind: 'pending',
       projectSlug: 'demo',
@@ -556,7 +556,7 @@ describe('conversation search', () => {
       boundSessionId: 'session-metadata',
       degraded: false,
     });
-    db.upsertBoundSession({
+    db.boundSessions.upsert({
       id: 'session-metadata',
       provider: 'codex',
       projectSlug: 'demo',
@@ -582,7 +582,7 @@ describe('conversation search', () => {
   it('excludes persisted results for projects outside the active project set', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-active-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationSearchIndex('demo', 'codex', [{
+    db.searchIndex.replace('demo', 'codex', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',
       projectPath: '/tmp/demo',
@@ -598,7 +598,7 @@ describe('conversation search', () => {
       timestamp: '2026-06-18T12:00:00.000Z',
       text: 'retained search phrase',
     }]);
-    db.replaceConversationSearchIndex('inactive', 'codex', [{
+    db.searchIndex.replace('inactive', 'codex', [{
       projectSlug: 'inactive',
       projectDisplayName: 'Inactive Project',
       projectPath: '/tmp/inactive',
@@ -627,7 +627,7 @@ describe('conversation search', () => {
   it('applies the search limit after choosing the best chunk for each conversation', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-dedupe-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationSearchIndex('demo', 'codex', [
+    db.searchIndex.replace('demo', 'codex', [
       ...Array.from({ length: 9 }, (_, index) => ({
         projectSlug: 'demo',
         projectDisplayName: 'Demo Project',
@@ -676,7 +676,7 @@ describe('conversation search', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const recentUpdatedAt = daysAgo(2);
     const olderUpdatedAt = daysAgo(20);
-    db.replaceConversationSearchIndex('demo', 'codex', [
+    db.searchIndex.replace('demo', 'codex', [
       {
         projectSlug: 'demo',
         projectDisplayName: 'Demo Project',
@@ -728,7 +728,7 @@ describe('conversation search', () => {
     await fs.mkdir(projectPath, { recursive: true });
     await fs.mkdir(providerRoot, { recursive: true });
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'cached-upgrade',
       kind: 'history',
       projectSlug: 'demo',
@@ -805,7 +805,7 @@ describe('conversation search', () => {
     await fs.mkdir(projectPath, { recursive: true });
     await fs.mkdir(providerRoot, { recursive: true });
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.replaceConversationIndex('demo', 'codex', [{
+    db.conversationIndex.replace('demo', 'codex', [{
       ref: 'reactivated-cached',
       kind: 'history',
       projectSlug: 'demo',
@@ -861,7 +861,7 @@ describe('conversation search', () => {
       await indexing.primeProjectMetadata();
       const query = buildFtsQuery('reactivated cached phrase');
       expect(query).toBeTruthy();
-      const results = db.searchConversationIndex(query!, 10, { projectSlugs: ['demo'] });
+      const results = db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] });
 
       expect(results[0]?.conversationRef).toBe('reactivated-cached');
     } finally {

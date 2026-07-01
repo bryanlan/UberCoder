@@ -77,7 +77,7 @@ const adoptionProvider: ProviderAdapter = {
 };
 
 function seedPendingAdoption(db: AppDatabase): void {
-  db.putPendingConversation({
+  db.pendingConversations.put({
     ref: 'pending:adopt-me',
     kind: 'pending',
     projectSlug: 'demo',
@@ -94,7 +94,7 @@ function seedPendingAdoption(db: AppDatabase): void {
       lastUserInputAt: '2026-03-07T00:00:05.000Z',
     },
   });
-  db.upsertBoundSession({
+  db.boundSessions.upsert({
     id: 'session-adopt-me',
     provider: 'codex',
     projectSlug: 'demo',
@@ -109,8 +109,8 @@ function seedPendingAdoption(db: AppDatabase): void {
 }
 
 function getAdoptionState(db: AppDatabase): Record<string, unknown> {
-  const pending = db.getPendingConversation('pending:adopt-me');
-  const session = db.getBoundSessionById('session-adopt-me');
+  const pending = db.pendingConversations.get('pending:adopt-me');
+  const session = db.boundSessions.getById('session-adopt-me');
   return {
     pendingIsBound: pending?.isBound,
     pendingBoundSessionId: pending?.boundSessionId,

@@ -274,7 +274,7 @@ export class ConversationSearchService {
 
     const activeProjects = await this.projectService.listActiveProjects();
     const now = new Date();
-    const persistedResults = this.db.searchConversationIndex(ftsQuery, limit * SEARCH_RESULT_MULTIPLIER, {
+    const persistedResults = this.db.searchIndex.search(ftsQuery, limit * SEARCH_RESULT_MULTIPLIER, {
       projectSlugs: activeProjects.map((project) => project.slug),
       now: now.toISOString(),
     });
@@ -288,7 +288,7 @@ export class ConversationSearchService {
       return [];
     }
     const projectMap = new Map(activeProjects.map((project) => [project.slug, project]));
-    const sessions = this.db.listBoundSessions().filter(isTreeVisibleBoundSession);
+    const sessions = this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
     const results: ConversationSearchResult[] = [];
 
     for (const session of sessions) {
@@ -297,8 +297,8 @@ export class ConversationSearchService {
         continue;
       }
       const summary = session.conversationRef.startsWith('pending:')
-        ? this.db.getPendingConversation(session.conversationRef)
-        : this.db.getConversationIndexEntry(session.projectSlug, session.provider, session.conversationRef);
+        ? this.db.pendingConversations.get(session.conversationRef)
+        : this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
       const isPendingConversation = session.conversationRef.startsWith('pending:');
       const title = summary?.title ?? session.title ?? 'Live session';
       if (!isConversationVisibleInDiscovery(summary ?? {

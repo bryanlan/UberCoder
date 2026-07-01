@@ -12,7 +12,7 @@ describe('SessionManager keystroke submit', () => {
   it('records submitted bypass text only when Enter carries the submitted draft', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:bypass-submit',
       kind: 'pending',
       projectSlug: project.slug,
@@ -63,7 +63,7 @@ describe('SessionManager keystroke submit', () => {
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
     const userInputOffset = eventLog.indexOf('{"type":"user-input"');
-    const pending = db.getPendingConversation('pending:bypass-submit');
+    const pending = db.pendingConversations.get('pending:bypass-submit');
     expect(userInputEvents).toBe(1);
     expect(result.recordedUserInput).toEqual({
       id: `live:${session.id}:${userInputOffset}`,
@@ -123,7 +123,7 @@ describe('SessionManager keystroke submit', () => {
   it('does not record bypass slash commands as conversation user input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:bypass-command',
       kind: 'pending',
       projectSlug: project.slug,
@@ -164,7 +164,7 @@ describe('SessionManager keystroke submit', () => {
     await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '/model' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    const pending = db.getPendingConversation('pending:bypass-command');
+    const pending = db.pendingConversations.get('pending:bypass-command');
     expect(userInputEvents).toBe(0);
     expect(eventLog).not.toContain('"type":"user-input"');
     expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
@@ -176,7 +176,7 @@ describe('SessionManager keystroke submit', () => {
   it('does not record draft slash commands as conversation user input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:draft-command',
       kind: 'pending',
       projectSlug: project.slug,
@@ -216,7 +216,7 @@ describe('SessionManager keystroke submit', () => {
     await manager.sendKeystrokes(session.id, { text: '/model', keys: ['Enter'], submittedText: '/model' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    const pending = db.getPendingConversation('pending:draft-command');
+    const pending = db.pendingConversations.get('pending:draft-command');
     expect(tmux.sent).toEqual(['/model']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
     expect(userInputEvents).toBe(0);
@@ -230,7 +230,7 @@ describe('SessionManager keystroke submit', () => {
   it('does not record bypass model-menu numeric selections as conversation user input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:bypass-selection',
       kind: 'pending',
       projectSlug: project.slug,
@@ -284,7 +284,7 @@ describe('SessionManager keystroke submit', () => {
     await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '4' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    const pending = db.getPendingConversation('pending:bypass-selection');
+    const pending = db.pendingConversations.get('pending:bypass-selection');
     expect(userInputEvents).toBe(0);
     expect(eventLog).not.toContain('"type":"user-input"');
     expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
@@ -296,7 +296,7 @@ describe('SessionManager keystroke submit', () => {
   it('does not record deferred model-menu selections after the picker closes before Enter', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:bypass-selection-closed',
       kind: 'pending',
       projectSlug: project.slug,
@@ -347,7 +347,7 @@ describe('SessionManager keystroke submit', () => {
     await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '4' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    const pending = db.getPendingConversation('pending:bypass-selection-closed');
+    const pending = db.pendingConversations.get('pending:bypass-selection-closed');
     expect(userInputEvents).toBe(0);
     expect(eventLog).not.toContain('"type":"user-input"');
     expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();

@@ -40,7 +40,7 @@ describe('SessionManager keystrokes', () => {
   it('does not record pending first input for literal selection keystrokes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:selection-keystroke',
       kind: 'pending',
       projectSlug: project.slug,
@@ -78,7 +78,7 @@ describe('SessionManager keystrokes', () => {
 
     await manager.sendKeystrokes(session.id, { text: '1', keys: ['Enter'] });
 
-    const pending = db.getPendingConversation('pending:selection-keystroke');
+    const pending = db.pendingConversations.get('pending:selection-keystroke');
     expect(tmux.sent).toEqual(['1']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
     expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
@@ -90,7 +90,7 @@ describe('SessionManager keystrokes', () => {
   it('does not record pending first input for Claude model picker keystrokes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:claude-model-selection',
       kind: 'pending',
       projectSlug: project.slug,
@@ -125,7 +125,7 @@ describe('SessionManager keystrokes', () => {
 
     await manager.sendKeystrokes(session.id, { text: '4', keys: ['Enter'] });
 
-    const pending = db.getPendingConversation('pending:claude-model-selection');
+    const pending = db.pendingConversations.get('pending:claude-model-selection');
     expect(tmux.sent).toEqual(['4']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
     expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
@@ -136,7 +136,7 @@ describe('SessionManager keystrokes', () => {
   it('does not record pending first input for text-only literal selection chunks', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.putPendingConversation({
+    db.pendingConversations.put({
       ref: 'pending:text-only-selection',
       kind: 'pending',
       projectSlug: project.slug,
@@ -168,7 +168,7 @@ describe('SessionManager keystrokes', () => {
     await manager.sendKeystrokes(session.id, { text: '1', deferScreenUpdate: true });
     await manager.sendKeystrokes(session.id, { keys: ['Enter'] });
 
-    const pending = db.getPendingConversation('pending:text-only-selection');
+    const pending = db.pendingConversations.get('pending:text-only-selection');
     expect(tmux.sent).toEqual(['1']);
     expect(tmux.sentKeys).toEqual([['Enter']]);
     expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();

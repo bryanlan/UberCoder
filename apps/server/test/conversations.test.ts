@@ -76,7 +76,7 @@ describe('conversation rename routes', () => {
     await app.ready();
 
     const seedDb = new AppDatabase(databasePath);
-    seedDb.replaceConversationIndex('demo', 'codex', [
+    seedDb.conversationIndex.replace('demo', 'codex', [
       {
         ref: 'history-1',
         kind: 'history',
@@ -88,7 +88,7 @@ describe('conversation rename routes', () => {
         degraded: false,
       },
     ]);
-    seedDb.putPendingConversation({
+    seedDb.pendingConversations.put({
       ref: 'pending:test',
       kind: 'pending',
       projectSlug: 'demo',
