@@ -90,7 +90,7 @@ describe('parseSessionScreenSnapshot', () => {
   });
 
   it('treats the Codex startup placeholder as an empty composer', () => {
-    for (const placeholder of ['Implement {feature}', 'Write tests for @filename', 'Find and fix a bug in @filename', 'Explain this codebase', 'Summarize recent commits']) {
+    for (const placeholder of ['Implement {feature}', 'Write tests for @filename', 'Improve documentation in @filename', 'Find and fix a bug in @filename', 'Explain this codebase', 'Summarize recent commits', 'Run /review on my current changes']) {
       const screen = parseSessionScreenSnapshot([
         `› ${placeholder}`,
         '',
@@ -107,6 +107,55 @@ describe('parseSessionScreenSnapshot', () => {
       expect(screen.inputText).toBe('');
       expect(screen.content).not.toContain(placeholder);
     }
+  });
+
+  it('treats Codex startup placeholders after the startup chrome as an empty composer', () => {
+    const screen = parseSessionScreenSnapshot([
+      'WARNING: proceeding, even though we could not create PATH aliases',
+      '╭───────────────────────────────────────────────────────╮',
+      '│ >_ OpenAI Codex (v0.142.5)                            │',
+      '│                                                       │',
+      '│ model:       gpt-5.5 high   /model to change          │',
+      '│ directory:   ~/code/…/agent-console-mvp/agent-console │',
+      '│ permissions: YOLO mode                                │',
+      '╰───────────────────────────────────────────────────────╯',
+      '',
+      '  Tip: New Use /fast to enable our fastest inference with increased plan usage.',
+      '',
+      '• You have 4 usage limit resets available. Run /usage to use one.',
+      '',
+      '',
+      '› Write tests for @filename',
+      '',
+      '  gpt-5.5 high · ~/code/UberCoder/agent-console-mvp/agent-console',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).not.toContain('Write tests for @filename');
+    expect(screen.status).toContain('gpt-5.5 high');
+  });
+
+  it('treats dim Codex starter suggestions after slash-command output as an empty composer', () => {
+    const screen = parseSessionScreenSnapshot([
+      '\u001b[2m╭───────────────────────────────────────────────────────╮\u001b[0m',
+      '\u001b[2m│ >_ \u001b[0;1mOpenAI Codex\u001b[0;2m (v0.142.5)                            │\u001b[0m',
+      '\u001b[2m│ model:       \u001b[0mgpt-5.5 high\u001b[2m   \u001b[0m\u001b[38;5;6m/model\u001b[2m\u001b[39m to change          │\u001b[0m',
+      '\u001b[2m╰───────────────────────────────────────────────────────╯\u001b[0m',
+      '',
+      '  \u001b[1mTip:\u001b[0m Start a fresh idea with /new; the previous session stays in history.',
+      '',
+      '\u001b[2m• \u001b[0mModel changed to gpt-5.4-mini medium',
+      '',
+      '',
+      '\u001b[1m›\u001b[0m \u001b[2mSummarize recent commits\u001b[0m',
+      '',
+      '  \u001b[38;2;246;226;183mgpt-5.4-mini medium\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m~/code/UberCoder/agent-console-mvp/agent-console\u001b[39m',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('Model changed to gpt-5.4-mini medium');
+    expect(screen.content).not.toContain('Summarize recent commits');
+    expect(screen.status).toContain('gpt-5.4-mini medium');
   });
 
   it('keeps Codex starter prompt text when it is real active input', () => {

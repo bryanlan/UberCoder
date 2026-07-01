@@ -463,7 +463,7 @@ async function main() {
   const claudeModelPicker = await verifyModelPicker(page, options, {
     label: 'Claude',
     url: options.claudeUrl,
-    selection: '4',
+    selection: '5',
     expectedModel: 'Haiku 4.5',
     menuPattern: /Select model[\s\S]*Haiku/i,
     modelPattern: /Haiku\s+4\.5/,

@@ -81,9 +81,13 @@ function parsePromptInput(line: string): string | undefined {
   return text;
 }
 
+function isCodexStartupPlaceholderPromptText(text: string): boolean {
+  return /^(?:Implement \{feature\}|Write tests for @filename|Improve documentation in @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits|Run \/review on my current changes)$/i.test(text);
+}
+
 function isCodexStartupPlaceholderPrompt(line: string): boolean {
   const promptText = line.match(/^\s*[❯›>]\s*(.*?)\s*$/u)?.[1]?.trim();
-  return /^(?:Implement \{feature\}|Write tests for @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits)$/i.test(promptText ?? '');
+  return isCodexStartupPlaceholderPromptText(promptText ?? '');
 }
 
 function isClaudeStartupPlaceholderPromptText(text: string): boolean {
@@ -95,6 +99,31 @@ function isCodexStartupChromeAfterPrompt(line: string): boolean {
   return isLeadingTerminalChrome(normalized)
     || /^Tip:/i.test(normalized)
     || /^•?\s*You have \d+ usage limit resets available/i.test(normalized);
+}
+
+function isCodexStartupContextLine(line: string): boolean {
+  const normalized = normalizeTerminalChromeLine(line);
+  return !normalized
+    || isBoxDrawingOnly(line)
+    || isLeadingTerminalChrome(normalized)
+    || /^WARNING: proceeding, even though we could not create PATH aliases/i.test(normalized)
+    || /^Tip:/i.test(normalized)
+    || /^•?\s*You have \d+ usage limit resets available/i.test(normalized);
+}
+
+function isCodexStartupPromptAfterChrome(lines: ScreenLine[], index: number, promptText: string): boolean {
+  if (!isCodexStartupPlaceholderPromptText(promptText)) {
+    return false;
+  }
+
+  const previous = lines.slice(0, index).filter((line) => line.plain.trim().length > 0);
+  return previous.some((line) => /OpenAI Codex/i.test(normalizeTerminalChromeLine(line.plain)))
+    && previous.every((line) => isCodexStartupContextLine(line.plain));
+}
+
+function isDimStyledCodexStarterSuggestion(line: ScreenLine, promptText: string): boolean {
+  return isCodexStartupPlaceholderPromptText(promptText)
+    && (/\x1b\[2m/.test(line.raw) || /\x1b\[0;2m/.test(line.raw));
 }
 
 function isPromptFollowedByCodexStartupChrome(lines: ScreenLine[], index: number): boolean {
@@ -282,6 +311,13 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     if (promptText === undefined) {
       continue;
     }
+    const sourceLine = contentLines[index]!;
+    const effectivePromptText = (
+      isCodexStartupPromptAfterChrome(contentLines, index, promptText)
+      || isDimStyledCodexStarterSuggestion(sourceLine, promptText)
+    )
+      ? ''
+      : promptText;
 
     const following = contentLines.slice(index + 1).filter((line) => line.plain.trim().length > 0);
     if (following.some((line) => /^\s*[•●]/u.test(line.plain))) {
@@ -306,7 +342,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       }
     }
 
-    const inputParts = [promptText];
+    const inputParts = [effectivePromptText];
     let nextSectionStart = index + 1;
     let boundaryLine: ScreenLine | undefined;
     for (let lineIndex = index + 1; lineIndex < contentLines.length; lineIndex += 1) {
