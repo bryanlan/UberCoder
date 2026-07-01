@@ -180,8 +180,6 @@ describe('session routes', () => {
         initialPrompt: 'fix the stuck pending console',
       }));
       expect(sendKeystrokes).not.toHaveBeenCalled();
-      expect(db.getPendingConversation('pending:first-turn')?.boundSessionId).toBe('session-restarted');
-      expect(db.getPendingConversation('pending:first-turn')?.rawMetadata?.lastUserInputPreview).toBe('fix the stuck pending console');
     } finally {
       await app.close();
       db.close();
@@ -272,8 +270,6 @@ describe('session routes', () => {
         initialPrompt: 'fix via text bypass',
       }));
       expect(sendKeystrokes).not.toHaveBeenCalled();
-      expect(db.getPendingConversation('pending:first-turn-submitted')?.boundSessionId).toBe('session-restarted');
-      expect(db.getPendingConversation('pending:first-turn-submitted')?.rawMetadata?.lastUserInputPreview).toBe('fix via text bypass');
     } finally {
       await app.close();
       db.close();

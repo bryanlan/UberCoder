@@ -12,11 +12,11 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { CodexProvider } from '../providers/codex-provider.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
-import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
 import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
+import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 
@@ -314,80 +314,22 @@ export class IndexingService {
 
     const claimedRefs = new Set<string>();
     for (const pending of scopedPending) {
-      const pendingTimestamp = getPendingConversationMatchTimestamp(pending);
-      const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string' ? pending.rawMetadata.lastUserInputHash : undefined;
-      const matchedConversation = conversations
-        .filter((conversation) => !claimedRefs.has(conversation.ref) && conversation.ref !== pending.ref)
-        .map((conversation) => ({
-          conversation,
-          delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
-          score: this.scorePendingMatch(pendingLastUserHash, pending, conversation),
-        }))
-        .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= 30 * 60 * 1000)
-        .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
-
+      const matchedConversation = findPendingAdoptionMatch(pending, conversations, { claimedRefs });
       if (!matchedConversation) continue;
-      claimedRefs.add(matchedConversation.ref);
 
-      const titleOverride = this.db.getConversationTitleOverride(projectSlug, providerId, pending.ref);
-      if (titleOverride) {
-        this.db.setConversationTitleOverride(
-          projectSlug,
-          providerId,
-          matchedConversation.ref,
-          titleOverride.title,
-          nowIso(),
-        );
-        this.db.deleteConversationTitleOverride(projectSlug, providerId, pending.ref);
-      }
-
-      const session = pending.boundSessionId
-        ? this.db.getBoundSessionById(pending.boundSessionId)
-        : this.db.getBoundSessionByConversation(projectSlug, providerId, pending.ref);
-      if (session && session.shouldRestore && session.conversationRef === pending.ref) {
-        const reboundSession = {
-          ...session,
-          conversationRef: matchedConversation.ref,
-          resumeConversationRef: matchedConversation.ref,
-          title: matchedConversation.title,
-          updatedAt: nowIso(),
-        };
-        this.db.upsertBoundSession(reboundSession);
-        this.eventBus.emit({ type: 'session.updated', session: reboundSession });
-      }
-
-      this.db.putPendingConversation({
-        ...pending,
-        isBound: false,
-        boundSessionId: undefined,
-        updatedAt: nowIso(),
-        transcriptPath: matchedConversation.transcriptPath,
-        rawMetadata: {
-          ...(pending.rawMetadata ?? {}),
-          adoptedConversationRef: matchedConversation.ref,
-          adoptedTranscriptPath: matchedConversation.transcriptPath,
-          adoptedAt: nowIso(),
-        },
+      const adoption = adoptPendingConversation({
+        db: this.db,
+        projectSlug,
+        providerId,
+        pendingRef: pending.ref,
+        matchedConversation,
       });
+      if (!adoption.adopted) continue;
+      claimedRefs.add(matchedConversation.ref);
+      if (adoption.reboundSession) {
+        this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
+      }
     }
-  }
-
-  private scorePendingMatch(
-    pendingLastUserHash: string | undefined,
-    pending: ConversationSummary,
-    conversation: ConversationSummary,
-  ): number {
-    const rawMetadata = conversation.rawMetadata ?? {};
-    const candidateHashes = [
-      rawMetadata.lastUserTextHash,
-      rawMetadata.firstUserTextHash,
-    ].filter((value): value is string => typeof value === 'string');
-
-    if (pendingLastUserHash) {
-      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
-    }
-
-    return -1;
   }
 
   private persistProjectMetadata(projects: Awaited<ReturnType<ProjectService['listActiveProjects']>>): void {

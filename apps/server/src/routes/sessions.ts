@@ -3,8 +3,6 @@ import path from 'node:path';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
-import { nowIso } from '../lib/time.js';
-import { truncate, normalizeComparableText, stableTextHash } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
@@ -65,18 +63,6 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
     provider,
     providerSettings,
     initialPrompt: input.text,
-  });
-  const inputAt = nowIso();
-  const rawMetadata = { ...(pendingConversation?.rawMetadata ?? {}) } as Record<string, unknown>;
-  rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(input.text));
-  rawMetadata.lastUserInputPreview = truncate(input.text, 120);
-  rawMetadata.lastUserInputAt = inputAt;
-  input.db.putPendingConversation({
-    ...pendingConversation!,
-    updatedAt: inputAt,
-    isBound: true,
-    boundSessionId: restarted.id,
-    rawMetadata,
   });
   return { kind: 'restarted', session: restarted };
 }

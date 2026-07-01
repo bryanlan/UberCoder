@@ -299,6 +299,11 @@ async function main() {
       body: JSON.stringify({ text: prompt }),
     });
     assert(send.response.ok, `Send failed: ${send.response.status} ${send.text}`);
+    const sentSession = send.json?.session ?? send.json;
+    if (sentSession?.id && sentSession.id !== sessionId) {
+      sessionId = sentSession.id;
+      diagnostics.tmuxSessionName = sentSession.tmuxSessionName ?? diagnostics.tmuxSessionName;
+    }
     console.log(`Prompt sent: ${prompt}`);
 
     const deadline = Date.now() + options.timeoutMs;

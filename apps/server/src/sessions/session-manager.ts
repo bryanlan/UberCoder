@@ -6,8 +6,7 @@ import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } fro
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
-import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl, truncate } from '../lib/text.js';
-import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
+import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl } from '../lib/text.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
@@ -17,6 +16,14 @@ import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output.js';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
+import {
+  adoptPendingConversation,
+  clearPendingRestoreBinding as clearPendingConversationRestoreBinding,
+  findPendingAdoptionMatch,
+  markPendingSessionNotLive as markPendingConversationSessionNotLive,
+  pendingConversationHasRecordedUserInput,
+  recordPendingUserInput,
+} from './pending-adoption.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -427,24 +434,6 @@ export class SessionManager {
     return undefined;
   }
 
-  private scorePendingMatch(
-    pendingLastUserHash: string | undefined,
-    pending: ConversationSummary,
-    conversation: ConversationSummary,
-  ): number {
-    const rawMetadata = conversation.rawMetadata ?? {};
-    const candidateHashes = [
-      rawMetadata.lastUserTextHash,
-      rawMetadata.firstUserTextHash,
-    ].filter((value): value is string => typeof value === 'string');
-
-    if (pendingLastUserHash) {
-      return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
-    }
-
-    return -1;
-  }
-
   private async tryResolvePendingResumeSession(
     session: BoundSession,
     project: ActiveProject,
@@ -460,96 +449,23 @@ export class SessionManager {
       return session;
     }
 
-    const pendingTimestamp = getPendingConversationMatchTimestamp(pending);
-    const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string'
-      ? pending.rawMetadata.lastUserInputHash
-      : undefined;
-    if (!Number.isFinite(pendingTimestamp) || !pendingLastUserHash) {
-      return session;
-    }
-
     const conversations = await provider.listConversations(project, providerSettings);
-    const matchedConversation = conversations
-      .filter((conversation) => conversation.ref !== pending.ref)
-      .map((conversation) => ({
-        conversation,
-        delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
-        score: this.scorePendingMatch(pendingLastUserHash, pending, conversation),
-      }))
-      .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= 30 * 60 * 1000)
-      .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
-
+    const matchedConversation = findPendingAdoptionMatch(pending, conversations);
     if (!matchedConversation) {
       return session;
     }
 
-    const titleOverride = this.db.getConversationTitleOverride(project.slug, provider.id, pending.ref);
-    if (titleOverride) {
-      this.db.setConversationTitleOverride(
-        project.slug,
-        provider.id,
-        matchedConversation.ref,
-        titleOverride.title,
-        nowIso(),
-      );
-      this.db.deleteConversationTitleOverride(project.slug, provider.id, pending.ref);
-    }
-
-    const adoptedAt = nowIso();
-    const reboundSession: BoundSession = {
-      ...session,
-      conversationRef: matchedConversation.ref,
-      resumeConversationRef: matchedConversation.ref,
-      title: matchedConversation.title,
-      updatedAt: adoptedAt,
-    };
-    this.db.upsertBoundSession(reboundSession);
-    this.db.putPendingConversation({
-      ...pending,
-      isBound: false,
-      boundSessionId: undefined,
-      updatedAt: adoptedAt,
-      transcriptPath: matchedConversation.transcriptPath,
-      rawMetadata: {
-        ...(pending.rawMetadata ?? {}),
-        adoptedConversationRef: matchedConversation.ref,
-        adoptedTranscriptPath: matchedConversation.transcriptPath,
-        adoptedAt,
-      },
+    const adoption = adoptPendingConversation({
+      db: this.db,
+      projectSlug: project.slug,
+      providerId: provider.id,
+      pendingRef: pending.ref,
+      matchedConversation,
     });
-    this.eventBus.emit({ type: 'session.updated', session: reboundSession });
-    return reboundSession;
-  }
-
-  private clearPendingRestoreBinding(session: BoundSession): BoundSession {
-    if (!session.conversationRef.startsWith('pending:')) {
-      return session;
+    if (adoption.reboundSession) {
+      this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
     }
-    const pending = this.db.getPendingConversation(session.conversationRef);
-    if (pending) {
-      this.db.putPendingConversation({
-        ...pending,
-        isBound: false,
-        boundSessionId: undefined,
-        updatedAt: nowIso(),
-      });
-    }
-
-    const ended: BoundSession = {
-      ...session,
-      status: 'ended',
-      shouldRestore: false,
-      updatedAt: nowIso(),
-      isWorking: false,
-    };
-    this.db.upsertBoundSession(ended);
-    this.appendEvent(ended, {
-      type: 'status',
-      text: 'Pending session expired before its first prompt was submitted.',
-      timestamp: nowIso(),
-    });
-    this.eventBus.emit({ type: 'session.updated', session: ended });
-    return ended;
+    return this.db.getBoundSessionById(session.id) ?? session;
   }
 
   private hasRecordedPendingUserInput(session: BoundSession): boolean {
@@ -557,7 +473,7 @@ export class SessionManager {
       return false;
     }
     const pending = this.db.getPendingConversation(session.conversationRef);
-    return typeof pending?.rawMetadata?.lastUserInputHash === 'string';
+    return pendingConversationHasRecordedUserInput(pending);
   }
 
   private markPendingSessionNotLive(session: BoundSession): void {
@@ -565,26 +481,12 @@ export class SessionManager {
       return;
     }
 
-    const pending = this.db.getPendingConversation(session.conversationRef);
     const updatedAt = nowIso();
-    if (pending) {
-      this.db.putPendingConversation({
-        ...pending,
-        isBound: false,
-        boundSessionId: undefined,
-        updatedAt: pending.updatedAt,
-      });
-    }
-
-    const failed: BoundSession = {
-      ...session,
-      status: 'error',
+    const { failed, shouldEmitFailure } = markPendingConversationSessionNotLive({
+      db: this.db,
+      session,
       updatedAt,
-      isWorking: false,
-      pid: undefined,
-    };
-    const shouldEmitFailure = session.status !== 'error';
-    this.db.upsertBoundSession(failed);
+    });
     if (shouldEmitFailure) {
       this.appendEvent(failed, {
         type: 'status',
@@ -632,7 +534,16 @@ export class SessionManager {
         : undefined;
       const hasRecordedUserInput = this.hasRecordedPendingUserInput(resolvedSession);
       if (pending && !hasRecordedUserInput) {
-        this.clearPendingRestoreBinding(resolvedSession);
+        const ended = clearPendingConversationRestoreBinding({
+          db: this.db,
+          session: resolvedSession,
+        });
+        this.appendEvent(ended, {
+          type: 'status',
+          text: 'Pending session expired before its first prompt was submitted.',
+          timestamp: ended.updatedAt,
+        });
+        this.eventBus.emit({ type: 'session.updated', session: ended });
         return undefined;
       }
       const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
@@ -786,22 +697,15 @@ export class SessionManager {
       };
       this.db.upsertBoundSession(boundSession);
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
-        const pending = this.db.getPendingConversation(boundSession.conversationRef);
-        if (pending) {
-          const inputAt = nowIso();
-          const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-          rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(initialPrompt));
-          rawMetadata.lastUserInputPreview = truncate(initialPrompt, 120);
-          rawMetadata.lastUserInputAt = inputAt;
-          this.db.putPendingConversation({
-            ...pending,
-            updatedAt: inputAt,
-            isBound: true,
-            boundSessionId: boundSession.id,
-            rawMetadata,
-          });
-        }
-        this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: nowIso() });
+        const inputAt = nowIso();
+        recordPendingUserInput({
+          db: this.db,
+          pendingRef: boundSession.conversationRef,
+          boundSessionId: boundSession.id,
+          text: initialPrompt,
+          inputAt,
+        });
+        this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: inputAt });
       }
       this.appendEvent(boundSession, { type: 'status', text: `Bound ${input.provider.id} session in ${input.project.displayName}.`, timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: boundSession });
@@ -842,31 +746,32 @@ export class SessionManager {
       throw new Error('Session is no longer running.');
     }
     await this.sendLiteralInputToSession(liveSession.tmuxSessionName, text);
+    const activityAt = nowIso();
+    const updated = this.updateBoundSessionFields(liveSession.id, {
+      updatedAt: activityAt,
+      lastActivityAt: activityAt,
+    });
+    if (updated.conversationRef.startsWith('pending:')) {
+      recordPendingUserInput({
+        db: this.db,
+        pendingRef: updated.conversationRef,
+        boundSessionId: updated.id,
+        text,
+        inputAt: activityAt,
+      });
+    }
+    this.appendEvent(updated, { type: 'user-input', text, timestamp: activityAt });
+    await this.emitScreenUpdate(updated);
+    return updated;
+  }
+
+  private updateBoundSessionFields(sessionId: string, patch: Partial<BoundSession>): BoundSession {
+    const current = this.mustGetSession(sessionId);
     const updated: BoundSession = {
-      ...liveSession,
-      updatedAt: nowIso(),
-      lastActivityAt: nowIso(),
+      ...current,
+      ...patch,
     };
     this.db.upsertBoundSession(updated);
-    if (updated.conversationRef.startsWith('pending:')) {
-      const pending = this.db.getPendingConversation(updated.conversationRef);
-      if (pending) {
-        const inputAt = nowIso();
-        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(text));
-        rawMetadata.lastUserInputPreview = truncate(text, 120);
-        rawMetadata.lastUserInputAt = inputAt;
-        this.db.putPendingConversation({
-          ...pending,
-          updatedAt: inputAt,
-          isBound: true,
-          boundSessionId: updated.id,
-          rawMetadata,
-        });
-      }
-    }
-    this.appendEvent(updated, { type: 'user-input', text, timestamp: nowIso() });
-    await this.emitScreenUpdate(updated);
     return updated;
   }
 
@@ -916,12 +821,11 @@ export class SessionManager {
         await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
       }
 
-      const updated: BoundSession = {
-        ...liveSession,
-        updatedAt: nowIso(),
-        lastActivityAt: nowIso(),
-      };
-      this.db.upsertBoundSession(updated);
+      const activityAt = nowIso();
+      const updated = this.updateBoundSessionFields(liveSession.id, {
+        updatedAt: activityAt,
+        lastActivityAt: activityAt,
+      });
       this.deferredTextReadyUntil.set(updated.id, Date.now() + DEFERRED_TEXT_READY_TTL_MS);
       if (!payload.deferScreenUpdate) {
         await this.emitScreenUpdate(updated);
@@ -1000,12 +904,11 @@ export class SessionManager {
       await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
     }
 
-    const updated: BoundSession = {
-      ...liveSession,
-      updatedAt: nowIso(),
-      lastActivityAt: nowIso(),
-    };
-    this.db.upsertBoundSession(updated);
+    const activityAt = nowIso();
+    const updated = this.updateBoundSessionFields(liveSession.id, {
+      updatedAt: activityAt,
+      lastActivityAt: activityAt,
+    });
     const submittedUserTurnText = !submittedDeferredSelection && submittedTextShouldCreateUserTurn(beforeScreen, submittedText)
       ? submittedText
       : undefined;
@@ -1018,24 +921,16 @@ export class SessionManager {
     const userInputTextToRecord = submittedUserTurnText
       ?? fallbackUserTurnText;
     if (userInputTextToRecord && updated.conversationRef.startsWith('pending:')) {
-      const pending = this.db.getPendingConversation(updated.conversationRef);
-      if (pending) {
-        const inputAt = nowIso();
-        const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(userInputTextToRecord));
-        rawMetadata.lastUserInputPreview = truncate(userInputTextToRecord, 120);
-        rawMetadata.lastUserInputAt = inputAt;
-        this.db.putPendingConversation({
-          ...pending,
-          updatedAt: inputAt,
-          isBound: true,
-          boundSessionId: updated.id,
-          rawMetadata,
-        });
-      }
+      recordPendingUserInput({
+        db: this.db,
+        pendingRef: updated.conversationRef,
+        boundSessionId: updated.id,
+        text: userInputTextToRecord,
+        inputAt: activityAt,
+      });
     }
     if (userInputTextToRecord) {
-      this.appendEvent(updated, { type: 'user-input', text: userInputTextToRecord, timestamp: nowIso() });
+      this.appendEvent(updated, { type: 'user-input', text: userInputTextToRecord, timestamp: activityAt });
     }
     await this.emitScreenUpdate(updated, {
       waitForChange: Boolean(payload.keys?.length),
@@ -1241,7 +1136,8 @@ export class SessionManager {
         if (this.hasRecordedPendingUserInput(session)) {
           this.markPendingSessionNotLive(session);
         } else {
-          this.clearPendingRestoreBinding(session);
+          const ended = clearPendingConversationRestoreBinding({ db: this.db, session });
+          this.eventBus.emit({ type: 'session.updated', session: ended });
         }
         return undefined;
       }

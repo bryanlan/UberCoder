@@ -78,6 +78,10 @@ export class AppDatabase {
     return this.sqlite.open;
   }
 
+  transaction<T>(fn: () => T): T {
+    return this.sqlite.transaction(fn)();
+  }
+
   private migrate(): void {
     this.sqlite.exec(`
       create table if not exists meta (

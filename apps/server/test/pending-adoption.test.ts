@@ -10,6 +10,7 @@ import type { ActiveProject } from '../src/projects/project-service.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { FakeTmux, createRecoveryManager } from './helpers/session-fixtures.js';
+import { adoptPendingConversation } from '../src/sessions/pending-adoption.js';
 
 const project: ActiveProject = {
   slug: 'demo',
@@ -51,6 +52,14 @@ const adoptedConversation: ConversationSummary = {
     firstUserTextHash: 'match-hash',
     lastUserTextHash: 'match-hash',
   },
+};
+
+const racedConversation: ConversationSummary = {
+  ...adoptedConversation,
+  ref: 'real-raced',
+  title: 'Raced conversation',
+  transcriptPath: '/tmp/codex/real-raced.jsonl',
+  providerConversationId: 'real-raced',
 };
 
 const adoptionProvider: ProviderAdapter = {
@@ -163,5 +172,44 @@ describe('pending conversation adoption', () => {
     }
   });
 
-  it.todo('serializes concurrent pending adoption so two refresh owners cannot claim the same vendor conversation');
+  it('serializes pending adoption so two refresh owners cannot overwrite the same pending row', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-adoption-race-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    seedPendingAdoption(db);
+
+    try {
+      const first = adoptPendingConversation({
+        db,
+        projectSlug: 'demo',
+        providerId: 'codex',
+        pendingRef: 'pending:adopt-me',
+        matchedConversation: adoptedConversation,
+        adoptedAt: '2026-03-07T00:02:00.000Z',
+      });
+      const second = adoptPendingConversation({
+        db,
+        projectSlug: 'demo',
+        providerId: 'codex',
+        pendingRef: 'pending:adopt-me',
+        matchedConversation: racedConversation,
+        adoptedAt: '2026-03-07T00:03:00.000Z',
+      });
+
+      expect(first.adopted).toBe(true);
+      expect(first.reboundSession?.conversationRef).toBe('real-adopted');
+      expect(second).toEqual({ adopted: false });
+      expect(getAdoptionState(db)).toEqual({
+        pendingIsBound: false,
+        pendingBoundSessionId: undefined,
+        adoptedConversationRef: 'real-adopted',
+        adoptedTranscriptPath: '/tmp/codex/real-adopted.jsonl',
+        pendingTranscriptPath: '/tmp/codex/real-adopted.jsonl',
+        sessionConversationRef: 'real-adopted',
+        sessionResumeConversationRef: 'real-adopted',
+        sessionTitle: 'Real adopted conversation',
+      });
+    } finally {
+      db.close();
+    }
+  });
 });
