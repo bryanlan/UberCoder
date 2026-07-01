@@ -35,6 +35,7 @@ export function stripAnsiAndControl(text: string): string {
     .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
     .replace(/\u001BP[\s\S]*?\u001B\\/g, '')
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\u001B[()*+\-.\/][0-~]/g, '')
     .replace(/\u001B[@-_]/g, '')
     .replace(/\r\n?/g, '\n');
 

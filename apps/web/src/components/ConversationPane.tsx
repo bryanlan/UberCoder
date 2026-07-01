@@ -131,62 +131,388 @@ function MobileSummaryStrip({
   );
 }
 
-const TranscriptBubble = memo(function TranscriptBubble({ role, text, timestamp }: { role: string; text: string; timestamp: string }) {
-  const isUser = role === 'user';
-  const isStatus = role === 'status' || role === 'system';
-  return (
-    <div className={clsx('flex', isUser ? 'justify-end' : isStatus ? 'justify-center' : 'justify-start')}>
-      <div className={clsx(
-        'max-w-[90%] rounded-2xl px-4 py-3 text-sm shadow-panel whitespace-pre-wrap',
-        isUser
-          ? 'bg-sky-500/20 text-sky-50 border border-sky-400/30'
-          : isStatus
-            ? 'bg-slate-900/90 text-slate-300 border border-slate-700'
-            : 'bg-slate-800/85 text-slate-50 border border-slate-700',
-      )}>
-        <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">{role}</div>
-        <div>{text}</div>
-        <div className="mt-2 text-[11px] text-slate-500">{new Date(timestamp).toLocaleString()}</div>
-      </div>
-    </div>
-  );
-});
-
-function messagesShareTranscriptBubble(previous: NormalizedMessage, next: NormalizedMessage): boolean {
-  return previous.role === next.role
-    && (previous.role === 'assistant' || previous.role === 'user');
+function messageRoleLabel(role: NormalizedMessage['role']): string {
+  switch (role) {
+    case 'user':
+      return 'You';
+    case 'assistant':
+      return 'Assistant';
+    case 'tool':
+      return 'Tool';
+    case 'system':
+      return 'System';
+    case 'status':
+      return 'Status';
+  }
 }
 
-function mergeTranscriptMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
-  const merged: NormalizedMessage[] = [];
-  for (const message of messages) {
-    const previous = merged.at(-1);
-    if (previous && messagesShareTranscriptBubble(previous, message)) {
-      previous.id = `${previous.id}:${message.id}`;
-      previous.text = [previous.text.trimEnd(), message.text.trimStart()].filter(Boolean).join('\n\n');
-      previous.timestamp = message.timestamp;
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      nodes.push(text.slice(cursor, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith('`')) {
+      nodes.push(
+        <code key={`${match.index}:code`} className="font-mono text-[0.92em] text-inherit">
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else {
+      nodes.push(<strong key={`${match.index}:bold`} className="font-semibold text-inherit">{token.slice(2, -2)}</strong>);
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+  return nodes;
+}
+
+function renderInlineLines(lines: string[]): ReactNode[] {
+  return lines.flatMap((line, index) => [
+    ...renderInlineMarkdown(line),
+    ...(index < lines.length - 1 ? [<br key={`br:${index}`} />] : []),
+  ]);
+}
+
+function isMarkdownBlockStart(line: string): boolean {
+  const trimmed = line.trim();
+  return /^```/.test(trimmed)
+    || /^#{1,4}\s+/.test(trimmed)
+    || /^[-*_]{3,}$/.test(trimmed)
+    || /^>\s?/.test(trimmed)
+    || /^[-*]\s+/.test(trimmed)
+    || /^\d+[.)]\s+/.test(trimmed);
+}
+
+function renderMessageMarkdown(text: string): ReactNode[] {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const blocks: ReactNode[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    const trimmed = line.trim();
+    if (!trimmed) {
+      index += 1;
       continue;
     }
-    merged.push({ ...message });
+
+    if (/^```/.test(trimmed)) {
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test((lines[index] ?? '').trim())) {
+        codeLines.push(lines[index] ?? '');
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(
+        <pre key={`code:${index}`} className="my-3 overflow-x-auto border-l border-current pl-3 text-xs leading-5 text-inherit">
+          <code>{codeLines.join('\n')}</code>
+        </pre>,
+      );
+      continue;
+    }
+
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.*)$/);
+    if (headingMatch) {
+      blocks.push(
+        <div key={`heading:${index}`} className="mt-4 text-base font-semibold text-inherit first:mt-0">
+          {renderInlineMarkdown(headingMatch[2] ?? '')}
+        </div>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^[-*_]{3,}$/.test(trimmed)) {
+      blocks.push(<div key={`rule:${index}`} className="my-4 border-t border-slate-800" />);
+      index += 1;
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && /^>\s?/.test((lines[index] ?? '').trim())) {
+        quoteLines.push((lines[index] ?? '').trim().replace(/^>\s?/, ''));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote key={`quote:${index}`} className="my-3 pl-3 text-inherit">
+          {renderInlineLines(quoteLines)}
+        </blockquote>,
+      );
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test((lines[index] ?? '').trim())) {
+        items.push((lines[index] ?? '').trim().replace(/^[-*]\s+/, ''));
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`ul:${index}`} className="my-3 list-disc space-y-1 pl-5">
+          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}
+        </ul>,
+      );
+      continue;
+    }
+
+    if (/^\d+[.)]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\d+[.)]\s+/.test((lines[index] ?? '').trim())) {
+        items.push((lines[index] ?? '').trim().replace(/^\d+[.)]\s+/, ''));
+        index += 1;
+      }
+      blocks.push(
+        <ol key={`ol:${index}`} className="my-3 list-decimal space-y-1 pl-5">
+          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}
+        </ol>,
+      );
+      continue;
+    }
+
+    const paragraphLines = [line];
+    index += 1;
+    while (index < lines.length && (lines[index] ?? '').trim() && !isMarkdownBlockStart(lines[index] ?? '')) {
+      paragraphLines.push(lines[index] ?? '');
+      index += 1;
+    }
+    blocks.push(
+      <p key={`p:${index}`} className="my-3 first:mt-0 last:mb-0">
+        {renderInlineLines(paragraphLines)}
+      </p>,
+    );
   }
-  return merged;
+
+  return blocks.length > 0 ? blocks : [text];
 }
 
-const LiveSessionOutputBlock = memo(function LiveSessionOutputBlock({
-  content,
-  contentAnsi,
-}: {
-  content: string;
-  contentAnsi?: string;
-}) {
+type TranscriptTurn = {
+  id: string;
+  role: NormalizedMessage['role'];
+  lifecycle: NormalizedMessage['lifecycle'];
+  startedAt: string;
+  endedAt: string;
+  messages: NormalizedMessage[];
+};
+
+type EmbeddedTranscriptSegment = {
+  type: 'transcript';
+  role: NormalizedMessage['role'];
+  label: string;
+  timestamp: string;
+  text: string;
+};
+
+type EmbeddedTranscriptPart =
+  | { type: 'text'; text: string }
+  | EmbeddedTranscriptSegment;
+
+function transcriptSpeakerRole(label: string): NormalizedMessage['role'] | undefined {
+  switch (label.trim().toLowerCase()) {
+    case 'you':
+      return 'user';
+    case 'assistant':
+      return 'assistant';
+    case 'tool':
+      return 'tool';
+    case 'system':
+      return 'system';
+    case 'status':
+      return 'status';
+    default:
+      return undefined;
+  }
+}
+
+function parseTranscriptSpeakerLine(line: string): { role: NormalizedMessage['role']; label: string; prefix?: string } | undefined {
+  const exactRole = transcriptSpeakerRole(line);
+  if (exactRole) {
+    return { role: exactRole, label: line.trim() };
+  }
+  const suffixMatch = line.match(/^(.*:\s*)(You|Assistant|Tool|System|Status)\s*$/i);
+  const suffixRole = suffixMatch ? transcriptSpeakerRole(suffixMatch[2] ?? '') : undefined;
+  if (!suffixMatch || !suffixRole) {
+    return undefined;
+  }
+  return { role: suffixRole, label: suffixMatch[2] ?? '', prefix: suffixMatch[1] ?? '' };
+}
+
+function isTranscriptTimestampLine(line: string): boolean {
+  return /^\d{1,2}\/\d{1,2}\/\d{4},\s+\d{1,2}:\d{2}(?::\d{2})?\s+(?:AM|PM)$/i.test(line.trim());
+}
+
+function parseEmbeddedTranscriptParts(text: string): EmbeddedTranscriptPart[] {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const parts: EmbeddedTranscriptPart[] = [];
+  const pendingTextLines: string[] = [];
+  let index = 0;
+
+  const flushPendingText = () => {
+    const pendingText = pendingTextLines.join('\n').trimEnd();
+    if (pendingText) {
+      parts.push({ type: 'text', text: pendingText });
+    }
+    pendingTextLines.length = 0;
+  };
+
+  while (index < lines.length) {
+    const speaker = parseTranscriptSpeakerLine(lines[index] ?? '');
+    if (!speaker || !isTranscriptTimestampLine(lines[index + 1] ?? '')) {
+      pendingTextLines.push(lines[index] ?? '');
+      index += 1;
+      continue;
+    }
+
+    if (speaker.prefix) {
+      pendingTextLines.push(speaker.prefix.trimEnd());
+    }
+    flushPendingText();
+
+    const timestamp = (lines[index + 1] ?? '').trim();
+    index += 2;
+    const transcriptLines: string[] = [];
+    while (index < lines.length) {
+      const nextSpeaker = parseTranscriptSpeakerLine(lines[index] ?? '');
+      if (nextSpeaker && isTranscriptTimestampLine(lines[index + 1] ?? '')) {
+        break;
+      }
+      transcriptLines.push(lines[index] ?? '');
+      index += 1;
+    }
+
+    parts.push({
+      type: 'transcript',
+      role: speaker.role,
+      label: speaker.label,
+      timestamp,
+      text: transcriptLines.join('\n').trim(),
+    });
+  }
+
+  flushPendingText();
+  return parts;
+}
+
+function renderUserMessageContent(text: string): ReactNode[] {
+  const parts = parseEmbeddedTranscriptParts(text);
+  if (!parts.some((part) => part.type === 'transcript')) {
+    return [
+      <div key="user-text" className="font-bold text-emerald-600">
+        {renderMessageMarkdown(text)}
+      </div>,
+    ];
+  }
+
+  return parts.map((part, index) => {
+    if (part.type === 'text') {
+      return (
+        <div key={`text:${index}`} className="font-bold text-emerald-600">
+          {renderMessageMarkdown(part.text)}
+        </div>
+      );
+    }
+    const isEmbeddedUser = part.role === 'user';
+    return (
+      <div
+        key={`transcript:${index}`}
+        className={clsx(
+          'my-3 border-l pl-3',
+          isEmbeddedUser
+            ? 'border-emerald-800 font-bold text-emerald-600'
+            : 'border-slate-800 font-normal text-slate-100',
+        )}
+      >
+        <div className="mb-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-slate-500">
+          <span className={clsx(isEmbeddedUser ? 'font-bold text-emerald-600' : 'font-semibold text-slate-300')}>{part.label}</span>
+          <span>{part.timestamp}</span>
+        </div>
+        {part.text ? renderMessageMarkdown(part.text) : null}
+      </div>
+    );
+  });
+}
+
+function messagesShareTranscriptTurn(previous: NormalizedMessage, next: NormalizedMessage): boolean {
+  if (previous.role !== next.role) {
+    return false;
+  }
+  return previous.role === 'assistant' || previous.role === 'user' || previous.role === 'tool';
+}
+
+function groupTranscriptTurns(messages: NormalizedMessage[]): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  for (const message of messages) {
+    const lastTurn = turns.at(-1);
+    const lastMessage = lastTurn?.messages.at(-1);
+    if (lastTurn && lastMessage && messagesShareTranscriptTurn(lastMessage, message)) {
+      lastTurn.id = `${lastTurn.id}:${message.id}`;
+      lastTurn.lifecycle = lastTurn.lifecycle === 'pending' || message.lifecycle === 'pending' ? 'pending' : message.lifecycle;
+      lastTurn.endedAt = message.timestamp;
+      lastTurn.messages.push(message);
+      continue;
+    }
+    turns.push({
+      id: message.id,
+      role: message.role,
+      lifecycle: message.lifecycle,
+      startedAt: message.timestamp,
+      endedAt: message.timestamp,
+      messages: [message],
+    });
+  }
+  return turns;
+}
+
+function shouldShowInMainTranscript(message: NormalizedMessage): boolean {
+  if (message.role !== 'user' && message.role !== 'assistant') {
+    return false;
+  }
+  if (message.lifecycle === 'pending' && message.source === 'live-output' && message.role !== 'assistant') {
+    return false;
+  }
+  return true;
+}
+
+function formatTimestampRange(startedAt: string, endedAt: string): string {
+  const started = new Date(startedAt).toLocaleString();
+  if (startedAt === endedAt) {
+    return started;
+  }
+  return `${started} - ${new Date(endedAt).toLocaleTimeString()}`;
+}
+
+function combinedTurnText(turn: TranscriptTurn): string {
+  return turn.messages
+    .map((message) => message.text.trim())
+    .filter(Boolean)
+    .join(turn.role === 'assistant' ? '\n' : '\n\n');
+}
+
+const TranscriptDocumentTurn = memo(function TranscriptDocumentTurn({ turn }: { turn: TranscriptTurn }) {
+  const isPending = turn.lifecycle === 'pending';
+  const isUser = turn.role === 'user';
+  const turnText = combinedTurnText(turn);
   return (
-    <div>
-      <LiveAnsiBlock
-        text={content || 'Waiting for session output…'}
-        ansiText={contentAnsi}
-        className="rounded-lg border border-slate-800 bg-slate-950 p-3 whitespace-pre-wrap break-words font-mono text-[13px] leading-5 text-slate-200"
-      />
-    </div>
+    <article className="py-5">
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-slate-500">
+        <span className={clsx(isUser ? 'font-bold text-emerald-500' : 'font-semibold text-slate-300')}>{messageRoleLabel(turn.role)}</span>
+        {isPending ? <span className="text-amber-300">pending</span> : null}
+        <time>{formatTimestampRange(turn.startedAt, turn.endedAt)}</time>
+      </div>
+      <div className="max-w-none break-words text-sm leading-7 text-slate-100">
+        {isUser ? renderUserMessageContent(turnText) : renderMessageMarkdown(turnText)}
+      </div>
+    </article>
   );
 });
 
@@ -697,6 +1023,7 @@ function LiveSessionInputBridge({
   async function syncDraftToRemote(extraKeys: SessionKeyToken[] = [], options: { clearAfterSend?: boolean } = {}): Promise<boolean> {
     const baseText = committedInputRef.current;
     const nextText = draftText;
+    const submittedText = extraKeys.includes('Enter') ? nextText.trim() : '';
     let prefixLength = 0;
     while (prefixLength < baseText.length && prefixLength < nextText.length && baseText[prefixLength] === nextText[prefixLength]) {
       prefixLength += 1;
@@ -715,6 +1042,7 @@ function LiveSessionInputBridge({
       const ok = await queueKeystrokes({
         ...(appendedText ? { text: appendedText } : {}),
         ...(extraKeys.length > 0 ? { keys: extraKeys } : {}),
+        ...(submittedText ? { submittedText } : {}),
       });
       if (!ok) {
         return false;
@@ -768,17 +1096,45 @@ function LiveSessionInputBridge({
     });
   }
 
+  function bypassPreviewAfterSubmit(preview: string, submittedText: string): string {
+    if (!preview) {
+      return '';
+    }
+    if (submittedText && preview.startsWith(submittedText)) {
+      return preview.slice(submittedText.length);
+    }
+    return preview;
+  }
+
+  function clearSubmittedBypassPreview(submittedText: string): string {
+    const previewBeforeSubmit = bypassPreviewText ?? inputText;
+    setBypassPreviewText((current) => bypassPreviewAfterSubmit(current ?? '', submittedText));
+    return previewBeforeSubmit;
+  }
+
+  function restoreSubmittedBypassPreview(submittedText: string, previewBeforeSubmit: string): void {
+    const expectedPreview = bypassPreviewAfterSubmit(previewBeforeSubmit, submittedText);
+    setBypassPreviewText((current) => ((current ?? '') === expectedPreview ? previewBeforeSubmit : current));
+  }
+
   async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
     if (source === 'button') {
       if (specialKey === 'Enter') {
         if (textBypassEnabled) {
+          const submittedText = (bypassPreviewText ?? inputText).trim();
           const ok = await flushBufferedText();
           if (!ok) {
             return;
           }
           keepBypassSelectionPinnedRef.current = true;
-          setBypassPreviewText('');
-          enqueueKeystrokes({ keys: ['Enter'] });
+          const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
+          const submitted = await queueKeystrokes({
+            keys: ['Enter'],
+            ...(submittedText ? { submittedText } : {}),
+          });
+          if (!submitted) {
+            restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
+          }
           return;
         }
         await runBridgeAction(async () => {
@@ -824,17 +1180,29 @@ function LiveSessionInputBridge({
     }
 
     if (textBypassEnabled) {
+      const submittedText = specialKey === 'Enter' ? (bypassPreviewText ?? inputText).trim() : '';
       const ok = await flushBufferedText();
       if (!ok) {
         return;
       }
       keepBypassSelectionPinnedRef.current = true;
       if (specialKey === 'Enter') {
-        setBypassPreviewText('');
+        const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
+        const submitted = await queueKeystrokes({
+          keys: [specialKey],
+          ...(submittedText ? { submittedText } : {}),
+        });
+        if (!submitted) {
+          restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
+        }
+        return;
       } else {
         setBypassPreviewText(undefined);
       }
-      enqueueKeystrokes({ keys: [specialKey] });
+      enqueueKeystrokes({
+        keys: [specialKey],
+        ...(submittedText ? { submittedText } : {}),
+      });
       return;
     }
 
@@ -1264,12 +1632,6 @@ export function ConversationPane({
   const historyMessages = timeline?.messages ?? [];
   const hasSavedHistory = historyMessages.length > 0;
   const showHistory = hasSavedHistory;
-  const showLiveTail = Boolean(
-    liveMode
-    && liveScreen
-    && liveScreen.content.trim()
-    && liveScreen.content.trim() !== 'Waiting for session output…',
-  );
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1311,8 +1673,15 @@ export function ConversationPane({
   const renderedHistoryMessages = renderedHistoryState.messages;
   const renderedHasOlderMessages = renderedHistoryState.hasOlderMessages;
   const renderedLoadingOlderMessages = renderedHistoryState.loadingOlderMessages;
-  const renderedTranscriptMessages = useMemo(() => mergeTranscriptMessages(renderedHistoryMessages), [renderedHistoryMessages]);
-  const renderedShowMessages = renderedTranscriptMessages.length > 0;
+  const visibleHistoryMessages = useMemo(
+    () => renderedHistoryMessages.filter(shouldShowInMainTranscript),
+    [renderedHistoryMessages],
+  );
+  const renderedShowMessages = visibleHistoryMessages.length > 0;
+  const renderedHistoryTurns = useMemo(
+    () => groupTranscriptTurns(visibleHistoryMessages),
+    [visibleHistoryMessages],
+  );
 
   if (!timeline) {
     if (loading && selectedProvider && project) {
@@ -1480,29 +1849,23 @@ export function ConversationPane({
         ref={scrollRef}
         className="scrollbar-thin flex-1 min-h-0 overflow-y-auto px-4 py-5"
       >
-        {renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages || showLiveTail ? (
-          <div className="space-y-4 pb-5">
+        {renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages ? (
+          <div className="w-full divide-y divide-slate-900/80 pb-5">
             {(renderedHasOlderMessages || renderedLoadingOlderMessages) && (
               <div className="text-center text-xs text-slate-500">
                 {renderedLoadingOlderMessages ? 'Loading earlier messages…' : 'Scroll up to load earlier messages'}
               </div>
             )}
-            {renderedTranscriptMessages.map((message) => (
-              <TranscriptBubble key={message.id} role={message.role} text={message.text} timestamp={message.timestamp} />
+            {renderedHistoryTurns.map((turn) => (
+              <TranscriptDocumentTurn key={turn.id} turn={turn} />
             ))}
-            {showLiveTail && liveScreen ? (
-              <LiveSessionOutputBlock
-                content={liveScreen.content}
-                contentAnsi={liveScreen.contentAnsi}
-              />
-            ) : null}
           </div>
         ) : boundSession ? (
-          <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
+          <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
             Waiting for session output…
           </div>
         ) : (
-          <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-center text-slate-400">
+          <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
             No saved transcript yet. Bind this conversation and use the composer below to drive the live session.
           </div>
         )}

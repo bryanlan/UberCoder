@@ -30,7 +30,10 @@ function shouldHideClaudeDisplayMessage(message: NormalizedMessage): boolean {
     return true;
   }
 
-  return /^<(?:command-name|command-message|command-args|local-command-(?:stdout|stderr|caveat))>/i.test(message.text.trim());
+  const trimmed = message.text.trim();
+  return /^<(?:command-name|command-message|command-args|local-command-(?:stdout|stderr|caveat))>/i.test(trimmed)
+    || /^<task-notification>[\s\S]*<\/task-notification>$/i.test(trimmed)
+    || trimmed === 'No response requested.';
 }
 
 function extractClaudeMessage(record: Record<string, unknown>): { role: NormalizedMessage['role']; text: string } | undefined {
@@ -93,6 +96,7 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
       role: extracted.role,
+      lifecycle: 'durable',
       text: extracted.text,
       timestamp,
       conversationRef: input.conversationRef,

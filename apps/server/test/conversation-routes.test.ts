@@ -550,7 +550,7 @@ describe('conversation routes', () => {
           id: 'session-live-adopted',
         },
         liveScreen: {
-          content: 'Still working through the direct-load case…',
+          content: '',
         },
       });
       expect(getSessionScreen).toHaveBeenCalledWith('session-live-adopted');
@@ -880,6 +880,7 @@ describe('conversation routes', () => {
         id: 'old-user',
         provider: 'codex',
         role: 'user',
+        lifecycle: 'durable',
         text: 'Older prompt',
         timestamp: '2026-03-14T18:00:00.000Z',
         conversationRef: 'history-ref',
@@ -889,6 +890,7 @@ describe('conversation routes', () => {
         id: 'old-assistant',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: 'Older answer',
         timestamp: '2026-03-14T18:00:01.000Z',
         conversationRef: 'history-ref',
@@ -898,6 +900,7 @@ describe('conversation routes', () => {
         id: 'same-turn-first',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: 'Same turn first chunk',
         timestamp: '2026-03-14T18:00:02.000Z',
         conversationRef: 'history-ref',
@@ -907,6 +910,7 @@ describe('conversation routes', () => {
         id: 'same-turn-second',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: 'Same turn second chunk',
         timestamp: '2026-03-14T18:00:03.000Z',
         conversationRef: 'history-ref',
@@ -916,6 +920,7 @@ describe('conversation routes', () => {
         id: 'new-user',
         provider: 'codex',
         role: 'user',
+        lifecycle: 'durable',
         text: 'Next prompt',
         timestamp: '2026-03-14T18:00:04.000Z',
         conversationRef: 'history-ref',
@@ -925,6 +930,7 @@ describe('conversation routes', () => {
         id: 'new-assistant',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: 'Latest answer',
         timestamp: '2026-03-14T18:00:05.000Z',
         conversationRef: 'history-ref',
@@ -1067,6 +1073,7 @@ describe('conversation routes', () => {
         id: 'history-user',
         provider: 'codex',
         role: 'user',
+        lifecycle: 'durable',
         text: 'Continue with the implementation plan.',
         timestamp: '2026-03-14T18:00:00.000Z',
         conversationRef: 'history-ref',
@@ -1076,6 +1083,7 @@ describe('conversation routes', () => {
         id: 'history-assistant',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: transcriptAnswer,
         timestamp: '2026-03-14T18:02:05.000Z',
         conversationRef: 'history-ref',
@@ -1158,17 +1166,22 @@ describe('conversation routes', () => {
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain(transcriptAnswer);
       expect(texts).toContain('Continue with the implementation plan.');
-      expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(2);
-      expect(texts).not.toContain('Fresh live-only follow-up.');
+      expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(1);
+      expect(texts).toContain('Fresh live-only follow-up.');
       expect(texts).not.toContain(liveTranscriptTail);
-      expect(response.json().liveScreen.content).toBe('Fresh live-only follow-up.');
+      expect(response.json().messages.find((message: NormalizedMessage) => message.text === 'Fresh live-only follow-up.')).toMatchObject({
+        lifecycle: 'pending',
+        role: 'assistant',
+        source: 'live-output',
+      });
+      expect(response.json().liveScreen.content).toBe('');
     } finally {
       await app.close();
       db.close();
     }
   });
 
-  it('trims live screen scrollback that starts before the recent transcript tail', async () => {
+  it('does not expose raw live screen scrollback in transcript-backed timelines', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     db.replaceConversationIndex('demo', 'codex', [{
@@ -1202,6 +1215,7 @@ describe('conversation routes', () => {
       id: `history-assistant-${index}`,
       provider: 'codex',
       role: 'assistant',
+      lifecycle: 'durable',
       text: `Saved transcript segment ${index + 1} has enough unique content to identify long terminal scrollback ${index + 1}.`,
       timestamp: `2026-03-14T18:${String(index).padStart(2, '0')}:00.000Z`,
       conversationRef: 'history-long-tail',
@@ -1281,14 +1295,15 @@ describe('conversation routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().messages).toEqual([]);
-      expect(response.json().liveScreen.content).toBe('Fresh live-only follow-up.');
+      expect(response.json().liveScreen.content).toBe('');
+      expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
     }
   });
 
-  it('trims transcript-backed live screen scrollback with interleaved terminal chrome', async () => {
+  it('does not expose raw live screen scrollback with interleaved terminal chrome', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     db.replaceConversationIndex('demo', 'codex', [{
@@ -1324,6 +1339,7 @@ describe('conversation routes', () => {
       id: 'history-assistant',
       provider: 'codex',
       role: 'assistant',
+      lifecycle: 'durable',
       text: `${transcriptLineA}\n\n${transcriptLineB}`,
       timestamp: '2026-03-14T18:02:00.000Z',
       conversationRef: 'history-chrome-tail',
@@ -1408,74 +1424,97 @@ describe('conversation routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().messages).toEqual([]);
-      expect(response.json().liveScreen.content).toBe('Fresh active terminal line.');
+      expect(response.json().liveScreen.content).toBe('');
     } finally {
       await app.close();
       db.close();
     }
   });
 
-  it('trims markdown transcript tail from wrapped Claude screen output', async () => {
+  it('renders a Claude transcript paragraph only once when the event log replays it with command status lines', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     db.replaceConversationIndex('waltiumweb', 'claude', [{
-      ref: 'claude-markdown-tail',
+      ref: 'claude-duplicate-tail',
       kind: 'history',
       projectSlug: 'waltiumweb',
       provider: 'claude',
-      title: 'Claude markdown tail',
+      title: 'Claude duplicate tail',
       createdAt: '2026-06-30T12:30:00.000Z',
       updatedAt: '2026-06-30T12:35:41.995Z',
       isBound: true,
-      boundSessionId: 'session-claude-markdown-tail',
+      boundSessionId: 'session-claude-duplicate-tail',
       degraded: false,
     } satisfies ConversationSummary]);
 
+    const assistantText = [
+      'That "completed" was just the launcher returning — the actual codex run is detached via `nohup`. Let me check its progress:',
+      '',
+      'Good news in the run log: this retry **ran the proof-of-read `wc -l` successfully** — so local file access is working (the bwrap bypass holds), and Codex is now analyzing. It\'s still running (detached via nohup), output is written at the end. Let me wait for it to finish:',
+    ].join('\n');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '● That "completed" was just the launcher returning — the actual codex run is detached via `nohup`. Let me check its progress:',
+          '',
+          'Ran 1 shell command',
+          '',
+          '● Good news in the run log: this retry ran the proof-of-read wc -l successfully — so local file access is working (the bwrap bypass holds), and Codex is now analyzing. It\'s still running (detached via nohup), output is written at the end. Let me wait for it to finish:',
+        ].join('\n'),
+        timestamp: '2026-06-30T12:35:42.000Z',
+      }),
+    ].join('\n'));
+
     const session: BoundSession = {
-      id: 'session-claude-markdown-tail',
+      id: 'session-claude-duplicate-tail',
       provider: 'claude',
       projectSlug: 'waltiumweb',
-      conversationRef: 'claude-markdown-tail',
-      tmuxSessionName: 'ac-claude-waltiumweb-markdown-tail',
+      conversationRef: 'claude-duplicate-tail',
+      tmuxSessionName: 'ac-claude-waltiumweb-duplicate-tail',
       status: 'bound',
-      title: 'Claude markdown tail',
+      title: 'Claude duplicate tail',
       startedAt: '2026-06-30T12:30:00.000Z',
       updatedAt: '2026-06-30T12:35:41.995Z',
       lastActivityAt: '2026-06-30T12:35:41.995Z',
+      eventLogPath,
     };
     db.upsertBoundSession(session);
 
-    const assistantText = [
-      'Plus nits: advisory lock against overlapping runs, reconciliation indexes, `NOT NULL`s, treat `balance` cash-flow rows as snapshots not events.',
-      '',
-      '---',
-      '',
-      '**Where this leaves us:** the design is converging — the open items are now precise refinements I can fold into a v3, except **key-stability (#4), which is a data check requiring a second weekly export**, not more review.',
-      '',
-      'My recommendation: I write **v3** with 1–3, 5–6 fully incorporated, flag #4 as a pre-implementation validation gate (diff two consecutive exports the first time we have them), and run **one more focused Codex pass** to confirm the fixes are correct — then we\'d be at GO.',
-      '',
-      'Want me to produce v3 and run that final review, or stop the review loop here and have me turn v3 into the implementation plan directly?',
-    ].join('\n');
-    const providerMessages: NormalizedMessage[] = [{
-      id: 'history-assistant-markdown',
-      provider: 'claude',
-      role: 'assistant',
-      text: assistantText,
-      timestamp: '2026-06-30T12:35:41.995Z',
-      conversationRef: 'claude-markdown-tail',
-      source: 'history-file',
-    }];
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'history-assistant-duplicate',
+        provider: 'claude',
+        role: 'assistant',
+        lifecycle: 'durable',
+        text: assistantText,
+        timestamp: '2026-06-30T12:35:41.995Z',
+        conversationRef: 'claude-duplicate-tail',
+        source: 'history-file',
+      },
+      {
+        id: 'history-assistant-frontier',
+        provider: 'claude',
+        role: 'assistant',
+        lifecycle: 'durable',
+        text: 'Later durable transcript frontier.',
+        timestamp: '2026-06-30T12:36:00.000Z',
+        conversationRef: 'claude-duplicate-tail',
+        source: 'history-file',
+      },
+    ];
     const getConversation = vi.fn(async () => ({
       summary: {
-        ref: 'claude-markdown-tail',
+        ref: 'claude-duplicate-tail',
         kind: 'history',
         projectSlug: 'waltiumweb',
         provider: 'claude',
-        title: 'Claude markdown tail',
+        title: 'Claude duplicate tail',
         createdAt: '2026-06-30T12:30:00.000Z',
         updatedAt: '2026-06-30T12:35:41.995Z',
         isBound: true,
-        boundSessionId: 'session-claude-markdown-tail',
+        boundSessionId: 'session-claude-duplicate-tail',
         degraded: false,
       } satisfies ConversationSummary,
       messages: providerMessages,
@@ -1485,23 +1524,11 @@ describe('conversation routes', () => {
       session,
       screen: {
         content: [
-          'reconciliation indexes, NOT NULLs, treat balance cash-flow rows as snapshots',
-          '  not events.',
+          'hat "completed" was just the launcher returning — the actual codex run is detached via `nohup`. Let me check its progress:',
           '',
-          '  ---',
-          '  Where this leaves us: the design is converging — the open items are now',
-          '  precise refinements I can fold into a v3, except key-stability (#4), which is',
-          '  a data check requiring a second weekly export, not more review.',
+          'Ran 1 shell command',
           '',
-          '  My recommendation: I write v3 with 1–3, 5–6 fully incorporated, flag #4 as a',
-          '  pre-implementation validation gate (diff two consecutive exports the first',
-          '  time we have them), and run one more focused Codex pass to confirm the fixes',
-          '  are correct — then we\'d be at GO.',
-          '',
-          '  Want me to produce v3 and run that final review, or stop the review loop here',
-          '  and have me turn v3 into the implementation plan directly?',
-          '',
-          '✻ Cooked for 1m 17s',
+          '● Good news in the run log: this retry ran the proof-of-read wc -l successfully — so local file access is working (the bwrap bypass holds), and Codex is now analyzing. It\'s still running (detached via nohup), output is written at the end. Let me wait for it to finish:',
         ].join('\n'),
         inputText: '',
         status: 'Session active',
@@ -1552,7 +1579,142 @@ describe('conversation routes', () => {
     try {
       const response = await app.inject({
         method: 'GET',
-        url: '/api/conversations/waltiumweb/claude/claude-markdown-tail/messages?limit=0',
+        url: '/api/conversations/waltiumweb/claude/claude-duplicate-tail/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const messages = response.json().messages as NormalizedMessage[];
+      expect(messages.filter((message) => message.text.includes('launcher returning'))).toHaveLength(1);
+      expect(messages.filter((message) => message.text.includes('proof-of-read'))).toHaveLength(1);
+      expect(messages.some((message) => message.text === 'Ran 1 shell command')).toBe(false);
+      expect(messages.filter((message) => message.lifecycle === 'pending')).toHaveLength(0);
+      expect(response.json().liveScreen.content).toBe('');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('trims Claude status-only live output and saved prompt echoes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('waltiumweb', 'claude', [{
+      ref: 'claude-status-tail',
+      kind: 'history',
+      projectSlug: 'waltiumweb',
+      provider: 'claude',
+      title: 'Claude status tail',
+      createdAt: '2026-06-30T19:00:00.000Z',
+      updatedAt: '2026-06-30T19:14:01.072Z',
+      isBound: true,
+      boundSessionId: 'session-claude-status-tail',
+      degraded: false,
+    } satisfies ConversationSummary]);
+
+    const session: BoundSession = {
+      id: 'session-claude-status-tail',
+      provider: 'claude',
+      projectSlug: 'waltiumweb',
+      conversationRef: 'claude-status-tail',
+      tmuxSessionName: 'ac-claude-waltiumweb-status-tail',
+      status: 'bound',
+      title: 'Claude status tail',
+      startedAt: '2026-06-30T19:00:00.000Z',
+      updatedAt: '2026-06-30T19:14:01.072Z',
+      lastActivityAt: '2026-06-30T19:14:01.072Z',
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = [{
+      id: 'history-user-short-prompt',
+      provider: 'claude',
+      role: 'user',
+      lifecycle: 'durable',
+      text: 'what happene',
+      timestamp: '2026-06-30T19:14:01.072Z',
+      conversationRef: 'claude-status-tail',
+      source: 'history-file',
+    }];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'claude-status-tail',
+        kind: 'history',
+        projectSlug: 'waltiumweb',
+        provider: 'claude',
+        title: 'Claude status tail',
+        createdAt: '2026-06-30T19:00:00.000Z',
+        updatedAt: '2026-06-30T19:14:01.072Z',
+        isBound: true,
+        boundSessionId: 'session-claude-status-tail',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: [
+          '✻ Baked for 12m 40s',
+          '',
+          '● Background command "Proof-gated Codex review of ingest layer" failed with exit',
+          'code 144',
+          '',
+          '❯ what happene',
+          '',
+          '✽ Gusting…',
+          '  tmux focus-events off · add \'set -g focus-events on\' to ~/.tmux.conf and rea…',
+        ].join('\n'),
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-06-30T19:14:02.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'waltiumweb'
+            ? {
+                slug: 'waltiumweb',
+                displayName: 'Waltium Web',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'claude',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['claude'],
+            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
+            continueCommand: ['claude', '--continue'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/waltiumweb/claude/claude-status-tail/messages?limit=0',
       });
 
       expect(response.statusCode).toBe(200);
@@ -1616,6 +1778,7 @@ describe('conversation routes', () => {
         id: 'history-user',
         provider: 'codex',
         role: 'user',
+        lifecycle: 'durable',
         text: 'Continue with the implementation plan.',
         timestamp: '2026-03-14T18:00:00.000Z',
         conversationRef: 'history-input-buffer',
@@ -1625,6 +1788,7 @@ describe('conversation routes', () => {
         id: 'history-assistant',
         provider: 'codex',
         role: 'assistant',
+        lifecycle: 'durable',
         text: transcriptAnswer,
         timestamp: '2026-03-14T18:02:05.000Z',
         conversationRef: 'history-input-buffer',
@@ -1706,7 +1870,7 @@ describe('conversation routes', () => {
       expect(response.statusCode).toBe(200);
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain(activeInput);
-      expect(response.json().liveScreen.content).toBe('Live model menu is waiting for a selection.');
+      expect(response.json().liveScreen.content).toBe('');
       expect(response.json().liveScreen.inputText).toBe(activeInput);
     } finally {
       await app.close();
@@ -1814,7 +1978,7 @@ describe('conversation routes', () => {
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain('Draft an event-only implementation plan.');
       expect(texts).toContain(eventOnlyAnswer);
-      expect(response.json().liveScreen.content).toBe('Fresh active terminal line.');
+      expect(response.json().liveScreen.content).toBe('');
       expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();

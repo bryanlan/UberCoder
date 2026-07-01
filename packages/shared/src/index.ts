@@ -3,6 +3,7 @@ export type ProviderId = (typeof PROVIDERS)[number];
 
 export const MESSAGE_ROLES = ['user', 'assistant', 'system', 'tool', 'status'] as const;
 export type MessageRole = (typeof MESSAGE_ROLES)[number];
+export type MessageLifecycle = 'durable' | 'pending' | 'status';
 
 export const SESSION_STATUSES = ['starting', 'bound', 'releasing', 'ended', 'error'] as const;
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
@@ -74,6 +75,7 @@ export interface NormalizedMessage {
   id: string;
   provider: ProviderId;
   role: MessageRole;
+  lifecycle: MessageLifecycle;
   text: string;
   timestamp: string;
   conversationRef: string;
@@ -158,6 +160,7 @@ export interface SessionKeystrokeRequest {
   text?: string;
   keys?: string[];
   deferScreenUpdate?: boolean;
+  submittedText?: string;
 }
 
 export interface LoginRequest {
@@ -288,6 +291,15 @@ export type SessionEvent =
       provider: ProviderId;
       conversationRef: string;
       chunk: string;
+      timestamp: string;
+    }
+  | {
+      type: 'session.user-input';
+      sessionId: string;
+      projectSlug: string;
+      provider: ProviderId;
+      conversationRef: string;
+      text: string;
       timestamp: string;
     }
   | {

@@ -2,6 +2,7 @@ export declare const PROVIDERS: readonly ["codex", "claude"];
 export type ProviderId = (typeof PROVIDERS)[number];
 export declare const MESSAGE_ROLES: readonly ["user", "assistant", "system", "tool", "status"];
 export type MessageRole = (typeof MESSAGE_ROLES)[number];
+export type MessageLifecycle = 'durable' | 'pending' | 'status';
 export declare const SESSION_STATUSES: readonly ["starting", "bound", "releasing", "ended", "error"];
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
 export type ConversationKind = 'history' | 'pending';
@@ -59,6 +60,7 @@ export interface NormalizedMessage {
     id: string;
     provider: ProviderId;
     role: MessageRole;
+    lifecycle: MessageLifecycle;
     text: string;
     timestamp: string;
     conversationRef: string;
@@ -164,6 +166,14 @@ export type SessionEvent = {
     provider: ProviderId;
     conversationRef: string;
     chunk: string;
+    timestamp: string;
+} | {
+    type: 'session.user-input';
+    sessionId: string;
+    projectSlug: string;
+    provider: ProviderId;
+    conversationRef: string;
+    text: string;
     timestamp: string;
 } | {
     type: 'conversation.index-updated';

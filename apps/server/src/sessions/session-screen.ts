@@ -69,6 +69,9 @@ function parsePromptInput(line: string): string | undefined {
     return undefined;
   }
   const text = match[1]?.replace(/\u00a0/g, ' ').trim();
+  if (isClaudeStartupPlaceholderPromptText(text ?? '')) {
+    return '';
+  }
   if (!text) {
     return '';
   }
@@ -78,15 +81,53 @@ function parsePromptInput(line: string): string | undefined {
   return text;
 }
 
+function isCodexStartupPlaceholderPrompt(line: string): boolean {
+  const promptText = line.match(/^\s*[❯›>]\s*(.*?)\s*$/u)?.[1]?.trim();
+  return /^(?:Implement \{feature\}|Write tests for @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits)$/i.test(promptText ?? '');
+}
+
+function isClaudeStartupPlaceholderPromptText(text: string): boolean {
+  return /^Try\s+".*"\s*$/i.test(text);
+}
+
+function isCodexStartupChromeAfterPrompt(line: string): boolean {
+  const normalized = normalizeTerminalChromeLine(line);
+  return isLeadingTerminalChrome(normalized)
+    || /^Tip:/i.test(normalized)
+    || /^•?\s*You have \d+ usage limit resets available/i.test(normalized);
+}
+
+function isPromptFollowedByCodexStartupChrome(lines: ScreenLine[], index: number): boolean {
+  if (!isCodexStartupPlaceholderPrompt(lines[index]?.plain ?? '')) {
+    return false;
+  }
+
+  const following = lines
+    .slice(index + 1, index + 12)
+    .filter((line) => line.plain.trim().length > 0);
+  if (!following.length || !isLikelyFooterStatus(following[0]!.plain)) {
+    return false;
+  }
+
+  return following.slice(1).some((line) => isCodexStartupChromeAfterPrompt(line.plain));
+}
+
 function looksLikeMenuChoice(line: string): boolean {
   const normalized = normalizeWhitespace(line.replace(/^[❯›>]\s*/u, ''));
   return /^\/[\w-]/.test(normalized)
     || /^\d+\.\s/.test(normalized);
 }
 
+function looksLikeSlashCommandSuggestion(line: string): boolean {
+  const normalized = normalizeWhitespace(line.replace(/^[❯›>]\s*/u, ''));
+  return /^\/[\w-]+(?:\s{2,}|\s+(?:Set|Use|Run|Show|Create|Open|Search|Switch|List|Resume|Continue|Manage)\b)/i.test(normalized);
+}
+
 function isInteractivePickerHint(line: string): boolean {
   const normalized = normalizeWhitespace(line);
   return /Enter to confirm · Esc to exit/i.test(normalized)
+    || /Press enter to confirm or esc to go back/i.test(normalized)
+    || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
     || /Enter to select · .*Esc to cancel/i.test(normalized);
 }
@@ -161,15 +202,40 @@ function joinAnsi(lines: ScreenLine[]): string {
   return lines.map((line) => line.raw).join('\n').trim();
 }
 
-function extractClaudeHeaderModel(lines: ScreenLine[]): string | undefined {
-  for (const line of lines.slice(0, 12)) {
+function formatClaudeModelName(name: string, version: string): string {
+  return `${name[0]!.toUpperCase()}${name.slice(1).toLowerCase()} ${version}`;
+}
+
+function extractClaudeVisibleModel(lines: ScreenLine[]): string | undefined {
+  let latestModel: string | undefined;
+
+  for (const [index, line] of lines.entries()) {
     const normalized = normalizeWhitespace(line.plain);
-    const match = normalized.match(/\b(Opus|Sonnet|Haiku)\s+([0-9]+(?:\.[0-9]+)?)\b/i);
-    if (match) {
-      return `${match[1]![0]!.toUpperCase()}${match[1]!.slice(1).toLowerCase()} ${match[2]}`;
+
+    const explicitSelection = normalized.match(/\bSet\s+model\s+to\s+(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)/i);
+    if (explicitSelection) {
+      latestModel = formatClaudeModelName(explicitSelection[1]!, explicitSelection[2]!);
+      continue;
+    }
+
+    if (normalized.includes('✔')) {
+      const checkedModelMatches = [...normalized.matchAll(/\b(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)\b/gi)];
+      const checkedModel = checkedModelMatches.at(-1);
+      if (checkedModel) {
+        latestModel = formatClaudeModelName(checkedModel[1]!, checkedModel[2]!);
+        continue;
+      }
+    }
+
+    if (index < 12 && /\bClaude Max\b/i.test(normalized) && !/^\s*(?:[❯›>]\s*)?\d+\.\s/.test(normalized)) {
+      const headerModel = normalized.match(/\b(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)\b/i);
+      if (headerModel) {
+        latestModel = formatClaudeModelName(headerModel[1]!, headerModel[2]!);
+      }
     }
   }
-  return undefined;
+
+  return latestModel;
 }
 
 function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
@@ -218,11 +284,16 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     }
 
     const following = contentLines.slice(index + 1).filter((line) => line.plain.trim().length > 0);
-    if (following.some((line) => /^\s*●/.test(line.plain))) {
+    if (following.some((line) => /^\s*[•●]/u.test(line.plain))) {
       continue;
     }
 
     const previous = contentLines.slice(0, index).reverse().find((line) => line.plain.trim().length > 0);
+    const previousContext = contentLines.slice(Math.max(0, index - 8), index);
+    if (promptText.startsWith('/') && previousContext.some((line) => looksLikeSlashCommandSuggestion(line.plain))) {
+      continue;
+    }
+
     if (previous && following.length > 0 && looksLikeMenuChoice(previous.plain) && following.every((line) => looksLikeMenuChoice(line.plain))) {
       continue;
     }
@@ -274,8 +345,9 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const lines = toScreenLines(snapshot);
 
   const visibleLines = collapseBlankRuns(
-    trimLeadingTerminalChrome(lines).filter((line) => {
+    trimLeadingTerminalChrome(lines).filter((line, index, all) => {
       if (isBoxDrawingOnly(line.plain)) return false;
+      if (isPromptFollowedByCodexStartupChrome(all, index)) return false;
       return true;
     }),
   );
@@ -335,7 +407,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
       }
     }
   }
-  finalModel ??= extractClaudeHeaderModel(lines);
+  finalModel ??= extractClaudeVisibleModel(lines);
 
   return {
     content,

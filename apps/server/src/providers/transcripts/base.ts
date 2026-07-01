@@ -3,7 +3,6 @@ import path from 'node:path';
 import type { ConversationSummary, MessageRole, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import { samePath } from '../../lib/path-utils.js';
 import { coerceText, normalizeComparableText, stableTextHash, truncate } from '../../lib/text.js';
-import { readTextWindowed } from '../file-utils.js';
 import type { ParsedTranscript, TranscriptMetadata, TranscriptParseInput } from './types.js';
 
 type JsonRecord = Record<string, unknown>;
@@ -269,7 +268,7 @@ export async function loadJsonlRecords(filePath: string): Promise<{
   records: Array<{ index: number; record: JsonRecord }>;
   fallbackTime: string;
 }> {
-  const text = await readTextWindowed(filePath);
+  const text = await fs.readFile(filePath, 'utf8');
   const stat = await fs.stat(filePath);
   const records = text
     .split(/\r?\n/)

@@ -6,7 +6,7 @@ import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } fro
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
-import { normalizeComparableText, normalizeWhitespace, stableTextHash, truncate } from '../lib/text.js';
+import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl, truncate } from '../lib/text.js';
 import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
@@ -37,6 +37,8 @@ const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
 const RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS = 500;
+const SESSION_MODEL_METADATA_KEY = 'lastLiveModel';
+const SESSION_MODEL_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -60,6 +62,23 @@ function sessionScreenShowsWorking(screen: SessionScreen): boolean {
 
 function screenInputChanged(previous: SessionScreen, next: SessionScreen): boolean {
   return normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
+}
+
+function screenInputMatchesText(screen: SessionScreen, text: string | undefined): boolean {
+  if (!text?.trim()) {
+    return false;
+  }
+  return normalizeComparableText(screen.inputText) === normalizeComparableText(text);
+}
+
+function screenInputHasSubmittedTextEvidence(screen: SessionScreen, text: string | undefined): boolean {
+  if (screenInputMatchesText(screen, text)) {
+    return true;
+  }
+  if (!text?.trim() || !shouldUseBracketedPasteTransport(text)) {
+    return false;
+  }
+  return /\[Pasted text #\d+(?: \+\d+ lines)?\]/i.test(screen.inputText);
 }
 
 function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {
@@ -88,7 +107,9 @@ function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: s
     .filter(Boolean);
   const trailingLines = normalizedLines.slice(-8);
 
-  if (trailingLines.some((line) => /Enter to confirm · Esc to exit/i.test(line))) {
+  if (trailingLines.some((line) => /Enter to confirm · Esc to exit/i.test(line)
+    || /Press enter to confirm or esc to go back/i.test(line)
+    || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line))) {
     return true;
   }
 
@@ -104,6 +125,54 @@ function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: s
   return numberedChoices.length >= 2;
 }
 
+function formatClaudeModelName(name: string, version: string): string {
+  return `${name[0]!.toUpperCase()}${name.slice(1).toLowerCase()} ${version}`;
+}
+
+function extractLastClaudeModelFromText(text: string): string | undefined {
+  const plain = stripAnsiAndControl(text).replace(/\u00a0/g, ' ');
+  const explicitSelections = [...plain.matchAll(/\bSet\s+model\s+to\s+(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)/gi)];
+  const latestExplicitSelection = explicitSelections.at(-1);
+  if (latestExplicitSelection) {
+    return formatClaudeModelName(latestExplicitSelection[1]!, latestExplicitSelection[2]!);
+  }
+
+  const checkedOptions = [...plain.matchAll(/\b(Opus|Sonnet|Haiku|Fable)\s*✔[^\n]*(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)/gi)];
+  const latestCheckedOption = checkedOptions.at(-1);
+  if (latestCheckedOption) {
+    return formatClaudeModelName(latestCheckedOption[2]!, latestCheckedOption[3]!);
+  }
+
+  const headers = [...plain.matchAll(/\b(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)(?:\s+\([^)]*\))?\s+.*?Claude Max\b/gi)];
+  const latestHeader = headers.at(-1);
+  if (latestHeader) {
+    return formatClaudeModelName(latestHeader[1]!, latestHeader[2]!);
+  }
+
+  return undefined;
+}
+
+function readTextTailSync(filePath: string | undefined, maxBytes: number): string {
+  if (!filePath) {
+    return '';
+  }
+  try {
+    const stat = fs.statSync(filePath);
+    const start = Math.max(0, stat.size - maxBytes);
+    const length = stat.size - start;
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(length);
+      const bytesRead = fs.readSync(fd, buffer, 0, length, start);
+      return buffer.subarray(0, bytesRead).toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
+}
+
 function screenShowsInteractiveSelectionHint(screen: SessionScreen): boolean {
   return `${screen.content}\n${screen.status}`
     .split('\n')
@@ -111,12 +180,25 @@ function screenShowsInteractiveSelectionHint(screen: SessionScreen): boolean {
     .filter(Boolean)
     .slice(-8)
     .some((line) => /Enter to confirm · Esc to exit/i.test(line)
+      || /Press enter to confirm or esc to go back/i.test(line)
+      || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
       || /Esc to cancel · Tab to amend/i.test(line)
       || /Enter to select · .*Esc to cancel/i.test(line));
 }
 
 function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
   return Boolean(text?.trim().match(/^\d{1,8}$/)) && screenShowsInteractiveSelectionHint(screen);
+}
+
+function submittedTextShouldCreateUserTurn(screen: SessionScreen, text: string | undefined): boolean {
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.startsWith('/')) {
+    return false;
+  }
+  return !screenAllowsLiteralSelectionTokenWithoutInput(screen, trimmed);
 }
 
 function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
@@ -222,8 +304,10 @@ export class SessionManager {
   private readonly watchers = new Map<string, WatchState>();
   private readonly lastScreenHashes = new Map<string, string>();
   private readonly deferredTextReadyUntil = new Map<string, number>();
+  private readonly deferredSelectionInputs = new Map<string, { text: string; expiresAt: number }>();
   private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
   private readonly rawOutputScreenUpdateTimers = new Map<string, NodeJS.Timeout>();
+  private readonly liveSessionModels = new Map<string, string>();
   private stopped = false;
 
   constructor(
@@ -263,6 +347,9 @@ export class SessionManager {
       clearTimeout(timer);
       this.rawOutputScreenUpdateTimers.delete(sessionId);
     }
+    this.deferredTextReadyUntil.clear();
+    this.deferredSelectionInputs.clear();
+    this.liveSessionModels.clear();
   }
 
   async observeSessions(): Promise<void> {
@@ -767,7 +854,7 @@ export class SessionManager {
     return updated;
   }
 
-  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean }): Promise<BoundSession> {
+  async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean; submittedText?: string }): Promise<BoundSession> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -781,17 +868,23 @@ export class SessionManager {
 
     if (payload.text && !hasSpecialKeys) {
       let preparedScreen: SessionScreen | undefined;
+      const trimmedTransportText = payload.text.trim();
+      const shouldProbeDeferredSelection = payload.deferScreenUpdate === true && /^\d{1,8}$/.test(trimmedTransportText);
       const canUseDeferredTextReadyCache = payload.deferScreenUpdate === true
         && (this.deferredTextReadyUntil.get(liveSession.id) ?? 0) > Date.now();
-      if (liveSession.provider === 'codex' && !canUseDeferredTextReadyCache) {
+      if ((liveSession.provider === 'codex' || shouldProbeDeferredSelection) && !canUseDeferredTextReadyCache) {
         preparedScreen = await this.captureSessionScreen(liveSession);
         if (screenIsStartingUp(preparedScreen) || screenShowsQueuedMessageHint(preparedScreen)) {
           await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
         }
       }
+      if (shouldProbeDeferredSelection && preparedScreen && screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, trimmedTransportText)) {
+        this.deferredSelectionInputs.set(liveSession.id, {
+          text: trimmedTransportText,
+          expiresAt: Date.now() + DEFERRED_TEXT_READY_TTL_MS,
+        });
+      }
       const transportText = payload.text;
-      const shouldRecordTextAsUserInput = !preparedScreen
-        || !screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, transportText);
       if (shouldUseBracketedPasteTransport(transportText)) {
         await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
       } else {
@@ -804,26 +897,6 @@ export class SessionManager {
         lastActivityAt: nowIso(),
       };
       this.db.upsertBoundSession(updated);
-      if (shouldRecordTextAsUserInput && updated.conversationRef.startsWith('pending:')) {
-        const pending = this.db.getPendingConversation(updated.conversationRef);
-        if (pending) {
-          const inputAt = nowIso();
-          const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-          rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
-          rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
-          rawMetadata.lastUserInputAt = inputAt;
-          this.db.putPendingConversation({
-            ...pending,
-            updatedAt: inputAt,
-            isBound: true,
-            boundSessionId: updated.id,
-            rawMetadata,
-          });
-        }
-      }
-      if (shouldRecordTextAsUserInput) {
-        this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
-      }
       this.deferredTextReadyUntil.set(updated.id, Date.now() + DEFERRED_TEXT_READY_TTL_MS);
       if (!payload.deferScreenUpdate) {
         await this.emitScreenUpdate(updated);
@@ -835,6 +908,16 @@ export class SessionManager {
     let latestObservedScreen = beforeScreen;
     let latestObservedHash = hashScreen(beforeScreen);
     let shouldRecordTextAsUserInput = false;
+    const submittedText = payload.keys?.includes('Enter') ? payload.submittedText?.trim() : undefined;
+    const rememberedSelection = submittedText ? this.deferredSelectionInputs.get(liveSession.id) : undefined;
+    const submittedDeferredSelection = Boolean(
+      rememberedSelection
+        && rememberedSelection.expiresAt > Date.now()
+        && rememberedSelection.text === submittedText,
+    );
+    if (hasSpecialKeys) {
+      this.deferredSelectionInputs.delete(liveSession.id);
+    }
 
     if (payload.text) {
       const transportText = payload.text;
@@ -845,35 +928,66 @@ export class SessionManager {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
         latestObservedHash = hashScreen(latestObservedScreen);
       }
+      const textAlreadyVisible = Boolean(payload.keys?.length) && screenInputMatchesText(latestObservedScreen, transportText);
       const textEntryScreen = latestObservedScreen;
-      if (useBracketedPasteTransport) {
-        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
-      } else {
-        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
-      }
-      if (payload.keys?.length || useBracketedPasteTransport) {
-        const textSettledScreen = await this.waitForInputTextChange(
-          liveSession,
-          latestObservedHash,
-          textEntryScreen,
-          combinedTextKeySettleWaitMs(transportText),
-        );
-        if (textSettledScreen) {
-          latestObservedScreen = textSettledScreen;
-          latestObservedHash = hashScreen(textSettledScreen);
-          this.publishScreenUpdate(liveSession, textSettledScreen);
+      const transportTextShouldCreateUserTurn = submittedTextShouldCreateUserTurn(textEntryScreen, transportText);
+      if (!textAlreadyVisible) {
+        if (useBracketedPasteTransport) {
+          await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
+        } else {
+          await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
         }
-        if (expectsVisibleInputChange && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
-          this.appendDebugTrace(liveSession, {
-            action: 'send-keystrokes-rejected',
-            text: payload.text,
-            keys: payload.keys,
-            before: textEntryScreen,
-            after: latestObservedScreen,
-          });
-          throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
+        if (payload.keys?.length || useBracketedPasteTransport) {
+          const textSettledScreen = await this.waitForInputTextChange(
+            liveSession,
+            latestObservedHash,
+            textEntryScreen,
+            combinedTextKeySettleWaitMs(transportText),
+          );
+          if (textSettledScreen) {
+            latestObservedScreen = textSettledScreen;
+            latestObservedHash = hashScreen(textSettledScreen);
+            this.publishScreenUpdate(liveSession, textSettledScreen);
+          }
+          if (expectsVisibleInputChange && transportTextShouldCreateUserTurn && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
+            this.appendDebugTrace(liveSession, {
+              action: 'send-keystrokes-rejected',
+              text: payload.text,
+              keys: payload.keys,
+              before: textEntryScreen,
+              after: latestObservedScreen,
+            });
+            throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
+          }
         }
       }
+    }
+    const submittedTextRequiresInputEvidence = Boolean(
+      submittedText
+        && !payload.text
+        && !submittedDeferredSelection
+        && submittedTextShouldCreateUserTurn(beforeScreen, submittedText),
+    );
+    if (submittedTextRequiresInputEvidence && submittedText && !screenInputHasSubmittedTextEvidence(latestObservedScreen, submittedText)) {
+      const evidenceScreen = await this.waitForScreenMatch(
+        liveSession,
+        latestObservedHash,
+        combinedTextKeySettleWaitMs(submittedText),
+        (screen) => screenInputHasSubmittedTextEvidence(screen, submittedText),
+      );
+      if (!evidenceScreen || !screenInputHasSubmittedTextEvidence(evidenceScreen, submittedText)) {
+        this.appendDebugTrace(liveSession, {
+          action: 'send-keystrokes-rejected',
+          text: submittedText,
+          keys: payload.keys,
+          before: beforeScreen,
+          after: evidenceScreen ?? latestObservedScreen,
+        });
+        throw new SessionKeystrokeRejectedError('Live session did not accept the typed text into its input buffer. The draft was not submitted.');
+      }
+      latestObservedScreen = evidenceScreen;
+      latestObservedHash = hashScreen(evidenceScreen);
+      this.publishScreenUpdate(liveSession, evidenceScreen);
     }
     if (payload.keys?.length) {
       await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys);
@@ -885,13 +999,24 @@ export class SessionManager {
       lastActivityAt: nowIso(),
     };
     this.db.upsertBoundSession(updated);
-    if (shouldRecordTextAsUserInput && payload.text && updated.conversationRef.startsWith('pending:')) {
+    const submittedUserTurnText = !submittedDeferredSelection && submittedTextShouldCreateUserTurn(beforeScreen, submittedText)
+      ? submittedText
+      : undefined;
+    const fallbackUserTurnText = submittedText === undefined
+      && payload.keys?.includes('Enter')
+      && shouldRecordTextAsUserInput
+      && submittedTextShouldCreateUserTurn(beforeScreen, payload.text)
+      ? payload.text
+      : undefined;
+    const userInputTextToRecord = submittedUserTurnText
+      ?? fallbackUserTurnText;
+    if (userInputTextToRecord && updated.conversationRef.startsWith('pending:')) {
       const pending = this.db.getPendingConversation(updated.conversationRef);
       if (pending) {
         const inputAt = nowIso();
         const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(payload.text));
-        rawMetadata.lastUserInputPreview = truncate(payload.text, 120);
+        rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(userInputTextToRecord));
+        rawMetadata.lastUserInputPreview = truncate(userInputTextToRecord, 120);
         rawMetadata.lastUserInputAt = inputAt;
         this.db.putPendingConversation({
           ...pending,
@@ -902,8 +1027,8 @@ export class SessionManager {
         });
       }
     }
-    if (shouldRecordTextAsUserInput && payload.text) {
-      this.appendEvent(updated, { type: 'user-input', text: payload.text, timestamp: nowIso() });
+    if (userInputTextToRecord) {
+      this.appendEvent(updated, { type: 'user-input', text: userInputTextToRecord, timestamp: nowIso() });
     }
     await this.emitScreenUpdate(updated, {
       waitForChange: Boolean(payload.keys?.length),
@@ -985,6 +1110,8 @@ export class SessionManager {
     this.stopWatching(session.id);
     this.lastScreenHashes.delete(session.id);
     this.deferredTextReadyUntil.delete(session.id);
+    this.deferredSelectionInputs.delete(session.id);
+    this.liveSessionModels.delete(session.id);
     const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
@@ -1082,6 +1209,8 @@ export class SessionManager {
       this.stopWatching(session.id);
       this.lastScreenHashes.delete(session.id);
       this.deferredTextReadyUntil.delete(session.id);
+      this.deferredSelectionInputs.delete(session.id);
+      this.liveSessionModels.delete(session.id);
       if (!restoreMissing && session.conversationRef.startsWith('pending:')) {
         if (this.hasRecordedPendingUserInput(session)) {
           this.markPendingSessionNotLive(session);
@@ -1137,6 +1266,17 @@ export class SessionManager {
   private appendEvent(session: BoundSession, event: { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string }): void {
     if (!session.eventLogPath) return;
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
+    if (event.type === 'user-input') {
+      this.eventBus.emit({
+        type: 'session.user-input',
+        sessionId: session.id,
+        projectSlug: session.projectSlug,
+        provider: session.provider,
+        conversationRef: session.conversationRef,
+        text: event.text,
+        timestamp: event.timestamp,
+      });
+    }
     if (event.type === 'raw-output') {
       this.eventBus.emit({
         type: 'session.raw-output',
@@ -1617,6 +1757,14 @@ export class SessionManager {
   }
 
   private decorateScreenForSession(session: BoundSession, screen: SessionScreen): SessionScreen {
+    const model = screen.model ?? this.getStoredSessionModel(session) ?? this.recoverSessionModelFromLogs(session);
+    if (model && model !== screen.model) {
+      screen = { ...screen, model };
+    }
+    if (model) {
+      this.rememberSessionModel(session, model);
+    }
+
     if (session.provider !== 'claude') {
       return screen;
     }
@@ -1635,5 +1783,48 @@ export class SessionManager {
       status: nextStatus,
       statusAnsi: nextStatus,
     };
+  }
+
+  private getStoredSessionModel(session: BoundSession): string | undefined {
+    const cached = this.liveSessionModels.get(session.id);
+    if (cached) {
+      return cached;
+    }
+    if (!session.conversationRef.startsWith('pending:')) {
+      return undefined;
+    }
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    const model = pending?.rawMetadata?.[SESSION_MODEL_METADATA_KEY];
+    return typeof model === 'string' && model.trim() ? model.trim() : undefined;
+  }
+
+  private rememberSessionModel(session: BoundSession, model: string): void {
+    this.liveSessionModels.set(session.id, model);
+    if (!session.conversationRef.startsWith('pending:')) {
+      return;
+    }
+    const pending = this.db.getPendingConversation(session.conversationRef);
+    if (!pending) {
+      return;
+    }
+    if (pending.rawMetadata?.[SESSION_MODEL_METADATA_KEY] === model) {
+      return;
+    }
+    this.db.putPendingConversation({
+      ...pending,
+      rawMetadata: {
+        ...(pending.rawMetadata ?? {}),
+        [SESSION_MODEL_METADATA_KEY]: model,
+      },
+    });
+  }
+
+  private recoverSessionModelFromLogs(session: BoundSession): string | undefined {
+    if (session.provider !== 'claude') {
+      return undefined;
+    }
+
+    return extractLastClaudeModelFromText(readTextTailSync(session.rawLogPath, SESSION_MODEL_LOG_TAIL_BYTES))
+      ?? extractLastClaudeModelFromText(readTextTailSync(session.eventLogPath, SESSION_MODEL_LOG_TAIL_BYTES));
   }
 }

@@ -562,6 +562,56 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('recovers the Claude model from session logs when the visible screen header has scrolled away', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      '● CLAUDE_FINAL_CLEAN_OK',
+      '',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ ',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'pending:claude-model-from-log',
+      title: 'Conversation',
+      kind: 'pending',
+    });
+    db.putPendingConversation({
+      ref: 'pending:claude-model-from-log',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'Conversation',
+      createdAt: '2026-07-01T03:45:00.000Z',
+      updatedAt: '2026-07-01T03:45:00.000Z',
+      isBound: true,
+      boundSessionId: session.id,
+      degraded: false,
+      rawMetadata: {},
+    });
+    await fs.writeFile(session.rawLogPath!, '  ⎿  Set model to Haiku 4.5 and saved as your default for new sessions\n');
+
+    const liveScreen = await manager.getSessionScreen(session.id);
+    expect(liveScreen?.screen.model).toBe('Haiku 4.5');
+    expect(liveScreen?.screen.status).toContain('bypass permissions on');
+    expect(db.getPendingConversation('pending:claude-model-from-log')?.rawMetadata?.lastLiveModel).toBe('Haiku 4.5');
+
+    await fs.writeFile(session.rawLogPath!, '');
+    const restoredFromMetadata = await manager.getSessionScreen(session.id);
+    expect(restoredFromMetadata?.screen.model).toBe('Haiku 4.5');
+    db.close();
+  });
+
   it('emits visible screen updates when bound session output changes', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -1331,8 +1381,11 @@ describe('SessionManager', () => {
     tmux.paneText = [
       'OpenAI Codex',
       '',
-      'Select model',
-      'Enter to confirm · Esc to exit',
+      'Select Model and Effort',
+      '› 1. gpt-5.5 (current)',
+      '  2. gpt-5.4',
+      '  3. gpt-5.4-mini',
+      'Press enter to confirm or esc to go back',
     ].join('\n');
     const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
 
@@ -1346,6 +1399,7 @@ describe('SessionManager', () => {
     });
 
     expect(await manager.allowsLiteralSelectionKeystroke(session.id, '1')).toBe(true);
+    expect(await manager.allowsLiteralSelectionKeystroke(session.id, '3')).toBe(true);
     expect(await manager.allowsLiteralSelectionKeystroke(session.id, 'help')).toBe(false);
 
     await manager.sendKeystrokes(session.id, { text: '1', keys: ['Enter'] });
@@ -1355,6 +1409,52 @@ describe('SessionManager', () => {
     expect(tmux.sentKeys).toEqual([['Enter']]);
     expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
     expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+    db.close();
+  });
+
+  it('does not record pending first input for Claude model picker keystrokes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:claude-model-selection',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Select model',
+      '  3. Sonnet',
+      '  4. Haiku',
+      'Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings: { ...providerSettings, id: 'claude' },
+      conversationRef: 'pending:claude-model-selection',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    expect(await manager.allowsLiteralSelectionKeystroke(session.id, '4')).toBe(true);
+
+    await manager.sendKeystrokes(session.id, { text: '4', keys: ['Enter'] });
+
+    const pending = db.getPendingConversation('pending:claude-model-selection');
+    expect(tmux.sent).toEqual(['4']);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(pending?.rawMetadata?.lastUserInputHash).toBeUndefined();
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
     db.close();
   });
@@ -1506,11 +1606,15 @@ describe('SessionManager', () => {
     tmux.paneText = tmux.renderDraft('');
     const eventBus = new RealtimeEventBus();
     let screenUpdates = 0;
+    let userInputEvents = 0;
     const screenUpdateInputTexts: string[] = [];
     const unsubscribe = eventBus.subscribe((event) => {
       if (event.type === 'session.screen-updated') {
         screenUpdates += 1;
         screenUpdateInputTexts.push(event.screen.inputText);
+      }
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
       }
     });
     const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
@@ -1532,6 +1636,8 @@ describe('SessionManager', () => {
     expect(tmux.sent).toEqual(['a', 'b']);
     expect(tmux.captureStartLines).toHaveLength(1);
     expect(screenUpdates).toBe(0);
+    expect(userInputEvents).toBe(0);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
 
     await manager.sendKeystrokes(session.id, { keys: ['Enter'] });
     const capturesAfterEnter = tmux.captureStartLines.length;
@@ -1541,6 +1647,349 @@ describe('SessionManager', () => {
     await manager.sendKeystrokes(session.id, { text: 'c', deferScreenUpdate: true });
     expect(tmux.sent).toEqual(['a', 'b', 'c']);
     expect(tmux.captureStartLines).toHaveLength(capturesAfterEnter + 1);
+    expect(userInputEvents).toBe(0);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+
+    unsubscribe();
+    db.close();
+  });
+
+  it('records submitted bypass text only when Enter carries the submitted draft', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:bypass-submit',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:bypass-submit',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: 'hello', deferScreenUpdate: true });
+    expect(userInputEvents).toBe(0);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+
+    await manager.sendKeystrokes(session.id, { text: 'hello' });
+    expect(userInputEvents).toBe(0);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Ready.',
+      '❯ hello',
+      'gpt-5.4 xhigh · 65% left · ~/demo',
+    ].join('\n');
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'hello' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:bypass-submit');
+    expect(userInputEvents).toBe(1);
+    expect(eventLog).toContain('"type":"user-input"');
+    expect(eventLog).toContain('"text":"hello"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBe('hello');
+
+    unsubscribe();
+    db.close();
+  });
+
+  it('rejects Enter-only submitted text when no matching live draft is visible', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:stale-bypass-submit',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'codex',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'OpenAI Codex',
+      '',
+      'Ready.',
+      '❯ ',
+      'gpt-5.4 xhigh · 65% left · ~/demo',
+    ].join('\n');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:stale-bypass-submit',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await expect(manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'hello' }))
+      .rejects.toThrow(SessionKeystrokeRejectedError);
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:stale-bypass-submit');
+    expect(tmux.sentKeys).toEqual([]);
+    expect(eventLog).not.toContain('"type":"user-input"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    db.close();
+  });
+
+  it('does not record bypass slash commands as conversation user input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:bypass-command',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Ready.',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'pending:bypass-command',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '/model', deferScreenUpdate: true });
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '/model' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:bypass-command');
+    expect(userInputEvents).toBe(0);
+    expect(eventLog).not.toContain('"type":"user-input"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+
+    unsubscribe();
+    db.close();
+  });
+
+  it('does not record draft slash commands as conversation user input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:draft-command',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Ready.',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'pending:draft-command',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '/model', keys: ['Enter'], submittedText: '/model' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:draft-command');
+    expect(tmux.sent).toEqual(['/model']);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(userInputEvents).toBe(0);
+    expect(eventLog).not.toContain('"type":"user-input"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+
+    unsubscribe();
+    db.close();
+  });
+
+  it('does not record bypass model-menu numeric selections as conversation user input', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:bypass-selection',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Select model',
+      '1. Default',
+      '2. Opus',
+      '3. Sonnet',
+      '4. Haiku',
+      'Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'pending:bypass-selection',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '4', deferScreenUpdate: true });
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Select model',
+      '1. Default',
+      '2. Opus',
+      '3. Sonnet',
+      '4. Haiku',
+      'Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n');
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '4' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:bypass-selection');
+    expect(userInputEvents).toBe(0);
+    expect(eventLog).not.toContain('"type":"user-input"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+
+    unsubscribe();
+    db.close();
+  });
+
+  it('does not record deferred model-menu selections after the picker closes before Enter', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:bypass-selection-closed',
+      kind: 'pending',
+      projectSlug: project.slug,
+      provider: 'claude',
+      title: 'New conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: { pending: true },
+    });
+    const tmux = new FakeTmux();
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Select model',
+      '1. Default',
+      '2. Opus',
+      '3. Sonnet',
+      '4. Haiku',
+      'Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n');
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'pending:bypass-selection-closed',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '4', deferScreenUpdate: true });
+    tmux.paneText = [
+      'Claude Code',
+      '',
+      'Set model to Haiku 4.5 and saved as your default for new sessions',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '4' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const pending = db.getPendingConversation('pending:bypass-selection-closed');
+    expect(userInputEvents).toBe(0);
+    expect(eventLog).not.toContain('"type":"user-input"');
+    expect(pending?.rawMetadata?.lastUserInputPreview).toBeUndefined();
 
     unsubscribe();
     db.close();
@@ -2219,6 +2668,114 @@ describe('SessionManager', () => {
       keys: ['Enter'],
     })).rejects.toThrow(SessionKeystrokeRejectedError);
     expect(tmux.sentKeys).toEqual([]);
+    db.close();
+  });
+
+  it('rejects explicit submitted text when the terminal never accepts the typed input', async () => {
+    const submittedText = 'this should not submit if screen capture never shows it';
+
+    class StaleRepaintTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          '› ',
+          'gpt-5.4 xhigh · 65% left · ~/demo',
+        ].join('\n');
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new StaleRepaintTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-input-stale-repaint-submit',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await expect(manager.sendKeystrokes(session.id, {
+      text: submittedText,
+      keys: ['Enter'],
+      submittedText,
+    })).rejects.toThrow(SessionKeystrokeRejectedError);
+
+    expect(tmux.sent).toEqual([submittedText]);
+    expect(tmux.sentKeys).toEqual([]);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
+    db.close();
+  });
+
+  it('submits an already-visible live draft without retyping it first', async () => {
+    const draft = 'Live session did not accept the typed text into its input buffer. The draft was not submitted';
+
+    class VisibleDraftTmux extends FakeTmux {
+      constructor() {
+        super();
+        this.paneText = this.renderComposer(draft);
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (keys.includes('Enter')) {
+          this.paneText = [
+            'OpenAI Codex',
+            '',
+            'Working',
+            '',
+            '❯ ',
+            'gpt-5.4 xhigh · 65% left · ~/demo',
+          ].join('\n');
+        }
+      }
+
+      private renderComposer(text: string): string {
+        return [
+          'OpenAI Codex',
+          '',
+          'Ready for input.',
+          '',
+          `❯ ${text}`,
+          'gpt-5.4 xhigh · 65% left · ~/demo',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new VisibleDraftTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-visible-draft-submit',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, {
+      text: draft,
+      keys: ['Enter'],
+    });
+
+    expect(tmux.sent).toEqual([]);
+    expect(tmux.pasted).toEqual([]);
+    expect(tmux.sentKeys).toEqual([['Enter']]);
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain(draft);
     db.close();
   });
 

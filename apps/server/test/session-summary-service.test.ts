@@ -43,6 +43,7 @@ function message(input: Partial<NormalizedMessage> & Pick<NormalizedMessage, 'ro
     id: `${input.role}:${input.timestamp}:${input.text}`,
     provider: 'codex',
     conversationRef: 'conversation-1',
+    lifecycle: 'durable',
     source: 'history-file',
     ...input,
   };

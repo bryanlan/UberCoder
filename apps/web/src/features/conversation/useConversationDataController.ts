@@ -4,6 +4,7 @@ import type { ConversationTimeline, ProviderId } from '@agent-console/shared';
 import { api } from '../../lib/api';
 
 const TIMELINE_MESSAGE_PAGE_SIZE = 80;
+const TIMELINE_HISTORY_ENABLE_DELAY_MS = 1000;
 
 export function resetTimelineHistoryQuery(
   queryClient: QueryClient,
@@ -60,6 +61,23 @@ export function useConversationDataController({
     },
   });
 
+  const [historyEnabledKey, setHistoryEnabledKey] = useState<string>();
+  const metadataReady = Boolean(timelineQuery.data);
+
+  useEffect(() => {
+    setHistoryEnabledKey(undefined);
+    if (!conversationKey || !metadataReady) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setHistoryEnabledKey(conversationKey);
+    }, TIMELINE_HISTORY_ENABLE_DELAY_MS);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [conversationKey, metadataReady]);
+
   const timelineHistoryQuery = useInfiniteQuery({
     queryKey: ['timeline-history', selectedProjectSlug, selectedProvider, selectedConversationRef],
     queryFn: ({ pageParam }) => api.timeline(
@@ -71,7 +89,7 @@ export function useConversationDataController({
         before: typeof pageParam === 'number' ? pageParam : undefined,
       },
     ),
-    enabled: Boolean(authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef),
+    enabled: Boolean(authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef && historyEnabledKey === conversationKey),
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage) => lastPage.messagePage?.olderCursor,
   });

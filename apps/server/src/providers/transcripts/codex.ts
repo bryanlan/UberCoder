@@ -15,18 +15,50 @@ import type { ParsedTranscript, TranscriptParseInput } from './types.js';
 
 const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
 
+function isCodexDisplayChromeLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^[✻✽✦]\s*(?:Cogitated|Thinking|Thought|Worked)\b.*\bfor\s+\d+/i.test(trimmed)
+    || /^Live input bridge$/i.test(trimmed)
+    || /^LIVE INPUT BRIDGE$/i.test(trimmed)
+    || /^Expand to type directly into the live session\.$/i.test(trimmed);
+}
+
+function sanitizeCodexDisplayText(text: string): string {
+  return text
+    .replace(/^<codex_internal_context\b[\s\S]*?<\/codex_internal_context>\s*/gim, '')
+    .replace(/^<turn_aborted>[\s\S]*?<\/turn_aborted>\s*/gim, '')
+    .split('\n')
+    .filter((line) => !isCodexDisplayChromeLine(line))
+    .join('\n')
+    .trim();
+}
+
 function shouldHideCodexDisplayMessage(message: NormalizedMessage): boolean {
   if (message.role !== 'user' && message.role !== 'assistant') {
     return true;
   }
 
-  if (message.role !== 'user') {
-    return false;
+  if (message.role === 'assistant') {
+    const record = asObject(message.rawMetadata);
+    const payload = asObject(record?.payload);
+    if (payload?.phase === 'commentary') {
+      return true;
+    }
+    const trimmed = message.text.trim();
+    return isCodexDisplayChromeLine(trimmed);
   }
 
   const trimmed = message.text.trim();
   return /^<user_instructions>[\s\S]*<\/user_instructions>$/i.test(trimmed)
     || /^<environment_context>[\s\S]*<\/environment_context>$/i.test(trimmed)
+    || /^<codex_internal_context\b[\s\S]*<\/codex_internal_context>$/i.test(trimmed)
+    || /^<turn_aborted>[\s\S]*<\/turn_aborted>$/i.test(trimmed)
+    || /^<permissions instructions>[\s\S]*<\/permissions instructions>$/i.test(trimmed)
+    || /^<collaboration_mode>[\s\S]*<\/collaboration_mode>$/i.test(trimmed)
+    || /^<apps_instructions>[\s\S]*<\/apps_instructions>$/i.test(trimmed)
+    || /^<skills_instructions>[\s\S]*<\/skills_instructions>$/i.test(trimmed)
+    || /^<plugins_instructions>[\s\S]*<\/plugins_instructions>$/i.test(trimmed)
+    || trimmed === 'Live session did not accept the typed text into its input buffer. The draft was not submitted'
     || /^#\s*AGENTS\.md instructions for\b[\s\S]*$/i.test(trimmed)
     || /^<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>$/i.test(trimmed);
 }
@@ -171,6 +203,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
       role: extracted.role,
+      lifecycle: 'durable',
       text: extracted.text,
       timestamp,
       conversationRef: input.conversationRef,
@@ -180,7 +213,13 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   }
 
   const dedupedMessages = dedupeCodexEventResponseMessages(messages);
-  const displayMessages = dedupedMessages.filter((message) => !shouldHideCodexDisplayMessage(message));
+  const displayMessages = dedupedMessages
+    .filter((message) => !shouldHideCodexDisplayMessage(message))
+    .map((message) => ({
+      ...message,
+      text: sanitizeCodexDisplayText(message.text),
+    }))
+    .filter((message) => message.text.length > 0);
 
   return buildParsedTranscript({
     ...input,

@@ -24,6 +24,7 @@ const keystrokeBodySchema = z.object({
   text: z.string().min(1).optional(),
   keys: z.array(keystrokeKeySchema).min(1).optional(),
   deferScreenUpdate: z.boolean().optional(),
+  submittedText: z.string().min(1).optional(),
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
 });
@@ -209,17 +210,21 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
-    const isLiteralSelectionKeystroke = parsed.data.text && parsed.data.keys?.includes('Enter')
-      ? await sessions.allowsLiteralSelectionKeystroke(sessionId, parsed.data.text)
+    const submittedPromptText = parsed.data.keys?.includes('Enter')
+      ? (parsed.data.submittedText ?? parsed.data.text)?.trim()
+      : undefined;
+    const shouldRestartFromSubmittedPrompt = Boolean(submittedPromptText && !submittedPromptText.startsWith('/'));
+    const isLiteralSelectionKeystroke = shouldRestartFromSubmittedPrompt && submittedPromptText
+      ? await sessions.allowsLiteralSelectionKeystroke(sessionId, submittedPromptText)
       : false;
-    if (parsed.data.text && parsed.data.keys?.includes('Enter') && !isLiteralSelectionKeystroke) {
+    if (submittedPromptText && shouldRestartFromSubmittedPrompt && !isLiteralSelectionKeystroke) {
       const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
         db,
         projectService,
         providerRegistry,
         sessions,
         session,
-        text: parsed.data.text,
+        text: submittedPromptText,
       });
       if (pendingRestart.kind === 'project-not-found') {
         reply.code(404).send({ error: 'Project not found.' });

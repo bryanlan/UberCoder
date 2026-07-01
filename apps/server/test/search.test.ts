@@ -42,6 +42,7 @@ function message(input: Pick<NormalizedMessage, 'role' | 'text' | 'timestamp'>):
     id: `${input.role}:${input.timestamp}`,
     provider: 'codex',
     conversationRef: 'conversation-1',
+    lifecycle: 'durable',
     source: 'history-file',
     ...input,
   };

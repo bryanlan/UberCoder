@@ -188,6 +188,159 @@ describe('session routes', () => {
     }
   });
 
+  it('restarts a first-turn pending Codex session from the full submittedText when Enter also carries transport text', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:first-turn-submitted',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-pending',
+      degraded: false,
+      rawMetadata: { pending: true },
+    } satisfies ConversationSummary);
+    const session: BoundSession = {
+      id: 'session-pending',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:first-turn-submitted',
+      tmuxSessionName: 'ac-codex-demo-pending',
+      status: 'bound',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+    };
+    const restartedSession: BoundSession = {
+      ...session,
+      id: 'session-restarted',
+      tmuxSessionName: 'ac-codex-demo-restarted',
+      shouldRestore: true,
+      updatedAt: '2026-03-14T18:01:00.000Z',
+      lastActivityAt: '2026-03-14T18:01:00.000Z',
+    };
+    const restartPendingSessionWithInitialPrompt = vi.fn(async () => {
+      db.upsertBoundSession(restartedSession);
+      return restartedSession;
+    });
+    const sendKeystrokes = vi.fn(async () => session);
+    const app = fastify();
+    await registerSessionRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      db,
+      {
+        getProjectBySlug: vi.fn(async () => ({ slug: 'demo', displayName: 'Demo' })),
+        getMergedProviderSettings: vi.fn(() => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        })),
+      } as never,
+      {
+        get: vi.fn(() => ({ id: 'codex' })),
+      } as never,
+      {
+        getSessionById: vi.fn(() => session),
+        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
+        restartPendingSessionWithInitialPrompt,
+        sendKeystrokes,
+      } as never,
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/session-pending/keys',
+        payload: { text: 'delta only', keys: ['Enter'], submittedText: 'fix via text bypass' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ id: 'session-restarted' });
+      expect(restartPendingSessionWithInitialPrompt).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: 'session-pending',
+        initialPrompt: 'fix via text bypass',
+      }));
+      expect(sendKeystrokes).not.toHaveBeenCalled();
+      expect(db.getPendingConversation('pending:first-turn-submitted')?.boundSessionId).toBe('session-restarted');
+      expect(db.getPendingConversation('pending:first-turn-submitted')?.rawMetadata?.lastUserInputPreview).toBe('fix via text bypass');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('keeps first-turn pending Codex slash commands on the live session bridge', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.putPendingConversation({
+      ref: 'pending:slash-command',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-pending',
+      degraded: false,
+      rawMetadata: { pending: true },
+    } satisfies ConversationSummary);
+    const session: BoundSession = {
+      id: 'session-pending',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:slash-command',
+      tmuxSessionName: 'ac-codex-demo-pending',
+      status: 'bound',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:00.000Z',
+    };
+    const restartPendingSessionWithInitialPrompt = vi.fn(async () => session);
+    const sendKeystrokes = vi.fn(async () => session);
+    const app = fastify();
+    await registerSessionRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      db,
+      {} as never,
+      {} as never,
+      {
+        getSessionById: vi.fn(() => session),
+        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
+        restartPendingSessionWithInitialPrompt,
+        sendKeystrokes,
+      } as never,
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/session-pending/keys',
+        payload: { keys: ['Enter'], submittedText: '/model' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { keys: ['Enter'], submittedText: '/model' });
+      expect(db.getPendingConversation('pending:slash-command')?.rawMetadata?.lastUserInputPreview).toBeUndefined();
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('keeps first-turn pending Codex selection keystrokes on the live session bridge', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

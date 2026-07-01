@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
+import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
@@ -71,6 +72,132 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.title).toContain('Refactor the tmux manager');
+  });
+
+  it('parses complete large Claude transcripts instead of splicing head and tail windows', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-large-'));
+    const transcriptPath = path.join(tempDir, 'large-claude-transcript.jsonl');
+    const largeHeadAssistantText = `large head ${'x'.repeat(2_100_000)}`;
+    const largeTailAssistantText = `large tail ${'y'.repeat(2_100_000)}`;
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Start the large transcript',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: largeHeadAssistantText,
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:10.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Middle marker that used to disappear from a large transcript',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:15.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: largeTailAssistantText,
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:20.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: 'End marker',
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseClaudeConversationFile({
+      filePath: transcriptPath,
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'large-claude-transcript',
+    });
+
+    expect(parsed.displayMessages).toHaveLength(5);
+    expect(parsed.displayMessages.map((message) => message.text.length)).toEqual([
+      'Start the large transcript'.length,
+      largeHeadAssistantText.length,
+      'Middle marker that used to disappear from a large transcript'.length,
+      largeTailAssistantText.length,
+      'End marker'.length,
+    ]);
+    expect(parsed.displayMessages[2]?.text).toBe('Middle marker that used to disappear from a large transcript');
+  });
+
+  it('hides Claude task notifications from display transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-notification-'));
+    const transcriptPath = path.join(tempDir, 'task-notification.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Run the review',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:00.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '<task-notification>\n<status>failed</status>\n</task-notification>',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:01.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: 'No response requested.',
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:05.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: 'The review failed with exit code 144.',
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseClaudeConversationFile({
+      filePath: transcriptPath,
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'task-notification',
+    });
+
+    expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+      'Run the review',
+      'The review failed with exit code 144.',
+    ]);
   });
 
   it('extracts Codex project context from harness environment messages when session metadata is absent', async () => {
@@ -178,6 +305,151 @@ describe('provider history discovery', () => {
       },
     ]);
     expect(parsed.messages).toHaveLength(2);
+  });
+
+  it('hides Codex commentary-phase assistant progress from display transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-commentary-progress.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Fix the transcript UI.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'I am checking the current build.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:10.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'Fixed and verified.' }],
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'commentary-progress',
+    });
+
+    expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+      'Fix the transcript UI.',
+      'Fixed and verified.',
+    ]);
+    expect(parsed.messages.map((message) => message.text)).toContain('I am checking the current build.');
+  });
+
+  it('hides Codex internal continuation and rejected-submit records from display transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'internal-continuation-records.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: 'Run the readable transcript checks.\n✻ Cogitated for 23s\nLive input bridge\nExpand to type directly into the live session.',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '<codex_internal_context source="goal">\nContinue working toward the active thread goal.\n</codex_internal_context>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Live session did not accept the typed text into its input buffer. The draft was not submitted' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:04.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{
+            type: 'input_text',
+            text: '<permissions instructions>\nFilesystem sandboxing is disabled.\n</permissions instructions>',
+          }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '✻ Cogitated for 23s' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:10.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'Transcript checks are readable now.' }],
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'internal-continuation-records',
+    });
+
+    expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+      'Run the readable transcript checks.',
+      'Transcript checks are readable now.',
+    ]);
+    expect(parsed.messages).toHaveLength(7);
   });
 
   it('extracts Codex project context from "Current working directory" text in older transcripts', async () => {

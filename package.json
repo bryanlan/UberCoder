@@ -14,6 +14,7 @@
     "typecheck": "npm run build -w @agent-console/shared && npm run typecheck -w @agent-console/server && npm run typecheck -w @agent-console/web",
     "auth:hash": "node ./scripts/generate-password-hash.mjs",
     "smoke:codex": "node ./scripts/smoke-codex-adoption.mjs",
+    "verify:live-console": "node ./scripts/verify-live-console.mjs",
     "summaries:backfill-work-mode": "npm run build -w @agent-console/shared && npm run build -w @agent-console/server && node ./scripts/backfill-work-mode-session-summaries.mjs"
   },
   "devDependencies": {

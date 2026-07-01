@@ -34,26 +34,6 @@ export async function listFilesRecursive(root: string, predicate: (absolutePath:
   return results.sort();
 }
 
-export async function readTextWindowed(filePath: string, maxBytes = 4_000_000): Promise<string> {
-  const handle = await fs.open(filePath, 'r');
-  try {
-    const stat = await handle.stat();
-    if (stat.size <= maxBytes) {
-      return await handle.readFile({ encoding: 'utf8' });
-    }
-    const chunkSize = Math.floor(maxBytes / 2);
-    const head = Buffer.alloc(chunkSize);
-    const tail = Buffer.alloc(chunkSize);
-    await handle.read(head, 0, chunkSize, 0);
-    await handle.read(tail, 0, chunkSize, Math.max(0, stat.size - chunkSize));
-    const headText = head.toString('utf8');
-    const tailText = tail.toString('utf8');
-    return [headText.slice(0, headText.lastIndexOf('\n')), tailText.slice(tailText.indexOf('\n') + 1)].join('\n');
-  } finally {
-    await handle.close();
-  }
-}
-
 export async function readTextHead(filePath: string, maxBytes = 65_536): Promise<string> {
   const handle = await fs.open(filePath, 'r');
   try {

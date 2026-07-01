@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
 import type {
   BoundSession,
   ConversationTimeline,
+  NormalizedMessage,
   ProjectSummary,
   ProviderId,
   SessionEvent,
@@ -48,6 +49,7 @@ const defaultUiPreferences: UiPreferences = {
   },
 };
 const LIVE_MESSAGE_REFRESH_THROTTLE_MS = 3000;
+const OPTIMISTIC_MESSAGE_DUPLICATE_WINDOW_MS = 15_000;
 
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
@@ -234,6 +236,150 @@ function applySessionActivityToTimeline(
   };
 }
 
+function messageTimestampMs(message: NormalizedMessage): number | undefined {
+  const parsed = Date.parse(message.timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function messagesRepresentSameTimelineEntry(a: NormalizedMessage, b: NormalizedMessage): boolean {
+  if (a.id === b.id) {
+    return true;
+  }
+  if (a.role !== b.role || a.text.trim() !== b.text.trim()) {
+    return false;
+  }
+  if (a.source !== b.source && a.rawMetadata?.optimistic !== true && b.rawMetadata?.optimistic !== true) {
+    return false;
+  }
+  const aMs = messageTimestampMs(a);
+  const bMs = messageTimestampMs(b);
+  return aMs !== undefined
+    && bMs !== undefined
+    && Math.abs(aMs - bMs) <= OPTIMISTIC_MESSAGE_DUPLICATE_WINDOW_MS;
+}
+
+function preferTimelineMessage(existing: NormalizedMessage, candidate: NormalizedMessage): NormalizedMessage {
+  if (existing.rawMetadata?.optimistic === true && candidate.rawMetadata?.optimistic !== true) {
+    return candidate;
+  }
+  return existing;
+}
+
+function mergeTimelineMessage(messages: NormalizedMessage[], message: NormalizedMessage): NormalizedMessage[] {
+  const duplicateIndex = messages.findIndex((existing) => messagesRepresentSameTimelineEntry(existing, message));
+  if (duplicateIndex !== -1) {
+    const next = [...messages];
+    next[duplicateIndex] = preferTimelineMessage(next[duplicateIndex]!, message);
+    return next;
+  }
+
+  return [...messages, message].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+function appendTimelineMessage(
+  current: ConversationTimeline | undefined,
+  message: NormalizedMessage,
+): ConversationTimeline | undefined {
+  if (!current) {
+    return current;
+  }
+  const messages = mergeTimelineMessage(current.messages, message);
+  return {
+    ...current,
+    messages,
+    messagePage: current.messagePage
+      ? {
+          ...current.messagePage,
+          total: Math.max(current.messagePage.total, messages.length),
+        }
+      : current.messagePage,
+  };
+}
+
+function removeTimelineMessage(
+  current: ConversationTimeline | undefined,
+  messageId: string,
+): ConversationTimeline | undefined {
+  if (!current) {
+    return current;
+  }
+  const messages = current.messages.filter((message) => message.id !== messageId);
+  if (messages.length === current.messages.length) {
+    return current;
+  }
+  return {
+    ...current,
+    messages,
+    messagePage: current.messagePage
+      ? {
+          ...current.messagePage,
+          total: Math.max(0, current.messagePage.total - 1),
+        }
+      : current.messagePage,
+  };
+}
+
+type TimelineHistoryData = InfiniteData<ConversationTimeline, number | undefined>;
+
+function appendTimelineHistoryMessage(
+  current: TimelineHistoryData | undefined,
+  message: NormalizedMessage,
+): TimelineHistoryData | undefined {
+  if (!current?.pages.length) {
+    return current;
+  }
+  const pages = [...current.pages];
+  const newestPage = pages[0];
+  if (!newestPage) {
+    return current;
+  }
+  pages[0] = appendTimelineMessage(newestPage, message) ?? newestPage;
+  return {
+    ...current,
+    pages,
+  };
+}
+
+function removeTimelineHistoryMessage(
+  current: TimelineHistoryData | undefined,
+  messageId: string,
+): TimelineHistoryData | undefined {
+  if (!current?.pages.length) {
+    return current;
+  }
+  let changed = false;
+  const pages = current.pages.map((page) => {
+    const next = removeTimelineMessage(page, messageId);
+    if (next !== page) {
+      changed = true;
+    }
+    return next ?? page;
+  });
+  return changed ? { ...current, pages } : current;
+}
+
+function buildLiveUserMessage(input: {
+  sessionId: string;
+  projectSlug: string;
+  provider: ProviderId;
+  conversationRef: string;
+  text: string;
+  timestamp: string;
+  optimistic?: boolean;
+}): NormalizedMessage {
+  return {
+    id: `${input.optimistic ? 'optimistic' : 'live'}:${input.sessionId}:${input.timestamp}:user:${input.text}`,
+    provider: input.provider,
+    role: 'user',
+    lifecycle: 'durable',
+    text: input.text,
+    timestamp: input.timestamp,
+    conversationRef: input.conversationRef,
+    source: 'user-input',
+    rawMetadata: input.optimistic ? { optimistic: true } : undefined,
+  };
+}
+
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -353,8 +499,93 @@ function AppShell() {
     scheduleTimelineMessageRefresh(selectedProjectSlug, selectedProvider, selectedConversationRef);
   }
 
+  function appendMessageToConversationCache(input: { projectSlug: string; provider: ProviderId; conversationRef: string; message: NormalizedMessage }): void {
+    queryClient.setQueryData<ConversationTimeline | undefined>(
+      ['timeline', input.projectSlug, input.provider, input.conversationRef],
+      (current) => appendTimelineMessage(current, input.message),
+    );
+
+    queryClient.setQueryData<TimelineHistoryData | undefined>(
+      ['timeline-history', input.projectSlug, input.provider, input.conversationRef],
+      (current) => {
+        const appended = appendTimelineHistoryMessage(current, input.message);
+        if (appended) {
+          return appended;
+        }
+        if (
+          timeline
+          && timeline.conversation.projectSlug === input.projectSlug
+          && timeline.conversation.provider === input.provider
+          && timeline.conversation.ref === input.conversationRef
+        ) {
+          return {
+            pages: [{
+              ...timeline,
+              messages: [input.message],
+              messagePage: timeline.messagePage ?? { hasOlder: false, total: 1 },
+            }],
+            pageParams: [undefined],
+          };
+        }
+        return current;
+      },
+    );
+  }
+
+  function removeMessageFromConversationCache(input: { projectSlug: string; provider: ProviderId; conversationRef: string; messageId: string }): void {
+    queryClient.setQueryData<ConversationTimeline | undefined>(
+      ['timeline', input.projectSlug, input.provider, input.conversationRef],
+      (current) => removeTimelineMessage(current, input.messageId),
+    );
+
+    queryClient.setQueryData<TimelineHistoryData | undefined>(
+      ['timeline-history', input.projectSlug, input.provider, input.conversationRef],
+      (current) => removeTimelineHistoryMessage(current, input.messageId),
+    );
+  }
+
+  function appendSelectedSubmittedText(input: { sessionId: string; text: string; timestamp?: string; optimistic?: boolean }): NormalizedMessage | undefined {
+    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
+      return undefined;
+    }
+    const text = input.text.trim();
+    if (!text) {
+      return undefined;
+    }
+    const message = buildLiveUserMessage({
+      sessionId: input.sessionId,
+      projectSlug: selectedProjectSlug,
+      provider: selectedProvider,
+      conversationRef: selectedConversationRef,
+      text,
+      timestamp: input.timestamp ?? new Date().toISOString(),
+      optimistic: input.optimistic,
+    });
+    appendMessageToConversationCache({
+      projectSlug: selectedProjectSlug,
+      provider: selectedProvider,
+      conversationRef: selectedConversationRef,
+      message,
+    });
+    return message;
+  }
+
   function shouldRefreshTimelineAfterKeystrokes(body: SessionKeystrokeRequest): boolean {
     return Boolean(body.keys?.includes('Enter'));
+  }
+
+  function optimisticSubmittedTextForKeystrokes(body: SessionKeystrokeRequest): string | undefined {
+    if (!body.keys?.includes('Enter')) {
+      return undefined;
+    }
+    const text = (body.submittedText ?? body.text)?.trim();
+    if (!text || text.startsWith('/')) {
+      return undefined;
+    }
+    if (/^\d{1,8}$/.test(text)) {
+      return undefined;
+    }
+    return text;
   }
 
   useEffect(() => () => {
@@ -409,6 +640,36 @@ function AppShell() {
           if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
             scheduleTimelineMessageRefresh(selectedProjectSlug, selectedProvider, selectedConversationRef);
           }
+          return;
+        }
+        if (parsed.type === 'session.user-input') {
+          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
+            || (
+              parsed.projectSlug === selectedProjectSlug
+              && parsed.provider === selectedProvider
+              && parsed.conversationRef === selectedConversationRef
+            );
+          queryClient.setQueryData<TreeResponse | undefined>(
+            ['tree'],
+            (current) => applySessionActivityToTree(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
+          );
+          queryClient.setQueryData<ConversationTimeline | undefined>(
+            ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
+            (current) => applySessionActivityToTimeline(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
+          );
+          appendMessageToConversationCache({
+            projectSlug: parsed.projectSlug,
+            provider: parsed.provider,
+            conversationRef: parsed.conversationRef,
+            message: buildLiveUserMessage({
+              sessionId: parsed.sessionId,
+              projectSlug: parsed.projectSlug,
+              provider: parsed.provider,
+              conversationRef: parsed.conversationRef,
+              text: parsed.text,
+              timestamp: parsed.timestamp,
+            }),
+          });
           return;
         }
         if (parsed.type === 'session.updated') {
@@ -763,6 +1024,25 @@ function AppShell() {
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
+    const optimisticSubmittedText = optimisticSubmittedTextForKeystrokes(body);
+    const optimisticMessage = optimisticSubmittedText
+      ? appendSelectedSubmittedText({
+          sessionId,
+          text: optimisticSubmittedText,
+          optimistic: true,
+        })
+      : undefined;
+    const discardOptimisticMessage = () => {
+      if (!optimisticMessage || !selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
+        return;
+      }
+      removeMessageFromConversationCache({
+        projectSlug: selectedProjectSlug,
+        provider: selectedProvider,
+        conversationRef: selectedConversationRef,
+        messageId: optimisticMessage.id,
+      });
+    };
     try {
       const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
       applyUpdatedSessionToSelection(sessionId, updatedSession);
@@ -778,16 +1058,12 @@ function AppShell() {
         && timeline?.boundSession?.id === sessionId
       ) {
         try {
-          const usePromptedCodexRebind = selectedProvider === 'codex'
-            && typeof body.text === 'string'
-            && body.text.trim().length > 0
-            && Array.isArray(body.keys)
-            && body.keys.includes('Enter');
+          const recoveryPrompt = selectedProvider === 'codex' ? optimisticSubmittedText : undefined;
           const reboundSession = await forceRebindSelectedConversation(
-            usePromptedCodexRebind ? body.text : undefined,
+            recoveryPrompt,
           );
           if (reboundSession) {
-            if (usePromptedCodexRebind) {
+            if (recoveryPrompt) {
               applyUpdatedSessionToSelection(reboundSession.id, reboundSession);
               setActionError(undefined);
               return true;
@@ -801,10 +1077,12 @@ function AppShell() {
             return true;
           }
         } catch (recoveryError) {
+          discardOptimisticMessage();
           setActionError(describeError(recoveryError, 'Live session input recovery failed.'));
           return false;
         }
       }
+      discardOptimisticMessage();
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
       return false;
     }

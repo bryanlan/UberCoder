@@ -89,6 +89,42 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('98% left');
   });
 
+  it('treats the Codex startup placeholder as an empty composer', () => {
+    for (const placeholder of ['Implement {feature}', 'Write tests for @filename', 'Find and fix a bug in @filename', 'Explain this codebase', 'Summarize recent commits']) {
+      const screen = parseSessionScreenSnapshot([
+        `› ${placeholder}`,
+        '',
+        'gpt-5.5 medium · ~/code/UberCoder/agent-console-mvp/agent-console',
+        '',
+        '│ >_ OpenAI Codex (v0.142.4)                            │',
+        '│ model:       gpt-5.5 medium   /model to change        │',
+        '│ directory:   ~/code/…/agent-console-mvp/agent-console │',
+        '│ permissions: YOLO mode                                │',
+        '',
+        'Tip: Use /status to see the current model, approvals, and token usage.',
+      ].join('\n'));
+
+      expect(screen.inputText).toBe('');
+      expect(screen.content).not.toContain(placeholder);
+    }
+  });
+
+  it('keeps Codex starter prompt text when it is real active input', () => {
+    for (const prompt of ['Explain this codebase', 'Write tests for @filename']) {
+      const screen = parseSessionScreenSnapshot([
+        'OpenAI Codex',
+        '',
+        'Ready for input.',
+        `❯ ${prompt}`,
+        'gpt-5.4 medium · 98% left · ~/demo',
+      ].join('\n'));
+
+      expect(screen.inputText).toBe(prompt);
+      expect(screen.content).toContain('Ready for input.');
+      expect(screen.status).toContain('98% left');
+    }
+  });
+
   it('keeps Claude pasted-text placeholders attached to the active composer input', () => {
     const screen = parseSessionScreenSnapshot([
       'Claude Code',
@@ -103,6 +139,49 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.inputText).toBe('[Pasted text #1 +58 lines]');
     expect(screen.content).toContain('Ready for input.');
     expect(screen.content).not.toContain('Pasted text #1');
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
+  it('treats Claude startup suggestion placeholders as an empty composer', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code v2.1.197',
+      'Opus 4.8 (1M context) with medium effort · Claude Max',
+      '~/code/UberCoder/agent-console-mvp/agent-console',
+      '',
+      '⚠ 2 MCP servers need authentication · run /mcp',
+      '',
+      '▎ Meet Sonnet 5, smarter and more efficient for everyday work. Switch anytime',
+      '▎ with /model.',
+      '',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ Try "edit session-manager.test.ts to..."',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).not.toContain('Try "edit');
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
+  it('does not treat Claude slash-command suggestions as active composer input', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code v2.1.197',
+      'Haiku 4.5 · Claude Max',
+      '~/code/UberCoder/agent-console-mvp/agent-console',
+      '',
+      '/model                          Set the AI model for Claude Code (currently',
+      '                                Haiku 4.5)',
+      '/waltium-portfolio-data         Use for deterministic Waltium portfolio',
+      '                                records and portfolio data configuration: a…',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ /model',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('/model');
     expect(screen.status).toContain('bypass permissions on');
   });
 
@@ -146,6 +225,19 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.inputText).toBe('');
     expect(screen.content).toContain('Run /review on my current changes');
     expect(screen.status).toContain('65% left');
+
+    const bulletOutputScreen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '',
+      '› Reply exactly AGENT_CONSOLE_BYPASS_OK',
+      '',
+      '• AGENT_CONSOLE_BYPASS_OK',
+      'gpt-5.4-mini medium · ~/demo',
+    ].join('\n'));
+
+    expect(bulletOutputScreen.inputText).toBe('');
+    expect(bulletOutputScreen.content).toContain('Reply exactly AGENT_CONSOLE_BYPASS_OK');
+    expect(bulletOutputScreen.content).toContain('AGENT_CONSOLE_BYPASS_OK');
   });
 
   it('extracts model and context from Codex footer status line', () => {
@@ -174,6 +266,41 @@ describe('parseSessionScreenSnapshot', () => {
 
     expect(screen.model).toBe('Opus 4.7');
     expect(screen.contextPercent).toBeUndefined();
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
+  it('extracts the checked Claude model from the model picker instead of the first menu option', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '',
+      'Select model',
+      '  1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday,',
+      '                            complex tasks',
+      '  2. Opus                   Opus 4.8 with 1M context · Best for everyday,',
+      '                            complex tasks',
+      '  3. Sonnet                 Sonnet 5 · Efficient for routine tasks',
+      '❯ 4. Haiku ✔                Haiku 4.5 · Fastest for quick answers',
+      '  5. Fable (disabled)       Claude Fable 5 is currently unavailable.',
+      '',
+      'Enter to set as default · s to use this session only · Esc to cancel',
+    ].join('\n'));
+
+    expect(screen.model).toBe('Haiku 4.5');
+  });
+
+  it('extracts the latest Claude model confirmation from visible output', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '',
+      '  1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday,',
+      '❯ 4. Haiku ✔                Haiku 4.5 · Fastest for quick answers',
+      '',
+      '❯ /model',
+      '  ⎿  Set model to Haiku 4.5 and saved as your default for new sessions',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+    ].join('\n'));
+
+    expect(screen.model).toBe('Haiku 4.5');
     expect(screen.status).toContain('bypass permissions on');
   });
 

@@ -62,6 +62,938 @@ describe('readLiveMessages', () => {
     expect(messages.some((message) => /Tip:|Starting MCP servers/.test(message.text) && message.role !== 'status')).toBe(false);
   });
 
+  it('keeps prefixed Claude terminal status lines out of assistant messages', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '\u273b Baked for 12m 40s',
+          '',
+          '\u25cf Background command "Proof-gated Codex review of ingest layer" failed with exit',
+          'code 144',
+          '',
+          '\u273d Gusting...',
+          '  tmux focus-events off \u00b7 add \'set -g focus-events on\' to ~/.tmux.conf and rea\u2026',
+          '',
+          'Actual assistant prose that should remain.',
+        ].join('\n'),
+        timestamp: '2026-06-30T19:14:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-status',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'claude-status',
+      tmuxSessionName: 'ac-claude-demo-status',
+      status: 'bound',
+      startedAt: '2026-06-30T19:00:00.000Z',
+      updatedAt: '2026-06-30T19:14:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    const assistantTexts = messages.filter((message) => message.role === 'assistant').map((message) => message.text);
+    expect(assistantTexts).toEqual(['Actual assistant prose that should remain.']);
+    expect(assistantTexts.some((text) => /Baked|Background command|code 144|Gusting|tmux focus-events/.test(text))).toBe(false);
+  });
+
+  it('keeps assistant prose that mentions tokens or short complete replies', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Tokens are counted after normalization.',
+          'Done',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:20:00.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-token-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:token-prose',
+      tmuxSessionName: 'ac-codex-demo-token-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T03:20:00.000Z',
+      updatedAt: '2026-07-01T03:20:00.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual([
+      'Tokens are counted after normalization.\nDone',
+    ]);
+  });
+
+  it('keeps numeric-only assistant replies outside picker chunks', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: '42',
+        timestamp: '2026-07-01T03:21:00.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-numeric-reply',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:numeric-reply',
+      tmuxSessionName: 'ac-codex-demo-numeric-reply',
+      status: 'bound',
+      startedAt: '2026-07-01T03:21:00.000Z',
+      updatedAt: '2026-07-01T03:21:00.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual(['42']);
+  });
+
+  it('does not remove prior assistant text from a later sentence that extends it', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Run npm test',
+        timestamp: '2026-07-01T03:25:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Run npm test after the build finishes.',
+        timestamp: '2026-07-01T03:25:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-repeated-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:repeated-prose',
+      tmuxSessionName: 'ac-codex-demo-repeated-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T03:25:00.000Z',
+      updatedAt: '2026-07-01T03:25:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual([
+      'Run npm test\nRun npm test after the build finishes.',
+    ]);
+  });
+
+  it('keeps repeated assistant answers across separate user turns', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'First check',
+        timestamp: '2026-07-01T03:25:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'No findings.',
+        timestamp: '2026-07-01T03:25:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Second check',
+        timestamp: '2026-07-01T03:25:10.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'No findings.',
+        timestamp: '2026-07-01T03:25:11.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-repeated-answer',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:repeated-answer',
+      tmuxSessionName: 'ac-codex-demo-repeated-answer',
+      status: 'bound',
+      startedAt: '2026-07-01T03:25:00.000Z',
+      updatedAt: '2026-07-01T03:25:11.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'First check' },
+      { role: 'assistant', source: 'live-output', text: 'No findings.' },
+      { role: 'user', source: 'user-input', text: 'Second check' },
+      { role: 'assistant', source: 'live-output', text: 'No findings.' },
+    ]);
+  });
+
+  it('keeps assistant prose that contains status-like words', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'What changed?',
+        timestamp: '2026-07-01T03:25:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'I worked on the parser.',
+        timestamp: '2026-07-01T03:25:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-status-like-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:status-like-prose',
+      tmuxSessionName: 'ac-codex-demo-status-like-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T03:25:00.000Z',
+      updatedAt: '2026-07-01T03:25:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'What changed?' },
+      { role: 'assistant', source: 'live-output', text: 'I worked on the parser.' },
+    ]);
+  });
+
+  it('does not suppress earlier assistant output that a later user input repeats', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Run npm test',
+        timestamp: '2026-07-01T03:26:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Run npm test',
+        timestamp: '2026-07-01T03:26:10.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Test run started.',
+        timestamp: '2026-07-01T03:26:11.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-future-user-echo',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:future-user-echo',
+      tmuxSessionName: 'ac-codex-demo-future-user-echo',
+      status: 'bound',
+      startedAt: '2026-07-01T03:26:00.000Z',
+      updatedAt: '2026-07-01T03:26:11.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'assistant', source: 'live-output', text: 'Run npm test' },
+      { role: 'user', source: 'user-input', text: 'Run npm test' },
+      { role: 'assistant', source: 'live-output', text: 'Test run started.' },
+    ]);
+  });
+
+  it('keeps only the final Claude live answer when the prompt echo is logged before submit', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: '\u001b(B\nReply exactly CLAUDE_SINGLE_OK',
+        timestamp: '2026-07-01T01:53:20.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_SINGLE_OK',
+        timestamp: '2026-07-01T01:53:21.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '\u001b(B',
+          'D',
+          '*2',
+          'D',
+          'Gallivanting…',
+          'Scmp',
+          'pein',
+          'i…',
+          '\u2736n',
+          'g…',
+          '\u2736rg',
+          '(1s · thinking)',
+          '·enthinking',
+          '*aliv',
+          'CLAUDE_SINGLE_OK',
+          'Cogitated for 1s',
+          'Churned for 1s',
+          '← for agents',
+        ].join('\n'),
+        timestamp: '2026-07-01T01:53:24.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-live-answer',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-live-answer',
+      tmuxSessionName: 'ac-claude-demo-live-answer',
+      status: 'bound',
+      startedAt: '2026-07-01T01:53:00.000Z',
+      updatedAt: '2026-07-01T01:53:24.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_SINGLE_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_SINGLE_OK' },
+    ]);
+  });
+
+  it('drops provider command menus and keeps only actual prompt and answer text', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '/waltium-portfolio-data Use for deterministic Waltium portfolio records and portfolio data configuration: a…',
+          'Switch between Claude models. Your pick becomes the default for new',
+          'sessions. For other/previous model names, specify with --model.',
+          '3. SonnetSonnet 5 · Efficient for routine tasks',
+          '5. Fable (disabled)Claude Fable 5 is currently unavailable. Learn',
+          'more: https://www.anthropic.com/news/fable-mythos-access',
+          '○ Effort not supported for Haiku',
+          'Enter to set as default · s to use this session only · Esc to cancel',
+          '⚠ 2 MCP servers need authentication · run /mcp',
+          '/code-review Review the current diff for correctness bugs',
+          'and reuse/simplification/efficiency cleanup…',
+          'Effort',
+          'Faster Smarter',
+          'lowmediumhighxhighmax',
+          '←/→ to adjust · Enter to confirm · Esc to cancel',
+          'Queued follow-up inputs',
+          '↳ 3',
+          'shift + ← edit last queued message',
+          'permissions: YOLO mode',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:12:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLEAN_MENU_OK',
+        timestamp: '2026-07-01T02:12:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '⎿ Cancelled',
+          'tmux detected · scroll with PgUp/PgDn · or add set -g mouse on',
+          'CLEAN_MENU_OK',
+          'Churned for 3s',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:12:04.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-menu-noise',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:menu-noise',
+      tmuxSessionName: 'ac-claude-demo-menu-noise',
+      status: 'bound',
+      startedAt: '2026-07-01T02:12:00.000Z',
+      updatedAt: '2026-07-01T02:12:04.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLEAN_MENU_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLEAN_MENU_OK' },
+    ]);
+  });
+
+  it('keeps assistant prose that mentions portfolio data configuration', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, JSON.stringify({
+      type: 'raw-output',
+      text: 'I fixed the portfolio data configuration bug.',
+      timestamp: '2026-07-01T02:17:00.000Z',
+    }));
+
+    const session: BoundSession = {
+      id: 'session-portfolio-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:portfolio-prose',
+      tmuxSessionName: 'ac-codex-demo-portfolio-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T02:17:00.000Z',
+      updatedAt: '2026-07-01T02:17:00.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'assistant', source: 'live-output', text: 'I fixed the portfolio data configuration bug.' },
+    ]);
+  });
+
+  it('keeps assistant prose that mentions Codex starter prompt text', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, JSON.stringify({
+      type: 'raw-output',
+      text: [
+        'I can explain this codebase by walking through the server.',
+        'Use Write tests for @filename as an example prompt.',
+      ].join('\n'),
+      timestamp: '2026-07-01T02:17:30.000Z',
+    }));
+
+    const session: BoundSession = {
+      id: 'session-starter-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:starter-prose',
+      tmuxSessionName: 'ac-codex-demo-starter-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T02:17:30.000Z',
+      updatedAt: '2026-07-01T02:17:30.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: [
+          'I can explain this codebase by walking through the server.',
+          'Use Write tests for @filename as an example prompt.',
+        ].join('\n'),
+      },
+    ]);
+  });
+
+  it('does not collapse non-exact prose that contains the requested exact reply', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly OK',
+        timestamp: '2026-07-01T02:18:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'The answer is OK, plus context.',
+        timestamp: '2026-07-01T02:18:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-non-exact-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:non-exact-prose',
+      tmuxSessionName: 'ac-codex-demo-non-exact-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T02:18:00.000Z',
+      updatedAt: '2026-07-01T02:18:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly OK' },
+      { role: 'assistant', source: 'live-output', text: 'The answer is OK, plus context.' },
+    ]);
+  });
+
+  it('strips Codex startup repaint text glued to a live answer marker', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CODEX_CLEAN_OK',
+        timestamp: '2026-07-01T02:27:25.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+          text: [
+          'Youhave3usagelimitresetsavailable.Run/usagetouseone.CODEX_CLEAN_OK›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
+          'You have 3 usage limit resets available. Run /usage to use one.›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
+          'Starting MCP servers (0/4): chrome-devtools, codex_apps, openaiDeveloperDocs,…›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
+          'SttarrtiSinStang art MCart MC1playwright (0s ecar MrtiMCPinP ng seng se2playwright',
+          'Working (1s sc tointerrupt)ngg 2 WWoorrkkiinWng 3Wogorrkkiinngg 4 WWoorrk kiinWng5Wog',
+          'CODEX_CLEAN_OK›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:27:30.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-codex-startup-repaint',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:codex-startup-repaint',
+      tmuxSessionName: 'ac-codex-demo-startup-repaint',
+      status: 'bound',
+      startedAt: '2026-07-01T02:27:00.000Z',
+      updatedAt: '2026-07-01T02:27:30.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CODEX_CLEAN_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CODEX_CLEAN_OK' },
+    ]);
+  });
+
+  it('does not render Claude slash-command screens as assistant transcript content', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Claude Code v2.1.197',
+          'Haiku 4.5 · Claude Max',
+          '/model Set the AI model for Claude Code (currently Haiku 4.5)',
+          '❯ /model',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:44:19.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_CLEAN_OK',
+        timestamp: '2026-07-01T02:45:56.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Press up to edit queued messages · esc to interrupt · ← for agents',
+          "I'm not sure what you're asking for with /model/model. Could you clarify what you'd like to do?",
+          'A few possibilities:',
+          'Check the current model? You are running on Claude Haiku 4.5',
+          'Switch to a faster mode? Use /fast to toggle to Opus with faster output',
+          'Invoke a skill? Skills use the format /skill-name',
+          'ReplyexactlyCLAUDE_CLEAN_OK',
+          'CLAUDE_CLEAN_OK',
+          'Crunched for 3s',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:46:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-slash-command',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-slash-command',
+      tmuxSessionName: 'ac-claude-demo-slash-command',
+      status: 'bound',
+      startedAt: '2026-07-01T02:44:00.000Z',
+      updatedAt: '2026-07-01T02:46:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_CLEAN_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_CLEAN_OK' },
+    ]);
+  });
+
+  it('drops stale provider model selection user-input rows from existing logs', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Claude Code',
+          'Select model',
+          '1. Default',
+          '2. Opus',
+          '3. Sonnet',
+          '4. Haiku',
+          'Enter to set as default · s to use this session only · Esc to cancel',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:50:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: '4',
+        timestamp: '2026-07-01T02:50:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Set model to Haiku 4.5 and saved as your default for new sessions',
+        timestamp: '2026-07-01T02:50:02.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly AFTER_MODEL_OK',
+        timestamp: '2026-07-01T02:51:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'AFTER_MODEL_OK',
+        timestamp: '2026-07-01T02:51:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-stale-model-selection',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:stale-model-selection',
+      tmuxSessionName: 'ac-claude-demo-stale-model-selection',
+      status: 'bound',
+      startedAt: '2026-07-01T02:50:00.000Z',
+      updatedAt: '2026-07-01T02:51:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly AFTER_MODEL_OK' },
+      { role: 'assistant', source: 'live-output', text: 'AFTER_MODEL_OK' },
+    ]);
+  });
+
+  it('keeps numeric user replies outside provider command menus', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Choose the next step:',
+          '1. Run the targeted tests',
+          '2. Inspect the debug logs',
+        ].join('\n'),
+        timestamp: '2026-07-01T02:55:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: '2',
+        timestamp: '2026-07-01T02:55:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'I will inspect the debug logs.',
+        timestamp: '2026-07-01T02:55:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-numeric-reply',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:numeric-reply',
+      tmuxSessionName: 'ac-codex-demo-numeric-reply',
+      status: 'bound',
+      startedAt: '2026-07-01T02:55:00.000Z',
+      updatedAt: '2026-07-01T02:55:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'assistant', source: 'live-output', text: 'Choose the next step:\n1. Run the targeted tests\n2. Inspect the debug logs' },
+      { role: 'user', source: 'user-input', text: '2' },
+      { role: 'assistant', source: 'live-output', text: 'I will inspect the debug logs.' },
+    ]);
+  });
+
+  it('keeps only new Claude output when the terminal repaints prior turns', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_FIRST_OK',
+        timestamp: '2026-07-01T03:00:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'CLAUDE_FIRST_OK\nWorked for 2s',
+        timestamp: '2026-07-01T03:00:02.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_SECOND_OK',
+        timestamp: '2026-07-01T03:01:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Reply exactly CLAUDE_FIRST_OK',
+          'CLAUDE_FIRST_OK',
+          'Churned for 1s',
+          'Reply exactly CLAUDE_SECOND_OK',
+          'CLAUDE_SECOND_OKSautéedfor2s',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:01:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-repaint-prior-turns',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-repaint-prior-turns',
+      tmuxSessionName: 'ac-claude-demo-repaint-prior-turns',
+      status: 'bound',
+      startedAt: '2026-07-01T03:00:00.000Z',
+      updatedAt: '2026-07-01T03:01:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_FIRST_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_FIRST_OK' },
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_SECOND_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_SECOND_OK' },
+    ]);
+  });
+
+  it('drops provider model-menu repaint chunks after an exact assistant reply', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_MODEL_MENU_OK',
+        timestamp: '2026-07-01T03:10:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'CLAUDE_MODEL_MENU_OK',
+        timestamp: '2026-07-01T03:10:02.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Reply exactly CLAUDE_MODEL_MENU_OK',
+          'CLAUDE_MODEL_MENU_OK',
+          'Select model',
+          '1. Default(recommended)Opus 4.8 with 1M context · Best for everyday,',
+          '2. OpusOpus 4.8 with 1M context · Best for everyday,',
+          '4. Haiku ✔ Haiku 4.5 · Fastest for quick answers',
+          'Use /fast to turn on Fast mode (Opus 4.8).',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:11:00.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-model-menu-repaint',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-model-menu-repaint',
+      tmuxSessionName: 'ac-claude-demo-model-menu-repaint',
+      status: 'bound',
+      startedAt: '2026-07-01T03:10:00.000Z',
+      updatedAt: '2026-07-01T03:11:00.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_MODEL_MENU_OK' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_MODEL_MENU_OK' },
+    ]);
+  });
+
+  it('keeps exact replies when stale Claude status repaint lines precede the answer', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_REAL_FILL_1782876390000',
+        timestamp: '2026-07-01T03:25:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'CLAUDE_REAL_FILL_1782876390000',
+        timestamp: '2026-07-01T03:25:02.000Z',
+      }),
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_RESTART_CLEAN_1782876900000',
+        timestamp: '2026-07-01T03:26:35.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Reply exactly CLAUDE_REAL_FILL_1782876390000',
+          'CLAUDE_REAL_FILL_1782876390000',
+          'START_CLEAN_18287690000',
+          'SetmodeltoHaiku 4.5andsavedasyourdefaultfornewsessions',
+          'Tip: Connect Claude to your IDE · /ide',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:26:36.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: ['M', '*o', 's', 'Me', 'osyi', 'en', 'Mosyin'].join('\n'),
+        timestamp: '2026-07-01T03:26:37.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Reply exactly CLAUDE_RESTART_CLEAN_1782876900000',
+          'CLAUDE_RESTART_CLEAN_1782876900000',
+          'Brewed for 2s',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:26:38.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-stale-status-before-answer',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-stale-status-before-answer',
+      tmuxSessionName: 'ac-claude-demo-stale-status-before-answer',
+      status: 'bound',
+      startedAt: '2026-07-01T03:26:00.000Z',
+      updatedAt: '2026-07-01T03:26:38.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_REAL_FILL_1782876390000' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_REAL_FILL_1782876390000' },
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_RESTART_CLEAN_1782876900000' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_RESTART_CLEAN_1782876900000' },
+    ]);
+  });
+
+  it('drops Claude animated-status character fragments after an exact reply', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'Reply exactly CLAUDE_RESTART_INPUT_OK_1782877501580',
+        timestamp: '2026-07-01T03:45:06.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'CLAUDE_RESTART_INPUT_OK_1782877501580',
+        timestamp: '2026-07-01T03:45:07.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: ['Ti', 'n', 'Tk', 'iner', 'ki', 'en', 'rg', 'in…', '*g', '…'].join('\n'),
+        timestamp: '2026-07-01T03:45:08.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Reply exactly CLAUDE_RESTART_INPUT_OK_1782877501580',
+          'CLAUDE_RESTART_INPUT_OK_1782877501580',
+          'Tinkering…',
+          'Baked for 1s',
+        ].join('\n'),
+        timestamp: '2026-07-01T03:45:09.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-exact-reply-status-fragments',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'pending:claude-exact-reply-status-fragments',
+      tmuxSessionName: 'ac-claude-demo-exact-reply-status-fragments',
+      status: 'bound',
+      startedAt: '2026-07-01T03:45:00.000Z',
+      updatedAt: '2026-07-01T03:45:09.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'Reply exactly CLAUDE_RESTART_INPUT_OK_1782877501580' },
+      { role: 'assistant', source: 'live-output', text: 'CLAUDE_RESTART_INPUT_OK_1782877501580' },
+    ]);
+  });
+
+  it('keeps legitimate assistant prose that contains a short user prompt', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'tokens',
+        timestamp: '2026-07-01T03:30:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Tokens are counted after normalization.',
+        timestamp: '2026-07-01T03:30:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-short-prompt-legitimate-prose',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:short-prompt-legitimate-prose',
+      tmuxSessionName: 'ac-codex-demo-short-prompt-legitimate-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T03:30:00.000Z',
+      updatedAt: '2026-07-01T03:30:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'tokens' },
+      { role: 'assistant', source: 'live-output', text: 'Tokens are counted after normalization.' },
+    ]);
+  });
+
   it('reads a bounded event-log tail from the next complete JSONL row', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
@@ -101,6 +1033,47 @@ describe('readLiveMessages', () => {
       'recent bounded tail answer',
     ]);
     expect(messages.some((message) => message.text.includes('old-tail-needle'))).toBe(false);
+  });
+
+  it('uses the preceding user input as echo-suppression context for bounded raw-output tails', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const prompt = 'Summarize the live dashboard without echoing this prompt.';
+    const answer = 'The dashboard summary is ready.';
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: prompt,
+        timestamp: '2026-03-07T00:02:00.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          `› ${prompt}`,
+          `gpt-5.4 xhigh · 100% left · ~/code/demo ${'payloadword '.repeat(120)}`,
+          answer,
+        ].join('\n'),
+        timestamp: '2026-03-07T00:02:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-context-tail',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:context-tail',
+      tmuxSessionName: 'ac-codex-demo-context-tail',
+      status: 'bound',
+      startedAt: '2026-03-07T00:02:00.000Z',
+      updatedAt: '2026-03-07T00:02:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session, { maxBytesFromEnd: 512 });
+    expect(messages.map((message) => message.text)).toEqual([
+      answer,
+    ]);
+    expect(messages.some((message) => message.text.includes(prompt))).toBe(false);
   });
 
   it('keeps the latest complete JSONL row when it starts before the bounded tail', async () => {

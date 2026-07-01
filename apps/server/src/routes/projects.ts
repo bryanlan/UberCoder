@@ -10,12 +10,13 @@ export async function registerProjectRoutes(
   sessions: SessionManager,
 ): Promise<void> {
   const TREE_OBSERVATION_INTERVAL_MS = 5_000;
+  const TREE_OBSERVATION_DEFER_MS = 60_000;
   let lastTreeObservationCompletedAt = 0;
   let treeObservationPromise: Promise<void> | undefined;
+  let treeObservationTimer: NodeJS.Timeout | undefined;
 
-  async function maybeObserveSessionsForTree(): Promise<void> {
-    if (treeObservationPromise) {
-      await treeObservationPromise;
+  function maybeObserveSessionsForTree(): void {
+    if (treeObservationPromise || treeObservationTimer) {
       return;
     }
 
@@ -23,19 +24,22 @@ export async function registerProjectRoutes(
       return;
     }
 
-    let currentObservation: Promise<void>;
-    currentObservation = (async () => {
-      await sessions.observeSessions();
-      lastTreeObservationCompletedAt = Date.now();
-    })();
-    treeObservationPromise = currentObservation;
-    try {
-      await currentObservation;
-    } finally {
-      if (treeObservationPromise === currentObservation) {
-        treeObservationPromise = undefined;
-      }
-    }
+    treeObservationTimer = setTimeout(() => {
+      treeObservationTimer = undefined;
+      const currentObservation = sessions.observeSessions()
+        .then(() => {
+          lastTreeObservationCompletedAt = Date.now();
+        })
+        .catch((error) => {
+          app.log.warn({ err: error }, 'Failed to observe live sessions for project tree refresh.');
+        })
+        .finally(() => {
+          if (treeObservationPromise === currentObservation) {
+            treeObservationPromise = undefined;
+          }
+        });
+      treeObservationPromise = currentObservation;
+    }, TREE_OBSERVATION_DEFER_MS);
   }
 
   app.get('/api/projects/tree', async (request, reply) => {
@@ -44,7 +48,7 @@ export async function registerProjectRoutes(
     } catch {
       return;
     }
-    await maybeObserveSessionsForTree();
+    maybeObserveSessionsForTree();
     return indexing.getTree();
   });
 
@@ -57,5 +61,9 @@ export async function registerProjectRoutes(
     await sessions.observeSessions();
     await indexing.refreshAll();
     return indexing.getTree();
+  });
+
+  app.addHook('onClose', async () => {
+    clearTimeout(treeObservationTimer);
   });
 }

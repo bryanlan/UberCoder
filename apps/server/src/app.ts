@@ -93,6 +93,17 @@ export async function buildApp(options: AppOptions = {}) {
     await app.register(fastifyStatic, {
       root: config.server.webDistPath,
       prefix: '/',
+      setHeaders: (response, filePath) => {
+        const fileName = path.basename(filePath);
+        if (
+          fileName === 'index.html'
+          || fileName === 'sw.js'
+          || fileName === 'manifest.webmanifest'
+          || fileName.startsWith('workbox-')
+        ) {
+          response.setHeader('Cache-Control', 'no-store');
+        }
+      },
     });
     app.setNotFoundHandler(async (request, reply) => {
       if (request.url.startsWith('/api') || request.url.startsWith('/proxy')) {
@@ -103,11 +114,17 @@ export async function buildApp(options: AppOptions = {}) {
     });
   }
 
+  await indexing.loadProjectMetadata();
   await indexing.start();
-  await sessions.observeSessions();
+  const startupServicesTimer = setTimeout(() => {
+    void sessions.observeSessions().catch((error) => {
+      app.log.warn({ err: error }, 'Failed to observe live sessions during background startup.');
+    });
+  }, 60_000);
   sessionSummaries.start();
 
   app.addHook('onClose', async () => {
+    clearTimeout(startupServicesTimer);
     await sessionSummaries.stop();
     await indexing.stop();
     sessions.stop();

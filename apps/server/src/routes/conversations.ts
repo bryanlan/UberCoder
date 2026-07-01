@@ -30,12 +30,8 @@ const timelineQuerySchema = z.object({
 const LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 const SHORT_EXACT_DUPLICATE_WINDOW_MS = 30 * 1000;
 const CONTAINMENT_DUPLICATE_MIN_LENGTH = 80;
-const TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
-const LIVE_SCREEN_DUPLICATE_MIN_LENGTH = 30;
-const LIVE_SCREEN_DUPLICATE_COMPACT_MIN_LENGTH = 40;
-const LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS = 2_000;
+const LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS = 1_000;
-const LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS = 5_000;
 const LIVE_TIMELINE_RESPONSE_CACHE_MAX_ENTRIES = 200;
 
 interface MessagePaginationOptions<T> {
@@ -313,159 +309,37 @@ function filterTranscriptBackedLiveMessages(
   return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
-function normalizeLiveTailText(text: string): string {
-  return normalizeComparableText(text).replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-function normalizeLiveTailCompactText(text: string): string {
-  return normalizeLiveTailText(text).replace(/[^a-z0-9]+/g, '');
-}
-
-function splitLines(text: string | undefined): string[] {
-  return (text ?? '').replace(/\r\n?/g, '\n').split('\n');
-}
-
-function isLiveScreenTrimFillerLine(line: string): boolean {
-  const trimmed = line.trim();
-  return !trimmed
-    || /^[⎿✻●]/u.test(trimmed)
-    || /^[-*_]{3,}$/.test(trimmed)
-    || /^[\s│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+$/u.test(line);
-}
-
-function countDurableDuplicatePrefixLines(lines: string[], durableText: string): number {
-  const durableCompactText = normalizeLiveTailCompactText(durableText);
-  let candidateCompactText = '';
-  let trimLineCount = 0;
-  let sawDuplicateLine = false;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? '';
-    const compactLine = normalizeLiveTailCompactText(line);
-    if (isLiveScreenTrimFillerLine(line)) {
-      if (sawDuplicateLine) {
-        trimLineCount = index + 1;
-      }
+function latestMessageTimestampMs(messages: NormalizedMessage[]): number | undefined {
+  let latest: number | undefined;
+  for (const message of messages) {
+    const timestampMs = Date.parse(message.timestamp);
+    if (!Number.isFinite(timestampMs)) {
       continue;
     }
-
-    const nextCandidateCompactText = `${candidateCompactText}${compactLine}`;
-    if (nextCandidateCompactText.length < LIVE_SCREEN_DUPLICATE_COMPACT_MIN_LENGTH) {
-      candidateCompactText = nextCandidateCompactText;
-      continue;
-    }
-
-    if (
-      durableCompactText.includes(nextCandidateCompactText)
-    ) {
-      sawDuplicateLine = true;
-      candidateCompactText = nextCandidateCompactText;
-      trimLineCount = index + 1;
-      continue;
-    }
-
-    break;
+    latest = latest === undefined ? timestampMs : Math.max(latest, timestampMs);
   }
-
-  return sawDuplicateLine ? trimLineCount : 0;
+  return latest;
 }
 
-function isDurableLiveTailMessage(message: NormalizedMessage): boolean {
-  return message.role === 'user' || message.role === 'assistant' || message.role === 'tool';
-}
-
-function buildDurableLiveTailText(
-  durableMessages: NormalizedMessage[],
-  screenComparableLength: number,
-): string {
-  const minComparableLength = screenComparableLength + LIVE_SCREEN_DURABLE_OVERLAP_MARGIN_CHARS;
-  const selectedTexts: string[] = [];
-  let selectedComparableLength = 0;
-
-  for (let index = durableMessages.length - 1; index >= 0; index -= 1) {
-    const message = durableMessages[index];
-    if (!message || !isDurableLiveTailMessage(message)) {
-      continue;
-    }
-
-    selectedTexts.unshift(message.text);
-    selectedComparableLength += normalizeLiveTailText(message.text).length + 1;
-    if (selectedComparableLength >= minComparableLength) {
-      break;
-    }
+function isPendingAfterTranscript(message: NormalizedMessage, latestTranscriptMs: number | undefined): boolean {
+  if (message.lifecycle === 'status') {
+    return false;
   }
-
-  return normalizeLiveTailText(selectedTexts.join('\n'));
-}
-
-function trimDurableMessagesToScreenContent(
-  durableMessages: NormalizedMessage[],
-  screenContent: string,
-): NormalizedMessage[] {
-  const comparableScreenContent = normalizeLiveTailText(screenContent);
-  let end = durableMessages.length;
-
-  while (end > 0) {
-    const message = durableMessages[end - 1];
-    if (!message || message.role !== 'user' || message.source !== 'user-input') {
-      break;
-    }
-
-    const comparableMessageText = normalizeLiveTailText(message.text);
-    if (
-      comparableMessageText.length >= LIVE_SCREEN_DUPLICATE_MIN_LENGTH
-      && comparableScreenContent.includes(comparableMessageText)
-    ) {
-      break;
-    }
-
-    end -= 1;
+  if (latestTranscriptMs === undefined) {
+    return true;
   }
-
-  return end === durableMessages.length ? durableMessages : durableMessages.slice(0, end);
+  const timestampMs = Date.parse(message.timestamp);
+  return Number.isFinite(timestampMs) && timestampMs > latestTranscriptMs;
 }
 
-function trimLiveScreenToActiveTail(
-  screen: SessionScreen | undefined,
-  durableMessages: NormalizedMessage[],
-): SessionScreen | undefined {
+function hideReadableScreenContent(screen: SessionScreen | undefined): SessionScreen | undefined {
   if (!screen) {
     return undefined;
   }
-
-  const contentLines = splitLines(screen.content);
-  const ansiLines = splitLines(screen.contentAnsi ?? screen.content);
-  const screenContent = contentLines.join('\n');
-  const screenComparableLength = normalizeLiveTailText(screenContent).length;
-  const durableText = buildDurableLiveTailText(
-    trimDurableMessagesToScreenContent(durableMessages, screenContent),
-    screenComparableLength,
-  );
-  if (!durableText) {
-    return screen;
-  }
-
-  let cutLineCount = 0;
-  for (let lineCount = 1; lineCount <= contentLines.length; lineCount += 1) {
-    const candidate = normalizeLiveTailText(contentLines.slice(0, lineCount).join('\n'));
-    if (candidate.length < LIVE_SCREEN_DUPLICATE_MIN_LENGTH) {
-      continue;
-    }
-    if (durableText.endsWith(candidate)) {
-      cutLineCount = lineCount;
-    }
-  }
-  cutLineCount += countDurableDuplicatePrefixLines(contentLines.slice(cutLineCount), durableText);
-
-  if (cutLineCount === 0) {
-    return screen;
-  }
-
-  const content = contentLines.slice(cutLineCount).join('\n').trim();
-  const contentAnsi = ansiLines.slice(cutLineCount).join('\n').trim();
   return {
     ...screen,
-    content,
-    contentAnsi: contentAnsi || content,
+    content: '',
+    contentAnsi: '',
   };
 }
 
@@ -524,7 +398,7 @@ export async function registerConversationRoutes(
     const cachedSummary = db.getConversationIndexEntry(projectSlug, providerId, resolvedConversationRef);
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
     const boundSession = db.getBoundSessionByConversation(projectSlug, providerId, resolvedConversationRef);
-    const liveTimelineResponseCacheKey = boundSession
+    const liveTimelineResponseCacheKey = boundSession && metadataOnly
       ? getLiveTimelineResponseCacheKey({
         projectSlug,
         provider: providerId,
@@ -546,18 +420,19 @@ export async function registerConversationRoutes(
       summary = buildSyntheticConversationFromSession(resolvedBoundSession);
     }
 
-    if (metadataOnly && summary && !resolvedBoundSession) {
+    if (metadataOnly && summary) {
       const emptyPage = paginateMessages([], parsedQuery.data);
+      const liveScreen = hideReadableScreenContent(rawLiveScreen);
       return rememberLiveTimelineResponse(liveTimelineResponseCacheKey, {
         conversation: {
           ...summary,
-          isBound: false,
-          boundSessionId: undefined,
+          isBound: Boolean(resolvedBoundSession),
+          boundSessionId: resolvedBoundSession?.id,
         },
         messages: emptyPage.pageMessages,
         allMessages: [],
-        boundSession: undefined,
-        liveScreen: undefined,
+        boundSession: resolvedBoundSession,
+        liveScreen,
         messagePage: emptyPage.pageInfo,
       }, LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS);
     }
@@ -585,7 +460,7 @@ export async function registerConversationRoutes(
     const liveMessages = resolvedBoundSession
       ? await readLiveMessages(
         resolvedBoundSession,
-        providerHasTranscript ? { maxBytesFromEnd: TRANSCRIPT_BACKED_LIVE_EVENT_LOG_TAIL_BYTES } : {},
+        { maxBytesFromEnd: LIVE_EVENT_LOG_TAIL_BYTES },
       )
       : [];
     const mergedAllMessages = uniqueBy(
@@ -599,11 +474,12 @@ export async function registerConversationRoutes(
     )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const liveMessagesNotInTranscript = filterTranscriptBackedLiveMessages(liveMessages, visibleMessages);
+    const latestVisibleTranscriptMs = latestMessageTimestampMs(visibleMessages);
     const mergedMessages = uniqueBy(
       [
         ...visibleMessages,
         ...(providerHasTranscript
-          ? liveMessagesNotInTranscript.filter((message) => message.role === 'user')
+          ? liveMessagesNotInTranscript.filter((message) => isPendingAfterTranscript(message, latestVisibleTranscriptMs))
           : filterUserVisibleMessages(liveMessages)),
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
@@ -614,7 +490,7 @@ export async function registerConversationRoutes(
         ...parsedQuery.data,
         samePageRun: messagesShareTimelinePageRun,
       });
-    const liveScreen = trimLiveScreenToActiveTail(rawLiveScreen, mergedMessages);
+    const liveScreen = hideReadableScreenContent(rawLiveScreen);
 
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });
@@ -632,7 +508,7 @@ export async function registerConversationRoutes(
       boundSession: resolvedBoundSession,
       liveScreen,
       messagePage: pagedMessages.pageInfo,
-    }, metadataOnly ? LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS : LIVE_TIMELINE_MESSAGE_RESPONSE_CACHE_MS);
+    }, LIVE_TIMELINE_METADATA_RESPONSE_CACHE_MS);
   });
 
   app.post('/api/conversations/:projectSlug/:provider/new/bind', async (request, reply) => {
