@@ -30,14 +30,18 @@ export class ApiError extends Error {
 }
 
 async function request<T>(input: string, init: RequestInit = {}, csrfToken?: string): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body !== undefined && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+  if (csrfToken) {
+    headers.set('x-csrf-token', csrfToken);
+  }
+
   const response = await fetch(input, {
     credentials: 'include',
-    headers: {
-      'content-type': 'application/json',
-      ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
-      ...(init.headers ?? {}),
-    },
     ...init,
+    headers,
   });
 
   if (response.status === 204) {

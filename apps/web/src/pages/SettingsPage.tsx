@@ -307,7 +307,11 @@ export function SettingsPage({
       : projectMessages[project.directoryName];
 
     return (
-      <section key={project.directoryName} className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-panel">
+      <section
+        key={project.directoryName}
+        data-testid={`saved-project-${project.directoryName}`}
+        className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-panel"
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-slate-100">{project.displayName ?? project.directoryName}</h2>
@@ -683,7 +687,7 @@ export function SettingsPage({
             </div>
           </section>
 
-          <section className="space-y-4">
+          <section className="space-y-4" data-testid="saved-projects-section">
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold text-slate-100">Saved projects</h2>

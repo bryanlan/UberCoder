@@ -34,8 +34,9 @@ test.describe('settings project management', () => {
     await login(page);
 
     await page.goto('/settings');
-    await expect(page.locator('body')).toContainText('No saved projects yet');
-    await expect(page.locator('body')).not.toContainText('UberCoder');
+    const savedProjects = page.getByTestId('saved-projects-section');
+    await expect(savedProjects).toContainText('No saved projects yet');
+    await expect(savedProjects).not.toContainText('UberCoder');
   });
 
   test('adds a nested explicit project from Settings and surfaces its history in the console tree', async ({ page }) => {
@@ -44,6 +45,8 @@ test.describe('settings project management', () => {
     await expect(page.locator('body')).toContainText('UberCoder--agent-console-mvp--agent-console');
     await expect(page.locator('body')).toContainText('agent-console-mvp/agent-console');
     await page.getByRole('link', { name: 'Back to Console' }).click();
+    await page.getByRole('button', { name: 'Work mode' }).click();
+    await page.getByRole('button', { name: 'Refresh project tree' }).click();
     await expect(page.locator('body')).toContainText('Legacy migrated Codex conversation');
   });
 
@@ -63,12 +66,18 @@ test.describe('settings project management', () => {
     await addAlphaProject(page);
 
     await page.goto('/settings');
-    const alphaProjectCard = page.locator('section').filter({ hasText: 'alpha--service' });
-    page.once('dialog', async (dialog) => {
-      await dialog.accept();
-    });
-    await alphaProjectCard.getByRole('button', { name: 'Remove project' }).click();
-    await expect(page.locator('body')).not.toContainText('alpha--service');
+    const alphaProjectCard = page.getByTestId('saved-project-alpha--service');
+    const deleteResponsePromise = page.waitForResponse((response) => (
+      response.request().method() === 'DELETE'
+      && response.url().includes('/api/settings/projects/alpha--service')
+    ));
+    const dialogPromise = page.waitForEvent('dialog');
+    const clickPromise = alphaProjectCard.getByRole('button', { name: 'Remove project' }).click();
+    const dialog = await dialogPromise;
+    await dialog.accept();
+    await clickPromise;
+    await expect((await deleteResponsePromise).status()).toBe(204);
+    await expect(alphaProjectCard).toBeHidden();
 
     await page.getByRole('link', { name: 'Back to Console' }).click();
     await expect(page.locator('body')).not.toContainText('Alpha nested Claude conversation');

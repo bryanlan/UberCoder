@@ -70,6 +70,7 @@ async function writeClaudeFixture(claudeHome: string, projectPath: string): Prom
 }
 
 async function main(): Promise<void> {
+  const serverPort = Number(process.env.AGENT_CONSOLE_E2E_SERVER_PORT ?? 4317);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-e2e-'));
   const projectsRoot = path.join(tempDir, 'projects');
   const uberLegacyRoot = path.join(projectsRoot, 'UberCoder');
@@ -83,13 +84,13 @@ async function main(): Promise<void> {
   await fs.mkdir(alphaProject, { recursive: true });
   await fs.writeFile(path.join(uberNestedProject, 'AGENTS.md'), '# UberCoder');
   await fs.writeFile(path.join(alphaProject, 'claude.md'), '# Alpha');
-  await writeCodexFixture(codexHome, uberLegacyRoot);
+  await writeCodexFixture(codexHome, uberNestedProject);
   await writeClaudeFixture(claudeHome, alphaProject);
 
   await fs.writeFile(configPath, JSON.stringify({
     server: {
       host: '127.0.0.1',
-      port: 4317,
+      port: serverPort,
       webDistPath: '../web/dist',
     },
     projectsRoot,

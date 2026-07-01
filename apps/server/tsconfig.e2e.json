@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "paths": {
+      "@agent-console/shared": ["packages/shared/src/index.ts"]
+    }
+  }
+}

@@ -6,6 +6,8 @@ import type { BoundSession } from '@agent-console/shared';
 import { readLiveMessages } from '../src/sessions/live-output.js';
 
 describe('readLiveMessages', () => {
+  it.todo('keeps live message ids stable when the event-log tail window shifts');
+
   it('strips ansi noise and suppresses echoed user input from live chunks', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

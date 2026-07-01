@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+const backendPort = process.env.AGENT_CONSOLE_E2E_SERVER_PORT ?? '4317';
+
 export default defineConfig({
   plugins: [
     react(),
@@ -29,8 +31,8 @@ export default defineConfig({
   server: {
     port: 5178,
     proxy: {
-      '/api': 'http://127.0.0.1:4317',
-      '/proxy': 'http://127.0.0.1:4317',
+      '/api': `http://127.0.0.1:${backendPort}`,
+      '/proxy': `http://127.0.0.1:${backendPort}`,
     },
   },
   build: {
