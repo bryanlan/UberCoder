@@ -1992,6 +1992,116 @@ describe('SessionManager', () => {
     db.close();
   });
 
+  it('selects Claude resume-from-summary before submitting normal text on an old-session prompt', async () => {
+    class ClaudeResumeChoiceTmux extends FakeTmux {
+      private resumeChoice = '';
+      private draft = '';
+      private onResumeChoice = true;
+
+      constructor() {
+        super();
+        this.paneText = this.renderResumeChoice();
+      }
+
+      override async sendLiteralText(_sessionName: string, text: string): Promise<void> {
+        this.sent.push(text);
+        if (this.onResumeChoice) {
+          this.resumeChoice += text;
+          return;
+        }
+        this.draft += text;
+        this.paneText = this.renderComposer(this.draft);
+      }
+
+      override async sendKeys(_sessionName: string, keys: string[]): Promise<void> {
+        this.sentKeys.push(keys);
+        if (!keys.includes('Enter')) {
+          return;
+        }
+        if (this.onResumeChoice && this.resumeChoice.trim() === '1') {
+          this.onResumeChoice = false;
+          this.paneText = this.renderComposer('');
+          return;
+        }
+        if (this.draft) {
+          this.draft = '';
+          this.paneText = [
+            'Claude Code',
+            '',
+            'Working through the request.',
+            '',
+            '❯ ',
+            '⏵⏵ bypass permissions on (shift+tab to cycle)',
+          ].join('\n');
+        }
+      }
+
+      private renderResumeChoice(): string {
+        return [
+          'Claude Code',
+          '',
+          'This session is 22h 53m old and 423.3k tokens.',
+          '',
+          'Resuming the full session will consume a substantial portion of your usage limits.',
+          'We recommend resuming from a summary.',
+          '',
+          '❯ 1. Resume from summary (recommended)',
+          '  2. Resume full session as-is',
+          "  3. Don't ask me again",
+          '',
+          'Enter to confirm · Esc to cancel',
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+
+      private renderComposer(input: string): string {
+        return [
+          'Claude Code',
+          '',
+          `❯ ${input}`,
+          '⏵⏵ bypass permissions on (shift+tab to cycle)',
+        ].join('\n');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new ClaudeResumeChoiceTmux();
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'session-claude-old-resume-choice',
+      title: 'Existing Claude conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, {
+      text: 'what was result',
+      keys: ['Enter'],
+      submittedText: 'what was result',
+    });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    expect(tmux.sent).toEqual(['1', 'what was result']);
+    expect(tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
+    expect(userInputEvents).toBe(1);
+    expect(eventLog).toContain('"type":"user-input"');
+    expect(eventLog).toContain('"text":"what was result"');
+    expect(eventLog).not.toContain('"text":"1"');
+    unsubscribe();
+    db.close();
+  });
+
   it('waits for pasted text to settle before sending Enter on combined submit keystrokes', async () => {
     class PasteAwareTmux extends FakeTmux {
       private pasteVisible = false;

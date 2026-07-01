@@ -33,6 +33,7 @@ const SESSION_COMPLETION_IDLE_MS = 60_000;
 const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
 const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
+const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
@@ -174,6 +175,36 @@ function screenShowsInteractiveSelectionHint(screen: SessionScreen): boolean {
       || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
       || /Esc to cancel · Tab to amend/i.test(line)
       || /Enter to select · .*Esc to cancel/i.test(line));
+}
+
+function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boolean {
+  if (screen.inputText.trim()) {
+    return false;
+  }
+
+  const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
+  return /This session is .+ old and .+ tokens/i.test(normalized)
+    && /Resume from summary/i.test(normalized)
+    && /Resume full session as-is/i.test(normalized)
+    && /Don't ask me again/i.test(normalized)
+    && /Enter to confirm · Esc to cancel/i.test(normalized);
+}
+
+function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
+  const hasClaudeInputFooter = /bypass permissions on/i.test(screen.status);
+  if (
+    (screenIsStartingUp(screen) && !hasClaudeInputFooter)
+    || screenShowsClaudeResumeSessionChoice(screen)
+    || sessionScreenShowsWorking(screen)
+  ) {
+    return false;
+  }
+
+  const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
+  return hasClaudeInputFooter
+    && !/Enter to confirm · Esc to cancel/i.test(normalized)
+    && !/Press enter to confirm or esc to go back/i.test(normalized)
+    && !/Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized);
 }
 
 function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
@@ -1629,6 +1660,34 @@ export class SessionManager {
       if (composerScreen) {
         screen = composerScreen;
         this.publishScreenUpdate(session, screen);
+      }
+    }
+
+    if (session.provider === 'claude' && screenShowsClaudeResumeSessionChoice(screen)) {
+      await this.sendLiteralTextToSession(session.tmuxSessionName, '1');
+      await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']);
+      const afterChoiceScreen = await this.waitForScreenMatch(
+        session,
+        hashScreen(screen),
+        CLAUDE_RESUME_READY_WAIT_MS,
+        (candidate) => !screenShowsClaudeResumeSessionChoice(candidate),
+      );
+      if (afterChoiceScreen) {
+        screen = afterChoiceScreen;
+        this.publishScreenUpdate(session, screen);
+      }
+
+      if (!screenLooksReadyForLiteralPrompt(screen)) {
+        const readyScreen = await this.waitForScreenMatch(
+          session,
+          hashScreen(screen),
+          CLAUDE_RESUME_READY_WAIT_MS,
+          screenLooksReadyForLiteralPrompt,
+        );
+        if (readyScreen) {
+          screen = readyScreen;
+          this.publishScreenUpdate(session, screen);
+        }
       }
     }
 

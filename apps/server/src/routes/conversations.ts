@@ -332,6 +332,30 @@ function isPendingAfterTranscript(message: NormalizedMessage, latestTranscriptMs
   return Number.isFinite(timestampMs) && timestampMs > latestTranscriptMs;
 }
 
+function filterPendingLiveMessagesAfterTranscript(
+  liveMessages: NormalizedMessage[],
+  latestTranscriptMs: number | undefined,
+): NormalizedMessage[] {
+  const filtered: NormalizedMessage[] = [];
+  let hasUnbackedLiveUserTurn = false;
+
+  for (const message of liveMessages) {
+    if (!isPendingAfterTranscript(message, latestTranscriptMs)) {
+      continue;
+    }
+    if (message.role === 'user' && message.source === 'user-input') {
+      hasUnbackedLiveUserTurn = true;
+      filtered.push(message);
+      continue;
+    }
+    if (hasUnbackedLiveUserTurn) {
+      filtered.push(message);
+    }
+  }
+
+  return filtered;
+}
+
 function hideReadableScreenContent(screen: SessionScreen | undefined): SessionScreen | undefined {
   if (!screen) {
     return undefined;
@@ -479,7 +503,7 @@ export async function registerConversationRoutes(
       [
         ...visibleMessages,
         ...(providerHasTranscript
-          ? liveMessagesNotInTranscript.filter((message) => isPendingAfterTranscript(message, latestVisibleTranscriptMs))
+          ? filterPendingLiveMessagesAfterTranscript(liveMessagesNotInTranscript, latestVisibleTranscriptMs)
           : filterUserVisibleMessages(liveMessages)),
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
