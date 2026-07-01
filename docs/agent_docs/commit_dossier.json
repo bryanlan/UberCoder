@@ -1,5 +1,14 @@
 {
   "changed_paths": [
+    "apps/server/package.json",
+    "apps/server/src/app.ts",
+    "apps/server/src/db/database.ts",
+    "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/routes/conversations.ts",
+    "apps/server/src/sessions/session-manager.ts",
+    "apps/server/test/conversation-routes.test.ts",
+    "apps/web/src/App.tsx",
+    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
@@ -10,8 +19,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "15a152db68306c7b0d37c89dcc9fbdf121f05f7c",
-      "date": "2026-06-27T00:26:10-04:00",
+      "commit": "2a7c837b145c7d9d1c5056ecc7292e9cbaafda1b",
+      "date": "2026-06-28T00:49:09-04:00",
       "files": [
         {
           "paths": [
@@ -50,24 +59,138 @@
           "status": "M"
         }
       ],
-      "short_commit": "15a152d",
+      "short_commit": "2a7c837",
       "subject": "Sync repo docs"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "3277ca021ac27206518eaeea9013329384df77c6",
+      "date": "2026-06-29T02:09:25-04:00",
+      "files": [
+        {
+          "paths": [
+            "docs/agent_docs/agents_md_status.json"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "3277ca0",
+      "subject": "Refresh AGENTS.md"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "048d52a36a5d743baba29ec66883bbf04371209d",
+      "date": "2026-06-29T14:39:59-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/indexing/indexing-service.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/App.tsx"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "048d52a",
+      "subject": "Fix agent console indexing CPU loop"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "2c79b0630cfe3e62c85b320d1c8f8cc82b2cbabd",
+      "date": "2026-06-30T08:36:56-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/package.json"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "2c79b06",
+      "subject": "Fix duplicate live transcript tail"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e",
+      "date": "2026-06-30T08:48:06-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "f7846a6",
+      "subject": "Harden live transcript tail trimming"
     }
   ],
   "docs_current_through": {
-    "commit": "208e48c4d4654604e6641ee2412815ad7b50fc03",
-    "date": "2026-06-26T00:59:02-04:00"
-  },
-  "from_commit": "208e48c4d4654604e6641ee2412815ad7b50fc03",
-  "generated_at": "2026-06-28T04:42:57+00:00",
-  "head": {
     "commit": "15a152db68306c7b0d37c89dcc9fbdf121f05f7c",
-    "date": "2026-06-27T00:26:10-04:00",
-    "short_commit": "15a152d"
+    "date": "2026-06-27T00:26:10-04:00"
+  },
+  "from_commit": "15a152db68306c7b0d37c89dcc9fbdf121f05f7c",
+  "generated_at": "2026-07-01T05:05:54+00:00",
+  "head": {
+    "commit": "f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e",
+    "date": "2026-06-30T08:48:06-04:00",
+    "short_commit": "f7846a6"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "15a152db68306c7b0d37c89dcc9fbdf121f05f7c",
+  "to_commit": "f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e",
   "worktree_dirty": true
 }
