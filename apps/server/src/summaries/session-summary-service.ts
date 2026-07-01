@@ -12,7 +12,7 @@ import { normalizeWhitespace, truncate } from '../lib/text.js';
 import type { ActiveProject, ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
-import { readLiveMessages } from '../sessions/live-output.js';
+import { LiveOutputReader } from '../sessions/live-output/reader.js';
 
 const SUMMARY_INTERVAL_MS = 60 * 60 * 1000;
 const SUMMARY_WINDOW_MS = 60 * 60 * 1000;
@@ -456,6 +456,7 @@ export class SessionSummaryService {
     private readonly runtimeDir: string,
     private readonly eventBus: RealtimeEventBus,
     private readonly runner: SessionSummaryRunner = createCodexSessionSummaryRunner(runtimeDir),
+    private readonly liveOutputReader: LiveOutputReader = new LiveOutputReader(),
   ) {}
 
   start(): void {
@@ -650,7 +651,7 @@ export class SessionSummaryService {
     const transcriptMessages = providerSettings.enabled && !session.conversationRef.startsWith('pending:')
       ? (await provider.getConversation(project, session.conversationRef, providerSettings))?.messages ?? []
       : [];
-    const liveMessages = await readLiveMessages(session);
+    const liveMessages = await this.liveOutputReader.readLiveMessages(session);
     const providerHasTranscript = transcriptMessages.some((message) => message.role === 'user' || message.role === 'assistant');
     return prepareMessages([
       ...transcriptMessages,

@@ -3,10 +3,45 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { BoundSession } from '@agent-console/shared';
-import { readLiveMessages } from '../src/sessions/live-output.js';
+import { LiveOutputReader } from '../src/sessions/live-output/reader.js';
+
+const liveOutputReader = new LiveOutputReader();
+const readLiveMessages = liveOutputReader.readLiveMessages.bind(liveOutputReader);
 
 describe('readLiveMessages', () => {
-  it.todo('keeps live message ids stable when the event-log tail window shifts');
+  it('keeps live message ids stable when the event-log tail window shifts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const rows = [
+      JSON.stringify({ type: 'user-input', text: 'summarize the result', timestamp: '2026-07-01T02:00:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'The result is stable.', timestamp: '2026-07-01T02:00:01.000Z' }),
+      JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-07-01T02:00:02.000Z' }),
+    ];
+    await fs.writeFile(eventLogPath, `${rows.join('\n')}\n`);
+    const targetOffset = Buffer.byteLength(`${rows[0]}\n`, 'utf8');
+
+    const session: BoundSession = {
+      id: 'session-stable-offset',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:stable-offset',
+      tmuxSessionName: 'ac-codex-demo-stable-offset',
+      status: 'bound',
+      startedAt: '2026-07-01T02:00:00.000Z',
+      updatedAt: '2026-07-01T02:00:02.000Z',
+      eventLogPath,
+    };
+
+    const fullMessages = await readLiveMessages(session);
+    const tailMessages = await readLiveMessages(session, {
+      maxBytesFromEnd: Buffer.byteLength(`${rows[1]}\n${rows[2]}\n`, 'utf8') + 4,
+    });
+    const fullAssistant = fullMessages.find((message) => message.text === 'The result is stable.');
+    const tailAssistant = tailMessages.find((message) => message.text === 'The result is stable.');
+
+    expect(fullAssistant?.id).toBe(`live:${session.id}:${targetOffset}`);
+    expect(tailAssistant?.id).toBe(fullAssistant?.id);
+  });
 
   it('strips ansi noise and suppresses echoed user input from live chunks', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));

@@ -1,12 +1,7 @@
-import fs from 'node:fs/promises';
-import type { BoundSession, MessageRole, NormalizedMessage } from '@agent-console/shared';
-import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl, truncate } from '../lib/text.js';
+import type { MessageRole, NormalizedMessage } from '@agent-console/shared';
+import { normalizeComparableText, normalizeWhitespace, stripAnsiAndControl, truncate } from '../../lib/text.js';
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function classifyChunk(text: string): MessageRole {
+export function classifyChunk(text: string): MessageRole {
   const trimmed = text.trim();
   if (!trimmed) return 'status';
   if (
@@ -80,7 +75,7 @@ function looksLikeTerminalRepaintFragmentCluster(lines: string[]): boolean {
   return !hasSubstantiveLine && fragmentCount / lines.length >= 0.75;
 }
 
-function rawOutputStartsProviderProgress(text: string): boolean {
+export function rawOutputStartsProviderProgress(text: string): boolean {
   const cleaned = stripAnsiAndControl(text);
   const lines = cleaned
     .split(/\n+/)
@@ -104,7 +99,7 @@ function lineLooksLikeProviderProgressControl(line: string, options: { allowBare
   return /compactingconversation/.test(compact);
 }
 
-function splitRawOutputAtProviderProgress(text: string, lastUserInput: string | undefined): {
+export function splitRawOutputAtProviderProgress(text: string, lastUserInput: string | undefined): {
   beforeProgressText: string;
   echoedUserInputAfterProgress: boolean;
   progressStarted: boolean;
@@ -142,7 +137,7 @@ function splitRawOutputAtProviderProgress(text: string, lastUserInput: string | 
   };
 }
 
-function linesAreOnlyProviderProgressRepaint(lines: string[]): boolean {
+export function linesAreOnlyProviderProgressRepaint(lines: string[]): boolean {
   if (lines.length === 0) return true;
   if (lines.every((line) => lineLooksLikeProviderProgressControl(line))) return true;
   return looksLikeTerminalRepaintFragmentCluster(lines);
@@ -189,7 +184,7 @@ function looksLikePickerChunk(lines: string[]): boolean {
 
 function removeKnownPromptPlaceholders(line: string): string {
   return line
-    .replace(/\s*(?:❯|›|>_?)\s*(?:Implement \{feature\}|Write tests for @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits).*$/i, '')
+    .replace(/\s*(?:❯|›|>_?)\s*(?:Implement \{feature\}|Write tests for @filename|Improve documentation in @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits|Run \/review on my current changes).*$/i, '')
     .trim();
 }
 
@@ -218,7 +213,7 @@ function extractExactReplyRequest(text: string | undefined): string | undefined 
   return expected || undefined;
 }
 
-function removePreviouslySeenAssistantText(line: string, messages: NormalizedMessage[]): string {
+export function removePreviouslySeenAssistantText(line: string, messages: NormalizedMessage[]): string {
   const normalizedLine = line.trim();
   const currentAssistantRun: NormalizedMessage[] = [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -237,7 +232,7 @@ function removePreviouslySeenAssistantText(line: string, messages: NormalizedMes
   return previousAssistantLines.has(normalizedLine) ? '' : line;
 }
 
-function shouldDropPreSubmitPromptEcho(
+export function shouldDropPreSubmitPromptEcho(
   previous: NormalizedMessage | undefined,
   inputText: string,
   inputTimestamp: string,
@@ -393,301 +388,4 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
   }
 
   return normalized;
-}
-
-interface SessionEventLine {
-  type: 'user-input' | 'raw-output' | 'status';
-  text: string;
-  timestamp: string;
-}
-
-interface ReadLiveMessagesOptions {
-  maxBytesFromEnd?: number;
-}
-
-interface CachedLiveMessages {
-  messages: NormalizedMessage[];
-}
-
-interface EventLogReadResult {
-  text: string;
-  lastUserInputBeforeText?: string;
-}
-
-const liveMessageCache = new Map<string, CachedLiveMessages>();
-const MAX_LIVE_MESSAGE_CACHE_ENTRIES = 64;
-const MAX_EVENT_LOG_ROW_BACKTRACK_BYTES = 4 * 1024 * 1024;
-
-function cloneMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
-  return messages.map((message) => ({ ...message }));
-}
-
-function rememberLiveMessages(cacheKey: string, messages: NormalizedMessage[]): void {
-  liveMessageCache.set(cacheKey, { messages: cloneMessages(messages) });
-  if (liveMessageCache.size <= MAX_LIVE_MESSAGE_CACHE_ENTRIES) {
-    return;
-  }
-
-  const oldestKey = liveMessageCache.keys().next().value as string | undefined;
-  if (oldestKey) {
-    liveMessageCache.delete(oldestKey);
-  }
-}
-
-async function getEventLogReadPlan(
-  filePath: string,
-  options: ReadLiveMessagesOptions,
-): Promise<{ cacheKey: string; size: number; maxBytes?: number }> {
-  const stat = await fs.stat(filePath);
-  const maxBytes = options.maxBytesFromEnd;
-  const cacheKey = [
-    filePath,
-    stat.size,
-    stat.mtimeMs,
-    maxBytes ?? 'all',
-  ].join(':');
-  return { cacheKey, size: stat.size, maxBytes };
-}
-
-async function readEventLogText(
-  filePath: string,
-  plan: { size: number; maxBytes?: number },
-): Promise<EventLogReadResult> {
-  if (!plan.maxBytes || plan.size <= plan.maxBytes) {
-    return { text: await fs.readFile(filePath, 'utf8') };
-  }
-
-  const start = Math.max(0, plan.size - plan.maxBytes);
-  const length = plan.size - start;
-  const text = await readFileSlice(filePath, start, length);
-  if (start === 0) {
-    return { text };
-  }
-
-  const firstNewline = text.indexOf('\n');
-  if (firstNewline !== -1) {
-    const rowStart = start + firstNewline + 1;
-    const completeTail = text.slice(firstNewline + 1);
-    if (completeTail.trim()) {
-      return {
-        text: completeTail,
-        lastUserInputBeforeText: await findLastUserInputBefore(filePath, rowStart),
-      };
-    }
-  }
-
-  const rowStart = await findBoundedRowStart(filePath, start);
-  if (rowStart === undefined) {
-    return { text: '' };
-  }
-  return {
-    text: await readFileSlice(filePath, rowStart, plan.size - rowStart),
-    lastUserInputBeforeText: await findLastUserInputBefore(filePath, rowStart),
-  };
-}
-
-async function readFileSlice(filePath: string, start: number, length: number): Promise<string> {
-  const buffer = Buffer.alloc(length);
-  const handle = await fs.open(filePath, 'r');
-  try {
-    let offset = 0;
-    while (offset < length) {
-      const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset);
-      if (bytesRead === 0) {
-        break;
-      }
-      offset += bytesRead;
-    }
-    return buffer.subarray(0, offset).toString('utf8');
-  } finally {
-    await handle.close();
-  }
-}
-
-async function findBoundedRowStart(filePath: string, offset: number): Promise<number | undefined> {
-  const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
-  const prefix = await readFileSlice(filePath, backtrackStart, offset - backtrackStart);
-  const previousNewline = prefix.lastIndexOf('\n');
-  if (previousNewline !== -1) {
-    return backtrackStart + previousNewline + 1;
-  }
-  return backtrackStart === 0 ? 0 : undefined;
-}
-
-function parseSessionEventLine(line: string): SessionEventLine | undefined {
-  try {
-    return JSON.parse(line) as SessionEventLine;
-  } catch {
-    return undefined;
-  }
-}
-
-async function findLastUserInputBefore(filePath: string, offset: number): Promise<string | undefined> {
-  if (offset <= 0) {
-    return undefined;
-  }
-
-  const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
-  const prefix = await readFileSlice(filePath, backtrackStart, offset - backtrackStart);
-  const lines = prefix.split(/\r?\n/).filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const event = parseSessionEventLine(lines[index] ?? '');
-    if (event?.type === 'user-input') {
-      const text = event.text.trim();
-      return text || undefined;
-    }
-  }
-  return undefined;
-}
-
-function nearbyRawEventContext(events: SessionEventLine[], index: number): string {
-  const context: string[] = [];
-  const start = Math.max(0, index - 4);
-  const end = Math.min(events.length - 1, index + 4);
-  for (let cursor = start; cursor <= end; cursor += 1) {
-    if (cursor === index) {
-      continue;
-    }
-    const event = events[cursor];
-    if (event?.type === 'raw-output' || event?.type === 'status') {
-      context.push(stripAnsiAndControl(event.text));
-    }
-  }
-  return context.join('\n');
-}
-
-function userInputLooksLikeProviderCommandControl(text: string, events: SessionEventLine[], index: number): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (trimmed.startsWith('/')) {
-    return true;
-  }
-  if (!/^\d{1,8}$/.test(trimmed)) {
-    return false;
-  }
-
-  const context = nearbyRawEventContext(events, index);
-  return /(?:Select model|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter to set as default|s to use this session only|Set\s*model\s*to|Set\s*mode\s*to|saved as your default for new sessions|Select Model and Effort|Effort not supported|Faster Smarter|lowmediumhighxhighmax|Enter to confirm\s*·\s*Esc to exit|Press enter to confirm or esc to go back)/i.test(context);
-}
-
-export async function readLiveMessages(session: BoundSession, options: ReadLiveMessagesOptions = {}): Promise<NormalizedMessage[]> {
-  if (!session.eventLogPath) return [];
-  try {
-    const plan = await getEventLogReadPlan(session.eventLogPath, options);
-    const { cacheKey } = plan;
-    const cached = liveMessageCache.get(cacheKey);
-    if (cached) {
-      return cloneMessages(cached.messages);
-    }
-    const readResult = await readEventLogText(session.eventLogPath, plan);
-
-    const events = readResult.text.split(/\r?\n/).filter(Boolean).flatMap((line) => {
-      const event = parseSessionEventLine(line);
-      return event ? [event] : [];
-    });
-
-    const grouped: NormalizedMessage[] = [];
-    let lastUserInput = readResult.lastUserInputBeforeText;
-    let hasTrackedUserTurn = Boolean(readResult.lastUserInputBeforeText?.trim());
-    const priorUserInputEchoes = readResult.lastUserInputBeforeText ? [readResult.lastUserInputBeforeText] : [];
-    let suppressProviderProgressRepaints = false;
-    for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
-      const event = events[eventIndex]!;
-      if (event.type === 'user-input') {
-        const text = event.text.trim();
-        if (!text) continue;
-        suppressProviderProgressRepaints = false;
-        if (userInputLooksLikeProviderCommandControl(text, events, eventIndex)) {
-          continue;
-        }
-        if (shouldDropPreSubmitPromptEcho(grouped.at(-1), text, event.timestamp)) {
-          grouped.pop();
-        }
-        lastUserInput = text;
-        hasTrackedUserTurn = true;
-        priorUserInputEchoes.push(text);
-        grouped.push({
-          id: stableTextHash(`${session.id}:${event.timestamp}:user:${text}`),
-          provider: session.provider,
-          role: 'user',
-          lifecycle: 'durable',
-          text,
-          timestamp: event.timestamp,
-          conversationRef: session.conversationRef,
-          source: 'user-input',
-        });
-        continue;
-      }
-
-      if (event.type === 'raw-output' && !hasTrackedUserTurn) {
-        continue;
-      }
-
-      const rawOutputHasProviderProgress = event.type === 'raw-output'
-        && rawOutputStartsProviderProgress(event.text);
-      const providerProgress = rawOutputHasProviderProgress
-        ? splitRawOutputAtProviderProgress(event.text, lastUserInput)
-        : undefined;
-      let lines = event.type === 'status'
-        ? [truncate(normalizeWhitespace(stripAnsiAndControl(event.text)), 240)].filter(Boolean)
-        : normalizeRawOutputLines(
-          providerProgress?.progressStarted ? providerProgress.beforeProgressText : event.text,
-          lastUserInput,
-          priorUserInputEchoes,
-        );
-
-      if (event.type === 'raw-output') {
-        if (providerProgress?.progressStarted && rawOutputHasProviderProgress) {
-          suppressProviderProgressRepaints = true;
-          if (
-            providerProgress.echoedUserInputAfterProgress
-            || linesAreOnlyProviderProgressRepaint(lines)
-          ) {
-            continue;
-          }
-        }
-        if (suppressProviderProgressRepaints && linesAreOnlyProviderProgressRepaint(lines)) {
-          continue;
-        }
-        if (lines.length > 0 && !providerProgress?.progressStarted) {
-          suppressProviderProgressRepaints = false;
-        }
-      }
-
-      for (const line of lines) {
-        const dedupedLine = event.type === 'raw-output'
-          ? removePreviouslySeenAssistantText(line, grouped)
-          : line;
-        if (!dedupedLine) {
-          continue;
-        }
-        const role = event.type === 'status' ? 'status' : classifyChunk(dedupedLine);
-        const text = role === 'status' ? truncate(dedupedLine, 240) : dedupedLine;
-        const previous = grouped.at(-1);
-        if (previous && previous.role === role && previous.source === 'live-output' && event.type === 'raw-output') {
-          previous.text = role === 'status'
-            ? text
-            : `${previous.text}\n${text}`.trim();
-          previous.timestamp = event.timestamp;
-          continue;
-        }
-        grouped.push({
-          id: stableTextHash(`${session.id}:${event.timestamp}:${role}:${text}`),
-          provider: session.provider,
-          role,
-          lifecycle: role === 'status' ? 'status' : 'pending',
-          text,
-          timestamp: event.timestamp,
-          conversationRef: session.conversationRef,
-          source: event.type === 'status' ? 'synthetic-status' : 'live-output',
-        });
-      }
-    }
-    rememberLiveMessages(cacheKey, grouped);
-    return cloneMessages(grouped);
-  } catch {
-    return [];
-  }
 }

@@ -5,7 +5,7 @@ import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility
 import { sanitizeSearchableProse } from '../lib/prose-sanitizer.js';
 import { normalizeWhitespace } from '../lib/text.js';
 import type { ActiveProject, ProjectService } from '../projects/project-service.js';
-import { readLiveMessages } from '../sessions/live-output.js';
+import { LiveOutputReader } from '../sessions/live-output/reader.js';
 
 const MAX_SEARCH_CHUNK_CHARS = 1200;
 const SEARCH_RESULT_MULTIPLIER = 4;
@@ -263,6 +263,7 @@ export class ConversationSearchService {
   constructor(
     private readonly db: AppDatabase,
     private readonly projectService: Pick<ProjectService, 'listActiveProjects'>,
+    private readonly liveOutputReader: LiveOutputReader = new LiveOutputReader(),
   ) {}
 
   async search(query: string, limit: number): Promise<ConversationSearchResult[]> {
@@ -307,7 +308,7 @@ export class ConversationSearchService {
         continue;
       }
       const providerHasTranscript = Boolean(summary) && !isPendingConversation;
-      const messages = await readLiveMessages(session, {
+      const messages = await this.liveOutputReader.readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
       const liveMessageUpdatedAt = latestSearchableMessageTimestamp(messages);

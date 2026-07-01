@@ -103,7 +103,6 @@ export interface ConversationMessagePage {
 export interface ConversationTimeline {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
-  allMessages?: NormalizedMessage[];
   boundSession?: BoundSession;
   liveScreen?: SessionScreen;
   messagePage?: ConversationMessagePage;
@@ -154,6 +153,17 @@ export interface BoundSession {
 
 export interface SessionInputRequest {
   text: string;
+}
+
+export interface RecordedUserInput {
+  id: string;
+  text: string;
+  timestamp: string;
+}
+
+export interface SessionInputResponse {
+  session: BoundSession;
+  recordedUserInput?: RecordedUserInput;
 }
 
 export interface SessionKeystrokeRequest {
@@ -299,6 +309,7 @@ export type SessionEvent =
       projectSlug: string;
       provider: ProviderId;
       conversationRef: string;
+      messageId: string;
       text: string;
       timestamp: string;
     }

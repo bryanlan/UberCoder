@@ -844,7 +844,6 @@ describe('conversation routes', () => {
           isBound: false,
         },
         messages: [],
-        allMessages: [],
         messagePage: {
           hasOlder: false,
           total: 0,

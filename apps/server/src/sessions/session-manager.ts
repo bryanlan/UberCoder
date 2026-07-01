@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, ProviderId, RecordedUserInput, SessionInputResponse, SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -11,7 +11,7 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
-import { normalizeRawOutputLines } from './live-output.js';
+import { normalizeRawOutputLines } from './live-output/filters.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import {
@@ -57,6 +57,16 @@ interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
 }
+
+type SessionEventLogEntry = { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string };
+
+interface AppendedSessionEvent {
+  event: SessionEventLogEntry;
+  messageId: string;
+  offset: number;
+}
+
+export type SessionCommandResult = BoundSession & SessionInputResponse;
 
 export class SessionKeystrokeRejectedError extends Error {
   readonly statusCode = 409;
@@ -113,6 +123,32 @@ function readLastUserInput(eventLogPath: string | undefined): string | undefined
   }
 
   return undefined;
+}
+
+function liveMessageId(sessionId: string, offset: number): string {
+  return `live:${sessionId}:${offset}`;
+}
+
+function recordedUserInputFromEvent(appended: AppendedSessionEvent | undefined): RecordedUserInput | undefined {
+  if (!appended || appended.event.type !== 'user-input') {
+    return undefined;
+  }
+  return {
+    id: appended.messageId,
+    text: appended.event.text,
+    timestamp: appended.event.timestamp,
+  };
+}
+
+function sessionCommandResult(
+  session: BoundSession,
+  recordedUserInput?: RecordedUserInput,
+): SessionCommandResult {
+  return {
+    ...session,
+    session,
+    recordedUserInput,
+  };
 }
 
 function splitLiteralTextForTmux(text: string): string[] {
@@ -454,7 +490,8 @@ export class SessionManager {
   }): Promise<BoundSession> {
     const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
     const sessionId = existing?.id ?? randomUUID();
-    return await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
+    const result = await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
+    return result.session;
   }
 
   private async bindConversationInternal(input: {
@@ -465,12 +502,12 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
-  }, sessionId: string): Promise<BoundSession> {
+  }, sessionId: string): Promise<SessionCommandResult> {
     const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
       const liveSession = await this.refreshSessionState(existing);
       if (liveSession) {
-        return liveSession;
+        return sessionCommandResult(liveSession);
       }
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
@@ -531,6 +568,7 @@ export class SessionManager {
         pid,
       };
       this.db.upsertBoundSession(boundSession);
+      let recordedInitialUserInput: RecordedUserInput | undefined;
       if (initialPrompt && boundSession.conversationRef.startsWith('pending:')) {
         const inputAt = nowIso();
         recordPendingUserInput({
@@ -540,14 +578,16 @@ export class SessionManager {
           text: initialPrompt,
           inputAt,
         });
-        this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: inputAt });
+        recordedInitialUserInput = recordedUserInputFromEvent(
+          this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: inputAt }),
+        );
       }
       this.appendEvent(boundSession, { type: 'status', text: `Bound ${input.provider.id} session in ${input.project.displayName}.`, timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: boundSession });
       this.watchSessionOutput(boundSession);
       await this.waitForStartupOutput(boundSession);
       await this.emitScreenUpdate(boundSession);
-      return boundSession;
+      return sessionCommandResult(boundSession, recordedInitialUserInput);
     } catch (error) {
       if (tmuxCreated) {
         try {
@@ -574,11 +614,11 @@ export class SessionManager {
     }
   }
 
-  async sendInput(sessionId: string, text: string): Promise<BoundSession> {
+  async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
   }
 
-  private async sendInputInternal(sessionId: string, text: string): Promise<BoundSession> {
+  private async sendInputInternal(sessionId: string, text: string): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -599,9 +639,11 @@ export class SessionManager {
         inputAt: activityAt,
       });
     }
-    this.appendEvent(updated, { type: 'user-input', text, timestamp: activityAt });
+    const recordedUserInput = recordedUserInputFromEvent(
+      this.appendEvent(updated, { type: 'user-input', text, timestamp: activityAt }),
+    );
     await this.emitScreenUpdate(updated);
-    return updated;
+    return sessionCommandResult(updated, recordedUserInput);
   }
 
   private updateBoundSessionFields(sessionId: string, patch: Partial<BoundSession>): BoundSession {
@@ -614,11 +656,11 @@ export class SessionManager {
     return updated;
   }
 
-  async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<BoundSession> {
+  async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
 
-  private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<BoundSession> {
+  private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -669,7 +711,7 @@ export class SessionManager {
       if (!payload.deferScreenUpdate) {
         await this.emitScreenUpdate(updated);
       }
-      return updated;
+      return sessionCommandResult(updated);
     }
 
     const beforeScreen = await this.captureSessionScreen(liveSession);
@@ -767,9 +809,9 @@ export class SessionManager {
         inputAt: activityAt,
       });
     }
-    if (userInputTextToRecord) {
-      this.appendEvent(updated, { type: 'user-input', text: userInputTextToRecord, timestamp: activityAt });
-    }
+    const recordedUserInput = userInputTextToRecord
+      ? recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: userInputTextToRecord, timestamp: activityAt }))
+      : undefined;
     await this.emitScreenUpdate(updated, {
       waitForChange: Boolean(payload.keys?.length),
       previousHashOverride: latestObservedHash,
@@ -783,7 +825,7 @@ export class SessionManager {
       before: latestObservedScreen,
       after: afterScreen,
     });
-    return updated;
+    return sessionCommandResult(updated, recordedUserInput);
   }
 
   async restartPendingSessionWithInitialPrompt(input: {
@@ -792,7 +834,7 @@ export class SessionManager {
     provider: ProviderAdapter;
     providerSettings: MergedProviderSettings;
     initialPrompt: string;
-  }): Promise<BoundSession> {
+  }): Promise<SessionCommandResult> {
     return await this.runtimes.run(input.sessionId, 'restartPendingSessionWithInitialPrompt', () => this.restartPendingSessionWithInitialPromptInternal(input));
   }
 
@@ -802,7 +844,7 @@ export class SessionManager {
     provider: ProviderAdapter;
     providerSettings: MergedProviderSettings;
     initialPrompt: string;
-  }): Promise<BoundSession> {
+  }): Promise<SessionCommandResult> {
     const session = this.mustGetSession(input.sessionId);
     if (!session.conversationRef.startsWith('pending:')) {
       throw new Error('Only pending sessions can be restarted with an initial prompt.');
@@ -1035,8 +1077,10 @@ export class SessionManager {
     return refreshed;
   }
 
-  private appendEvent(session: BoundSession, event: { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string }): void {
-    if (!session.eventLogPath) return;
+  private appendEvent(session: BoundSession, event: SessionEventLogEntry): AppendedSessionEvent | undefined {
+    if (!session.eventLogPath) return undefined;
+    const offset = fs.existsSync(session.eventLogPath) ? fs.statSync(session.eventLogPath).size : 0;
+    const messageId = liveMessageId(session.id, offset);
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
     if (event.type === 'user-input') {
       this.eventBus.emit({
@@ -1045,6 +1089,7 @@ export class SessionManager {
         projectSlug: session.projectSlug,
         provider: session.provider,
         conversationRef: session.conversationRef,
+        messageId,
         text: event.text,
         timestamp: event.timestamp,
       });
@@ -1060,6 +1105,7 @@ export class SessionManager {
         timestamp: event.timestamp,
       });
     }
+    return { event, messageId, offset };
   }
 
   private appendDebugTrace(session: BoundSession, input: {

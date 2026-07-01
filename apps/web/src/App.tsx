@@ -8,6 +8,7 @@ import type {
   NormalizedMessage,
   ProjectSummary,
   ProviderId,
+  RecordedUserInput,
   SessionEvent,
   SessionKeystrokeRequest,
   TreeResponse,
@@ -363,12 +364,13 @@ function buildLiveUserMessage(input: {
   projectSlug: string;
   provider: ProviderId;
   conversationRef: string;
+  messageId?: string;
   text: string;
   timestamp: string;
   optimistic?: boolean;
 }): NormalizedMessage {
   return {
-    id: `${input.optimistic ? 'optimistic' : 'live'}:${input.sessionId}:${input.timestamp}:user:${input.text}`,
+    id: input.messageId ?? `${input.optimistic ? 'optimistic' : 'live'}:${input.sessionId}:${input.timestamp}:user:${input.text}`,
     provider: input.provider,
     role: 'user',
     lifecycle: 'durable',
@@ -570,6 +572,36 @@ function AppShell() {
     return message;
   }
 
+  function appendRecordedSubmittedText(input: {
+    session: BoundSession;
+    recordedUserInput: RecordedUserInput;
+    optimisticMessage?: NormalizedMessage;
+  }): void {
+    const conversationRef = input.session.conversationRef;
+    if (input.optimisticMessage) {
+      removeMessageFromConversationCache({
+        projectSlug: input.session.projectSlug,
+        provider: input.session.provider,
+        conversationRef,
+        messageId: input.optimisticMessage.id,
+      });
+    }
+    appendMessageToConversationCache({
+      projectSlug: input.session.projectSlug,
+      provider: input.session.provider,
+      conversationRef,
+      message: buildLiveUserMessage({
+        sessionId: input.session.id,
+        projectSlug: input.session.projectSlug,
+        provider: input.session.provider,
+        conversationRef,
+        messageId: input.recordedUserInput.id,
+        text: input.recordedUserInput.text,
+        timestamp: input.recordedUserInput.timestamp,
+      }),
+    });
+  }
+
   function shouldRefreshTimelineAfterKeystrokes(body: SessionKeystrokeRequest): boolean {
     return Boolean(body.keys?.includes('Enter'));
   }
@@ -666,6 +698,7 @@ function AppShell() {
               projectSlug: parsed.projectSlug,
               provider: parsed.provider,
               conversationRef: parsed.conversationRef,
+              messageId: parsed.messageId,
               text: parsed.text,
               timestamp: parsed.timestamp,
             }),
@@ -1044,8 +1077,16 @@ function AppShell() {
       });
     };
     try {
-      const updatedSession = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      const response = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      const updatedSession = response.session;
       applyUpdatedSessionToSelection(sessionId, updatedSession);
+      if (response.recordedUserInput) {
+        appendRecordedSubmittedText({
+          session: updatedSession,
+          recordedUserInput: response.recordedUserInput,
+          optimisticMessage,
+        });
+      }
       if (refreshTimelineMessages) {
         scheduleSelectedTimelineMessageRefresh();
       }
@@ -1068,8 +1109,16 @@ function AppShell() {
               setActionError(undefined);
               return true;
             }
-            const retriedSession = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
+            const retryResponse = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
+            const retriedSession = retryResponse.session;
             applyUpdatedSessionToSelection(reboundSession.id, retriedSession);
+            if (retryResponse.recordedUserInput) {
+              appendRecordedSubmittedText({
+                session: retriedSession,
+                recordedUserInput: retryResponse.recordedUserInput,
+                optimisticMessage,
+              });
+            }
             if (refreshTimelineMessages) {
               scheduleSelectedTimelineMessageRefresh();
             }

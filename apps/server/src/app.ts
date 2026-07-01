@@ -21,6 +21,7 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
+import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
 import { SessionSummaryService } from './summaries/session-summary-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
@@ -40,8 +41,9 @@ export async function buildApp(options: AppOptions = {}) {
   const eventBus = new RealtimeEventBus();
   const projectService = new ProjectService(configService);
   const providerRegistry = new ProviderRegistry();
+  const liveOutputReader = new LiveOutputReader();
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus);
-  const search = new ConversationSearchService(db, projectService);
+  const search = new ConversationSearchService(db, projectService, liveOutputReader);
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -53,6 +55,8 @@ export async function buildApp(options: AppOptions = {}) {
     providerRegistry,
     config.runtimeDir,
     eventBus,
+    undefined,
+    liveOutputReader,
   );
   const restartService = new RestartService(() => app.close());
 
@@ -82,7 +86,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
   await registerProjectRoutes(app, authService, indexing, sessions);
   await registerSearchRoutes(app, authService, search);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
@@ -127,6 +131,7 @@ export async function buildApp(options: AppOptions = {}) {
     await sessionSummaries.stop();
     await indexing.stop();
     sessions.stop();
+    liveOutputReader.clear();
     db.close();
   });
 

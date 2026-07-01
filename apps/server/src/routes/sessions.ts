@@ -6,8 +6,8 @@ import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
-import { SessionKeystrokeRejectedError, SessionManager } from '../sessions/session-manager.js';
-import type { BoundSession } from '@agent-console/shared';
+import { SessionKeystrokeRejectedError, SessionManager, type SessionCommandResult } from '../sessions/session-manager.js';
+import type { BoundSession, SessionInputResponse } from '@agent-console/shared';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 
@@ -29,8 +29,15 @@ const keystrokeBodySchema = z.object({
 
 type PendingCodexFirstTurnRestartResult =
   | { kind: 'not-applicable' }
-  | { kind: 'restarted'; session: BoundSession }
+  | { kind: 'restarted'; result: SessionCommandResult }
   | { kind: 'project-not-found' };
+
+function sessionInputResponse(result: SessionCommandResult): SessionInputResponse {
+  return {
+    session: result.session,
+    recordedUserInput: result.recordedUserInput,
+  };
+}
 
 async function restartFirstPendingCodexTurnIfNeeded(input: {
   db: AppDatabase;
@@ -64,7 +71,7 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
     providerSettings,
     initialPrompt: input.text,
   });
-  return { kind: 'restarted', session: restarted };
+  return { kind: 'restarted', result: restarted };
 }
 
 export async function registerSessionRoutes(
@@ -105,9 +112,9 @@ export async function registerSessionRoutes(
       return;
     }
     if (pendingRestart.kind === 'restarted') {
-      return pendingRestart.session;
+      return sessionInputResponse(pendingRestart.result);
     }
-    return await sessions.sendInput(sessionId, parsed.data.text);
+    return sessionInputResponse(await sessions.sendInput(sessionId, parsed.data.text));
   });
 
   app.post('/api/sessions/:sessionId/release', async (request, reply) => {
@@ -217,11 +224,11 @@ export async function registerSessionRoutes(
         return;
       }
       if (pendingRestart.kind === 'restarted') {
-        return pendingRestart.session;
+        return sessionInputResponse(pendingRestart.result);
       }
     }
     try {
-      return await sessions.sendKeystrokes(sessionId, parsed.data);
+      return sessionInputResponse(await sessions.sendKeystrokes(sessionId, parsed.data));
     } catch (error) {
       if (error instanceof SessionKeystrokeRejectedError) {
         reply.code(error.statusCode).send({ error: error.message });

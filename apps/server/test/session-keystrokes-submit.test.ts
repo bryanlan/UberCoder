@@ -26,9 +26,11 @@ describe('SessionManager keystroke submit', () => {
     const tmux = new FakeTmux();
     const eventBus = new RealtimeEventBus();
     let userInputEvents = 0;
+    const userInputMessageIds: string[] = [];
     const unsubscribe = eventBus.subscribe((event) => {
       if (event.type === 'session.user-input') {
         userInputEvents += 1;
+        userInputMessageIds.push(event.messageId);
       }
     });
     const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
@@ -57,11 +59,18 @@ describe('SessionManager keystroke submit', () => {
       '❯ hello',
       'gpt-5.4 xhigh · 65% left · ~/demo',
     ].join('\n');
-    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'hello' });
+    const result = await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: 'hello' });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    const userInputOffset = eventLog.indexOf('{"type":"user-input"');
     const pending = db.getPendingConversation('pending:bypass-submit');
     expect(userInputEvents).toBe(1);
+    expect(result.recordedUserInput).toEqual({
+      id: `live:${session.id}:${userInputOffset}`,
+      text: 'hello',
+      timestamp: result.recordedUserInput?.timestamp,
+    });
+    expect(userInputMessageIds).toEqual([result.recordedUserInput?.id]);
     expect(eventLog).toContain('"type":"user-input"');
     expect(eventLog).toContain('"text":"hello"');
     expect(pending?.rawMetadata?.lastUserInputPreview).toBe('hello');
