@@ -6,7 +6,6 @@ import type { BoundSession, ConversationSummary, ProviderId, SessionScreen } fro
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
-import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl } from '../lib/text.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
@@ -14,7 +13,7 @@ import type { ProviderAdapter } from '../providers/types.js';
 import type { TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output.js';
-import { isWorkingStatusLine, parseSessionScreenSnapshot } from './session-screen.js';
+import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import {
   adoptPendingConversation,
@@ -24,6 +23,23 @@ import {
   pendingConversationHasRecordedUserInput,
   recordPendingUserInput,
 } from './pending-adoption.js';
+import {
+  combinedTextKeySettleWaitMs,
+  extractLastClaudeModelFromText,
+  hashScreen,
+  screenAllowsLiteralSelectionTokenWithoutInput,
+  screenAllowsLiteralSelectionWithoutInput,
+  screenInputChanged,
+  screenInputMatchesText,
+  screenIsStartingUp,
+  screenLooksReadyForLiteralPrompt,
+  screenShowsClaudeResumeSessionChoice,
+  screenShowsQueuedMessageHint,
+  sessionScreenShowsWorking,
+  shouldUseBracketedPasteTransport,
+  submittedTextShouldCreateUserTurn,
+  TMUX_LITERAL_TEXT_CHUNK_SIZE,
+} from './screen-heuristics.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -38,12 +54,9 @@ interface WatchState {
 }
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
-const MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 700;
-const MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS = 3_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
-const TMUX_LITERAL_TEXT_CHUNK_SIZE = 512;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
 const RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS = 500;
 const SESSION_MODEL_METADATA_KEY = 'lastLiveModel';
@@ -60,95 +73,6 @@ export class SessionKeystrokeRejectedError extends Error {
     super(message);
     this.name = 'SessionKeystrokeRejectedError';
   }
-}
-
-function sessionScreenShowsWorking(screen: SessionScreen): boolean {
-  return [screen.status, screen.statusAnsi ?? '', ...screen.content.split('\n').slice(-8)]
-    .flatMap((block) => block.split('\n'))
-    .map((line) => normalizeWhitespace(line))
-    .some((line) => isWorkingStatusLine(line));
-}
-
-function screenInputChanged(previous: SessionScreen, next: SessionScreen): boolean {
-  return normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
-}
-
-function screenInputMatchesText(screen: SessionScreen, text: string | undefined): boolean {
-  if (!text?.trim()) {
-    return false;
-  }
-  return normalizeComparableText(screen.inputText) === normalizeComparableText(text);
-}
-
-function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {
-  return `${screen.content}\n${screen.status}\n${screen.statusAnsi ?? ''}`
-    .split('\n')
-    .map((line) => normalizeWhitespace(line))
-    .some((line) => /tab to queue message/i.test(line));
-}
-
-function screenIsStartingUp(screen: SessionScreen): boolean {
-  const normalizedStatus = normalizeWhitespace(screen.status);
-  const normalizedContent = normalizeWhitespace(screen.content);
-  return /^starting session/i.test(normalizedStatus)
-    || /^waiting for session output/i.test(normalizedContent)
-    || /starting mcp servers/i.test(`${normalizedContent}\n${normalizedStatus}`);
-}
-
-function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
-  if (!text || text.length > 8 || !/^[\w./:-]+$/u.test(text.trim())) {
-    return false;
-  }
-
-  const normalizedLines = `${screen.content}\n${screen.status}`
-    .split('\n')
-    .map((line) => normalizeWhitespace(line))
-    .filter(Boolean);
-  const trailingLines = normalizedLines.slice(-8);
-
-  if (trailingLines.some((line) => /Enter to confirm · Esc to exit/i.test(line)
-    || /Press enter to confirm or esc to go back/i.test(line)
-    || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line))) {
-    return true;
-  }
-
-  if (trailingLines.some((line) => /Esc to cancel · Tab to amend/i.test(line))) {
-    return true;
-  }
-
-  if (trailingLines.some((line) => /(?:^|\s)\d:\s+\S/.test(line))) {
-    return true;
-  }
-
-  const numberedChoices = trailingLines.filter((line) => /^(?:[❯›>]\s*)?\d+\.\s/.test(line));
-  return numberedChoices.length >= 2;
-}
-
-function formatClaudeModelName(name: string, version: string): string {
-  return `${name[0]!.toUpperCase()}${name.slice(1).toLowerCase()} ${version}`;
-}
-
-function extractLastClaudeModelFromText(text: string): string | undefined {
-  const plain = stripAnsiAndControl(text).replace(/\u00a0/g, ' ');
-  const explicitSelections = [...plain.matchAll(/\bSet\s+model\s+to\s+(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)/gi)];
-  const latestExplicitSelection = explicitSelections.at(-1);
-  if (latestExplicitSelection) {
-    return formatClaudeModelName(latestExplicitSelection[1]!, latestExplicitSelection[2]!);
-  }
-
-  const checkedOptions = [...plain.matchAll(/\b(Opus|Sonnet|Haiku|Fable)\s*✔[^\n]*(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)/gi)];
-  const latestCheckedOption = checkedOptions.at(-1);
-  if (latestCheckedOption) {
-    return formatClaudeModelName(latestCheckedOption[2]!, latestCheckedOption[3]!);
-  }
-
-  const headers = [...plain.matchAll(/\b(Opus|Sonnet|Haiku|Fable)\s+([0-9]+(?:\.[0-9]+)?)(?:\s+\([^)]*\))?\s+.*?Claude Max\b/gi)];
-  const latestHeader = headers.at(-1);
-  if (latestHeader) {
-    return formatClaudeModelName(latestHeader[1]!, latestHeader[2]!);
-  }
-
-  return undefined;
 }
 
 function readTextTailSync(filePath: string | undefined, maxBytes: number): string {
@@ -170,64 +94,6 @@ function readTextTailSync(filePath: string | undefined, maxBytes: number): strin
   } catch {
     return '';
   }
-}
-
-function screenShowsInteractiveSelectionHint(screen: SessionScreen): boolean {
-  return `${screen.content}\n${screen.status}`
-    .split('\n')
-    .map((line) => normalizeWhitespace(line))
-    .filter(Boolean)
-    .slice(-8)
-    .some((line) => /Enter to confirm · Esc to exit/i.test(line)
-      || /Press enter to confirm or esc to go back/i.test(line)
-      || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
-      || /Esc to cancel · Tab to amend/i.test(line)
-      || /Enter to select · .*Esc to cancel/i.test(line));
-}
-
-function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boolean {
-  if (screen.inputText.trim()) {
-    return false;
-  }
-
-  const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
-  return /This session is .+ old and .+ tokens/i.test(normalized)
-    && /Resume from summary/i.test(normalized)
-    && /Resume full session as-is/i.test(normalized)
-    && /Don't ask me again/i.test(normalized)
-    && /Enter to confirm · Esc to cancel/i.test(normalized);
-}
-
-function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
-  const hasClaudeInputFooter = /bypass permissions on/i.test(screen.status);
-  if (
-    (screenIsStartingUp(screen) && !hasClaudeInputFooter)
-    || screenShowsClaudeResumeSessionChoice(screen)
-    || sessionScreenShowsWorking(screen)
-  ) {
-    return false;
-  }
-
-  const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
-  return hasClaudeInputFooter
-    && !/Enter to confirm · Esc to cancel/i.test(normalized)
-    && !/Press enter to confirm or esc to go back/i.test(normalized)
-    && !/Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized);
-}
-
-function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
-  return Boolean(text?.trim().match(/^\d{1,8}$/)) && screenShowsInteractiveSelectionHint(screen);
-}
-
-function submittedTextShouldCreateUserTurn(screen: SessionScreen, text: string | undefined): boolean {
-  const trimmed = text?.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (trimmed.startsWith('/')) {
-    return false;
-  }
-  return !screenAllowsLiteralSelectionTokenWithoutInput(screen, trimmed);
 }
 
 function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
@@ -259,24 +125,6 @@ function isRecentTimestamp(timestamp: string | undefined, referenceTimestamp: st
   }
 
   return referenceMs - valueMs <= maxAgeMs;
-}
-
-function hashScreen(screen: SessionScreen): string {
-  return stableTextHash(
-    `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
-  );
-}
-
-function combinedTextKeySettleWaitMs(text: string): number {
-  const lengthFactorMs = Math.max(0, text.length - 32) * 4;
-  return Math.min(
-    MAX_COMBINED_TEXT_KEY_SETTLE_WAIT_MS,
-    Math.max(MIN_COMBINED_TEXT_KEY_SETTLE_WAIT_MS, 450 + lengthFactorMs),
-  );
-}
-
-function shouldUseBracketedPasteTransport(text: string): boolean {
-  return text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
 }
 
 function readLastUserInput(eventLogPath: string | undefined): string | undefined {
