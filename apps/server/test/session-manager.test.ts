@@ -2086,17 +2086,77 @@ describe('SessionManager', () => {
     });
 
     await manager.sendKeystrokes(session.id, {
-      text: 'what was result',
+      text: '2',
       keys: ['Enter'],
-      submittedText: 'what was result',
+      submittedText: '2',
     });
 
     const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-    expect(tmux.sent).toEqual(['1', 'what was result']);
+    expect(tmux.sent).toEqual(['1', '2']);
     expect(tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
     expect(userInputEvents).toBe(1);
     expect(eventLog).toContain('"type":"user-input"');
-    expect(eventLog).toContain('"text":"what was result"');
+    expect(eventLog).toContain('"text":"2"');
+    expect(eventLog).not.toContain('"text":"1"');
+    unsubscribe();
+    db.close();
+  });
+
+  it('selects Claude resume-from-summary before sending deferred live-bridge text', async () => {
+    const resumeChoice = [
+      'Claude Code',
+      '',
+      'This session is 22h 53m old and 423.3k tokens.',
+      '',
+      'Resuming the full session will consume a substantial portion of your usage limits.',
+      'We recommend resuming from a summary.',
+      '',
+      '❯ 1. Resume from summary (recommended)',
+      '  2. Resume full session as-is',
+      "  3. Don't ask me again",
+      '',
+      'Enter to confirm · Esc to cancel',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    const composer = [
+      'Claude Code',
+      '',
+      '❯ ',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = resumeChoice;
+    tmux.captureSequence = [resumeChoice, resumeChoice, composer];
+    const eventBus = new RealtimeEventBus();
+    let userInputEvents = 0;
+    const unsubscribe = eventBus.subscribe((event) => {
+      if (event.type === 'session.user-input') {
+        userInputEvents += 1;
+      }
+    });
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), eventBus);
+
+    const session = await manager.bindConversation({
+      project,
+      provider: claudeProvider,
+      providerSettings,
+      conversationRef: 'session-claude-old-resume-live-bridge',
+      title: 'Existing Claude conversation',
+      kind: 'history',
+    });
+
+    await manager.sendKeystrokes(session.id, { text: '2', deferScreenUpdate: true });
+    await manager.sendKeystrokes(session.id, { keys: ['Enter'], submittedText: '2' });
+
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    expect(tmux.sent).toEqual(['1', '2']);
+    expect(tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
+    expect(userInputEvents).toBe(1);
+    expect(eventLog).toContain('"type":"user-input"');
+    expect(eventLog).toContain('"text":"2"');
     expect(eventLog).not.toContain('"text":"1"');
     unsubscribe();
     db.close();

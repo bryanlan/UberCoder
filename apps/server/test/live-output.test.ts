@@ -63,6 +63,281 @@ describe('readLiveMessages', () => {
     expect(messages.some((message) => /Tip:|Starting MCP servers/.test(message.text) && message.role !== 'status')).toBe(false);
   });
 
+  it('drops Claude compaction progress repaints after a submitted prompt', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'what was result', timestamp: '2026-07-01T19:20:45.128Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Again, sorry for the earlier misreport -- the death at 15:15 and "still running" readings were me matching unrelated processes.',
+          '● Background command "Background waiter keyed on this run\'s exit file" completed (exit code 0)',
+          '❯ /compact',
+          '* Compacting conversation...',
+          '▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 1%',
+          '❯ what was result',
+          'Press up to edit queued messages',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:20:45.184Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '✶Co',
+          'm',
+          '✻Cp',
+          'omac',
+          'pt',
+          '✽ai',
+          'cn',
+          'tig ',
+          '1',
+          'nc',
+          'go',
+          ' cnv',
+          '✻oe',
+          'nr',
+          'vs',
+          '✶erat',
+          'si',
+          '*ao',
+          'tin...',
+          '▰2',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:20:55.304Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'The review result was clear: no blocking findings remain.',
+        timestamp: '2026-07-01T19:21:30.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-claude-compact-progress',
+      provider: 'claude',
+      projectSlug: 'waltiumweb',
+      conversationRef: 'f2390870-ad17-4408-9b19-6f78eef6513a',
+      tmuxSessionName: 'ac-claude-waltiumweb-compact-progress',
+      status: 'bound',
+      startedAt: '2026-07-01T19:20:45.000Z',
+      updatedAt: '2026-07-01T19:21:30.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'what was result' },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: 'The review result was clear: no blocking findings remain.',
+      },
+    ]);
+  });
+
+  it('keeps assistant prose that shares a raw chunk with compact progress', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'summarize result', timestamp: '2026-07-01T19:25:00.000Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'The check completed successfully.',
+          '❯ /compact',
+          '* Compacting conversation...',
+          '▱▱▱▱▱▱▱▱▱▱ 1%',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:25:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-compact-progress-with-prose',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'compact-progress-with-prose',
+      tmuxSessionName: 'ac-claude-demo-compact-progress-with-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T19:25:00.000Z',
+      updatedAt: '2026-07-01T19:25:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'summarize result' },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: 'The check completed successfully.',
+      },
+    ]);
+  });
+
+  it('keeps short assistant replies before compact progress and drops later progress repaint lines', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'answer with the number only', timestamp: '2026-07-01T19:27:00.000Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '42',
+          '❯ /compact',
+          '* Compacting conversation...',
+          '▱▱▱▱▱▱▱▱▱▱ 1%',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:27:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: '▰▱▱ 2%',
+        timestamp: '2026-07-01T19:27:02.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-compact-progress-with-short-reply',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'compact-progress-with-short-reply',
+      tmuxSessionName: 'ac-claude-demo-compact-progress-with-short-reply',
+      status: 'bound',
+      startedAt: '2026-07-01T19:27:00.000Z',
+      updatedAt: '2026-07-01T19:27:02.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'answer with the number only' },
+      { role: 'assistant', source: 'live-output', text: '42' },
+    ]);
+  });
+
+  it('keeps percentage assistant replies when compact progress has not started', async () => {
+    for (const reply of ['50%', '50%\nThe deployment is halfway done.']) {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+      const eventLogPath = path.join(tempDir, 'events.jsonl');
+      await fs.writeFile(eventLogPath, [
+        JSON.stringify({ type: 'user-input', text: 'What percent is complete?', timestamp: '2026-07-01T19:28:00.000Z' }),
+        JSON.stringify({
+          type: 'raw-output',
+          text: reply,
+          timestamp: '2026-07-01T19:28:01.000Z',
+        }),
+      ].join('\n'));
+
+      const session: BoundSession = {
+        id: `session-percent-reply-${reply.length}`,
+        provider: 'claude',
+        projectSlug: 'demo',
+        conversationRef: 'percent-reply',
+        tmuxSessionName: 'ac-claude-demo-percent-reply',
+        status: 'bound',
+        startedAt: '2026-07-01T19:28:00.000Z',
+        updatedAt: '2026-07-01T19:28:01.000Z',
+        eventLogPath,
+      };
+
+      const messages = await readLiveMessages(session);
+      expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+        { role: 'user', source: 'user-input', text: 'What percent is complete?' },
+        { role: 'assistant', source: 'live-output', text: reply },
+      ]);
+    }
+  });
+
+  it('keeps assistant prose that mentions compact commands', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'How do I reduce context?', timestamp: '2026-07-01T19:30:00.000Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: 'Use /compact when you want to reduce the active context.',
+        timestamp: '2026-07-01T19:30:01.000Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-compact-prose',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'compact-prose',
+      tmuxSessionName: 'ac-claude-demo-compact-prose',
+      status: 'bound',
+      startedAt: '2026-07-01T19:30:00.000Z',
+      updatedAt: '2026-07-01T19:30:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'How do I reduce context?' },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: 'Use /compact when you want to reduce the active context.',
+      },
+    ]);
+  });
+
+  it('keeps short assistant replies after compact progress when a new prompt starts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'summarize first', timestamp: '2026-07-01T19:40:00.000Z' }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '❯ /compact',
+          '* Compacting conversation...',
+          '▱▱▱▱▱▱▱▱▱▱ 1%',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:40:01.000Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          '✶Co',
+          'm',
+          '✻Cp',
+          'omac',
+          'pt',
+          '✽ai',
+          'cn',
+          'tig ',
+        ].join('\n'),
+        timestamp: '2026-07-01T19:40:02.000Z',
+      }),
+      JSON.stringify({ type: 'user-input', text: 'status', timestamp: '2026-07-01T19:41:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Done.', timestamp: '2026-07-01T19:41:01.000Z' }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-compact-short-reply',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'compact-short-reply',
+      tmuxSessionName: 'ac-claude-demo-compact-short-reply',
+      status: 'bound',
+      startedAt: '2026-07-01T19:40:00.000Z',
+      updatedAt: '2026-07-01T19:41:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = await readLiveMessages(session);
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'summarize first' },
+      { role: 'user', source: 'user-input', text: 'status' },
+      { role: 'assistant', source: 'live-output', text: 'Done.' },
+    ]);
+  });
+
   it('suppresses restored terminal repaint output before a tracked user turn exists', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

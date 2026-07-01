@@ -486,6 +486,11 @@ describe('conversation search', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({
+        type: 'user-input',
+        text: 'Search the recent live tail.',
+        timestamp: '2026-06-18T11:59:59.000Z',
+      }),
+      JSON.stringify({
         type: 'raw-output',
         text: `old-tail-needle ${'outside-tail '.repeat(60_000)}`,
         timestamp: '2026-06-18T12:00:00.000Z',

@@ -1183,6 +1183,332 @@ describe('conversation routes', () => {
     }
   });
 
+  it('keeps repeated pending live output when provider history has only the submitted user turn', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const userPrompt = 'Continue deployment checks.';
+    const repeatedReply = 'Done.';
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: userPrompt, timestamp: '2026-03-14T18:02:00.100Z' }),
+      JSON.stringify({ type: 'raw-output', text: repeatedReply, timestamp: '2026-03-14T18:02:01.000Z' }),
+    ].join('\n'));
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-pending-live',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Deployment checks',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-pending-live',
+      degraded: false,
+    } satisfies ConversationSummary]);
+    const session: BoundSession = {
+      id: 'session-pending-live',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-pending-live',
+      tmuxSessionName: 'ac-codex-demo-pending-live',
+      status: 'bound',
+      title: 'Deployment checks',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:01.000Z',
+      lastActivityAt: '2026-03-14T18:02:01.000Z',
+      eventLogPath,
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'history-user-1',
+        provider: 'codex',
+        role: 'user',
+        lifecycle: 'durable',
+        text: 'Initial checklist.',
+        timestamp: '2026-03-14T18:00:00.000Z',
+        conversationRef: 'history-pending-live',
+        source: 'history-file',
+      },
+      {
+        id: 'history-assistant-1',
+        provider: 'codex',
+        role: 'assistant',
+        lifecycle: 'durable',
+        text: repeatedReply,
+        timestamp: '2026-03-14T18:01:00.000Z',
+        conversationRef: 'history-pending-live',
+        source: 'history-file',
+      },
+      {
+        id: 'history-user-2',
+        provider: 'codex',
+        role: 'user',
+        lifecycle: 'durable',
+        text: userPrompt,
+        timestamp: '2026-03-14T18:02:00.000Z',
+        conversationRef: 'history-pending-live',
+        source: 'history-file',
+      },
+    ];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-pending-live',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Deployment checks',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:02:00.000Z',
+        isBound: true,
+        boundSessionId: 'session-pending-live',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: repeatedReply,
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:02.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-pending-live/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const messages = response.json().messages as NormalizedMessage[];
+      expect(messages.map((message) => message.text)).toEqual([
+        'Initial checklist.',
+        repeatedReply,
+        userPrompt,
+        repeatedReply,
+      ]);
+      expect(messages.filter((message) => message.text === userPrompt)).toHaveLength(1);
+      expect(messages.filter((message) => message.text === repeatedReply)).toHaveLength(2);
+      expect(messages.find((message) => message.text === repeatedReply && message.source === 'live-output')).toMatchObject({
+        lifecycle: 'pending',
+        role: 'assistant',
+        source: 'live-output',
+      });
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('drops stale short transcript scrollback after a transcript-backed user turn', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    const userPrompt = 'Continue deployment checks.';
+    const staleTranscriptReply = 'OK.';
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: userPrompt, timestamp: '2026-03-14T18:02:00.100Z' }),
+      JSON.stringify({ type: 'raw-output', text: staleTranscriptReply, timestamp: '2026-03-14T18:02:01.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Pending streamed answer.', timestamp: '2026-03-14T18:02:02.000Z' }),
+    ].join('\n'));
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.replaceConversationIndex('demo', 'codex', [{
+      ref: 'history-stale-short-scrollback',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Deployment checks',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-stale-short-scrollback',
+      degraded: false,
+    } satisfies ConversationSummary]);
+    const session: BoundSession = {
+      id: 'session-stale-short-scrollback',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-stale-short-scrollback',
+      tmuxSessionName: 'ac-codex-demo-stale-short-scrollback',
+      status: 'bound',
+      title: 'Deployment checks',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:02:02.000Z',
+      lastActivityAt: '2026-03-14T18:02:02.000Z',
+      eventLogPath,
+    };
+    db.upsertBoundSession(session);
+
+    const providerMessages: NormalizedMessage[] = [
+      {
+        id: 'history-user-1',
+        provider: 'codex',
+        role: 'user',
+        lifecycle: 'durable',
+        text: 'Initial checklist.',
+        timestamp: '2026-03-14T18:00:00.000Z',
+        conversationRef: 'history-stale-short-scrollback',
+        source: 'history-file',
+      },
+      {
+        id: 'history-assistant-1',
+        provider: 'codex',
+        role: 'assistant',
+        lifecycle: 'durable',
+        text: staleTranscriptReply,
+        timestamp: '2026-03-14T18:01:00.000Z',
+        conversationRef: 'history-stale-short-scrollback',
+        source: 'history-file',
+      },
+      {
+        id: 'history-user-2',
+        provider: 'codex',
+        role: 'user',
+        lifecycle: 'durable',
+        text: userPrompt,
+        timestamp: '2026-03-14T18:02:00.000Z',
+        conversationRef: 'history-stale-short-scrollback',
+        source: 'history-file',
+      },
+    ];
+    const getConversation = vi.fn(async () => ({
+      summary: {
+        ref: 'history-stale-short-scrollback',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Deployment checks',
+        createdAt: '2026-03-14T18:00:00.000Z',
+        updatedAt: '2026-03-14T18:02:00.000Z',
+        isBound: true,
+        boundSessionId: 'session-stale-short-scrollback',
+        degraded: false,
+      } satisfies ConversationSummary,
+      messages: providerMessages,
+      allMessages: providerMessages,
+    }));
+    const getSessionScreen = vi.fn(async () => ({
+      session,
+      screen: {
+        content: `${staleTranscriptReply}\nPending streamed answer.`,
+        inputText: '',
+        status: 'Session active',
+        capturedAt: '2026-03-14T18:02:03.000Z',
+      } satisfies SessionScreen,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/history-stale-short-scrollback/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      const messages = response.json().messages as NormalizedMessage[];
+      expect(messages.map((message) => message.text)).toEqual([
+        'Initial checklist.',
+        staleTranscriptReply,
+        userPrompt,
+        'Pending streamed answer.',
+      ]);
+      expect(messages.filter((message) => message.text === staleTranscriptReply)).toHaveLength(1);
+      expect(messages.find((message) => message.text === 'Pending streamed answer.')).toMatchObject({
+        lifecycle: 'pending',
+        role: 'assistant',
+        source: 'live-output',
+      });
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('drops live terminal process text and flattened repeats once provider history has the formatted answer', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

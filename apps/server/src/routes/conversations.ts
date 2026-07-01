@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
-import { normalizeComparableText, uniqueBy } from '../lib/text.js';
+import { normalizeComparableText, stableTextHash, uniqueBy } from '../lib/text.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
@@ -254,6 +254,16 @@ function comparableTextsMatch(a: ComparableMessage, b: ComparableMessage): boole
   return a.compact.includes(b.compact) || b.compact.includes(a.compact);
 }
 
+function comparableTextsMatchIgnoringTimestamp(a: ComparableMessage, b: ComparableMessage): boolean {
+  if (a.comparable === b.comparable) {
+    return true;
+  }
+
+  const minLength = Math.min(a.comparable.length, b.comparable.length);
+  return minLength >= CONTAINMENT_DUPLICATE_MIN_LENGTH
+    && (a.compact.includes(b.compact) || b.compact.includes(a.compact));
+}
+
 function comparableTimestampsAreNear(a: ComparableMessage, b: ComparableMessage): boolean {
   if (a.timestampMs === undefined || b.timestampMs === undefined) {
     return true;
@@ -309,14 +319,99 @@ function filterTranscriptBackedLiveMessages(
   return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
-function latestMessageTimestampMs(messages: NormalizedMessage[]): number | undefined {
-  let latest: number | undefined;
+function liveMessageRepeatsTranscriptContent(
+  liveMessage: NormalizedMessage,
+  transcriptMessages: NormalizedMessage[],
+): boolean {
+  if (liveMessage.role !== 'assistant' && liveMessage.role !== 'tool') {
+    return false;
+  }
+  const comparableLiveMessage = toComparableMessage(liveMessage);
+  if (!comparableLiveMessage) {
+    return false;
+  }
+  return transcriptMessages.some((transcriptMessage) => {
+    if (transcriptMessage.role !== liveMessage.role) {
+      return false;
+    }
+    const comparableTranscriptMessage = toComparableMessage(transcriptMessage);
+    return comparableTranscriptMessage
+      ? comparableTextsMatchIgnoringTimestamp(comparableLiveMessage, comparableTranscriptMessage)
+      : false;
+  });
+}
+
+function hasLaterNonTranscriptReplyInSamePendingTurn(
+  liveMessages: NormalizedMessage[],
+  startIndex: number,
+  transcriptMessages: NormalizedMessage[],
+  latestTranscriptMs: number | undefined,
+): boolean {
+  for (let index = startIndex + 1; index < liveMessages.length; index += 1) {
+    const message = liveMessages[index]!;
+    if (!isPendingAfterTranscript(message, latestTranscriptMs)) {
+      continue;
+    }
+    if (message.role === 'user' && message.source === 'user-input') {
+      return false;
+    }
+    if (
+      (message.role === 'assistant' || message.role === 'tool')
+      && !liveMessageRepeatsTranscriptContent(message, transcriptMessages)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stripTranscriptBackedPrefixLines(
+  liveMessage: NormalizedMessage,
+  transcriptMessages: NormalizedMessage[],
+): NormalizedMessage {
+  if (liveMessage.role !== 'assistant' && liveMessage.role !== 'tool') {
+    return liveMessage;
+  }
+
+  const lines = liveMessage.text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) {
+    return liveMessage;
+  }
+
+  let firstKeptLine = 0;
+  while (
+    firstKeptLine < lines.length
+    && liveMessageRepeatsTranscriptContent({ ...liveMessage, text: lines[firstKeptLine]! }, transcriptMessages)
+  ) {
+    firstKeptLine += 1;
+  }
+  if (firstKeptLine === 0 || firstKeptLine === lines.length) {
+    return liveMessage;
+  }
+
+  const text = lines.slice(firstKeptLine).join('\n');
+  return {
+    ...liveMessage,
+    id: stableTextHash(`${liveMessage.id}:transcript-prefix-stripped:${text}`),
+    text,
+  };
+}
+
+function latestMessageByTimestamp(messages: NormalizedMessage[]): NormalizedMessage | undefined {
+  let latest: NormalizedMessage | undefined;
+  let latestMs: number | undefined;
   for (const message of messages) {
     const timestampMs = Date.parse(message.timestamp);
     if (!Number.isFinite(timestampMs)) {
       continue;
     }
-    latest = latest === undefined ? timestampMs : Math.max(latest, timestampMs);
+    if (latestMs === undefined || timestampMs > latestMs) {
+      latest = message;
+      latestMs = timestampMs;
+    }
   }
   return latest;
 }
@@ -334,22 +429,39 @@ function isPendingAfterTranscript(message: NormalizedMessage, latestTranscriptMs
 
 function filterPendingLiveMessagesAfterTranscript(
   liveMessages: NormalizedMessage[],
-  latestTranscriptMs: number | undefined,
+  transcriptMessages: NormalizedMessage[],
+  latestTranscriptMessage: NormalizedMessage | undefined,
 ): NormalizedMessage[] {
+  const latestTranscriptMs = latestTranscriptMessage ? Date.parse(latestTranscriptMessage.timestamp) : undefined;
   const filtered: NormalizedMessage[] = [];
+  let hasPendingLiveTurn = latestTranscriptMessage?.role === 'user';
   let hasUnbackedLiveUserTurn = false;
 
-  for (const message of liveMessages) {
+  for (let index = 0; index < liveMessages.length; index += 1) {
+    const message = liveMessages[index]!;
     if (!isPendingAfterTranscript(message, latestTranscriptMs)) {
       continue;
     }
     if (message.role === 'user' && message.source === 'user-input') {
+      hasPendingLiveTurn = true;
       hasUnbackedLiveUserTurn = true;
       filtered.push(message);
       continue;
     }
-    if (hasUnbackedLiveUserTurn) {
-      filtered.push(message);
+    if (
+      hasPendingLiveTurn
+      && !hasUnbackedLiveUserTurn
+      && liveMessageRepeatsTranscriptContent(message, transcriptMessages)
+      && hasLaterNonTranscriptReplyInSamePendingTurn(liveMessages, index, transcriptMessages, latestTranscriptMs)
+    ) {
+      continue;
+    }
+    if (hasPendingLiveTurn) {
+      filtered.push(
+        hasUnbackedLiveUserTurn
+          ? message
+          : stripTranscriptBackedPrefixLines(message, transcriptMessages),
+      );
     }
   }
 
@@ -498,12 +610,12 @@ export async function registerConversationRoutes(
     )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const liveMessagesNotInTranscript = filterTranscriptBackedLiveMessages(liveMessages, visibleMessages);
-    const latestVisibleTranscriptMs = latestMessageTimestampMs(visibleMessages);
+    const latestVisibleTranscriptMessage = latestMessageByTimestamp(visibleMessages);
     const mergedMessages = uniqueBy(
       [
         ...visibleMessages,
         ...(providerHasTranscript
-          ? filterPendingLiveMessagesAfterTranscript(liveMessagesNotInTranscript, latestVisibleTranscriptMs)
+          ? filterPendingLiveMessagesAfterTranscript(liveMessagesNotInTranscript, visibleMessages, latestVisibleTranscriptMessage)
           : filterUserVisibleMessages(liveMessages)),
       ],
       (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,

@@ -50,6 +50,104 @@ function looksLikeFragmentCluster(lines: string[]): boolean {
   });
 }
 
+function normalizeFragmentToken(line: string): string {
+  return normalizeComparableText(line
+    .replace(/[▰▱█▐▌▛▜▘▝*·✻✽✢✶…]+/gu, ' ')
+    .replace(/\([^)]*\)/g, ' '))
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function looksLikeRepaintFragment(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return true;
+  if (/^\d{1,3}%?$/.test(trimmed)) return true;
+  const compact = normalizeFragmentToken(trimmed);
+  if (!compact) return true;
+  if (/^\d{1,3}$/.test(compact)) return true;
+  if (/^[a-z]{1,7}\d{0,3}$/.test(compact) && trimmed.length <= 14) return true;
+  if (/^[a-z]{1,5}\s+[a-z]{1,3}$/i.test(trimmed)) return true;
+  return false;
+}
+
+function looksLikeTerminalRepaintFragmentCluster(lines: string[]): boolean {
+  if (lines.length < 4) return false;
+  const fragmentCount = lines.filter(looksLikeRepaintFragment).length;
+  const hasSubstantiveLine = lines.some((line) => {
+    if (looksLikeRepaintFragment(line)) return false;
+    const compact = normalizeFragmentToken(line);
+    return compact.length >= 14 || /[.!?][)"']?$/.test(line.trim());
+  });
+  return !hasSubstantiveLine && fragmentCount / lines.length >= 0.75;
+}
+
+function rawOutputStartsProviderProgress(text: string): boolean {
+  const cleaned = stripAnsiAndControl(text);
+  const lines = cleaned
+    .split(/\n+/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+  const hasCompactCommandLine = lines.some((line) => /^(?:[❯›>]\s*)?\/compact(?:\s|$)/i.test(line));
+  const hasCompactingProgressLine = lines.some((line) => (
+    /compactingconversation/.test(normalizeComparableText(line).replace(/\s+/g, ''))
+  ));
+  const hasProgressBarLine = lines.some((line) => /[▰▱█]{3,}.*\d{1,3}%?$/.test(line) || /^\d{1,3}%?$/.test(line));
+  return hasCompactingProgressLine && (hasCompactCommandLine || hasProgressBarLine);
+}
+
+function lineLooksLikeProviderProgressControl(line: string, options: { allowBarePercent?: boolean } = {}): boolean {
+  const trimmed = normalizeWhitespace(line);
+  if (!trimmed) return true;
+  if (/^(?:[❯›>]\s*)?\/compact(?:\s|$)/i.test(trimmed)) return true;
+  if (/[▰▱█]{3,}.*\d{1,3}%?$/.test(trimmed)) return true;
+  if (options.allowBarePercent === true && /^\d{1,3}%$/.test(trimmed)) return true;
+  const compact = normalizeComparableText(trimmed).replace(/[^a-z0-9]+/g, '');
+  return /compactingconversation/.test(compact);
+}
+
+function splitRawOutputAtProviderProgress(text: string, lastUserInput: string | undefined): {
+  beforeProgressText: string;
+  echoedUserInputAfterProgress: boolean;
+  progressStarted: boolean;
+} {
+  const comparable = normalizeComparableText(lastUserInput ?? '');
+  const compact = comparable.replace(/\s+/g, '');
+  const beforeProgressLines: string[] = [];
+  let sawProviderProgress = false;
+  let echoedUserInputAfterProgress = false;
+
+  for (const rawLine of stripAnsiAndControl(text).split(/\n/)) {
+    const line = normalizeTerminalLine(rawLine);
+    if (!line) {
+      continue;
+    }
+    if (lineLooksLikeProviderProgressControl(line, { allowBarePercent: true })) {
+      sawProviderProgress = true;
+      continue;
+    }
+    if (!sawProviderProgress) {
+      beforeProgressLines.push(rawLine);
+      continue;
+    }
+    if (!compact) continue;
+    const comparableLine = normalizeComparableText(line);
+    const compactLine = comparableLine.replace(/\s+/g, '');
+    if (lineEchoesUserInput(comparableLine, compactLine, comparable, compact)) {
+      echoedUserInputAfterProgress = true;
+    }
+  }
+  return {
+    beforeProgressText: beforeProgressLines.join('\n'),
+    echoedUserInputAfterProgress,
+    progressStarted: sawProviderProgress,
+  };
+}
+
+function linesAreOnlyProviderProgressRepaint(lines: string[]): boolean {
+  if (lines.length === 0) return true;
+  if (lines.every((line) => lineLooksLikeProviderProgressControl(line))) return true;
+  return looksLikeTerminalRepaintFragmentCluster(lines);
+}
+
 function looksLikeTerminalChrome(line: string): boolean {
   return /(?:^|\s)(?:OpenAI Codex|Claude Code|model:|directory:|permissions:|approval:|sandbox:|context window:|Use medium effort|with medium effort|Use \/skills to list available|loading \/model to change)/i.test(line)
     || /^(?:We recommend .+ effort|Effort determines|recommend .+ effort for most tasks|and maximize rate limits|Use ultrathink)/i.test(line)
@@ -290,6 +388,10 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
     normalized.push(line);
   }
 
+  if (looksLikeTerminalRepaintFragmentCluster(normalized)) {
+    return [];
+  }
+
   return normalized;
 }
 
@@ -490,11 +592,13 @@ export async function readLiveMessages(session: BoundSession, options: ReadLiveM
     let lastUserInput = readResult.lastUserInputBeforeText;
     let hasTrackedUserTurn = Boolean(readResult.lastUserInputBeforeText?.trim());
     const priorUserInputEchoes = readResult.lastUserInputBeforeText ? [readResult.lastUserInputBeforeText] : [];
+    let suppressProviderProgressRepaints = false;
     for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
       const event = events[eventIndex]!;
       if (event.type === 'user-input') {
         const text = event.text.trim();
         if (!text) continue;
+        suppressProviderProgressRepaints = false;
         if (userInputLooksLikeProviderCommandControl(text, events, eventIndex)) {
           continue;
         }
@@ -521,9 +625,36 @@ export async function readLiveMessages(session: BoundSession, options: ReadLiveM
         continue;
       }
 
-      const lines = event.type === 'status'
+      const rawOutputHasProviderProgress = event.type === 'raw-output'
+        && rawOutputStartsProviderProgress(event.text);
+      const providerProgress = rawOutputHasProviderProgress
+        ? splitRawOutputAtProviderProgress(event.text, lastUserInput)
+        : undefined;
+      let lines = event.type === 'status'
         ? [truncate(normalizeWhitespace(stripAnsiAndControl(event.text)), 240)].filter(Boolean)
-        : normalizeRawOutputLines(event.text, lastUserInput, priorUserInputEchoes);
+        : normalizeRawOutputLines(
+          providerProgress?.progressStarted ? providerProgress.beforeProgressText : event.text,
+          lastUserInput,
+          priorUserInputEchoes,
+        );
+
+      if (event.type === 'raw-output') {
+        if (providerProgress?.progressStarted && rawOutputHasProviderProgress) {
+          suppressProviderProgressRepaints = true;
+          if (
+            providerProgress.echoedUserInputAfterProgress
+            || linesAreOnlyProviderProgressRepaint(lines)
+          ) {
+            continue;
+          }
+        }
+        if (suppressProviderProgressRepaints && linesAreOnlyProviderProgressRepaint(lines)) {
+          continue;
+        }
+        if (lines.length > 0 && !providerProgress?.progressStarted) {
+          suppressProviderProgressRepaints = false;
+        }
+      }
 
       for (const line of lines) {
         const dedupedLine = event.type === 'raw-output'

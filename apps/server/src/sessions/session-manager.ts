@@ -891,12 +891,21 @@ export class SessionManager {
       let preparedScreen: SessionScreen | undefined;
       const trimmedTransportText = payload.text.trim();
       const shouldProbeDeferredSelection = payload.deferScreenUpdate === true && /^\d{1,8}$/.test(trimmedTransportText);
+      const shouldProbeClaudeResumePrompt = payload.deferScreenUpdate === true
+        && liveSession.provider === 'claude';
       const canUseDeferredTextReadyCache = payload.deferScreenUpdate === true
         && (this.deferredTextReadyUntil.get(liveSession.id) ?? 0) > Date.now();
-      if ((liveSession.provider === 'codex' || shouldProbeDeferredSelection) && !canUseDeferredTextReadyCache) {
+      if ((liveSession.provider === 'codex' || shouldProbeDeferredSelection || shouldProbeClaudeResumePrompt) && !canUseDeferredTextReadyCache) {
         preparedScreen = await this.captureSessionScreen(liveSession);
-        if (screenIsStartingUp(preparedScreen) || screenShowsQueuedMessageHint(preparedScreen)) {
-          await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
+        if (
+          screenIsStartingUp(preparedScreen)
+          || screenShowsQueuedMessageHint(preparedScreen)
+          || (shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen))
+        ) {
+          preparedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
+        }
+        if (shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen)) {
+          throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
         }
       }
       if (shouldProbeDeferredSelection && preparedScreen && screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, trimmedTransportText)) {
@@ -942,12 +951,21 @@ export class SessionManager {
 
     if (payload.text) {
       const transportText = payload.text;
-      const expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
+      let expectsVisibleInputChange = !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
       shouldRecordTextAsUserInput = !screenAllowsLiteralSelectionTokenWithoutInput(latestObservedScreen, transportText);
       const useBracketedPasteTransport = shouldUseBracketedPasteTransport(transportText);
-      if ((payload.keys?.length || useBracketedPasteTransport) && expectsVisibleInputChange) {
+      const shouldPrepareClaudeResumePrompt = liveSession.provider === 'claude'
+        && screenShowsClaudeResumeSessionChoice(latestObservedScreen);
+      if ((payload.keys?.length || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt)) {
         latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
         latestObservedHash = hashScreen(latestObservedScreen);
+        if (shouldPrepareClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(latestObservedScreen)) {
+          throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
+        }
+        expectsVisibleInputChange = shouldPrepareClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(latestObservedScreen)
+          ? true
+          : !screenAllowsLiteralSelectionWithoutInput(latestObservedScreen, transportText);
+        shouldRecordTextAsUserInput = !screenAllowsLiteralSelectionTokenWithoutInput(latestObservedScreen, transportText);
       }
       const textAlreadyVisible = Boolean(payload.keys?.length) && screenInputMatchesText(latestObservedScreen, transportText);
       const textEntryScreen = latestObservedScreen;
