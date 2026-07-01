@@ -41,6 +41,7 @@ import {
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
+import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -138,14 +139,13 @@ function splitLiteralTextForTmux(text: string): string[] {
   return chunks;
 }
 
+interface SessionManagerLogger {
+  warn(bindings: unknown, message?: string): void;
+}
+
 export class SessionManager {
   private readonly outputWatchers = new OutputWatcherRegistry();
-  private readonly lastScreenHashes = new Map<string, string>();
-  private readonly deferredTextReadyUntil = new Map<string, number>();
-  private readonly deferredSelectionInputs = new Map<string, { text: string; expiresAt: number }>();
-  private readonly workingIdleTimers = new Map<string, NodeJS.Timeout>();
-  private readonly rawOutputScreenUpdateTimers = new Map<string, NodeJS.Timeout>();
-  private readonly liveSessionModels = new Map<string, string>();
+  private readonly runtimes: SessionRuntimeRegistry;
   private stopped = false;
 
   constructor(
@@ -154,8 +154,17 @@ export class SessionManager {
     private readonly runtimeDir: string,
     private readonly eventBus: RealtimeEventBus,
     private readonly recoveryDependencies?: SessionRecoveryDependencies,
+    private readonly logger?: SessionManagerLogger,
   ) {
     fs.mkdirSync(this.runtimeDir, { recursive: true });
+    this.runtimes = new SessionRuntimeRegistry({
+      onSlowCommand: ({ sessionId, label, elapsedMs }) => {
+        this.logger?.warn(
+          { sessionId, command: label, elapsedMs },
+          'Session runtime command is still running.',
+        );
+      },
+    });
   }
 
   private listRestorableSessions(): BoundSession[] {
@@ -171,22 +180,27 @@ export class SessionManager {
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
     }
-    for (const [sessionId, timer] of this.workingIdleTimers) {
-      clearTimeout(timer);
-      this.workingIdleTimers.delete(sessionId);
+    for (const sessionId of [...this.runtimes.keys()]) {
+      const state = this.runtimeState(sessionId);
+      if (state.workingIdleTimer) {
+        clearTimeout(state.workingIdleTimer);
+        state.workingIdleTimer = undefined;
+      }
+      if (state.rawOutputScreenUpdateTimer) {
+        clearTimeout(state.rawOutputScreenUpdateTimer);
+        state.rawOutputScreenUpdateTimer = undefined;
+      }
     }
-    for (const [sessionId, timer] of this.rawOutputScreenUpdateTimers) {
-      clearTimeout(timer);
-      this.rawOutputScreenUpdateTimers.delete(sessionId);
-    }
-    this.deferredTextReadyUntil.clear();
-    this.deferredSelectionInputs.clear();
-    this.liveSessionModels.clear();
+    this.runtimes.clear();
+  }
+
+  private runtimeState(sessionId: string): SessionRuntimeState {
+    return this.runtimes.state(sessionId);
   }
 
   async observeSessions(): Promise<void> {
     for (const session of this.listRestorableSessions()) {
-      await this.refreshSessionState(session, { restoreMissing: false });
+      await this.runtimes.run(session.id, 'observeSession', () => this.refreshSessionState(session, { restoreMissing: false }));
     }
   }
 
@@ -440,6 +454,20 @@ export class SessionManager {
     initialPrompt?: string;
   }): Promise<BoundSession> {
     const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
+    const sessionId = existing?.id ?? randomUUID();
+    return await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
+  }
+
+  private async bindConversationInternal(input: {
+    project: ActiveProject;
+    provider: ProviderAdapter;
+    providerSettings: MergedProviderSettings;
+    conversationRef: string;
+    title: string;
+    kind: ConversationSummary['kind'];
+    initialPrompt?: string;
+  }, sessionId: string): Promise<BoundSession> {
+    const existing = this.db.getRestorableSessionByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
       const liveSession = await this.refreshSessionState(existing);
       if (liveSession) {
@@ -448,7 +476,6 @@ export class SessionManager {
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
 
-    const sessionId = randomUUID();
     const tmuxSessionName = this.buildTmuxSessionName(input.project.slug, input.provider.id, input.conversationRef);
     const sessionDir = path.join(this.runtimeDir, sessionId);
     const rawLogPath = path.join(sessionDir, 'raw.log');
@@ -549,6 +576,10 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<BoundSession> {
+    return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
+  }
+
+  private async sendInputInternal(sessionId: string, text: string): Promise<BoundSession> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -585,6 +616,10 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean; submittedText?: string }): Promise<BoundSession> {
+    return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
+  }
+
+  private async sendKeystrokesInternal(sessionId: string, payload: { text?: string; keys?: string[]; deferScreenUpdate?: boolean; submittedText?: string }): Promise<BoundSession> {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
@@ -593,7 +628,7 @@ export class SessionManager {
 
     const hasSpecialKeys = Boolean(payload.keys?.length);
     if (hasSpecialKeys) {
-      this.deferredTextReadyUntil.delete(liveSession.id);
+      this.runtimeState(liveSession.id).deferredTextReadyUntil = undefined;
     }
 
     if (payload.text && !hasSpecialKeys) {
@@ -603,7 +638,7 @@ export class SessionManager {
       const shouldProbeClaudeResumePrompt = payload.deferScreenUpdate === true
         && liveSession.provider === 'claude';
       const canUseDeferredTextReadyCache = payload.deferScreenUpdate === true
-        && (this.deferredTextReadyUntil.get(liveSession.id) ?? 0) > Date.now();
+        && (this.runtimeState(liveSession.id).deferredTextReadyUntil ?? 0) > Date.now();
       if ((liveSession.provider === 'codex' || shouldProbeDeferredSelection || shouldProbeClaudeResumePrompt) && !canUseDeferredTextReadyCache) {
         preparedScreen = await this.captureSessionScreen(liveSession);
         if (
@@ -618,10 +653,10 @@ export class SessionManager {
         }
       }
       if (shouldProbeDeferredSelection && preparedScreen && screenAllowsLiteralSelectionTokenWithoutInput(preparedScreen, trimmedTransportText)) {
-        this.deferredSelectionInputs.set(liveSession.id, {
+        this.runtimeState(liveSession.id).deferredSelectionInput = {
           text: trimmedTransportText,
           expiresAt: Date.now() + DEFERRED_TEXT_READY_TTL_MS,
-        });
+        };
       }
       const transportText = payload.text;
       if (shouldUseBracketedPasteTransport(transportText)) {
@@ -635,7 +670,7 @@ export class SessionManager {
         updatedAt: activityAt,
         lastActivityAt: activityAt,
       });
-      this.deferredTextReadyUntil.set(updated.id, Date.now() + DEFERRED_TEXT_READY_TTL_MS);
+      this.runtimeState(updated.id).deferredTextReadyUntil = Date.now() + DEFERRED_TEXT_READY_TTL_MS;
       if (!payload.deferScreenUpdate) {
         await this.emitScreenUpdate(updated);
       }
@@ -647,14 +682,14 @@ export class SessionManager {
     let latestObservedHash = hashScreen(beforeScreen);
     let shouldRecordTextAsUserInput = false;
     const submittedText = payload.keys?.includes('Enter') ? payload.submittedText?.trim() : undefined;
-    const rememberedSelection = submittedText ? this.deferredSelectionInputs.get(liveSession.id) : undefined;
+    const rememberedSelection = submittedText ? this.runtimeState(liveSession.id).deferredSelectionInput : undefined;
     const submittedDeferredSelection = Boolean(
       rememberedSelection
         && rememberedSelection.expiresAt > Date.now()
         && rememberedSelection.text === submittedText,
     );
     if (hasSpecialKeys) {
-      this.deferredSelectionInputs.delete(liveSession.id);
+      this.runtimeState(liveSession.id).deferredSelectionInput = undefined;
     }
 
     if (payload.text) {
@@ -764,12 +799,22 @@ export class SessionManager {
     providerSettings: MergedProviderSettings;
     initialPrompt: string;
   }): Promise<BoundSession> {
+    return await this.runtimes.run(input.sessionId, 'restartPendingSessionWithInitialPrompt', () => this.restartPendingSessionWithInitialPromptInternal(input));
+  }
+
+  private async restartPendingSessionWithInitialPromptInternal(input: {
+    sessionId: string;
+    project: ActiveProject;
+    provider: ProviderAdapter;
+    providerSettings: MergedProviderSettings;
+    initialPrompt: string;
+  }): Promise<BoundSession> {
     const session = this.mustGetSession(input.sessionId);
     if (!session.conversationRef.startsWith('pending:')) {
       throw new Error('Only pending sessions can be restarted with an initial prompt.');
     }
-    await this.releaseSession(session.id);
-    return await this.bindConversation({
+    await this.releaseSessionInternal(session.id);
+    return await this.bindConversationInternal({
       project: input.project,
       provider: input.provider,
       providerSettings: input.providerSettings,
@@ -777,10 +822,14 @@ export class SessionManager {
       title: session.title ?? 'New conversation',
       kind: 'pending',
       initialPrompt: input.initialPrompt,
-    });
+    }, randomUUID());
   }
 
   async releaseSession(sessionId: string): Promise<void> {
+    await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
+  }
+
+  private async releaseSessionInternal(sessionId: string): Promise<void> {
     const session = this.mustGetSession(sessionId);
     const releasing = {
       ...session,
@@ -835,10 +884,7 @@ export class SessionManager {
     }
 
     this.stopWatching(session.id);
-    this.lastScreenHashes.delete(session.id);
-    this.deferredTextReadyUntil.delete(session.id);
-    this.deferredSelectionInputs.delete(session.id);
-    this.liveSessionModels.delete(session.id);
+    this.runtimes.clearEphemeral(session.id);
     const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
     this.db.upsertBoundSession(ended);
     if (session.conversationRef.startsWith('pending:')) {
@@ -882,6 +928,10 @@ export class SessionManager {
   }
 
   async ensureSession(sessionId: string): Promise<BoundSession | undefined> {
+    return await this.runtimes.run(sessionId, 'ensureSession', () => this.ensureSessionInternal(sessionId));
+  }
+
+  private async ensureSessionInternal(sessionId: string): Promise<BoundSession | undefined> {
     const session = this.mustGetSession(sessionId);
     return await this.refreshSessionState(session);
   }
@@ -937,10 +987,7 @@ export class SessionManager {
     }
     if (liveness === 'dead') {
       this.stopWatching(session.id);
-      this.lastScreenHashes.delete(session.id);
-      this.deferredTextReadyUntil.delete(session.id);
-      this.deferredSelectionInputs.delete(session.id);
-      this.liveSessionModels.delete(session.id);
+      this.runtimes.clearEphemeral(session.id);
       if (!restoreMissing && session.conversationRef.startsWith('pending:')) {
         if (this.hasRecordedPendingUserInput(session)) {
           this.markPendingSessionNotLive(session);
@@ -988,7 +1035,7 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     this.watchSessionOutput(refreshed);
-    if (!this.lastScreenHashes.has(refreshed.id)) {
+    if (!this.runtimeState(refreshed.id).lastScreenHash) {
       await this.emitScreenUpdate(refreshed);
     }
     return refreshed;
@@ -1068,28 +1115,31 @@ export class SessionManager {
   }
 
   private clearWorkingExpiry(sessionId: string): void {
-    const timer = this.workingIdleTimers.get(sessionId);
+    const state = this.runtimeState(sessionId);
+    const timer = state.workingIdleTimer;
     if (timer) {
       clearTimeout(timer);
-      this.workingIdleTimers.delete(sessionId);
+      state.workingIdleTimer = undefined;
     }
   }
 
   private clearRawOutputScreenUpdate(sessionId: string): void {
-    const timer = this.rawOutputScreenUpdateTimers.get(sessionId);
+    const state = this.runtimeState(sessionId);
+    const timer = state.rawOutputScreenUpdateTimer;
     if (timer) {
       clearTimeout(timer);
-      this.rawOutputScreenUpdateTimers.delete(sessionId);
+      state.rawOutputScreenUpdateTimer = undefined;
     }
   }
 
   private scheduleRawOutputScreenUpdate(session: BoundSession): void {
-    if (this.rawOutputScreenUpdateTimers.has(session.id)) {
+    const state = this.runtimeState(session.id);
+    if (state.rawOutputScreenUpdateTimer) {
       return;
     }
 
     const timer = setTimeout(() => {
-      this.rawOutputScreenUpdateTimers.delete(session.id);
+      state.rawOutputScreenUpdateTimer = undefined;
       if (this.stopped || !this.db.isOpen()) {
         return;
       }
@@ -1097,10 +1147,10 @@ export class SessionManager {
         if (this.stopped || !this.db.isOpen()) {
           return;
         }
-        console.error('Failed to publish deferred session screen update.', error);
+        this.logger?.warn({ err: error }, 'Failed to publish deferred session screen update.');
       });
     }, RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS);
-    this.rawOutputScreenUpdateTimers.set(session.id, timer);
+    state.rawOutputScreenUpdateTimer = timer;
   }
 
   private scheduleWorkingExpiry(sessionId: string, heartbeatAt: string): void {
@@ -1110,16 +1160,17 @@ export class SessionManager {
       return;
     }
 
-    const existing = this.workingIdleTimers.get(sessionId);
+    const state = this.runtimeState(sessionId);
+    const existing = state.workingIdleTimer;
     if (existing) {
       clearTimeout(existing);
     }
     const delayMs = Math.max(0, heartbeatMs + SESSION_COMPLETION_IDLE_MS - Date.now()) + 100;
     const timer = setTimeout(() => {
-      this.workingIdleTimers.delete(sessionId);
+      state.workingIdleTimer = undefined;
       void this.handleWorkingIdleExpiry(sessionId, heartbeatAt);
     }, delayMs);
-    this.workingIdleTimers.set(sessionId, timer);
+    state.workingIdleTimer = timer;
   }
 
   private async handleWorkingIdleExpiry(sessionId: string, expectedHeartbeatAt: string): Promise<void> {
@@ -1195,11 +1246,12 @@ export class SessionManager {
     screen: SessionScreen,
   ): boolean {
     const nextHash = hashScreen(screen);
-    if (this.lastScreenHashes.get(session.id) === nextHash) {
+    const state = this.runtimeState(session.id);
+    if (state.lastScreenHash === nextHash) {
       return false;
     }
 
-    this.lastScreenHashes.set(session.id, nextHash);
+    state.lastScreenHash = nextHash;
     this.syncSessionScreenState(this.mustGetSession(session.id), screen);
     const currentSession = this.mustGetSession(session.id);
     this.eventBus.emit({
@@ -1362,7 +1414,7 @@ export class SessionManager {
       previousHashOverride?: string;
     } = {},
   ): Promise<void> {
-    const previousHash = options.previousHashOverride ?? this.lastScreenHashes.get(session.id);
+    const previousHash = options.previousHashOverride ?? this.runtimeState(session.id).lastScreenHash;
     const screen = await this.waitForScreenChange(
       session,
       previousHash,
@@ -1455,7 +1507,7 @@ export class SessionManager {
   }
 
   private getStoredSessionModel(session: BoundSession): string | undefined {
-    const cached = this.liveSessionModels.get(session.id);
+    const cached = this.runtimeState(session.id).liveSessionModel;
     if (cached) {
       return cached;
     }
@@ -1468,7 +1520,7 @@ export class SessionManager {
   }
 
   private rememberSessionModel(session: BoundSession, model: string): void {
-    this.liveSessionModels.set(session.id, model);
+    this.runtimeState(session.id).liveSessionModel = model;
     if (!session.conversationRef.startsWith('pending:')) {
       return;
     }

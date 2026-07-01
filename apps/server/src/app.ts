@@ -33,6 +33,10 @@ export async function buildApp(options: AppOptions = {}) {
   const configService = new ConfigService(options.configPath);
   const config = configService.getConfig();
   const db = new AppDatabase(config.databasePath);
+  const app = fastify({
+    logger: true,
+    bodyLimit: 2 * 1024 * 1024,
+  });
   const eventBus = new RealtimeEventBus();
   const projectService = new ProjectService(configService);
   const providerRegistry = new ProviderRegistry();
@@ -41,7 +45,7 @@ export async function buildApp(options: AppOptions = {}) {
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
-  });
+  }, app.log);
   const authService = new AuthService(config, db);
   const sessionSummaries = new SessionSummaryService(
     db,
@@ -50,11 +54,6 @@ export async function buildApp(options: AppOptions = {}) {
     config.runtimeDir,
     eventBus,
   );
-
-  const app = fastify({
-    logger: true,
-    bodyLimit: 2 * 1024 * 1024,
-  });
   const restartService = new RestartService(() => app.close());
 
   await app.register(fastifyCookie);
