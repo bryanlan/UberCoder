@@ -1,6 +1,6 @@
 {
-  "agents_md_current_through_commit": "2a7c837b145c7d9d1c5056ecc7292e9cbaafda1b",
-  "agents_md_last_synced_at": "2026-06-29T06:09:25.433685+00:00",
+  "agents_md_current_through_commit": "2e726c384901c732c6c6f34bb42e3d167bbc94c2",
+  "agents_md_last_synced_at": "2026-07-02T07:33:27.321011+00:00",
   "alias": {
     "exists": true,
     "is_symlink": true,
@@ -15,19 +15,17 @@
     "template_sha256": "08c278e2b4e4a22acd24bf0b43db03813de078515e3efde82c8c7a0a0df30e30"
   },
   "canonical_path": "AGENTS.md",
-  "canonical_sha256": "3c15af318c9458445c4c3c3f7330d0cd1c020d077da1a58a05703251bfbab2ed",
+  "canonical_sha256": "04252473d4833b600c4d4cbe5d5e1edb74a898ca92d8530f9f3b08c9ed3daad2",
   "git_ignore": {
     "status": null
   },
   "git_status": {
     "alias": null,
-    "canonical": null,
+    "canonical": " M",
     "status": null
   },
   "managed_by": "roll-agents-md",
-  "notes": [
-    "Preserved server-first ownership, hidden tmux session model, authenticated localhost proxy, and recency semantics."
-  ],
+  "notes": [],
   "referenced_calibration_docs": [
     "docs/architecture.md",
     "docs/fileindex.md",
