@@ -1,5 +1,5 @@
 import type { NormalizedMessage } from '@agent-console/shared';
-import { normalizeComparableText, stableTextHash, uniqueBy } from '../lib/text.js';
+import { normalizeComparableText, uniqueBy } from '../lib/text.js';
 import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
 
 const LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
@@ -104,16 +104,6 @@ function comparableTextsMatch(a: ComparableMessage, b: ComparableMessage): boole
   return a.compact.includes(b.compact) || b.compact.includes(a.compact);
 }
 
-function comparableTextsMatchIgnoringTimestamp(a: ComparableMessage, b: ComparableMessage): boolean {
-  if (a.comparable === b.comparable) {
-    return true;
-  }
-
-  const minLength = Math.min(a.comparable.length, b.comparable.length);
-  return minLength >= CONTAINMENT_DUPLICATE_MIN_LENGTH
-    && (a.compact.includes(b.compact) || b.compact.includes(a.compact));
-}
-
 function comparableTimestampsAreNear(a: ComparableMessage, b: ComparableMessage): boolean {
   if (a.timestampMs === undefined || b.timestampMs === undefined) {
     return true;
@@ -169,87 +159,6 @@ function filterTranscriptBackedLiveMessages(
   return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
-function liveMessageRepeatsTranscriptContent(
-  liveMessage: NormalizedMessage,
-  transcriptMessages: NormalizedMessage[],
-): boolean {
-  if (liveMessage.role !== 'assistant' && liveMessage.role !== 'tool') {
-    return false;
-  }
-  const comparableLiveMessage = toComparableMessage(liveMessage);
-  if (!comparableLiveMessage) {
-    return false;
-  }
-  return transcriptMessages.some((transcriptMessage) => {
-    if (transcriptMessage.role !== liveMessage.role) {
-      return false;
-    }
-    const comparableTranscriptMessage = toComparableMessage(transcriptMessage);
-    return comparableTranscriptMessage
-      ? comparableTextsMatchIgnoringTimestamp(comparableLiveMessage, comparableTranscriptMessage)
-      : false;
-  });
-}
-
-function hasLaterNonTranscriptReplyInSamePendingTurn(
-  liveMessages: NormalizedMessage[],
-  startIndex: number,
-  transcriptMessages: NormalizedMessage[],
-  latestTranscriptMs: number | undefined,
-): boolean {
-  for (let index = startIndex + 1; index < liveMessages.length; index += 1) {
-    const message = liveMessages[index]!;
-    if (!isPendingAfterTranscript(message, latestTranscriptMs)) {
-      continue;
-    }
-    if (message.role === 'user' && message.source === 'user-input') {
-      return false;
-    }
-    if (
-      (message.role === 'assistant' || message.role === 'tool')
-      && !liveMessageRepeatsTranscriptContent(message, transcriptMessages)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function stripTranscriptBackedPrefixLines(
-  liveMessage: NormalizedMessage,
-  transcriptMessages: NormalizedMessage[],
-): NormalizedMessage {
-  if (liveMessage.role !== 'assistant' && liveMessage.role !== 'tool') {
-    return liveMessage;
-  }
-
-  const lines = liveMessage.text
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) {
-    return liveMessage;
-  }
-
-  let firstKeptLine = 0;
-  while (
-    firstKeptLine < lines.length
-    && liveMessageRepeatsTranscriptContent({ ...liveMessage, text: lines[firstKeptLine]! }, transcriptMessages)
-  ) {
-    firstKeptLine += 1;
-  }
-  if (firstKeptLine === 0 || firstKeptLine === lines.length) {
-    return liveMessage;
-  }
-
-  const text = lines.slice(firstKeptLine).join('\n');
-  return {
-    ...liveMessage,
-    id: stableTextHash(`${liveMessage.id}:transcript-prefix-stripped:${text}`),
-    text,
-  };
-}
-
 function latestMessageByTimestamp(messages: NormalizedMessage[]): NormalizedMessage | undefined {
   let latest: NormalizedMessage | undefined;
   let latestMs: number | undefined;
@@ -277,45 +186,16 @@ function isPendingAfterTranscript(message: NormalizedMessage, latestTranscriptMs
   return Number.isFinite(timestampMs) && timestampMs > latestTranscriptMs;
 }
 
-function filterPendingLiveMessagesAfterTranscript(
+function filterPendingLiveUserMessagesAfterTranscript(
   liveMessages: NormalizedMessage[],
-  transcriptMessages: NormalizedMessage[],
   latestTranscriptMessage: NormalizedMessage | undefined,
 ): NormalizedMessage[] {
   const latestTranscriptMs = latestTranscriptMessage ? Date.parse(latestTranscriptMessage.timestamp) : undefined;
-  const filtered: NormalizedMessage[] = [];
-  let hasPendingLiveTurn = latestTranscriptMessage?.role === 'user';
-  let hasUnbackedLiveUserTurn = false;
-
-  for (let index = 0; index < liveMessages.length; index += 1) {
-    const message = liveMessages[index]!;
-    if (!isPendingAfterTranscript(message, latestTranscriptMs)) {
-      continue;
-    }
-    if (message.role === 'user' && message.source === 'user-input') {
-      hasPendingLiveTurn = true;
-      hasUnbackedLiveUserTurn = true;
-      filtered.push(message);
-      continue;
-    }
-    if (
-      hasPendingLiveTurn
-      && !hasUnbackedLiveUserTurn
-      && liveMessageRepeatsTranscriptContent(message, transcriptMessages)
-      && hasLaterNonTranscriptReplyInSamePendingTurn(liveMessages, index, transcriptMessages, latestTranscriptMs)
-    ) {
-      continue;
-    }
-    if (hasPendingLiveTurn) {
-      filtered.push(
-        hasUnbackedLiveUserTurn
-          ? message
-          : stripTranscriptBackedPrefixLines(message, transcriptMessages),
-      );
-    }
-  }
-
-  return filtered;
+  return liveMessages.filter((message) => (
+    message.role === 'user'
+    && message.source === 'user-input'
+    && isPendingAfterTranscript(message, latestTranscriptMs)
+  ));
 }
 
 export function mergeTimelineMessages(input: {
@@ -343,7 +223,7 @@ export function mergeTimelineMessages(input: {
     [
       ...input.visibleMessages,
       ...(providerHasTranscript
-        ? filterPendingLiveMessagesAfterTranscript(liveMessagesNotInTranscript, input.visibleMessages, latestVisibleTranscriptMessage)
+        ? filterPendingLiveUserMessagesAfterTranscript(liveMessagesNotInTranscript, latestVisibleTranscriptMessage)
         : filterUserVisibleMessages(input.liveMessages)),
     ],
     (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,

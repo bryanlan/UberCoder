@@ -1165,13 +1165,8 @@ describe('conversation routes', () => {
       expect(texts).toContain('Continue with the implementation plan.');
       expect(texts.filter((text: string) => text === 'Continue with the implementation plan.')).toHaveLength(1);
       expect(texts).toContain('One more live follow-up.');
-      expect(texts).toContain('Fresh live-only follow-up.');
+      expect(texts).not.toContain('Fresh live-only follow-up.');
       expect(texts).not.toContain(liveTranscriptTail);
-      expect(response.json().messages.find((message: NormalizedMessage) => message.text === 'Fresh live-only follow-up.')).toMatchObject({
-        lifecycle: 'pending',
-        role: 'assistant',
-        source: 'live-output',
-      });
       expect(response.json().liveScreen.content).toBe('');
     } finally {
       await app.close();
@@ -1179,7 +1174,7 @@ describe('conversation routes', () => {
     }
   });
 
-  it('keeps repeated pending live output when provider history has only the submitted user turn', async () => {
+  it('keeps the transcript-backed submitted user turn without repeated raw-output assistant rows', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const userPrompt = 'Continue deployment checks.';
@@ -1327,15 +1322,10 @@ describe('conversation routes', () => {
         'Initial checklist.',
         repeatedReply,
         userPrompt,
-        repeatedReply,
       ]);
       expect(messages.filter((message) => message.text === userPrompt)).toHaveLength(1);
-      expect(messages.filter((message) => message.text === repeatedReply)).toHaveLength(2);
-      expect(messages.find((message) => message.text === repeatedReply && message.source === 'live-output')).toMatchObject({
-        lifecycle: 'pending',
-        role: 'assistant',
-        source: 'live-output',
-      });
+      expect(messages.filter((message) => message.text === repeatedReply)).toHaveLength(1);
+      expect(messages.find((message) => message.source === 'live-output')).toBeUndefined();
     } finally {
       await app.close();
       db.close();
@@ -1491,14 +1481,9 @@ describe('conversation routes', () => {
         'Initial checklist.',
         staleTranscriptReply,
         userPrompt,
-        'Pending streamed answer.',
       ]);
       expect(messages.filter((message) => message.text === staleTranscriptReply)).toHaveLength(1);
-      expect(messages.find((message) => message.text === 'Pending streamed answer.')).toMatchObject({
-        lifecycle: 'pending',
-        role: 'assistant',
-        source: 'live-output',
-      });
+      expect(messages.find((message) => message.text === 'Pending streamed answer.')).toBeUndefined();
     } finally {
       await app.close();
       db.close();
