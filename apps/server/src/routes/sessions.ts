@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { z } from 'zod';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
@@ -13,6 +13,9 @@ const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 
 const inputBodySchema = z.object({
   text: z.string().min(1),
+});
+const sessionParamsSchema = z.object({
+  sessionId: z.string().min(1),
 });
 const screenQuerySchema = z.object({
   lines: z.coerce.number().int().min(50).max(20000).optional(),
@@ -37,6 +40,15 @@ function sessionInputResponse(result: SessionCommandResult): SessionInputRespons
     session: result.session,
     recordedUserInput: result.recordedUserInput,
   };
+}
+
+function parseSessionId(params: unknown, reply: FastifyReply): string | undefined {
+  const parsed = sessionParamsSchema.safeParse(params);
+  if (!parsed.success) {
+    reply.code(400).send({ error: 'Invalid session route.', details: parsed.error.flatten() });
+    return undefined;
+  }
+  return parsed.data.sessionId;
 }
 
 async function restartFirstPendingCodexTurnIfNeeded(input: {
@@ -93,7 +105,10 @@ export async function registerSessionRoutes(
       reply.code(400).send({ error: 'Invalid input payload.', details: parsed.error.flatten() });
       return;
     }
-    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) {
+      return;
+    }
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       reply.code(404).send({ error: 'Session not found.' });
@@ -123,7 +138,10 @@ export async function registerSessionRoutes(
     } catch {
       return;
     }
-    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) {
+      return;
+    }
     await sessions.releaseSession(sessionId);
     reply.code(204).send();
   });
@@ -139,7 +157,10 @@ export async function registerSessionRoutes(
       reply.code(400).send({ error: 'Invalid screen query.', details: parsedQuery.error.flatten() });
       return;
     }
-    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) {
+      return;
+    }
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       reply.code(404).send({ error: 'Session not found.' });
@@ -161,7 +182,10 @@ export async function registerSessionRoutes(
     } catch {
       return;
     }
-    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) {
+      return;
+    }
     const session = sessions.getSessionById(sessionId);
     if (!session?.rawLogPath) {
       reply.code(404).send({ error: 'Session not found.' });
@@ -197,7 +221,10 @@ export async function registerSessionRoutes(
       reply.code(400).send({ error: 'Invalid keystroke payload.', details: parsed.error.flatten() });
       return;
     }
-    const sessionId = (request.params as { sessionId: string }).sessionId;
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) {
+      return;
+    }
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       reply.code(404).send({ error: 'Session not found.' });

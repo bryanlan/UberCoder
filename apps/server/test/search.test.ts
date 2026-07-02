@@ -347,6 +347,73 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('orders persisted and live results on the same term-count score scale', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-mixed-score-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const updatedAt = daysAgo(1);
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Please inspect the ranking test.', timestamp: updatedAt }),
+      JSON.stringify({ type: 'raw-output', text: 'scale needle scale needle scale needle scale needle', timestamp: updatedAt }),
+    ].join('\n'), 'utf8');
+
+    db.searchIndex.replace('demo', 'codex', [{
+      projectSlug: 'demo',
+      projectDisplayName: 'Demo Project',
+      projectPath: '/tmp/demo',
+      projectTags: [],
+      provider: 'codex',
+      conversationRef: 'persisted-weaker-score',
+      conversationKind: 'history',
+      conversationTitle: 'Persisted weaker score',
+      conversationUpdatedAt: updatedAt,
+      isBound: false,
+      messageId: 'persisted-score-message',
+      role: 'assistant',
+      timestamp: updatedAt,
+      text: 'scale needle',
+    }]);
+    db.pendingConversations.put({
+      ref: 'pending:live-stronger-score',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Live stronger score',
+      createdAt: updatedAt,
+      updatedAt,
+      isBound: true,
+      boundSessionId: 'session-live-stronger-score',
+      degraded: false,
+    });
+    db.boundSessions.upsert({
+      id: 'session-live-stronger-score',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:live-stronger-score',
+      tmuxSessionName: 'ac-codex-demo-live-stronger-score',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Live stronger score',
+      startedAt: updatedAt,
+      updatedAt,
+      lastActivityAt: updatedAt,
+      lastOutputAt: updatedAt,
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+    const results = await search.search('scale needle', 2);
+
+    expect(results.map((result) => result.conversationRef)).toEqual([
+      'pending:live-stronger-score',
+      'persisted-weaker-score',
+    ]);
+    expect(results[0]?.score).toBeGreaterThan(results[1]?.score ?? Number.POSITIVE_INFINITY);
+    db.close();
+  });
+
   it('does not search raw-output assistant chunks for transcript-backed sessions', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-history-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

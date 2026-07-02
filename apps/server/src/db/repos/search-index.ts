@@ -34,6 +34,38 @@ function conversationSearchRecencyBucketFromIndex(value: unknown): ConversationS
   return '60-plus-days';
 }
 
+function normalizedHaystack(text: string): string {
+  return text.toLocaleLowerCase();
+}
+
+function countMatches(text: string, term: string): number {
+  if (!term) return 0;
+  let count = 0;
+  let index = 0;
+  while (index < text.length) {
+    const found = text.indexOf(term, index);
+    if (found === -1) break;
+    count += 1;
+    index = found + Math.max(1, term.length);
+  }
+  return count;
+}
+
+function scorePersistedResult(input: {
+  title: string;
+  projectDisplayName: string;
+  text: string;
+  terms: string[];
+}): number {
+  const text = normalizedHaystack(input.text);
+  const title = normalizedHaystack(input.title);
+  const project = normalizedHaystack(input.projectDisplayName);
+  const textScore = input.terms.reduce((score, term) => score + countMatches(text, term), 0);
+  const titleScore = input.terms.reduce((score, term) => score + (title.includes(term) ? 3 : 0), 0);
+  const projectScore = input.terms.reduce((score, term) => score + (project.includes(term) ? 2 : 0), 0);
+  return textScore + titleScore + projectScore;
+}
+
 export class SearchIndexRepo {
   constructor(private readonly sqlite: Database.Database) {}
 
@@ -110,7 +142,7 @@ export class SearchIndexRepo {
     `).run(input.displayName, input.path, input.tags.join(' '), input.projectSlug);
   }
 
-  search(ftsQuery: string, limit: number, options: { projectSlugs?: string[]; now?: string } = {}): ConversationSearchResult[] {
+  search(ftsQuery: string, limit: number, options: { projectSlugs?: string[]; now?: string; terms?: string[] } = {}): ConversationSearchResult[] {
     const projectSlugs = options.projectSlugs;
     if (projectSlugs && projectSlugs.length === 0) {
       return [];
@@ -167,6 +199,7 @@ export class SearchIndexRepo {
         ranked_matches.role,
         ranked_matches.timestamp,
         ranked_matches.recency_bucket,
+        conversation_search_fts.text as matched_text,
         snippet(conversation_search_fts, 3, '', '', ' ... ', 40) as snippet,
         ranked_matches.rank,
         bs.id as bound_session_id
@@ -207,7 +240,14 @@ export class SearchIndexRepo {
       role: row.role === 'user' ? 'user' : 'assistant',
       timestamp: String(row.timestamp),
       snippet: String(row.snippet ?? ''),
-      score: -Number(row.rank ?? 0) * 1_000_000,
+      score: options.terms?.length
+        ? scorePersistedResult({
+          title: String(row.conversation_title),
+          projectDisplayName: String(row.project_display_name),
+          text: String(row.matched_text ?? ''),
+          terms: options.terms,
+        })
+        : 0,
       recencyBucket: conversationSearchRecencyBucketFromIndex(row.recency_bucket),
     }));
   }

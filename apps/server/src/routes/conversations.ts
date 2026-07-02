@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type ProviderId, type SessionScreen } from '@agent-console/shared';
-import type { FastifyInstance } from 'fastify';
+import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type SessionScreen } from '@agent-console/shared';
+import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
@@ -15,6 +15,13 @@ import { nowIso } from '../lib/time.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
 
 const providerSchema = z.enum(PROVIDERS);
+const projectProviderParamsSchema = z.object({
+  projectSlug: z.string().min(1),
+  provider: providerSchema,
+});
+const conversationParamsSchema = projectProviderParamsSchema.extend({
+  conversationRef: z.string().min(1),
+});
 const bindConversationBodySchema = z.object({
   force: z.boolean().optional(),
   initialPrompt: z.string().trim().min(1).optional(),
@@ -28,14 +35,31 @@ const timelineQuerySchema = z.object({
 });
 const LIVE_EVENT_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 
+type ProjectProviderParams = z.infer<typeof projectProviderParamsSchema>;
+type ConversationParams = z.infer<typeof conversationParamsSchema>;
+
 interface MessagePaginationOptions<T> {
   before?: number;
   limit?: number;
   samePageRun?: (previous: T, next: T) => boolean;
 }
 
-function parseProvider(raw: string): ProviderId {
-  return providerSchema.parse(raw);
+function parseProjectProviderParams(params: unknown, reply: FastifyReply): ProjectProviderParams | undefined {
+  const parsed = projectProviderParamsSchema.safeParse(params);
+  if (!parsed.success) {
+    reply.code(400).send({ error: 'Invalid conversation route.', details: parsed.error.flatten() });
+    return undefined;
+  }
+  return parsed.data;
+}
+
+function parseConversationParams(params: unknown, reply: FastifyReply): ConversationParams | undefined {
+  const parsed = conversationParamsSchema.safeParse(params);
+  if (!parsed.success) {
+    reply.code(400).send({ error: 'Invalid conversation route.', details: parsed.error.flatten() });
+    return undefined;
+  }
+  return parsed.data;
 }
 
 function resolveAdoptedConversationRef(summary: ConversationSummary | undefined): string | undefined {
@@ -137,13 +161,16 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
-    const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
+    const parsedParams = parseConversationParams(request.params, reply);
+    if (!parsedParams) {
+      return;
+    }
+    const { projectSlug, provider: providerId, conversationRef } = parsedParams;
     const parsedQuery = timelineQuerySchema.safeParse(request.query ?? {});
     if (!parsedQuery.success) {
       reply.code(400).send({ error: 'Invalid timeline query.', details: parsedQuery.error.flatten() });
       return;
     }
-    const providerId = parseProvider(providerRaw);
     const metadataOnly = parsedQuery.data.limit === 0;
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
@@ -246,8 +273,11 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
-    const { projectSlug, provider: providerRaw } = request.params as { projectSlug: string; provider: string };
-    const providerId = parseProvider(providerRaw);
+    const parsedParams = parseProjectProviderParams(request.params, reply);
+    if (!parsedParams) {
+      return;
+    }
+    const { projectSlug, provider: providerId } = parsedParams;
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
       reply.code(404).send({ error: 'Project not found.' });
@@ -320,8 +350,11 @@ export async function registerConversationRoutes(
       reply.code(400).send({ error: 'Invalid bind payload.', details: parsedBody.error.flatten() });
       return;
     }
-    const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
-    const providerId = parseProvider(providerRaw);
+    const parsedParams = parseConversationParams(request.params, reply);
+    if (!parsedParams) {
+      return;
+    }
+    const { projectSlug, provider: providerId, conversationRef } = parsedParams;
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
       reply.code(404).send({ error: 'Project not found.' });
@@ -395,8 +428,11 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
-    const { projectSlug, provider: providerRaw, conversationRef } = request.params as { projectSlug: string; provider: string; conversationRef: string };
-    const providerId = parseProvider(providerRaw);
+    const parsedParams = parseConversationParams(request.params, reply);
+    if (!parsedParams) {
+      return;
+    }
+    const { projectSlug, provider: providerId, conversationRef } = parsedParams;
     const parsedBody = renameConversationBodySchema.safeParse(request.body);
     if (!parsedBody.success) {
       reply.code(400).send({ error: 'Invalid conversation title.', details: parsedBody.error.flatten() });

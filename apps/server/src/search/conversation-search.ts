@@ -271,12 +271,14 @@ export class ConversationSearchService {
     if (!ftsQuery) {
       return [];
     }
+    const terms = tokenizeSearchQuery(query);
 
     const activeProjects = await this.projectService.listActiveProjects();
     const now = new Date();
     const persistedResults = this.db.searchIndex.search(ftsQuery, limit * SEARCH_RESULT_MULTIPLIER, {
       projectSlugs: activeProjects.map((project) => project.slug),
       now: now.toISOString(),
+      terms,
     });
     const liveResults = await this.searchLiveSessions(query, activeProjects, now.getTime());
     return mergePersistedAndLiveResults(persistedResults, liveResults, limit);
