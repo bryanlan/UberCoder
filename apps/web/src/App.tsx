@@ -18,18 +18,23 @@ import type {
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
-import { useConversationDataController, resetTimelineHistoryQuery } from './features/conversation/useConversationDataController';
+import {
+  conversationMetaQueryKey,
+  invalidateConversationData,
+  invalidateTimelineMessages,
+  timelineMessagesQueryKey,
+  useConversationData,
+} from './features/conversation/useConversationData';
 import { applySessionEvent } from './features/realtime/apply-session-event';
 import { useRealtimeConnection } from './features/realtime/connection';
 import {
   applySessionUpdateToTimeline,
   applySessionUpdateToTree,
-  appendTimelineHistoryMessage,
-  appendTimelineMessage,
+  appendTimelineMessagesMessage,
   buildLiveUserMessage,
-  removeTimelineHistoryMessage,
-  removeTimelineMessage,
-  type TimelineHistoryData,
+  removeTimelineMessagesMessage,
+  replaceTimelineMessagesMessage,
+  type TimelineMessagesData,
 } from './features/realtime/reducers';
 import { LoginPage } from './pages/LoginPage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -62,6 +67,12 @@ const defaultUiPreferences: UiPreferences = {
   },
 };
 const LIVE_MESSAGE_REFRESH_THROTTLE_MS = 3000;
+
+interface OptimisticSubmittedMessageRef {
+  id: string;
+  conversationRef: string;
+}
+
 function AppShell() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -118,7 +129,7 @@ function AppShell() {
     conversationKey,
     historyPrependVersion,
     tailKey,
-  } = useConversationDataController({
+  } = useConversationData({
     authenticated: authQuery.data?.authenticated,
     selectedProjectSlug,
     selectedProvider,
@@ -166,10 +177,7 @@ function AppShell() {
 
     const timer = window.setTimeout(() => {
       liveMessageRefreshTimersRef.current.delete(key);
-      void queryClient.resetQueries({
-        queryKey: ['timeline-history', projectSlug, provider, conversationRef],
-        exact: true,
-      });
+      invalidateTimelineMessages(queryClient, projectSlug, provider, conversationRef);
     }, LIVE_MESSAGE_REFRESH_THROTTLE_MS);
     liveMessageRefreshTimersRef.current.set(key, timer);
   }, [queryClient]);
@@ -182,15 +190,10 @@ function AppShell() {
   }
 
   function appendMessageToConversationCache(input: { projectSlug: string; provider: ProviderId; conversationRef: string; message: NormalizedMessage }): void {
-    queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', input.projectSlug, input.provider, input.conversationRef],
-      (current) => appendTimelineMessage(current, input.message),
-    );
-
-    queryClient.setQueryData<TimelineHistoryData | undefined>(
-      ['timeline-history', input.projectSlug, input.provider, input.conversationRef],
+    queryClient.setQueryData<TimelineMessagesData | undefined>(
+      timelineMessagesQueryKey(input.projectSlug, input.provider, input.conversationRef),
       (current) => {
-        const appended = appendTimelineHistoryMessage(current, input.message);
+        const appended = appendTimelineMessagesMessage(current, input.message);
         if (appended) {
           return appended;
         }
@@ -215,18 +218,41 @@ function AppShell() {
   }
 
   function removeMessageFromConversationCache(input: { projectSlug: string; provider: ProviderId; conversationRef: string; messageId: string }): void {
-    queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', input.projectSlug, input.provider, input.conversationRef],
-      (current) => removeTimelineMessage(current, input.messageId),
-    );
-
-    queryClient.setQueryData<TimelineHistoryData | undefined>(
-      ['timeline-history', input.projectSlug, input.provider, input.conversationRef],
-      (current) => removeTimelineHistoryMessage(current, input.messageId),
+    queryClient.setQueryData<TimelineMessagesData | undefined>(
+      timelineMessagesQueryKey(input.projectSlug, input.provider, input.conversationRef),
+      (current) => removeTimelineMessagesMessage(current, input.messageId),
     );
   }
 
-  function appendSelectedSubmittedText(input: { sessionId: string; text: string; timestamp?: string; optimistic?: boolean }): NormalizedMessage | undefined {
+  function replaceOptimisticSubmittedText(input: {
+    session: BoundSession;
+    recordedUserInput: RecordedUserInput;
+    optimisticMessage: OptimisticSubmittedMessageRef;
+  }): boolean {
+    let updated = false;
+    queryClient.setQueryData<TimelineMessagesData | undefined>(
+      timelineMessagesQueryKey(input.session.projectSlug, input.session.provider, input.session.conversationRef),
+      (current) => {
+        const next = replaceTimelineMessagesMessage(current, {
+          replaceMessageId: input.optimisticMessage.id,
+          message: buildLiveUserMessage({
+            sessionId: input.session.id,
+            projectSlug: input.session.projectSlug,
+            provider: input.session.provider,
+            conversationRef: input.session.conversationRef,
+            messageId: input.recordedUserInput.id,
+            text: input.recordedUserInput.text,
+            timestamp: input.recordedUserInput.timestamp,
+          }),
+        });
+        updated = Boolean(next);
+        return next;
+      },
+    );
+    return updated;
+  }
+
+  function appendSelectedSubmittedText(input: { sessionId: string; text: string; timestamp?: string; optimisticNonce?: string; optimistic?: boolean }): NormalizedMessage | undefined {
     if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
       return undefined;
     }
@@ -241,6 +267,7 @@ function AppShell() {
       conversationRef: selectedConversationRef,
       text,
       timestamp: input.timestamp ?? new Date().toISOString(),
+      optimisticNonce: input.optimisticNonce,
       optimistic: input.optimistic,
     });
     appendMessageToConversationCache({
@@ -252,19 +279,51 @@ function AppShell() {
     return message;
   }
 
+  function appendLocalSubmittedText(sessionId: string, text: string): OptimisticSubmittedMessageRef | undefined {
+    const message = appendSelectedSubmittedText({
+      sessionId,
+      text,
+      optimisticNonce: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}:${Math.random()}`,
+      optimistic: true,
+    });
+    return message ? { id: message.id, conversationRef: message.conversationRef } : undefined;
+  }
+
+  function discardSelectedSubmittedMessage(messageId: string): void {
+    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
+      return;
+    }
+    removeMessageFromConversationCache({
+      projectSlug: selectedProjectSlug,
+      provider: selectedProvider,
+      conversationRef: selectedConversationRef,
+      messageId,
+    });
+  }
+
   function appendRecordedSubmittedText(input: {
     session: BoundSession;
     recordedUserInput: RecordedUserInput;
-    optimisticMessage?: NormalizedMessage;
+    optimisticMessage?: OptimisticSubmittedMessageRef;
   }): void {
     const conversationRef = input.session.conversationRef;
     if (input.optimisticMessage) {
-      removeMessageFromConversationCache({
-        projectSlug: input.session.projectSlug,
-        provider: input.session.provider,
-        conversationRef,
-        messageId: input.optimisticMessage.id,
+      if (input.optimisticMessage.conversationRef !== conversationRef) {
+        removeMessageFromConversationCache({
+          projectSlug: input.session.projectSlug,
+          provider: input.session.provider,
+          conversationRef: input.optimisticMessage.conversationRef,
+          messageId: input.optimisticMessage.id,
+        });
+      }
+      const replaced = replaceOptimisticSubmittedText({
+        session: input.session,
+        recordedUserInput: input.recordedUserInput,
+        optimisticMessage: input.optimisticMessage,
       });
+      if (replaced) {
+        return;
+      }
     }
     appendMessageToConversationCache({
       projectSlug: input.session.projectSlug,
@@ -365,8 +424,7 @@ function AppShell() {
     onSuccess: () => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
-      queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+      invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     },
   });
 
@@ -376,8 +434,7 @@ function AppShell() {
     onSuccess: (_result, variables) => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
-      queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
-      resetTimelineHistoryQuery(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
+      invalidateConversationData(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
       navigate(`/projects/${encodeURIComponent(variables.projectSlug)}/${variables.provider}/${encodeURIComponent(variables.conversationRef)}`);
       closeSidebarIfMobile();
     },
@@ -427,18 +484,17 @@ function AppShell() {
         };
       });
       queryClient.setQueryData<ConversationTimeline | undefined>(
-        ['timeline', variables.projectSlug, variables.provider, variables.conversationRef],
+        conversationMetaQueryKey(variables.projectSlug, variables.provider, variables.conversationRef),
         (current) => current ? { ...current, conversation: { ...current.conversation, title: conversation.title } } : current,
       );
       if (conversation.ref !== variables.conversationRef) {
         queryClient.setQueryData<ConversationTimeline | undefined>(
-          ['timeline', variables.projectSlug, variables.provider, conversation.ref],
+          conversationMetaQueryKey(variables.projectSlug, variables.provider, conversation.ref),
           (current) => current ? { ...current, conversation: { ...current.conversation, title: conversation.title } } : current,
         );
       }
       queryClient.invalidateQueries({ queryKey: ['tree'] });
-      queryClient.invalidateQueries({ queryKey: ['timeline', variables.projectSlug, variables.provider, variables.conversationRef] });
-      resetTimelineHistoryQuery(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
+      invalidateConversationData(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
     },
     onSettled: () => {
       setRenamingConversationKey(undefined);
@@ -496,8 +552,7 @@ function AppShell() {
     onSuccess: () => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
-      queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-      resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+      invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     },
   });
 
@@ -561,7 +616,7 @@ function AppShell() {
   ): void {
     if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
       queryClient.setQueryData<ConversationTimeline | undefined>(
-        ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+        conversationMetaQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
         (current) => current?.boundSession?.id === sessionId
           ? {
               ...current,
@@ -573,8 +628,7 @@ function AppShell() {
           : current,
       );
       if (options.refreshTimeline) {
-        void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-        resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+        invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
       }
     }
     if (debugOpen && sessionId === timeline?.boundSession?.id) {
@@ -600,7 +654,7 @@ function AppShell() {
 
     queryClient.setQueryData(['tree'], (current: TreeResponse | undefined) => applySessionUpdateToTree(current, session));
     queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
+      conversationMetaQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
       (current) => current
         ? {
             ...current,
@@ -614,8 +668,7 @@ function AppShell() {
         : current,
     );
     void queryClient.invalidateQueries({ queryKey: ['tree'] });
-    void queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-    resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+    invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
     return session;
   }
 
@@ -623,10 +676,13 @@ function AppShell() {
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
     const optimisticSubmittedText = optimisticSubmittedTextForKeystrokes(body);
-    const optimisticMessage = optimisticSubmittedText
+    const optimisticMessage: OptimisticSubmittedMessageRef | undefined = optimisticSubmittedText && body.clientOptimisticMessageId && selectedConversationRef
+      ? { id: body.clientOptimisticMessageId, conversationRef: selectedConversationRef }
+      : optimisticSubmittedText
       ? appendSelectedSubmittedText({
           sessionId,
           text: optimisticSubmittedText,
+          optimisticNonce: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}:${Math.random()}`,
           optimistic: true,
         })
       : undefined;
@@ -952,6 +1008,8 @@ function AppShell() {
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSendKeystrokes={handleSendKeystrokes}
+              onLocalSubmittedText={appendLocalSubmittedText}
+              onDiscardLocalSubmittedText={discardSelectedSubmittedMessage}
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
               debugOpen={debugOpen}

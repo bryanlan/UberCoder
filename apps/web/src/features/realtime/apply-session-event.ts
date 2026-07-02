@@ -1,6 +1,10 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { ConversationTimeline, NormalizedMessage, ProviderId, SessionEvent, TreeResponse } from '@agent-console/shared';
-import { resetTimelineHistoryQuery } from '../conversation/useConversationDataController';
+import {
+  conversationMetaQueryKey,
+  invalidateConversationData,
+  timelineMessagesQueryKey,
+} from '../conversation/useConversationData';
 import {
   applySessionActivityToTimeline,
   applySessionActivityToTree,
@@ -50,10 +54,7 @@ function invalidateSelectedTimeline(context: ApplySessionEventContext): void {
   if (!hasSelectedConversation(context)) {
     return;
   }
-  context.queryClient.invalidateQueries({
-    queryKey: ['timeline', context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef],
-  });
-  resetTimelineHistoryQuery(
+  invalidateConversationData(
     context.queryClient,
     context.selectedProjectSlug,
     context.selectedProvider,
@@ -69,7 +70,7 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
   if (event.type === 'session.screen-updated') {
     if (eventTargetsSelectedConversation(context, event) && hasSelectedConversation(context)) {
       void context.queryClient.invalidateQueries({
-        queryKey: ['timeline', context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef],
+        queryKey: conversationMetaQueryKey(context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef),
       });
     }
     return;
@@ -82,7 +83,7 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
       (current) => applySessionActivityToTree(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
     );
     context.queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', event.projectSlug, event.provider, event.conversationRef],
+      conversationMetaQueryKey(event.projectSlug, event.provider, event.conversationRef),
       (current) => applySessionActivityToTimeline(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
     );
     if (event.sessionId === context.timelineBoundSessionId && context.debugOpen) {
@@ -104,7 +105,7 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
       (current) => applySessionActivityToTree(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
     );
     context.queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', event.projectSlug, event.provider, event.conversationRef],
+      conversationMetaQueryKey(event.projectSlug, event.provider, event.conversationRef),
       (current) => applySessionActivityToTimeline(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
     );
     context.appendMessageToConversationCache({
@@ -130,14 +131,20 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
       (current) => applySessionUpdateToTree(current, event.session),
     );
     context.queryClient.setQueryData<ConversationTimeline | undefined>(
-      ['timeline', event.session.projectSlug, event.session.provider, event.session.conversationRef],
+      conversationMetaQueryKey(event.session.projectSlug, event.session.provider, event.session.conversationRef),
       (current) => applySessionUpdateToTimeline(current, event.session),
     );
     if (hasSelectedConversation(context)) {
       context.queryClient.setQueryData<ConversationTimeline | undefined>(
-        ['timeline', context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef],
+        conversationMetaQueryKey(context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef),
         (current) => applySessionUpdateToTimeline(current, event.session),
       );
+      if (eventTargetsSelectedConversation(context, { ...event.session, sessionId: event.session.id })) {
+        void context.queryClient.invalidateQueries({
+          queryKey: timelineMessagesQueryKey(context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef),
+          exact: true,
+        });
+      }
     }
     return;
   }

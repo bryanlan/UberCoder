@@ -26,6 +26,7 @@ const keystrokeBodySchema = z.object({
   keys: z.array(keystrokeKeySchema).min(1).optional(),
   deferScreenUpdate: z.boolean().optional(),
   submittedText: z.string().min(1).optional(),
+  clientOptimisticMessageId: z.string().min(1).optional(),
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
 });

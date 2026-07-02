@@ -8,8 +8,6 @@ import type {
   TreeResponse,
 } from '@agent-console/shared';
 
-const OPTIMISTIC_MESSAGE_DUPLICATE_WINDOW_MS = 15_000;
-
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
 }
@@ -195,28 +193,6 @@ export function applySessionActivityToTimeline(
   };
 }
 
-function messageTimestampMs(message: NormalizedMessage): number | undefined {
-  const parsed = Date.parse(message.timestamp);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function messagesRepresentSameTimelineEntry(a: NormalizedMessage, b: NormalizedMessage): boolean {
-  if (a.id === b.id) {
-    return true;
-  }
-  if (a.role !== b.role || a.text.trim() !== b.text.trim()) {
-    return false;
-  }
-  if (a.source !== b.source && a.rawMetadata?.optimistic !== true && b.rawMetadata?.optimistic !== true) {
-    return false;
-  }
-  const aMs = messageTimestampMs(a);
-  const bMs = messageTimestampMs(b);
-  return aMs !== undefined
-    && bMs !== undefined
-    && Math.abs(aMs - bMs) <= OPTIMISTIC_MESSAGE_DUPLICATE_WINDOW_MS;
-}
-
 function preferTimelineMessage(existing: NormalizedMessage, candidate: NormalizedMessage): NormalizedMessage {
   if (existing.rawMetadata?.optimistic === true && candidate.rawMetadata?.optimistic !== true) {
     return candidate;
@@ -225,7 +201,7 @@ function preferTimelineMessage(existing: NormalizedMessage, candidate: Normalize
 }
 
 export function mergeTimelineMessage(messages: NormalizedMessage[], message: NormalizedMessage): NormalizedMessage[] {
-  const duplicateIndex = messages.findIndex((existing) => messagesRepresentSameTimelineEntry(existing, message));
+  const duplicateIndex = messages.findIndex((existing) => existing.id === message.id);
   if (duplicateIndex !== -1) {
     const next = [...messages];
     next[duplicateIndex] = preferTimelineMessage(next[duplicateIndex]!, message);
@@ -233,6 +209,27 @@ export function mergeTimelineMessage(messages: NormalizedMessage[], message: Nor
   }
 
   return [...messages, message].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+export function replaceTimelineMessage(
+  current: ConversationTimeline | undefined,
+  input: { replaceMessageId: string; message: NormalizedMessage },
+): ConversationTimeline | undefined {
+  if (!current) {
+    return current;
+  }
+  const withoutReplaced = current.messages.filter((message) => message.id !== input.replaceMessageId);
+  const messages = mergeTimelineMessage(withoutReplaced, input.message);
+  return {
+    ...current,
+    messages,
+    messagePage: current.messagePage
+      ? {
+          ...current.messagePage,
+          total: Math.max(current.messagePage.total, messages.length),
+        }
+      : current.messagePage,
+  };
 }
 
 export function appendTimelineMessage(
@@ -278,12 +275,12 @@ export function removeTimelineMessage(
   };
 }
 
-export type TimelineHistoryData = InfiniteData<ConversationTimeline, number | undefined>;
+export type TimelineMessagesData = InfiniteData<ConversationTimeline, number | undefined>;
 
-export function appendTimelineHistoryMessage(
-  current: TimelineHistoryData | undefined,
+export function appendTimelineMessagesMessage(
+  current: TimelineMessagesData | undefined,
   message: NormalizedMessage,
-): TimelineHistoryData | undefined {
+): TimelineMessagesData | undefined {
   if (!current?.pages.length) {
     return current;
   }
@@ -299,10 +296,29 @@ export function appendTimelineHistoryMessage(
   };
 }
 
-export function removeTimelineHistoryMessage(
-  current: TimelineHistoryData | undefined,
+export function replaceTimelineMessagesMessage(
+  current: TimelineMessagesData | undefined,
+  input: { replaceMessageId: string; message: NormalizedMessage },
+): TimelineMessagesData | undefined {
+  if (!current?.pages.length) {
+    return current;
+  }
+  const pages = [...current.pages];
+  const newestPage = pages[0];
+  if (!newestPage) {
+    return current;
+  }
+  pages[0] = replaceTimelineMessage(newestPage, input) ?? newestPage;
+  return {
+    ...current,
+    pages,
+  };
+}
+
+export function removeTimelineMessagesMessage(
+  current: TimelineMessagesData | undefined,
   messageId: string,
-): TimelineHistoryData | undefined {
+): TimelineMessagesData | undefined {
   if (!current?.pages.length) {
     return current;
   }
@@ -323,12 +339,16 @@ export function buildLiveUserMessage(input: {
   provider: ProviderId;
   conversationRef: string;
   messageId?: string;
+  optimisticNonce?: string;
   text: string;
   timestamp: string;
   optimistic?: boolean;
 }): NormalizedMessage {
+  const id = input.messageId
+    ?? (input.optimisticNonce ? `optimistic:${input.sessionId}:${input.optimisticNonce}` : undefined)
+    ?? `${input.optimistic ? 'optimistic' : 'live'}:${input.sessionId}:${input.timestamp}:user:${input.text}`;
   return {
-    id: input.messageId ?? `${input.optimistic ? 'optimistic' : 'live'}:${input.sessionId}:${input.timestamp}:user:${input.text}`,
+    id,
     provider: input.provider,
     role: 'user',
     lifecycle: 'durable',
@@ -336,6 +356,6 @@ export function buildLiveUserMessage(input: {
     timestamp: input.timestamp,
     conversationRef: input.conversationRef,
     source: 'user-input',
-    rawMetadata: input.optimistic ? { optimistic: true } : undefined,
+    rawMetadata: input.optimistic ? { optimistic: true, optimisticNonce: input.optimisticNonce } : undefined,
   };
 }

@@ -791,6 +791,8 @@ function LiveSessionInputBridge({
   provider,
   inputText,
   onSendKeystrokes,
+  onLocalSubmittedText,
+  onDiscardLocalSubmittedText,
   compact,
   mobileCollapsible,
   bridgeOpen,
@@ -808,6 +810,8 @@ function LiveSessionInputBridge({
   provider: ConversationTimeline['conversation']['provider'];
   inputText: string;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
+  onDiscardLocalSubmittedText: (messageId: string) => void;
   compact: boolean;
   mobileCollapsible: boolean;
   bridgeOpen: boolean;
@@ -1024,6 +1028,11 @@ function LiveSessionInputBridge({
     const baseText = committedInputRef.current;
     const nextText = draftText;
     const submittedText = extraKeys.includes('Enter') ? nextText.trim() : '';
+    const clearImmediately = options.clearAfterSend === true;
+    if (clearImmediately) {
+      setDraftText('');
+      setDraftDirty(false);
+    }
     let prefixLength = 0;
     while (prefixLength < baseText.length && prefixLength < nextText.length && baseText[prefixLength] === nextText[prefixLength]) {
       prefixLength += 1;
@@ -1034,6 +1043,10 @@ function LiveSessionInputBridge({
     if (backspaces > 0) {
       const ok = await queueKeystrokes({ keys: Array.from({ length: backspaces }, () => 'BSpace' as const) });
       if (!ok) {
+        if (clearImmediately) {
+          setDraftText(nextText);
+          setDraftDirty(true);
+        }
         return false;
       }
     }
@@ -1045,14 +1058,17 @@ function LiveSessionInputBridge({
         ...(submittedText ? { submittedText } : {}),
       });
       if (!ok) {
+        if (clearImmediately) {
+          setDraftText(nextText);
+          setDraftDirty(true);
+        }
         return false;
       }
     }
 
     committedInputRef.current = options.clearAfterSend ? '' : nextText;
-    setDraftDirty(false);
-    if (options.clearAfterSend) {
-      setDraftText('');
+    if (!clearImmediately) {
+      setDraftDirty(false);
     }
     return true;
   }
@@ -1117,24 +1133,42 @@ function LiveSessionInputBridge({
     setBypassPreviewText((current) => ((current ?? '') === expectedPreview ? previewBeforeSubmit : current));
   }
 
+  async function submitTextBypassEnter(): Promise<void> {
+    await runBridgeAction(async () => {
+      const submittedText = (bypassPreviewText ?? inputText).trim();
+      keepBypassSelectionPinnedRef.current = true;
+      const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
+      const optimisticMessage = submittedText ? onLocalSubmittedText(sessionId, submittedText) : undefined;
+      const restore = () => {
+        restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
+        if (optimisticMessage) {
+          onDiscardLocalSubmittedText(optimisticMessage.id);
+        }
+      };
+
+      const flushed = await flushBufferedText();
+      if (!flushed) {
+        restore();
+        return;
+      }
+      const submitted = await queueKeystrokes({
+        keys: ['Enter'],
+        ...(submittedText ? {
+          submittedText,
+          ...(optimisticMessage ? { clientOptimisticMessageId: optimisticMessage.id } : {}),
+        } : {}),
+      });
+      if (!submitted) {
+        restore();
+      }
+    });
+  }
+
   async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
     if (source === 'button') {
       if (specialKey === 'Enter') {
         if (textBypassEnabled) {
-          const submittedText = (bypassPreviewText ?? inputText).trim();
-          const ok = await flushBufferedText();
-          if (!ok) {
-            return;
-          }
-          keepBypassSelectionPinnedRef.current = true;
-          const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
-          const submitted = await queueKeystrokes({
-            keys: ['Enter'],
-            ...(submittedText ? { submittedText } : {}),
-          });
-          if (!submitted) {
-            restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
-          }
+          await submitTextBypassEnter();
           return;
         }
         await runBridgeAction(async () => {
@@ -1181,24 +1215,16 @@ function LiveSessionInputBridge({
 
     if (textBypassEnabled) {
       const submittedText = specialKey === 'Enter' ? (bypassPreviewText ?? inputText).trim() : '';
+      if (specialKey === 'Enter') {
+        await submitTextBypassEnter();
+        return;
+      }
       const ok = await flushBufferedText();
       if (!ok) {
         return;
       }
       keepBypassSelectionPinnedRef.current = true;
-      if (specialKey === 'Enter') {
-        const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
-        const submitted = await queueKeystrokes({
-          keys: [specialKey],
-          ...(submittedText ? { submittedText } : {}),
-        });
-        if (!submitted) {
-          restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
-        }
-        return;
-      } else {
-        setBypassPreviewText(undefined);
-      }
+      setBypassPreviewText(undefined);
       enqueueKeystrokes({
         keys: [specialKey],
         ...(submittedText ? { submittedText } : {}),
@@ -1581,6 +1607,8 @@ interface ConversationPaneProps {
   onBind: () => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
+  onDiscardLocalSubmittedText: (messageId: string) => void;
   binding: boolean;
   releasing: boolean;
   debugOpen: boolean;
@@ -1610,6 +1638,8 @@ export function ConversationPane({
   onBind,
   onRelease,
   onSendKeystrokes,
+  onLocalSubmittedText,
+  onDiscardLocalSubmittedText,
   binding,
   releasing,
   debugOpen,
@@ -1880,6 +1910,8 @@ export function ConversationPane({
           provider={timeline.conversation.provider}
           inputText={liveScreen?.inputText ?? ''}
           onSendKeystrokes={onSendKeystrokes}
+          onLocalSubmittedText={onLocalSubmittedText}
+          onDiscardLocalSubmittedText={onDiscardLocalSubmittedText}
           compact={compactLiveLayout}
           mobileCollapsible={isMobile}
           bridgeOpen={mobileBridgeOpen}

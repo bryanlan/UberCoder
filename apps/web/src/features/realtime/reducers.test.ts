@@ -8,6 +8,7 @@ import {
   appendTimelineMessage,
   buildLiveUserMessage,
   removeTimelineMessage,
+  replaceTimelineMessage,
 } from './reducers';
 
 const baseTime = '2026-03-07T00:00:00.000Z';
@@ -156,7 +157,7 @@ describe('realtime reducers', () => {
     });
   });
 
-  it('replaces nearby optimistic user text with the recorded message', () => {
+  it('does not merge nearby user text without a stable id match', () => {
     const optimistic = message({
       id: 'optimistic:session-1',
       text: 'recap where we left things',
@@ -170,6 +171,28 @@ describe('realtime reducers', () => {
     });
 
     const updated = appendTimelineMessage(conversationTimeline({ messages: [optimistic] }), recorded);
+
+    expect(updated?.messages.map((item) => item.id)).toEqual(['optimistic:session-1', 'live:session-1:120']);
+    expect(updated?.messagePage?.total).toBe(2);
+  });
+
+  it('replaces optimistic user text only through the recorded id swap', () => {
+    const optimistic = message({
+      id: 'optimistic:session-1:nonce-1',
+      text: 'recap where we left things',
+      timestamp: baseTime,
+      rawMetadata: { optimistic: true, optimisticNonce: 'nonce-1' },
+    });
+    const recorded = message({
+      id: 'live:session-1:120',
+      text: 'recap where we left things',
+      timestamp: '2026-03-07T00:00:02.000Z',
+    });
+
+    const updated = replaceTimelineMessage(
+      conversationTimeline({ messages: [optimistic] }),
+      { replaceMessageId: optimistic.id, message: recorded },
+    );
 
     expect(updated?.messages).toHaveLength(1);
     expect(updated?.messages[0]).toMatchObject({ id: 'live:session-1:120' });

@@ -171,6 +171,7 @@ export interface SessionKeystrokeRequest {
   keys?: string[];
   deferScreenUpdate?: boolean;
   submittedText?: string;
+  clientOptimisticMessageId?: string;
 }
 
 export interface LoginRequest {
