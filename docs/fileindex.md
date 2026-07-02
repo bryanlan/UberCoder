@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e
-current_through_date: 2026-06-30T08:48:06-04:00
+current_through_commit: 0c9740c7084267c0e219521b7099107d105675a0
+current_through_date: 2026-07-01T20:55:18-04:00
 ---
 
 # File Index
@@ -23,9 +23,11 @@ current_through_date: 2026-06-30T08:48:06-04:00
 - `apps/server/src/providers/` - Codex/Claude adapters and transcript normalization.
 - `apps/server/test/` - Vitest coverage for server routes, providers, sessions, live output, and
   indexing behavior.
-- `apps/web/src/features/conversation/` - client-side conversation data fetching and timeline
-  refresh controller.
-- `apps/web/src/components/` - sidebar, conversation pane, and app-level UI components.
+- `apps/web/src/features/conversation/` - client-side conversation data fetching, scroll control,
+  transcript grouping/rendering, markdown rendering, and explorer panes.
+- `apps/web/src/features/navigation/` - route selection and sidebar project derivation.
+- `apps/web/src/features/realtime/` - EventSource connection and cache reducers for live session events.
+- `apps/web/src/components/` - sidebar, conversation pane shell, and app-level UI components.
 - `apps/web/e2e/` - Playwright browser coverage for settings and explicit project workflows.
 - `config/` - runtime config templates and project/proxy/auth settings shape.
 - `packages/` - shared TypeScript contracts.
@@ -71,14 +73,21 @@ current_through_date: 2026-06-30T08:48:06-04:00
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
   working state, event-log observation, text entry, literal selection-keystroke detection, and
   recency timestamps.
-- `apps/server/src/sessions/live-output.ts` - event-log normalization for user-visible live output.
+- `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
+  normalization for user-visible live output.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and session metadata options.
-- `apps/web/src/features/conversation/useConversationDataController.ts` - conversation timeline
-  fetch/refresh path, metadata polling, infinite history pages, retained history, and live tail
-  keys on the web side.
-- `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation and display surfaces.
+- `apps/web/src/features/conversation/useConversationData.ts` - two-query conversation metadata
+  and timeline-message fetch path with paged history and live refresh behavior.
+- `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
+  `ExplorerPane.tsx` - extracted conversation rendering helpers.
+- `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
+  404 selection, sidebar ordering, and work-mode derivation.
+- `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
+  frontend realtime connection and query-cache updates.
+- `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
+  and display shell surfaces.
 - `apps/web/src/pages/SettingsPage.tsx` - explicit project/config management UI.
 - `apps/web/src/lib/api.ts` - web API client boundary.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
@@ -112,11 +121,12 @@ Test and verification anchors:
 - `apps/server/test/live-output.test.ts` - representative test or verification file.
 - `apps/server/test/search.test.ts` - conversation search, live-session search, recency/ranking,
   hidden-conversation filtering, and cached-index backfill coverage.
-- `apps/server/test/session-manager.test.ts` - representative test or verification file.
 - `apps/server/test/projects-routes.test.ts` - representative test or verification file.
 - `apps/server/test/projects.test.ts` - representative test or verification file.
 - `apps/server/test/providers.test.ts` - representative test or verification file.
-- `apps/server/test/session-manager.test.ts` - representative test or verification file.
+- `apps/server/test/session-lifecycle.test.ts`, `session-recency.test.ts`,
+  `session-keystrokes.test.ts`, and `session-keystrokes-submit.test.ts` - split session-manager
+  behavior coverage.
 - `apps/server/test/session-routes.test.ts` - representative test or verification file.
 - `apps/server/test/session-screen.test.ts` - representative test or verification file.
 - `apps/server/test/settings.test.ts` - representative test or verification file.
@@ -126,19 +136,22 @@ Test and verification anchors:
 - Manifest or dependency changes should be reviewed with setup docs and `docs/agent_docs/running_tests.md`.
 - Documentation-only changes should stay scoped to managed docs unless source-of-truth operator docs are stale.
 - Session recency, restore, recovery, or idle-completion changes should review
-  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-manager.test.ts`,
+  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-recency.test.ts`,
+  `apps/server/test/session-lifecycle.test.ts`,
   `apps/web/src/components/Sidebar.tsx`, and any API response shape consumed by the sidebar.
 - Pending Codex first-turn input or live keystroke changes should review
   `apps/server/src/routes/sessions.ts`, `apps/server/src/sessions/session-manager.ts`,
-  `apps/server/test/session-routes.test.ts`, and `apps/server/test/session-manager.test.ts`
+  `apps/server/test/session-routes.test.ts`, `apps/server/test/session-pending-first-turn.test.ts`,
+  and `apps/server/test/session-keystrokes-submit.test.ts`
   together so prompt restarts and literal selection passthrough stay distinct.
 - Live output, history pagination, duplicate filtering, or text latency changes should review
-  `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/live-output.ts`,
+  `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/live-output/`,
   `apps/server/src/providers/transcripts/codex.ts`,
   `apps/server/test/live-output.test.ts`,
   `apps/server/test/conversation-routes.test.ts`,
-  `apps/web/src/features/conversation/useConversationDataController.ts`, and
-  `apps/web/src/components/ConversationPane.tsx`.
+  `apps/web/src/features/conversation/useConversationData.ts`,
+  `apps/web/src/features/realtime/reducers.ts`, `apps/web/src/features/conversation/transcript-turns.tsx`,
+  and `apps/web/src/components/ConversationPane.tsx`.
 - Conversation search, FTS indexing, live-session search, hidden-conversation filtering, or cached
   search backfill changes should review `apps/server/src/routes/search.ts`,
   `apps/server/src/search/conversation-search.ts`, `apps/server/src/indexing/indexing-service.ts`,

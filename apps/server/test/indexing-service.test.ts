@@ -133,7 +133,7 @@ describe('IndexingService', () => {
       new RealtimeEventBus(),
     );
 
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     const conversation = indexing.getTree().projects[0]?.providers.codex.conversations[0];
     expect(conversation?.boundSessionId).toBe('session-with-summary');
@@ -196,7 +196,7 @@ describe('IndexingService', () => {
       new RealtimeEventBus(),
     );
 
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['visible-chat']);
     db.close();
@@ -657,7 +657,7 @@ describe('IndexingService', () => {
       new RealtimeEventBus(),
     );
 
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((conversation) => conversation.ref)).toEqual([
       'newer-created',

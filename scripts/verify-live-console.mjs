@@ -162,11 +162,13 @@ async function navigateToConsole(page, options, url) {
   await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
   await page.waitForLoadState('networkidle', { timeout: 500 }).catch(() => undefined);
 
-  if (new URL(page.url()).pathname === '/login') {
+  const passwordInput = page.getByLabel('Password');
+  const loginFormVisible = await passwordInput.isVisible({ timeout: 500 }).catch(() => false);
+  if (new URL(page.url()).pathname === '/login' || loginFormVisible) {
     assert(options.password, 'Browser is not authenticated. Pass --password or set AGENT_CONSOLE_PASSWORD.');
-    await page.getByLabel('Password').fill(options.password);
+    await passwordInput.fill(options.password);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    await page.waitForURL((currentUrl) => new URL(currentUrl).pathname !== '/login', { timeout: options.timeoutMs });
+    await passwordInput.waitFor({ state: 'detached', timeout: options.timeoutMs }).catch(() => undefined);
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
   }
 

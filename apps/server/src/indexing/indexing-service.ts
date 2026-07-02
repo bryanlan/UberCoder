@@ -1,6 +1,6 @@
 import path from 'node:path';
 import chokidar, { type FSWatcher } from 'chokidar';
-import type { BoundSession, ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
 import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService, MergedProviderSettings } from '../config/service.js';
 import { AppDatabase, pickPreferredConversation, type ConversationSearchIndexChunk } from '../db/database.js';
@@ -15,7 +15,7 @@ import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
-import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
+import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
@@ -151,7 +151,10 @@ export class IndexingService {
 
   getTree(): TreeResponse {
     const activeSessions = this.db.boundSessions.list()
-      .filter((session) => isTreeVisibleBoundSession(session) && this.isSessionVisibleInDiscovery(session));
+      .filter((session) => isTreeVisibleBoundSession(session) && isBoundSessionVisibleInDiscovery(session, {
+        getPendingConversation: (ref) => this.db.pendingConversations.get(ref),
+        getIndexedConversation: (projectSlug, provider, conversationRef) => this.db.conversationIndex.get(projectSlug, provider, conversationRef),
+      }));
     const activeSessionIds = new Set(activeSessions.map((session) => session.id));
     const sessionSummaryMap = this.db.interactionSummaries.listBySessionIds(activeSessions.map((session) => session.id));
     const history = this.db.conversationIndex.list().filter(isConversationVisibleInDiscovery);
@@ -234,18 +237,13 @@ export class IndexingService {
     };
   }
 
-  async primeProjectMetadata(): Promise<void> {
+  async loadProjectMetadata(options: { backfillSearchIndex?: boolean } = {}): Promise<void> {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
-    await this.backfillMissingSearchIndexRows(projects);
-    this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
-  }
-
-  async loadProjectMetadata(): Promise<void> {
-    const projects = await this.projectService.listActiveProjects();
-    this.projectCache = projects;
-    this.persistProjectMetadata(projects);
+    if (options.backfillSearchIndex === true) {
+      await this.backfillMissingSearchIndexRows(projects);
+    }
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
   }
 
@@ -389,7 +387,7 @@ export class IndexingService {
           messages: conversation.messages,
         }));
       } catch {
-        // Keep the conversation tree usable even if one transcript cannot be indexed for search.
+        continue;
       }
     }
     if (options.shouldCommit && !options.shouldCommit()) {
@@ -491,13 +489,4 @@ export class IndexingService {
     }
   }
 
-  private isSessionVisibleInDiscovery(session: BoundSession): boolean {
-    const summary = session.conversationRef.startsWith('pending:')
-      ? this.db.pendingConversations.get(session.conversationRef)
-      : this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
-    return isConversationVisibleInDiscovery(summary ?? {
-      title: session.title ?? 'Live session',
-      provider: session.provider as ProviderId,
-    });
-  }
 }

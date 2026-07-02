@@ -925,7 +925,7 @@ describe('conversation search', () => {
     );
 
     try {
-      await indexing.primeProjectMetadata();
+      await indexing.loadProjectMetadata({ backfillSearchIndex: true });
       const query = buildFtsQuery('reactivated cached phrase');
       expect(query).toBeTruthy();
       const results = db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] });

@@ -111,7 +111,6 @@ export const api = {
       { method: 'PUT', body: JSON.stringify(body) },
       csrfToken,
     ),
-  sendInput: (sessionId: string, text: string, csrfToken?: string) => request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/input`, { method: 'POST', body: JSON.stringify({ text }) }, csrfToken),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),

@@ -6,25 +6,10 @@ import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { toPosixPath } from '../lib/path-utils.js';
 import { listFilesRecursive, pathExists } from './file-utils.js';
+import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
 import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './types.js';
 import { conversationBelongsToProject, deriveConversationRef } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
-
-function compareConversationDiscoveryOrder(a: ConversationSummary, b: ConversationSummary): number {
-  const aPlacedAt = a.createdAt ?? a.updatedAt;
-  const bPlacedAt = b.createdAt ?? b.updatedAt;
-  const placedAtComparison = bPlacedAt.localeCompare(aPlacedAt);
-  return placedAtComparison || a.ref.localeCompare(b.ref);
-}
-
-function ensureProviderFlag(argv: string[], flag: string): string[] {
-  if (argv.length === 0 || argv.includes(flag)) {
-    return argv;
-  }
-  const command = argv[0]!;
-  const rest = argv.slice(1);
-  return [command, flag, ...rest];
-}
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
@@ -62,7 +47,7 @@ async function readClaudeHistory(projectPaths: string[], claudeHome: string): Pr
         files.push(transcriptPath);
       }
     } catch {
-      // ignore malformed history lines
+      continue;
     }
   }
   return files;

@@ -245,7 +245,7 @@ export class SessionManager {
     }
   }
 
-  private async sendLiteralInputToSession(sessionName: string, text: string): Promise<void> {
+  private async submitTextToSession(sessionName: string, text: string): Promise<void> {
     const lines = text.split(/\r?\n/);
     for (const line of lines) {
       if (line.length > 0) {
@@ -458,8 +458,8 @@ export class SessionManager {
       if (tmuxCreated) {
         try {
           await this.tmuxClient.killSession(restoring.tmuxSessionName);
-        } catch {
-          // Best-effort cleanup after partial restore failure.
+        } catch (cleanupError) {
+          void cleanupError;
         }
       }
       const failed = {
@@ -592,8 +592,8 @@ export class SessionManager {
       if (tmuxCreated) {
         try {
           await this.tmuxClient.killSession(tmuxSessionName);
-        } catch {
-          // Best-effort cleanup after partial launch failure.
+        } catch (cleanupError) {
+          void cleanupError;
         }
       }
       const failed: BoundSession = {
@@ -624,7 +624,7 @@ export class SessionManager {
     if (!liveSession) {
       throw new Error('Session is no longer running.');
     }
-    await this.sendLiteralInputToSession(liveSession.tmuxSessionName, text);
+    await this.submitTextToSession(liveSession.tmuxSessionName, text);
     const activityAt = nowIso();
     const updated = this.updateBoundSessionFields(liveSession.id, {
       updatedAt: activityAt,
@@ -891,14 +891,14 @@ export class SessionManager {
       try {
         await this.tmuxClient.interrupt(session.tmuxSessionName);
         await sleep(300);
-      } catch {
-        // Best effort interrupt.
+      } catch (interruptError) {
+        void interruptError;
       }
 
       try {
         await this.tmuxClient.killSession(session.tmuxSessionName);
-      } catch {
-        // Re-check below before claiming success.
+      } catch (killError) {
+        void killError;
       }
     }
 
@@ -1258,8 +1258,8 @@ export class SessionManager {
         this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
       }
       this.scheduleRawOutputScreenUpdate(updated);
-    } catch {
-      // Session may have ended while the debounce timer was pending.
+    } catch (updateError) {
+      void updateError;
     }
   }
 

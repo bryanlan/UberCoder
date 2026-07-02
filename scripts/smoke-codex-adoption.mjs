@@ -386,16 +386,16 @@ async function main() {
       try {
         await api(options.baseUrl, cookie, csrfToken, `/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST' });
         diagnostics.released = true;
-      } catch {
-        // Best effort cleanup.
+      } catch (cleanupError) {
+        diagnostics.releaseError = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
       }
     }
     if (sessionId) {
       try {
         const rawOutput = await api(options.baseUrl, cookie, csrfToken, `/api/sessions/${encodeURIComponent(sessionId)}/raw-output`);
         diagnostics.rawOutputPreview = rawOutput.json?.text?.slice(-4000);
-      } catch {
-        // Ignore diagnostics failure.
+      } catch (diagnosticsError) {
+        diagnostics.rawOutputError = diagnosticsError instanceof Error ? diagnosticsError.message : String(diagnosticsError);
       }
     }
     console.error(JSON.stringify({

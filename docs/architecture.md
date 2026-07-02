@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e
-current_through_date: 2026-06-30T08:48:06-04:00
+current_through_commit: 0c9740c7084267c0e219521b7099107d105675a0
+current_through_date: 2026-07-01T20:55:18-04:00
 ---
 
 # Architecture
@@ -17,9 +17,9 @@ First-class runtime surfaces:
   `apps/server/src/indexing/indexing-service.ts`, and the SQLite `conversation_search_fts` table in
   `apps/server/src/db/database.ts`.
 - Fastify session input API: `apps/server/src/routes/sessions.ts`.
-- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-screen.ts`, `live-output.ts`, and `tmux-client.ts`.
+- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-runtime.ts`, `session-screen.ts`, `live-output/reader.ts`, `screen-heuristics.ts`, `working-state.ts`, `tmux-health.ts`, and `tmux-client.ts`.
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
-- React conversation timeline controller: `apps/web/src/features/conversation/useConversationDataController.ts` and `apps/web/src/components/ConversationPane.tsx`.
+- React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`.
 
 ## Main Components
@@ -51,7 +51,7 @@ duplicate event-log content does not reappear after the durable provider transcr
 
 Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
 state, while user-visible incremental output comes through
-`apps/server/src/sessions/live-output.ts` and the event log attached to the bound session. The
+`apps/server/src/sessions/live-output/reader.ts` and the event log attached to the bound session. The
 conversation route trims the live screen against the durable transcript/event-log tail before
 returning it, so already-rendered scrollback stays in history bubbles and only the active live tail
 renders as terminal output. Codex transcript parsing prefers response-backed display messages over
@@ -97,17 +97,21 @@ stuck composer.
 - First-turn pending Codex input must keep prompt submission separate from literal selection
   keystrokes. Review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and
-  `apps/server/test/session-manager.test.ts` before changing pending conversation restart,
+  `apps/server/test/session-pending-first-turn.test.ts`,
+  `apps/server/test/session-keystrokes-submit.test.ts`, and `apps/server/test/session-routes.test.ts`
+  before changing pending conversation restart,
   selection detection, or text+Enter passthrough behavior.
 - Completion recency moves after new trackable output has idled past the completion window. Review
-  `apps/server/src/sessions/session-manager.ts` and `apps/server/test/session-manager.test.ts`
+  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-recency.test.ts`, and
+  `apps/server/test/session-lifecycle.test.ts`
   before changing `lastActivityAt`, `lastOutputAt`, `lastCompletedAt`, `isWorking`, restore, or
   recovery behavior.
 - Live-output latency and correctness belong in the server timeline boundary, not only the web
   renderer. Review `apps/server/src/routes/conversations.ts`,
-  `apps/server/src/sessions/live-output.ts`, `apps/server/test/conversation-routes.test.ts`,
+  `apps/server/src/sessions/live-output/`, `apps/server/test/conversation-routes.test.ts`,
   `apps/server/test/live-output.test.ts`, and
-  `apps/web/src/features/conversation/useConversationDataController.ts` before changing timeline
+  `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
+  and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
   merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
 - Conversation search belongs in the server search/index boundary. Review
   `apps/server/src/routes/search.ts`, `apps/server/src/search/conversation-search.ts`,
@@ -117,9 +121,9 @@ stuck composer.
 - The web app keeps paged history separately from metadata polling. `limit=0` refreshes live
   metadata and screen state, while the infinite history query loads durable messages in pages and
   retains prior pages during transient refreshes.
-- Playwright e2e can accidentally reuse an existing local Agent Console server because `playwright.config.ts`
-  sets `reuseExistingServer` outside CI. When validating isolation-sensitive settings behavior, make sure the
-  test server is not pointed at Bryan's real `~/.config/agent-console/config.json`.
+- Playwright e2e uses isolated backend/web servers by default (`4517`/`5178`) and does not reuse existing
+  local servers. This prevents settings tests from accidentally attaching to Bryan's real
+  `~/.config/agent-console/config.json`.
 
 ## Operational Notes
 Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not infer deploy, restore, migration, promotion, scheduler, or production-mutating workflows from test documentation.

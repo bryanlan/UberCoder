@@ -121,11 +121,6 @@ export class ConfigService {
     };
   }
 
-  getResolvedProviderEnv(directoryName: string, providerId: ProviderId): Record<string, string> {
-    const settings = this.getMergedProviderSettings(directoryName, providerId);
-    return Object.fromEntries(Object.entries(settings.commands.env).map(([key, value]) => [key, expandHome(value)]));
-  }
-
   getActiveProjectDirectoryNames(): string[] {
     return Object.entries(this.runtimeConfig.projects)
       .filter(([, value]) => value.active)

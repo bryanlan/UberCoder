@@ -1,24 +1,24 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e
-current_through_date: 2026-06-30T08:48:06-04:00
+current_through_commit: 0c9740c7084267c0e219521b7099107d105675a0
+current_through_date: 2026-07-01T20:55:18-04:00
 ---
 
 # Running Tests
 ## Primary Commands
-- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-06-14 with 16 files and 120 tests.
+- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-07-01 with 32 files and 266 tests.
 - `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search` - focused conversation search, live-session search, result ranking, hidden-conversation filtering, and cached-index backfill coverage; passed on 2026-06-26 with 17 tests.
-- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-06-14.
-- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-06-14.
-- `npm run test:e2e` - Playwright settings suite; failed on 2026-05-27 because the test reused an existing local Agent Console server/config and loaded Bryan's real saved projects instead of the isolated e2e fixture.
+- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-07-01.
+- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-07-01.
+- `npm run test:e2e` - Playwright settings suite; passed on 2026-07-01 with isolated backend/web servers.
 
 ## Targeted Test Patterns
-- Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager`.
-- Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-manager session-routes`.
+- Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
+- Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
 - Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
-- Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`, after ensuring Playwright does not reuse a live local server with the real user config.
+- Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`.
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.
 
 ## Environment and Fixtures
@@ -26,7 +26,7 @@ current_through_date: 2026-06-30T08:48:06-04:00
 - Host runtime needs Node 22+, npm 10+, tmux 3.4+, Codex CLI, Claude Code, git, build-essential, and python3.
 - `CLAUDE.md` is a symlink to `AGENTS.md`; do not replace it during docs or guidance edits.
 - `node_modules/@agent-console/*` workspace links point back to local `apps/*` and `packages/*`; do not replace them with copied package directories.
-- `playwright.config.ts` uses `reuseExistingServer: !process.env.CI`; local e2e runs can hit an already-running Agent Console server unless ports are free or CI-style isolation is used.
+- `playwright.config.ts` starts isolated local backend/web servers and does not reuse existing servers.
 
 ## Edge Cases
 - Treat deploy, restore, migration, promotion, scheduler, and production data commands as operational workflows, not tests.
@@ -35,4 +35,4 @@ current_through_date: 2026-06-30T08:48:06-04:00
 - Localhost proxy and auth tests are security-sensitive; avoid broadening allowlists as a test shortcut.
 
 ## Known Gaps
-- The current e2e failure is environmental/config isolation, not covered by the passing server unit/type/build checks.
+- Host-level Codex and Claude live smokes still require real tmux/provider CLIs and remain opt-in.

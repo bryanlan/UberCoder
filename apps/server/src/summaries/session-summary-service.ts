@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { BoundSession, NormalizedMessage, ProviderId, SessionInteractionSummary } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
-import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
+import { isBoundSessionVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import { looksLikeCodeLine, stripCodeLikeContent } from '../lib/prose-sanitizer.js';
 import { nowIso } from '../lib/time.js';
 import { normalizeWhitespace, truncate } from '../lib/text.js';
@@ -121,7 +121,7 @@ async function resolveExecutableFromPath(executable: string, envPath: string | u
       await fs.access(candidate, fsConstants.X_OK);
       return await fs.realpath(candidate).catch(() => candidate);
     } catch {
-      // Keep searching.
+      continue;
     }
   }
   return undefined;
@@ -504,7 +504,10 @@ export class SessionSummaryService {
       .filter((session) => (
         isTreeVisibleBoundSession(session)
         && projectMap.has(session.projectSlug)
-        && this.isSessionVisibleInDiscovery(session)
+        && isBoundSessionVisibleInDiscovery(session, {
+          getPendingConversation: (ref) => this.db.pendingConversations.get(ref),
+          getIndexedConversation: (projectSlug, provider, conversationRef) => this.db.conversationIndex.get(projectSlug, provider, conversationRef),
+        })
         && (!allowedSessionIds || allowedSessionIds.has(session.id))
       ));
 
@@ -668,16 +671,6 @@ export class SessionSummaryService {
       session.lastOutputAt,
       session.startedAt,
     );
-  }
-
-  private isSessionVisibleInDiscovery(session: BoundSession): boolean {
-    const summary = session.conversationRef.startsWith('pending:')
-      ? this.db.pendingConversations.get(session.conversationRef)
-      : this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
-    return isConversationVisibleInDiscovery(summary ?? {
-      title: session.title ?? 'Live session',
-      provider: session.provider as ProviderId,
-    });
   }
 
   private resolveTitleSuggestionApplication(

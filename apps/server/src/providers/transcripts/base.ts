@@ -161,7 +161,7 @@ export function extractAuthoritativeProjectPathsFromJsonlText(text: string): Set
     try {
       collectAuthoritativeProjectPaths(JSON.parse(line) as JsonRecord, authoritativeProjectPaths);
     } catch {
-      // Ignore malformed lines while scanning for session metadata.
+      continue;
     }
   }
   return authoritativeProjectPaths;

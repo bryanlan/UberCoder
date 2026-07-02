@@ -60,7 +60,7 @@ export class OutputWatcherRegistry {
           await handle.close();
         }
       } catch {
-        // Keep watcher alive even if the file is briefly unavailable.
+        return;
       } finally {
         state.processing = false;
         if (state.queued) {

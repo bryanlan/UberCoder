@@ -420,7 +420,7 @@ export async function registerSettingsRoutes(
     }
 
     const created = configService.createProjectConfig({ path: projectPath, active: true, displayName: path.basename(projectPath) });
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
     const project = (await projectService.listProjectSettings()).find((item) => item.directoryName === created.directoryName);
     if (!project) {
       reply.code(500).send({ error: 'Project was created but could not be loaded.' });
@@ -464,7 +464,7 @@ export async function registerSettingsRoutes(
       tags: dedupedTags,
       notes: normalizeOptionalText(parsedBody.data.notes),
     });
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     return {
       project: {
@@ -499,7 +499,7 @@ export async function registerSettingsRoutes(
       return;
     }
 
-    await indexing.primeProjectMetadata();
+    await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     reply.code(204).send();
   });

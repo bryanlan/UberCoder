@@ -118,8 +118,8 @@ export class ShellTmuxClient implements TmuxClient {
     } catch (error) {
       try {
         await runTmux(['delete-buffer', '-b', bufferName]);
-      } catch {
-        // Ignore cleanup failures after a failed paste.
+      } catch (cleanupError) {
+        void cleanupError;
       }
       throw error;
     } finally {
