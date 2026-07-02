@@ -3,6 +3,7 @@ import type { ConversationTimeline, ProjectSummary, ProviderId, SessionKeystroke
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { ExplorerPane, NavigationCrumbs } from '../features/conversation/ExplorerPane';
@@ -365,7 +366,7 @@ function LiveSessionInputBridge({
     setCopiedLastMessage(false);
   }, [latestAssistantMessage]);
 
-  const bridgeText = textBypassEnabled ? (bypassPreviewText ?? inputText) : draftText;
+  const bridgeText = textBypassEnabled ? (bypassPreviewText ?? '') : draftText;
 
   useEffect(() => {
     const capture = captureRef.current;
@@ -459,8 +460,35 @@ function LiveSessionInputBridge({
   function appendLiteralText(text: string): void {
     keepBypassSelectionPinnedRef.current = true;
     pendingTextRef.current += text;
-    setBypassPreviewText((current) => `${current ?? inputText}${text}`);
+    setBypassPreviewText((current) => `${current ?? ''}${text}`);
     scheduleBufferedTextFlush();
+  }
+
+  function setBridgeTextareaValue(value: string): void {
+    const capture = captureRef.current;
+    if (!capture) {
+      return;
+    }
+    capture.value = value;
+    const end = value.length;
+    capture.setSelectionRange(end, end);
+    capture.scrollTop = capture.scrollHeight;
+  }
+
+  function clearDraftSubmitPreview(): void {
+    flushSync(() => {
+      setDraftText('');
+      setDraftDirty(false);
+    });
+    setBridgeTextareaValue('');
+  }
+
+  function restoreDraftSubmitPreview(text: string): void {
+    flushSync(() => {
+      setDraftText(text);
+      setDraftDirty(true);
+    });
+    setBridgeTextareaValue(text);
   }
 
   function replaceDraftText(text: string): void {
@@ -477,8 +505,7 @@ function LiveSessionInputBridge({
     const submittedText = extraKeys.includes('Enter') ? nextText.trim() : '';
     const clearImmediately = options.clearAfterSend === true;
     if (clearImmediately) {
-      setDraftText('');
-      setDraftDirty(false);
+      clearDraftSubmitPreview();
     }
     let prefixLength = 0;
     while (prefixLength < baseText.length && prefixLength < nextText.length && baseText[prefixLength] === nextText[prefixLength]) {
@@ -491,8 +518,7 @@ function LiveSessionInputBridge({
       const ok = await queueKeystrokes({ keys: Array.from({ length: backspaces }, () => 'BSpace' as const) });
       if (!ok) {
         if (clearImmediately) {
-          setDraftText(nextText);
-          setDraftDirty(true);
+          restoreDraftSubmitPreview(nextText);
         }
         return false;
       }
@@ -506,8 +532,7 @@ function LiveSessionInputBridge({
       });
       if (!ok) {
         if (clearImmediately) {
-          setDraftText(nextText);
-          setDraftDirty(true);
+          restoreDraftSubmitPreview(nextText);
         }
         return false;
       }
@@ -570,19 +595,35 @@ function LiveSessionInputBridge({
   }
 
   function clearSubmittedBypassPreview(submittedText: string): string {
-    const previewBeforeSubmit = bypassPreviewText ?? inputText;
-    setBypassPreviewText((current) => bypassPreviewAfterSubmit(current ?? '', submittedText));
+    const previewBeforeSubmit = bypassPreviewText ?? '';
+    const nextPreview = bypassPreviewAfterSubmit(previewBeforeSubmit, submittedText);
+    flushSync(() => {
+      setBypassPreviewText(nextPreview);
+    });
+    setBridgeTextareaValue(nextPreview);
     return previewBeforeSubmit;
   }
 
   function restoreSubmittedBypassPreview(submittedText: string, previewBeforeSubmit: string): void {
     const expectedPreview = bypassPreviewAfterSubmit(previewBeforeSubmit, submittedText);
-    setBypassPreviewText((current) => ((current ?? '') === expectedPreview ? previewBeforeSubmit : current));
+    let restored = false;
+    flushSync(() => {
+      setBypassPreviewText((current) => {
+        if ((current ?? '') !== expectedPreview) {
+          return current;
+        }
+        restored = true;
+        return previewBeforeSubmit;
+      });
+    });
+    if (restored) {
+      setBridgeTextareaValue(previewBeforeSubmit);
+    }
   }
 
   async function submitTextBypassEnter(): Promise<void> {
     await runBridgeAction(async () => {
-      const submittedText = (bypassPreviewText ?? inputText).trim();
+      const submittedText = (bypassPreviewText ?? '').trim();
       keepBypassSelectionPinnedRef.current = true;
       const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
       const optimisticMessage = submittedText ? onLocalSubmittedText(sessionId, submittedText) : undefined;
@@ -630,9 +671,9 @@ function LiveSessionInputBridge({
         }
         keepBypassSelectionPinnedRef.current = true;
         if (specialKey === 'BSpace') {
-          setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
+          setBypassPreviewText((current) => (current ?? '').slice(0, -1));
         } else {
-          setBypassPreviewText(undefined);
+          setBypassPreviewText('');
         }
         enqueueKeystrokes({ keys: [specialKey] });
         return;
@@ -648,11 +689,11 @@ function LiveSessionInputBridge({
         if (pendingTextRef.current.length > 0) {
           keepBypassSelectionPinnedRef.current = true;
           pendingTextRef.current = pendingTextRef.current.slice(0, -1);
-          setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
+          setBypassPreviewText((current) => (current ?? '').slice(0, -1));
           return;
         }
         keepBypassSelectionPinnedRef.current = true;
-        setBypassPreviewText((current) => (current ?? inputText).slice(0, -1));
+        setBypassPreviewText((current) => (current ?? '').slice(0, -1));
         enqueueKeystrokes({ keys: ['BSpace'] });
         return;
       }
@@ -661,7 +702,7 @@ function LiveSessionInputBridge({
     }
 
     if (textBypassEnabled) {
-      const submittedText = specialKey === 'Enter' ? (bypassPreviewText ?? inputText).trim() : '';
+      const submittedText = specialKey === 'Enter' ? (bypassPreviewText ?? '').trim() : '';
       if (specialKey === 'Enter') {
         await submitTextBypassEnter();
         return;
@@ -671,7 +712,7 @@ function LiveSessionInputBridge({
         return;
       }
       keepBypassSelectionPinnedRef.current = true;
-      setBypassPreviewText(undefined);
+      setBypassPreviewText('');
       enqueueKeystrokes({
         keys: [specialKey],
         ...(submittedText ? { submittedText } : {}),
