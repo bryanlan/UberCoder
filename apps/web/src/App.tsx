@@ -19,9 +19,9 @@ import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
 import { useConversationDataController, resetTimelineHistoryQuery } from './features/conversation/useConversationDataController';
+import { applySessionEvent } from './features/realtime/apply-session-event';
+import { useRealtimeConnection } from './features/realtime/connection';
 import {
-  applySessionActivityToTimeline,
-  applySessionActivityToTree,
   applySessionUpdateToTimeline,
   applySessionUpdateToTree,
   appendTimelineHistoryMessage,
@@ -307,152 +307,37 @@ function AppShell() {
     liveMessageRefreshTimersRef.current.clear();
   }, []);
 
-  useEffect(() => {
-    if (!authQuery.data?.authenticated) return;
-    const source = new EventSource('/api/events', { withCredentials: true });
-    source.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data) as SessionEvent;
-        setEventError(undefined);
-        if (parsed.type === 'heartbeat') {
-          return;
-        }
-        if (parsed.type === 'session.screen-updated') {
-          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
-            || (
-              parsed.projectSlug === selectedProjectSlug
-              && parsed.provider === selectedProvider
-              && parsed.conversationRef === selectedConversationRef
-            );
-          if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
-            void queryClient.invalidateQueries({
-              queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-            });
-          }
-          return;
-        }
-        if (parsed.type === 'session.raw-output') {
-          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
-            || (
-              parsed.projectSlug === selectedProjectSlug
-              && parsed.provider === selectedProvider
-              && parsed.conversationRef === selectedConversationRef
-            );
-          queryClient.setQueryData<TreeResponse | undefined>(
-            ['tree'],
-            (current) => applySessionActivityToTree(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
-          );
-          queryClient.setQueryData<ConversationTimeline | undefined>(
-            ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
-            (current) => applySessionActivityToTimeline(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
-          );
-          if (parsed.sessionId === timeline?.boundSession?.id && debugOpen) {
-            queryClient.invalidateQueries({ queryKey: ['raw-output', parsed.sessionId] });
-          }
-          if (matchesSelectedSession && selectedProjectSlug && selectedProvider && selectedConversationRef) {
-            scheduleTimelineMessageRefresh(selectedProjectSlug, selectedProvider, selectedConversationRef);
-          }
-          return;
-        }
-        if (parsed.type === 'session.user-input') {
-          const matchesSelectedSession = parsed.sessionId === timeline?.boundSession?.id
-            || (
-              parsed.projectSlug === selectedProjectSlug
-              && parsed.provider === selectedProvider
-              && parsed.conversationRef === selectedConversationRef
-            );
-          queryClient.setQueryData<TreeResponse | undefined>(
-            ['tree'],
-            (current) => applySessionActivityToTree(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
-          );
-          queryClient.setQueryData<ConversationTimeline | undefined>(
-            ['timeline', parsed.projectSlug, parsed.provider, parsed.conversationRef],
-            (current) => applySessionActivityToTimeline(current, { sessionId: parsed.sessionId, timestamp: parsed.timestamp }),
-          );
-          appendMessageToConversationCache({
-            projectSlug: parsed.projectSlug,
-            provider: parsed.provider,
-            conversationRef: parsed.conversationRef,
-            message: buildLiveUserMessage({
-              sessionId: parsed.sessionId,
-              projectSlug: parsed.projectSlug,
-              provider: parsed.provider,
-              conversationRef: parsed.conversationRef,
-              messageId: parsed.messageId,
-              text: parsed.text,
-              timestamp: parsed.timestamp,
-            }),
-          });
-          return;
-        }
-        if (parsed.type === 'session.updated') {
-          queryClient.setQueryData<TreeResponse | undefined>(
-            ['tree'],
-            (current) => applySessionUpdateToTree(current, parsed.session),
-          );
-          queryClient.setQueryData<ConversationTimeline | undefined>(
-            ['timeline', parsed.session.projectSlug, parsed.session.provider, parsed.session.conversationRef],
-            (current) => applySessionUpdateToTimeline(current, parsed.session),
-          );
-          if (selectedProjectSlug && selectedProvider && selectedConversationRef) {
-            queryClient.setQueryData<ConversationTimeline | undefined>(
-              ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef],
-              (current) => applySessionUpdateToTimeline(current, parsed.session),
-            );
-          }
-          return;
-        }
-        if (parsed.type === 'session.released') {
-          queryClient.invalidateQueries({ queryKey: ['tree'] });
-          if (
-            selectedProjectSlug
-            && selectedProvider
-            && selectedConversationRef
-            && (
-              parsed.sessionId === timeline?.boundSession?.id
-              || (
-                parsed.projectSlug === selectedProjectSlug
-                && parsed.provider === selectedProvider
-                && parsed.conversationRef === selectedConversationRef
-              )
-            )
-          ) {
-            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-            resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
-          }
-          return;
-        }
-        if (parsed.type === 'conversation.index-updated') {
-          queryClient.invalidateQueries({ queryKey: ['tree'] });
-          const eventTargetsSelection = Boolean(
-            parsed.projectSlug
-            && parsed.provider
-            && parsed.conversationRef
-            && (
-              parsed.projectSlug === selectedProjectSlug
-              && parsed.provider === selectedProvider
-              && parsed.conversationRef === selectedConversationRef
-            ),
-          );
-          if (conversationSelection?.params.conversationRef && eventTargetsSelection) {
-            queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-            resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
-          }
-          return;
-        }
-        if (conversationSelection?.params.conversationRef) {
-          queryClient.invalidateQueries({ queryKey: ['timeline', selectedProjectSlug, selectedProvider, selectedConversationRef] });
-          resetTimelineHistoryQuery(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
-        }
-      } catch {
-        setEventError('Lost event stream parsing. Refresh to recover.');
-      }
-    };
-    source.onerror = () => {
-      setEventError('Realtime connection dropped. The page is still usable and polling the project tree and selected conversation.');
-    };
-    return () => source.close();
-  }, [authQuery.data?.authenticated, conversationSelection?.params.conversationRef, debugOpen, queryClient, scheduleTimelineMessageRefresh, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.boundSession?.id]);
+  const handleRealtimeEvent = useCallback((parsed: SessionEvent) => {
+    setEventError(undefined);
+    applySessionEvent(parsed, {
+      queryClient,
+      selectedProjectSlug,
+      selectedProvider,
+      selectedConversationRef,
+      selectedConversationRouteActive: Boolean(conversationSelection?.params.conversationRef),
+      timelineBoundSessionId: timeline?.boundSession?.id,
+      debugOpen,
+      appendMessageToConversationCache,
+      scheduleTimelineMessageRefresh,
+    });
+  }, [
+    appendMessageToConversationCache,
+    conversationSelection?.params.conversationRef,
+    debugOpen,
+    queryClient,
+    scheduleTimelineMessageRefresh,
+    selectedConversationRef,
+    selectedProjectSlug,
+    selectedProvider,
+    timeline?.boundSession?.id,
+  ]);
+
+  useRealtimeConnection({
+    authenticated: authQuery.data?.authenticated,
+    onEvent: handleRealtimeEvent,
+    onParseError: setEventError,
+    onConnectionError: setEventError,
+  });
 
   function describeError(error: unknown, fallback: string): string {
     return error instanceof ApiError ? error.message : fallback;
