@@ -2,10 +2,12 @@ import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, M
 import { Link, useLocation } from 'react-router-dom';
 import type { ConversationSearchResult, ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
+import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 const summaryPanelMargin = 12;
@@ -41,23 +43,12 @@ interface SidebarProps {
 }
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
-type BoundSessionItem = NonNullable<TreeResponse['boundSessions']>[number];
 
 interface SummaryPanelLayout {
   top: number;
   left: number;
   width: number;
   height: number;
-}
-
-function getConversationRecencyTimestamp(
-  conversation: ConversationItem,
-  session?: BoundSessionItem,
-): string {
-  if (!session) {
-    return conversation.updatedAt;
-  }
-  return session.lastCompletedAt ?? conversation.updatedAt;
 }
 
 function getConversationFreshnessClass(
@@ -104,6 +95,15 @@ function formatRelativeAge(timestamp: string | undefined, nowMs: number): string
   }
   const ageDays = Math.floor(ageHours / 24);
   return `${ageDays}d ago`;
+}
+
+function useNowMs(intervalMs = 30_000): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return nowMs;
 }
 
 function escapeRegExp(value: string): string {
@@ -162,15 +162,14 @@ function SearchResultsPanel({
   loading,
   error,
   onClose,
-  nowMs,
 }: {
   query: string;
   results: ConversationSearchResult[];
   loading: boolean;
   error?: string;
   onClose: () => void;
-  nowMs: number;
 }) {
+  const nowMs = useNowMs();
   if (!query.trim()) {
     return null;
   }
@@ -247,7 +246,6 @@ function ConversationLink({
   title,
   prefixLabel,
   isBound,
-  indicatorClassName,
   canRebind,
   onClose,
   onRebindConversation,
@@ -256,7 +254,7 @@ function ConversationLink({
   renaming,
   sessionSummary,
   lastInteractionAt,
-  nowMs,
+  sessionFreshnessThresholds,
   summaryPanelRef,
 }: {
   project: ProjectSummary;
@@ -265,7 +263,6 @@ function ConversationLink({
   title: string;
   prefixLabel?: string;
   isBound: boolean;
-  indicatorClassName: string;
   canRebind: boolean;
   onClose: () => void;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
@@ -274,10 +271,11 @@ function ConversationLink({
   renaming: boolean;
   sessionSummary?: ConversationItem['sessionSummary'];
   lastInteractionAt?: string;
-  nowMs: number;
+  sessionFreshnessThresholds: SessionFreshnessThresholds;
   summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
+  const nowMs = useNowMs();
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
@@ -288,6 +286,7 @@ function ConversationLink({
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
   const summaryTimestamp = sessionSummary?.lastInteractionAt ?? lastInteractionAt;
+  const indicatorClassName = getConversationFreshnessClass(isBound, summaryTimestamp, sessionFreshnessThresholds, nowMs);
   const summaryReady = sessionSummary?.status === 'ready';
   const lastHourSummaryTimestamp = sessionSummary?.windowEndAt;
   const lastHourSummaryAge = lastHourSummaryTimestamp ? formatRelativeAge(lastHourSummaryTimestamp, nowMs) : undefined;
@@ -537,17 +536,10 @@ function ProjectSection({
   rebindingConversationKey,
   renamingConversationKey,
   tailscaleIpv4,
-  nowMs,
+  sessionFreshnessThresholds,
   summaryPanelRef,
 }: {
-  project: ProjectSummary & {
-    combinedConversations: Array<{
-      provider: ProviderId;
-      conversation: ProjectSummary['providers'][ProviderId]['conversations'][number];
-      freshnessTimestamp: string;
-      indicatorClassName: string;
-    }>;
-  };
+  project: SidebarProject;
   workMode: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
@@ -566,7 +558,7 @@ function ProjectSection({
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
   tailscaleIpv4?: string;
-  nowMs: number;
+  sessionFreshnessThresholds: SessionFreshnessThresholds;
   summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
@@ -800,7 +792,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, indicatorClassName, freshnessTimestamp }) => (
+            {displayedConversations.map(({ provider, conversation, freshnessTimestamp }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -809,7 +801,6 @@ function ProjectSection({
                 title={conversation.title}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
-                indicatorClassName={indicatorClassName}
                 canRebind={conversation.kind === 'history'}
                 onClose={onClose}
                 onRebindConversation={onRebindConversation}
@@ -818,7 +809,7 @@ function ProjectSection({
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 sessionSummary={conversation.sessionSummary}
                 lastInteractionAt={freshnessTimestamp}
-                nowMs={nowMs}
+                sessionFreshnessThresholds={sessionFreshnessThresholds}
                 summaryPanelRef={summaryPanelRef}
               />
             ))}
@@ -868,16 +859,10 @@ export function Sidebar({
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [tailscaleIpv4, setTailscaleIpv4] = useState<string>();
   const [searchQuery, setSearchQuery] = useState('');
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
   const [searchSubmissionVersion, setSearchSubmissionVersion] = useState(0);
-  const [searchResults, setSearchResults] = useState<ConversationSearchResult[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string>();
   const summaryPanelRef = useRef<HTMLDivElement | null>(null);
-  const searchAbortControllerRef = useRef<AbortController | null>(null);
   const trimmedSearchQuery = searchQuery.trim();
   const trimmedSubmittedSearchQuery = submittedSearchQuery.trim();
   const showingSubmittedSearchResults = Boolean(
@@ -885,72 +870,23 @@ export function Sidebar({
     && trimmedSearchQuery === trimmedSubmittedSearchQuery,
   );
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const networkInfoQuery = useQuery({
+    queryKey: ['network-info'],
+    queryFn: api.networkInfo,
+    staleTime: 60_000,
+  });
+  const tailscaleIpv4 = networkInfoQuery.data?.tailscaleIpv4;
 
-  useEffect(() => {
-    let active = true;
-    void api.networkInfo()
-      .then((network) => {
-        if (active) {
-          setTailscaleIpv4(network.tailscaleIpv4);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setTailscaleIpv4(undefined);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const query = trimmedSubmittedSearchQuery;
-    if (!query) {
-      setSearchResults([]);
-      setSearchLoading(false);
-      setSearchError(undefined);
-      return () => {
-        active = false;
-      };
-    }
-
-    const controller = new AbortController();
-    searchAbortControllerRef.current?.abort();
-    searchAbortControllerRef.current = controller;
-    setSearchLoading(true);
-    setSearchError(undefined);
-    setSearchResults([]);
-    void api.searchConversations(query, { limit: 24, signal: controller.signal })
-      .then((response) => {
-        if (!active) return;
-        setSearchResults(response.results);
-        setSearchError(undefined);
-      })
-      .catch((error: unknown) => {
-        if (!active || controller.signal.aborted) return;
-        setSearchResults([]);
-        setSearchError(error instanceof Error ? error.message : 'Search failed.');
-      })
-      .finally(() => {
-        if (active) {
-          setSearchLoading(false);
-        }
-      });
-
-    return () => {
-      active = false;
-      controller.abort();
-      if (searchAbortControllerRef.current === controller) {
-        searchAbortControllerRef.current = null;
-      }
-    };
-  }, [trimmedSubmittedSearchQuery, searchSubmissionVersion]);
+  const searchQueryResult = useQuery({
+    queryKey: ['conversation-search', trimmedSubmittedSearchQuery, searchSubmissionVersion],
+    queryFn: ({ signal }) => api.searchConversations(trimmedSubmittedSearchQuery, { limit: 24, signal }),
+    enabled: Boolean(trimmedSubmittedSearchQuery),
+  });
+  const searchResults = showingSubmittedSearchResults ? searchQueryResult.data?.results ?? [] : [];
+  const searchLoading = showingSubmittedSearchResults && searchQueryResult.isFetching;
+  const searchError = showingSubmittedSearchResults && searchQueryResult.error instanceof Error
+    ? searchQueryResult.error.message
+    : undefined;
 
   function submitSearch(): void {
     setSubmittedSearchQuery(trimmedSearchQuery);
@@ -959,63 +895,14 @@ export function Sidebar({
 
   function updateSearchQuery(value: string): void {
     setSearchQuery(value);
-    if (value.trim() !== trimmedSubmittedSearchQuery) {
-      searchAbortControllerRef.current?.abort();
-      searchAbortControllerRef.current = null;
-      setSearchLoading(false);
-      setSearchError(undefined);
-    }
   }
 
-  const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
-  const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
-  const visibleProjects = (tree?.projects ?? [])
-    .map((project) => {
-      const providerEntries = (['codex', 'claude'] as const).map((provider) => {
-        const conversations = project.providers[provider].conversations
-          .filter((conversation) => !workMode || conversation.isBound);
-        return [provider, { ...project.providers[provider], conversations }] as const;
-      });
-      const combinedConversations = (['codex', 'claude'] as const)
-        .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
-          const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
-          const freshnessTimestamp = getConversationRecencyTimestamp(conversation, session);
-          return {
-            provider,
-            conversation,
-            freshnessTimestamp,
-            indicatorClassName: getConversationFreshnessClass(
-              conversation.isBound,
-              freshnessTimestamp,
-              sessionFreshnessThresholds,
-              nowMs,
-            ),
-          };
-        }))
-        .filter(({ conversation }) => !workMode || conversation.isBound);
-      const latestActivityAt = combinedConversations.reduce(
-        (latest, conversation) => conversation.freshnessTimestamp > latest ? conversation.freshnessTimestamp : latest,
-        '',
-      );
-      return {
-        ...project,
-        providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
-        combinedConversations,
-        latestActivityAt,
-      };
-    })
-    .filter((project) => !workMode || project.combinedConversations.length > 0)
-    .sort((a, b) => {
-      if (recentActivitySortEnabled) {
-        return (b.latestActivityAt || '').localeCompare(a.latestActivityAt || '');
-      }
-      const aIndex = manualOrderIndex.get(a.slug) ?? Number.MAX_SAFE_INTEGER;
-      const bIndex = manualOrderIndex.get(b.slug) ?? Number.MAX_SAFE_INTEGER;
-      if (aIndex !== bIndex) {
-        return aIndex - bIndex;
-      }
-      return a.displayName.localeCompare(b.displayName);
-    });
+  const visibleProjects = useMemo(() => deriveSidebarProjects({
+    tree,
+    workMode,
+    recentActivitySortEnabled,
+    manualProjectOrder,
+  }), [manualProjectOrder, recentActivitySortEnabled, tree, workMode]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -1117,7 +1004,6 @@ export function Sidebar({
                 loading={searchLoading}
                 error={searchError}
                 onClose={onClose}
-                nowMs={nowMs}
               />
             ) : visibleProjects.length ? visibleProjects.map((project) => (
               <ProjectSection
@@ -1150,7 +1036,7 @@ export function Sidebar({
                 rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
                 tailscaleIpv4={tailscaleIpv4}
-                nowMs={nowMs}
+                sessionFreshnessThresholds={sessionFreshnessThresholds}
                 summaryPanelRef={summaryPanelRef}
               />
             )) : (

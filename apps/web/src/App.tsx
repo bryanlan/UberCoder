@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X } from 'lucide-react';
-import { BrowserRouter, Link, Navigate, Route, Routes, matchPath, useLocation, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   BoundSession,
   ConversationTimeline,
@@ -26,6 +26,7 @@ import {
   useConversationData,
 } from './features/conversation/useConversationData';
 import { applySessionEvent } from './features/realtime/apply-session-event';
+import { selectConsoleRoute, type ConsoleRouteKind, type ConsoleRouteSelection } from './features/navigation/route-selection';
 import { useRealtimeConnection } from './features/realtime/connection';
 import {
   applySessionUpdateToTimeline,
@@ -73,7 +74,18 @@ interface OptimisticSubmittedMessageRef {
   conversationRef: string;
 }
 
-function AppShell() {
+function NotFoundPane() {
+  return (
+    <div className="flex h-full items-center justify-center px-6 text-center text-slate-400">
+      <div>
+        <div className="mb-2 text-lg font-medium text-slate-100">Page not found</div>
+        <Link to="/" className="text-sm text-sky-300 transition hover:text-sky-200">Back to console</Link>
+      </div>
+    </div>
+  );
+}
+
+function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -104,18 +116,11 @@ function AppShell() {
     queryFn: api.uiPreferences,
     enabled: authQuery.data?.authenticated,
   });
-  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: authQuery.data?.authenticated && location.pathname === '/settings' });
-  const inSettings = location.pathname === '/settings';
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: authQuery.data?.authenticated && routeSelection.inSettings });
 
-  const conversationSelection = matchPath({ path: '/projects/:projectSlug/:provider/:conversationRef', end: true }, location.pathname);
-  const providerSelection = matchPath({ path: '/projects/:projectSlug/:provider', end: true }, location.pathname);
-  const projectSelection = matchPath({ path: '/projects/:projectSlug', end: true }, location.pathname);
-
-  const selectedProjectSlug = conversationSelection?.params.projectSlug
-    ?? providerSelection?.params.projectSlug
-    ?? projectSelection?.params.projectSlug;
-  const selectedProvider = (conversationSelection?.params.provider ?? providerSelection?.params.provider) as ProviderId | undefined;
-  const selectedConversationRef = conversationSelection?.params.conversationRef ? decodeURIComponent(conversationSelection.params.conversationRef) : undefined;
+  const selectedProjectSlug = routeSelection.selectedProjectSlug;
+  const selectedProvider = routeSelection.selectedProvider;
+  const selectedConversationRef = routeSelection.selectedConversationRef;
 
   const {
     timeline,
@@ -148,16 +153,16 @@ function AppShell() {
   }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.conversation.ref]);
 
   useEffect(() => {
-    if (location.pathname !== '/settings' && location.pathname !== '/login') {
+    if (routeSelection.isConsoleRoute) {
       setLastConsolePath(location.pathname);
     }
-  }, [location.pathname, setLastConsolePath]);
+  }, [location.pathname, routeSelection.isConsoleRoute, setLastConsolePath]);
 
   useEffect(() => {
-    if (location.pathname === '/settings' || !timeline?.boundSession) {
+    if (routeSelection.inSettings || !timeline?.boundSession) {
       setMobileControlsHidden(false);
     }
-  }, [location.pathname, timeline?.boundSession]);
+  }, [routeSelection.inSettings, timeline?.boundSession]);
 
   useEffect(() => {
     setMobileControlsHidden(false);
@@ -373,7 +378,7 @@ function AppShell() {
       selectedProjectSlug,
       selectedProvider,
       selectedConversationRef,
-      selectedConversationRouteActive: Boolean(conversationSelection?.params.conversationRef),
+      selectedConversationRouteActive: routeSelection.conversationRouteActive,
       timelineBoundSessionId: timeline?.boundSession?.id,
       debugOpen,
       appendMessageToConversationCache,
@@ -381,9 +386,9 @@ function AppShell() {
     });
   }, [
     appendMessageToConversationCache,
-    conversationSelection?.params.conversationRef,
     debugOpen,
     queryClient,
+    routeSelection.conversationRouteActive,
     scheduleTimelineMessageRefresh,
     selectedConversationRef,
     selectedProjectSlug,
@@ -858,7 +863,7 @@ function AppShell() {
     );
   }
 
-  if (location.pathname === '/login') {
+  if (routeSelection.isLogin) {
     return <Navigate to="/" replace />;
   }
 
@@ -918,9 +923,9 @@ function AppShell() {
             </div>
             <div className="flex items-center gap-2">
               <Link
-                to={inSettings ? lastConsolePath : '/settings'}
+                to={routeSelection.inSettings ? lastConsolePath : '/settings'}
                 className="inline-flex rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-                aria-label={inSettings ? 'Back to console' : 'Settings'}
+                aria-label={routeSelection.inSettings ? 'Back to console' : 'Settings'}
               >
                 <Settings className="h-4 w-4" />
               </Link>
@@ -952,11 +957,11 @@ function AppShell() {
             </div>
             <div className="flex items-center gap-2">
               <Link
-                to={inSettings ? lastConsolePath : '/settings'}
+                to={routeSelection.inSettings ? lastConsolePath : '/settings'}
                 className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
               >
                 <Settings className="h-4 w-4" />
-                {inSettings ? 'Back to Console' : 'Settings'}
+                {routeSelection.inSettings ? 'Back to Console' : 'Settings'}
               </Link>
               <button
                 type="button"
@@ -983,7 +988,7 @@ function AppShell() {
         )}
 
         <main className="min-h-0 flex-1 overflow-hidden">
-          {location.pathname === '/settings' ? (
+          {routeSelection.inSettings ? (
             <SettingsPage
               settings={settingsQuery.data}
               uiPreferences={uiPreferences}
@@ -992,6 +997,8 @@ function AppShell() {
               csrfToken={authQuery.data?.csrfToken}
               backHref={lastConsolePath}
             />
+          ) : routeSelection.kind === 'not-found' ? (
+            <NotFoundPane />
           ) : (
             <ConversationPane
               projects={treeQuery.data?.projects}
@@ -1030,12 +1037,31 @@ function AppShell() {
   );
 }
 
+type RoutedShellProps = { kind: ConsoleRouteKind };
+
+function RoutedAppShell({ kind }: RoutedShellProps) {
+  const params = useParams();
+  return <AppShell routeSelection={selectConsoleRoute(kind, params)} />;
+}
+
+export function ConsoleRoutes({ Shell = RoutedAppShell }: { Shell?: ComponentType<RoutedShellProps> }) {
+  return (
+    <Routes>
+      <Route path="/" element={<Shell kind="home" />} />
+      <Route path="/login" element={<Shell kind="login" />} />
+      <Route path="/settings" element={<Shell kind="settings" />} />
+      <Route path="/projects/:projectSlug" element={<Shell kind="project" />} />
+      <Route path="/projects/:projectSlug/:provider" element={<Shell kind="provider" />} />
+      <Route path="/projects/:projectSlug/:provider/:conversationRef" element={<Shell kind="conversation" />} />
+      <Route path="*" element={<Shell kind="not-found" />} />
+    </Routes>
+  );
+}
+
 export function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/*" element={<AppShell />} />
-      </Routes>
+      <ConsoleRoutes />
     </BrowserRouter>
   );
 }
