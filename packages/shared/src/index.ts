@@ -305,6 +305,14 @@ export type SessionEvent =
       timestamp: string;
     }
   | {
+      type: 'session.transcript-updated';
+      sessionId: string;
+      projectSlug: string;
+      provider: ProviderId;
+      conversationRef: string;
+      timestamp: string;
+    }
+  | {
       type: 'session.user-input';
       sessionId: string;
       projectSlug: string;

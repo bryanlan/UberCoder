@@ -112,6 +112,27 @@ export function useConversationData({
     },
   });
 
+  const selectedMetaTimeline = useMemo(() => {
+    const meta = metaQuery.data;
+    if (!meta) {
+      return undefined;
+    }
+    if (
+      metaQuery.isPlaceholderData
+      && !timelineMatchesSelection(meta, selectedProjectSlug, selectedProvider, selectedConversationRef)
+    ) {
+      return undefined;
+    }
+    return meta;
+  }, [
+    metaQuery.data,
+    metaQuery.isPlaceholderData,
+    selectedConversationRef,
+    selectedProjectSlug,
+    selectedProvider,
+  ]);
+  const selectedBoundSession = selectedMetaTimeline?.boundSession;
+
   const messagesQuery = useInfiniteQuery({
     queryKey: timelineMessagesQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
     queryFn: ({ pageParam }) => api.timeline(
@@ -127,6 +148,7 @@ export function useConversationData({
     placeholderData: keepPreviousData,
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage) => lastPage.messagePage?.olderCursor,
+    refetchInterval: selectedBoundSession?.isWorking ? 1200 : false,
   });
 
   const messagePages = useMemo(() => {
@@ -156,14 +178,8 @@ export function useConversationData({
   );
 
   const timeline = useMemo(() => {
-    const meta = metaQuery.data;
+    const meta = selectedMetaTimeline;
     if (!meta) {
-      return undefined;
-    }
-    if (
-      metaQuery.isPlaceholderData
-      && !timelineMatchesSelection(meta, selectedProjectSlug, selectedProvider, selectedConversationRef)
-    ) {
       return undefined;
     }
     return {
@@ -173,12 +189,8 @@ export function useConversationData({
     };
   }, [
     messagePages,
-    metaQuery.data,
-    metaQuery.isPlaceholderData,
     pagedTimelineMessages,
-    selectedConversationRef,
-    selectedProjectSlug,
-    selectedProvider,
+    selectedMetaTimeline,
   ]);
 
   const boundSession = timeline?.boundSession;

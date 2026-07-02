@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BoundSession, ConversationSummary, ProviderId, RecordedUserInput, SessionInputResponse, SessionScreen } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, ProviderId, RecordedUserInput, SessionEvent, SessionInputResponse, SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -39,6 +39,7 @@ import {
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
+import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
 import type { ProjectService } from '../projects/project-service.js';
@@ -180,6 +181,8 @@ interface SessionManagerLogger {
 
 export class SessionManager {
   private readonly outputWatchers = new OutputWatcherRegistry();
+  private readonly transcriptWatchers = new TranscriptWatcherRegistry();
+  private readonly unsubscribeRealtimeEvents: () => void;
   private readonly runtimes: SessionRuntimeRegistry;
   private stopped = false;
 
@@ -200,6 +203,7 @@ export class SessionManager {
         );
       },
     });
+    this.unsubscribeRealtimeEvents = this.eventBus.subscribe((event) => this.handleRealtimeLifecycleEvent(event));
   }
 
   private listRestorableSessions(): BoundSession[] {
@@ -212,8 +216,12 @@ export class SessionManager {
 
   stop(): void {
     this.stopped = true;
+    this.unsubscribeRealtimeEvents();
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
+    }
+    for (const sessionId of [...this.transcriptWatchers.keys()]) {
+      this.transcriptWatchers.stop(sessionId);
     }
     for (const sessionId of [...this.runtimes.keys()]) {
       const state = this.runtimeState(sessionId);
@@ -231,6 +239,48 @@ export class SessionManager {
 
   private runtimeState(sessionId: string): SessionRuntimeState {
     return this.runtimes.state(sessionId);
+  }
+
+  private shouldWatchSession(session: BoundSession): boolean {
+    return !this.stopped
+      && session.shouldRestore !== false
+      && (session.status === 'starting' || session.status === 'bound');
+  }
+
+  private handleRealtimeLifecycleEvent(event: SessionEvent): void {
+    if (this.stopped) {
+      return;
+    }
+
+    if (event.type === 'session.updated') {
+      if (!this.shouldWatchSession(event.session)) {
+        this.stopWatching(event.session.id);
+        return;
+      }
+      this.watchSessionOutput(event.session);
+      return;
+    }
+
+    if (event.type === 'session.released') {
+      this.stopWatching(event.sessionId);
+      return;
+    }
+
+    if (event.type === 'conversation.index-updated') {
+      for (const session of this.listRestorableSessions()) {
+        if (!this.shouldWatchSession(session)) {
+          continue;
+        }
+        if (
+          event.projectSlug && event.projectSlug !== session.projectSlug
+          || event.provider && event.provider !== session.provider
+          || event.conversationRef && event.conversationRef !== session.conversationRef
+        ) {
+          continue;
+        }
+        this.watchSessionOutput(session);
+      }
+    }
   }
 
   async observeSessions(): Promise<void> {
@@ -1134,22 +1184,67 @@ export class SessionManager {
   }
 
   private watchSessionOutput(session: BoundSession): void {
-    if (!session.rawLogPath) return;
-    if (this.outputWatchers.has(session.id)) return;
+    if (!this.shouldWatchSession(session)) {
+      return;
+    }
 
-    const initialOffset = session.eventLogPath && fs.existsSync(session.eventLogPath) && fs.statSync(session.eventLogPath).size > 0 && fs.existsSync(session.rawLogPath)
-      ? fs.statSync(session.rawLogPath).size
-      : 0;
-    this.outputWatchers.watch({
+    this.watchSessionTranscript(session);
+
+    if (session.rawLogPath && !this.outputWatchers.has(session.id)) {
+      const initialOffset = session.eventLogPath && fs.existsSync(session.eventLogPath) && fs.statSync(session.eventLogPath).size > 0 && fs.existsSync(session.rawLogPath)
+        ? fs.statSync(session.rawLogPath).size
+        : 0;
+      this.outputWatchers.watch({
+        sessionId: session.id,
+        rawLogPath: session.rawLogPath,
+        initialOffset,
+        onChunk: (chunk) => this.flushPendingChunk(session.id, chunk),
+      });
+    }
+  }
+
+  private watchSessionTranscript(session: BoundSession): void {
+    if (session.conversationRef.startsWith('pending:')) {
+      this.transcriptWatchers.stop(session.id);
+      return;
+    }
+
+    const transcriptPath = this.db.conversationIndex.get(
+      session.projectSlug,
+      session.provider,
+      session.conversationRef,
+    )?.transcriptPath;
+    if (!transcriptPath) {
+      this.transcriptWatchers.stop(session.id);
+      return;
+    }
+
+    this.transcriptWatchers.watch({
       sessionId: session.id,
-      rawLogPath: session.rawLogPath,
-      initialOffset,
-      onChunk: (chunk) => this.flushPendingChunk(session.id, chunk),
+      transcriptPath,
+      onChange: () => this.emitTranscriptUpdated(session.id),
+    });
+  }
+
+  private emitTranscriptUpdated(sessionId: string): void {
+    const session = this.db.boundSessions.getById(sessionId);
+    if (!session || session.status === 'ended') {
+      this.transcriptWatchers.stop(sessionId);
+      return;
+    }
+    this.eventBus.emit({
+      type: 'session.transcript-updated',
+      sessionId: session.id,
+      projectSlug: session.projectSlug,
+      provider: session.provider,
+      conversationRef: session.conversationRef,
+      timestamp: nowIso(),
     });
   }
 
   private stopWatching(sessionId: string): void {
     this.outputWatchers.stop(sessionId, { flush: true }, (chunk) => this.flushPendingChunk(sessionId, chunk));
+    this.transcriptWatchers.stop(sessionId);
     this.clearWorkingExpiry(sessionId);
     this.clearRawOutputScreenUpdate(sessionId);
   }
