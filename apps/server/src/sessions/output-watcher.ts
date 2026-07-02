@@ -4,14 +4,26 @@ import fsPromises from 'node:fs/promises';
 interface WatchState {
   offset: number;
   watcher?: fs.FSWatcher;
+  pollTimer?: NodeJS.Timeout;
   processing: boolean;
   queued: boolean;
   pendingChunk: string;
   flushTimer?: NodeJS.Timeout;
 }
 
+interface OutputWatcherRegistryOptions {
+  pollIntervalMs?: number;
+}
+
+const DEFAULT_POLL_INTERVAL_MS = 500;
+
 export class OutputWatcherRegistry {
   private readonly watchers = new Map<string, WatchState>();
+  private readonly pollIntervalMs: number;
+
+  constructor(options: OutputWatcherRegistryOptions = {}) {
+    this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  }
 
   keys(): IterableIterator<string> {
     return this.watchers.keys();
@@ -70,9 +82,19 @@ export class OutputWatcherRegistry {
       }
     };
 
-    state.watcher = fs.watch(input.rawLogPath, { persistent: false }, () => {
-      void pump();
-    });
+    try {
+      state.watcher = fs.watch(input.rawLogPath, { persistent: false }, () => {
+        void pump();
+      });
+    } catch {
+      state.watcher = undefined;
+    }
+    if (this.pollIntervalMs > 0) {
+      state.pollTimer = setInterval(() => {
+        void pump();
+      }, this.pollIntervalMs);
+      state.pollTimer.unref?.();
+    }
     void pump();
   }
 
@@ -86,6 +108,10 @@ export class OutputWatcherRegistry {
       if (options.flush !== false && onChunk) {
         this.flush(state, onChunk);
       }
+    }
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = undefined;
     }
     state.watcher?.close();
     this.watchers.delete(sessionId);
