@@ -1,17 +1,17 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 25559bbced6c7fe785af3f64fe16004e681a62fd
-current_through_date: 2026-07-01T21:15:13-04:00
+current_through_commit: 146bfe4862378e8b96e3c1c5485c594c2c5eae2c
+current_through_date: 2026-07-02T12:31:45-04:00
 ---
 
 # Running Tests
 ## Primary Commands
-- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-07-01 with 32 files and 266 tests.
+- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-07-03 with 33 files and 270 tests.
 - `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search` - focused conversation search, live-session search, result ranking, hidden-conversation filtering, and cached-index backfill coverage; passed on 2026-06-26 with 17 tests.
-- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-07-01.
-- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-07-01.
-- `npm run test:e2e` - Playwright settings suite; passed on 2026-07-01 with isolated backend/web servers.
+- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-07-03.
+- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-07-03.
+- `npm run test:e2e` - Playwright settings suite; passed on 2026-07-03 with 4 tests on isolated backend/web servers.
 
 ## Targeted Test Patterns
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.

@@ -1,130 +1,33 @@
 {
   "changed_paths": [
-    "apps/server/src/app.ts",
-    "apps/server/src/config/service.ts",
-    "apps/server/src/db/database.ts",
-    "apps/server/src/db/repos/auth-sessions.ts",
-    "apps/server/src/db/repos/bound-sessions.ts",
-    "apps/server/src/db/repos/conversation-index.ts",
-    "apps/server/src/db/repos/interaction-summaries.ts",
-    "apps/server/src/db/repos/meta.ts",
-    "apps/server/src/db/repos/pending-conversations.ts",
-    "apps/server/src/db/repos/search-index.ts",
-    "apps/server/src/db/repos/title-overrides.ts",
-    "apps/server/src/db/repos/ui-preferences.ts",
-    "apps/server/src/db/schema.ts",
-    "apps/server/src/db/utils.ts",
-    "apps/server/src/indexing/indexing-service.ts",
-    "apps/server/src/lib/conversation-visibility.ts",
-    "apps/server/src/lib/text.ts",
-    "apps/server/src/providers/claude-provider.ts",
-    "apps/server/src/providers/codex-provider.ts",
-    "apps/server/src/providers/file-utils.ts",
-    "apps/server/src/providers/provider-utils.ts",
-    "apps/server/src/providers/transcripts/base.ts",
-    "apps/server/src/providers/transcripts/claude.ts",
-    "apps/server/src/providers/transcripts/codex.ts",
-    "apps/server/src/realtime/event-bus.ts",
-    "apps/server/src/routes/conversations.ts",
-    "apps/server/src/routes/projects.ts",
-    "apps/server/src/routes/sessions.ts",
-    "apps/server/src/routes/settings.ts",
-    "apps/server/src/search/conversation-search.ts",
-    "apps/server/src/security/auth-service.ts",
-    "apps/server/src/sessions/keystroke-transport.ts",
-    "apps/server/src/sessions/live-output.ts",
-    "apps/server/src/sessions/live-output/event-log-reader.ts",
-    "apps/server/src/sessions/live-output/filters.ts",
-    "apps/server/src/sessions/live-output/reader.ts",
+    "AGENTS.md",
     "apps/server/src/sessions/output-watcher.ts",
-    "apps/server/src/sessions/pending-adoption.ts",
-    "apps/server/src/sessions/screen-heuristics.ts",
     "apps/server/src/sessions/session-manager.ts",
-    "apps/server/src/sessions/session-runtime.ts",
-    "apps/server/src/sessions/session-screen.ts",
     "apps/server/src/sessions/timeline-merge.ts",
-    "apps/server/src/sessions/tmux-client.ts",
-    "apps/server/src/sessions/tmux-health.ts",
-    "apps/server/src/sessions/working-state.ts",
-    "apps/server/src/summaries/session-summary-service.ts",
+    "apps/server/src/sessions/transcript-watcher.ts",
     "apps/server/test/conversation-routes.test.ts",
-    "apps/server/test/conversations.test.ts",
-    "apps/server/test/database.test.ts",
-    "apps/server/test/e2e/server.ts",
-    "apps/server/test/helpers/session-fixtures.ts",
-    "apps/server/test/indexing-service.test.ts",
-    "apps/server/test/indexing.test.ts",
-    "apps/server/test/keystroke-planner.test.ts",
-    "apps/server/test/live-output.test.ts",
     "apps/server/test/output-watcher.test.ts",
-    "apps/server/test/pending-adoption.test.ts",
-    "apps/server/test/projects-routes.test.ts",
-    "apps/server/test/providers.test.ts",
-    "apps/server/test/realtime-event-bus.test.ts",
-    "apps/server/test/screen-heuristics.test.ts",
-    "apps/server/test/search.test.ts",
-    "apps/server/test/session-keystrokes-submit.test.ts",
-    "apps/server/test/session-keystrokes.test.ts",
-    "apps/server/test/session-lifecycle.test.ts",
-    "apps/server/test/session-manager.test.ts",
-    "apps/server/test/session-pending-first-turn.test.ts",
-    "apps/server/test/session-recency.test.ts",
-    "apps/server/test/session-routes.test.ts",
-    "apps/server/test/session-runtime.test.ts",
-    "apps/server/test/session-screen-state.test.ts",
-    "apps/server/test/session-screen.test.ts",
-    "apps/server/test/session-summary-service.test.ts",
     "apps/server/test/timeline-merge.test.ts",
-    "apps/server/test/tmux-health.test.ts",
-    "apps/server/test/working-state.test.ts",
-    "apps/server/tsconfig.e2e.json",
-    "apps/web/e2e/settings.spec.ts",
-    "apps/web/package.json",
-    "apps/web/src/App.tsx",
-    "apps/web/src/AppRoutes.test.tsx",
+    "apps/server/test/transcript-watcher.test.ts",
+    "apps/web/src/components/ConversationPane.test.tsx",
     "apps/web/src/components/ConversationPane.tsx",
-    "apps/web/src/components/Sidebar.tsx",
-    "apps/web/src/features/conversation/ExplorerPane.tsx",
-    "apps/web/src/features/conversation/markdown.tsx",
-    "apps/web/src/features/conversation/transcript-turns.tsx",
     "apps/web/src/features/conversation/useConversationData.ts",
-    "apps/web/src/features/conversation/useConversationDataController.ts",
-    "apps/web/src/features/navigation/route-selection.test.ts",
-    "apps/web/src/features/navigation/route-selection.ts",
-    "apps/web/src/features/navigation/sidebar-projects.test.ts",
-    "apps/web/src/features/navigation/sidebar-projects.ts",
+    "apps/web/src/features/realtime/apply-session-event.test.ts",
     "apps/web/src/features/realtime/apply-session-event.ts",
-    "apps/web/src/features/realtime/connection.test.tsx",
-    "apps/web/src/features/realtime/connection.ts",
-    "apps/web/src/features/realtime/reducers.test.ts",
-    "apps/web/src/features/realtime/reducers.ts",
-    "apps/web/src/lib/api.ts",
-    "apps/web/src/pages/LoginPage.test.tsx",
-    "apps/web/src/pages/SettingsPage.tsx",
-    "apps/web/src/test/setup.ts",
-    "apps/web/tsconfig.json",
-    "apps/web/vite.config.ts",
-    "apps/web/vitest.config.ts",
+    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
     "docs/fileindex.md",
-    "package-lock.json",
-    "package.json",
-    "packages/shared/src/index.d.ts",
-    "packages/shared/src/index.js",
-    "packages/shared/src/index.ts",
-    "playwright.config.ts",
-    "scripts/smoke-codex-adoption.mjs",
-    "scripts/verify-live-console.mjs"
+    "packages/shared/src/index.ts"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "d9c76ce818efe11ae34de5830156a92fb63e5ab8",
-      "date": "2026-07-01T01:05:54-04:00",
+      "commit": "2e726c384901c732c6c6f34bb42e3d167bbc94c2",
+      "date": "2026-07-02T00:31:58-04:00",
       "files": [
         {
           "paths": [
@@ -163,632 +66,38 @@
           "status": "M"
         }
       ],
-      "short_commit": "d9c76ce",
+      "short_commit": "2e726c3",
       "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "f4f746d18c5d49b2cc22156da0d2bdf0111d64c9",
-      "date": "2026-07-01T06:30:22-04:00",
+      "commit": "e16cdd2d0260453f701de8ae0988e1831f560442",
+      "date": "2026-07-02T03:33:36-04:00",
       "files": [
         {
           "paths": [
-            "apps/server/src/app.ts"
+            "AGENTS.md"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/src/indexing/indexing-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/lib/text.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/file-utils.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/transcripts/base.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/transcripts/claude.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/transcripts/codex.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/projects.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-screen.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/projects-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/providers.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/search.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-screen.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-summary-service.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/conversation/useConversationDataController.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "package.json"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "packages/shared/src/index.d.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "packages/shared/src/index.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "scripts/verify-live-console.mjs"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "f4f746d",
-      "subject": "Fix live console transcript and text bypass"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "53e9e6dc6b7b3978f0542b922edb3e3dbda7dce4",
-      "date": "2026-07-01T08:48:00-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
+            "docs/agent_docs/agents_md_status.json"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "53e9e6d",
-      "subject": "Fix restored live transcript submit handling"
+      "short_commit": "e16cdd2",
+      "subject": "Refresh AGENTS.md"
     },
     {
       "author": "bryanlan",
-      "commit": "d20acae0f7ff1179805cf48198744fd2baf0dce0",
-      "date": "2026-07-01T14:58:06-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "d20acae",
-      "subject": "Fix Claude resume input and transcript duplicates"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "d0663aeecd600ce1f03d064631d2a8bf46825032",
-      "date": "2026-07-01T17:45:25-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/search.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "d0663ae",
-      "subject": "Baseline transcript reliability fixes"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "cf257fd2964e7d14bd8a6a013e054ed03364e77f",
-      "date": "2026-07-01T18:03:17-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/test/e2e/server.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/helpers/session-fixtures.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/pending-adoption.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-keystrokes-submit.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-keystrokes.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-lifecycle.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-manager.test.ts"
-          ],
-          "status": "D"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-pending-first-turn.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-recency.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-screen-state.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/tsconfig.e2e.json"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/e2e/settings.spec.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/package.json"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/lib/api.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/pages/LoginPage.test.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/pages/SettingsPage.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/test/setup.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/tsconfig.json"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/vite.config.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/vitest.config.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "package-lock.json"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "playwright.config.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "cf257fd",
-      "subject": "Add rewrite safety net coverage"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "49562bf1bb755c6fc6786abec89fa9233ef601ca",
-      "date": "2026-07-01T18:08:16-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/tmux-client.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/tmux-health.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/helpers/session-fixtures.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-lifecycle.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/tmux-health.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "49562bf",
-      "subject": "Harden tmux liveness handling"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "022da3881d668ab9e32a4105f83ff105372b6a5f",
-      "date": "2026-07-01T18:23:29-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/db/database.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/indexing/indexing-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/pending-adoption.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/pending-adoption.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "scripts/smoke-codex-adoption.mjs"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "022da38",
-      "subject": "Consolidate pending adoption writes"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "3217bf10f457ff8fddd2645f16a46471ae01719a",
-      "date": "2026-07-01T18:27:43-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/screen-heuristics.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/screen-heuristics.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "3217bf1",
-      "subject": "Extract session screen heuristics"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "509902ac59ad1862188df469f3c2aecc89a26651",
-      "date": "2026-07-01T18:29:33-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/working-state.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/working-state.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "509902a",
-      "subject": "Extract session working state reducer"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "6c0494864e987dd1769acde6e8d4a26fad3461c3",
-      "date": "2026-07-01T18:31:21-04:00",
+      "commit": "b0b71388bac7624f51225cc0fd16529846a10db4",
+      "date": "2026-07-02T07:35:48-04:00",
       "files": [
         {
           "paths": [
             "apps/server/src/sessions/output-watcher.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
           ],
           "status": "M"
         },
@@ -796,56 +105,17 @@
           "paths": [
             "apps/server/test/output-watcher.test.ts"
           ],
-          "status": "A"
+          "status": "M"
         }
       ],
-      "short_commit": "6c04948",
-      "subject": "Extract session output watcher"
+      "short_commit": "b0b7138",
+      "subject": "Poll raw output logs when watch events drop"
     },
     {
       "author": "bryanlan",
-      "commit": "3ea651a09615307a01a8fb1e10d54ce86152ac7f",
-      "date": "2026-07-01T18:35:33-04:00",
+      "commit": "c9dde57a3e8ff435f37d8b2132001e6f14ee4a83",
+      "date": "2026-07-02T07:53:50-04:00",
       "files": [
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/timeline-merge.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/timeline-merge.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "3ea651a",
-      "subject": "Extract timeline merge logic"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "e9d1b8a139343e6dfaae64c23cb90c86324f22b3",
-      "date": "2026-07-01T18:43:33-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/app.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/realtime/event-bus.ts"
-          ],
-          "status": "M"
-        },
         {
           "paths": [
             "apps/server/src/sessions/session-manager.ts"
@@ -854,581 +124,31 @@
         },
         {
           "paths": [
-            "apps/server/src/sessions/session-runtime.ts"
+            "apps/server/src/sessions/transcript-watcher.ts"
           ],
           "status": "A"
         },
         {
           "paths": [
-            "apps/server/test/realtime-event-bus.test.ts"
+            "apps/server/test/transcript-watcher.test.ts"
           ],
           "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-runtime.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "e9d1b8a",
-      "subject": "Add session runtime queue"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "4fc7c7c855fcfae1907f21b47a85a689866d496f",
-      "date": "2026-07-01T18:47:08-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/keystroke-transport.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/keystroke-planner.test.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "4fc7c7c",
-      "subject": "Extract keystroke transport planner"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "aaa1c334e96b449ad6fdea9ab09364f573c8edfa",
-      "date": "2026-07-01T18:48:14-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/test/session-runtime.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "aaa1c33",
-      "subject": "Cover session runtime concurrency"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "970b2742d375b1d990975a0d19cf72496bb26631",
-      "date": "2026-07-01T19:24:33-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/session-screen.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-screen.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "scripts/verify-live-console.mjs"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "970b274",
-      "subject": "Harden startup placeholder parsing"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "cd660c5e3d4fbb0e178a1e5720fd2dc34d368453",
-      "date": "2026-07-01T19:47:39-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/app.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/search/conversation-search.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output/event-log-reader.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output.ts",
-            "apps/server/src/sessions/live-output/filters.ts"
-          ],
-          "status": "R060"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output/reader.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/summaries/session-summary-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-keystrokes-submit.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/lib/api.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "packages/shared/src/index.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "cd660c5",
-      "subject": "Stabilize live message identity"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "4d3b484c0336d75178c826fd3c13bbd84d2123b6",
-      "date": "2026-07-01T19:54:53-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/db/database.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/auth-sessions.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/bound-sessions.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/conversation-index.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/interaction-summaries.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/meta.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/pending-conversations.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/search-index.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/title-overrides.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/repos/ui-preferences.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/schema.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/db/utils.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/indexing/indexing-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/settings.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/search/conversation-search.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/security/auth-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/pending-adoption.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/summaries/session-summary-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversations.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/database.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/indexing-service.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/indexing.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/pending-adoption.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/search.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-keystrokes-submit.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-keystrokes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-lifecycle.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-pending-first-turn.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-recency.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-runtime.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-screen-state.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-summary-service.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "4d3b484",
-      "subject": "Split database layer into typed repos"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "2095631238811161608701d30beb3da27e271ab9",
-      "date": "2026-07-01T20:00:41-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/db/repos/search-index.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/search/conversation-search.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/search.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "2095631",
-      "subject": "Harden route params and search scoring"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "1324ec80e6a314682e0b236fe8128c6f9d51fa22",
-      "date": "2026-07-01T20:04:31-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/reducers.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/reducers.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "1324ec8",
-      "subject": "Extract frontend realtime reducers"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "ed586da0d06412b86e269fdb549deb996ba7a0c4",
-      "date": "2026-07-01T20:08:30-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/apply-session-event.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/connection.test.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/connection.ts"
-          ],
-          "status": "A"
-        }
-      ],
-      "short_commit": "ed586da",
-      "subject": "Extract frontend realtime connection"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "292a31e411573607731262b777f08c220acad9fd",
-      "date": "2026-07-01T20:33:06-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/routes/sessions.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.tsx"
-          ],
-          "status": "M"
         },
         {
           "paths": [
             "apps/web/src/features/conversation/useConversationData.ts"
           ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/realtime/apply-session-event.test.ts"
+          ],
           "status": "A"
         },
         {
           "paths": [
-            "apps/web/src/features/conversation/useConversationDataController.ts"
-          ],
-          "status": "D"
-        },
-        {
-          "paths": [
             "apps/web/src/features/realtime/apply-session-event.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/reducers.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/realtime/reducers.ts"
           ],
           "status": "M"
         },
@@ -1439,23 +159,17 @@
           "status": "M"
         }
       ],
-      "short_commit": "292a31e",
-      "subject": "Stabilize frontend transcript and input state"
+      "short_commit": "c9dde57",
+      "subject": "Ensure live transcript updates refresh conversations"
     },
     {
       "author": "bryanlan",
-      "commit": "0c9740c7084267c0e219521b7099107d105675a0",
-      "date": "2026-07-01T20:49:53-04:00",
+      "commit": "e7d1051d6f13adff78243499e36d26075407c3fc",
+      "date": "2026-07-02T08:19:47-04:00",
       "files": [
         {
           "paths": [
-            "apps/web/src/App.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/AppRoutes.test.tsx"
+            "apps/web/src/components/ConversationPane.test.tsx"
           ],
           "status": "A"
         },
@@ -1464,221 +178,53 @@
             "apps/web/src/components/ConversationPane.tsx"
           ],
           "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/components/Sidebar.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/conversation/ExplorerPane.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/conversation/markdown.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/conversation/transcript-turns.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/navigation/route-selection.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/navigation/route-selection.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/navigation/sidebar-projects.test.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/features/navigation/sidebar-projects.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "playwright.config.ts"
-          ],
-          "status": "M"
         }
       ],
-      "short_commit": "0c9740c",
-      "subject": "Refactor frontend shell structure"
+      "short_commit": "e7d1051",
+      "subject": "Clear live bridge draft on submit"
     },
     {
       "author": "bryanlan",
-      "commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
-      "date": "2026-07-01T21:15:13-04:00",
+      "commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
+      "date": "2026-07-02T12:31:45-04:00",
       "files": [
         {
           "paths": [
-            "apps/server/src/config/service.ts"
+            "apps/server/src/sessions/timeline-merge.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/src/indexing/indexing-service.ts"
+            "apps/server/test/conversation-routes.test.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/src/lib/conversation-visibility.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/claude-provider.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/codex-provider.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/provider-utils.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/src/providers/transcripts/base.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/routes/settings.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/output-watcher.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/tmux-client.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/summaries/session-summary-service.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/indexing-service.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/search.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/lib/api.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "docs/agent_docs/running_tests.md"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "docs/architecture.md"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "docs/fileindex.md"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "packages/shared/src/index.d.ts"
-          ],
-          "status": "D"
-        },
-        {
-          "paths": [
-            "packages/shared/src/index.js"
-          ],
-          "status": "D"
-        },
-        {
-          "paths": [
-            "scripts/smoke-codex-adoption.mjs"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "scripts/verify-live-console.mjs"
+            "apps/server/test/timeline-merge.test.ts"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "25559bb",
-      "subject": "Clean up architecture refactor leftovers"
+      "short_commit": "146bfe4",
+      "subject": "Keep raw terminal output out of transcript timelines"
     }
   ],
   "docs_current_through": {
-    "commit": "f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e",
-    "date": "2026-06-30T08:48:06-04:00"
-  },
-  "from_commit": "f7846a6d73b7e4d35f8b032cf2a9c582ff2f9d6e",
-  "generated_at": "2026-07-02T04:31:58+00:00",
-  "head": {
     "commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
-    "date": "2026-07-01T21:15:13-04:00",
-    "short_commit": "25559bb"
+    "date": "2026-07-01T21:15:13-04:00"
+  },
+  "from_commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
+  "generated_at": "2026-07-03T04:52:42+00:00",
+  "head": {
+    "commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
+    "date": "2026-07-02T12:31:45-04:00",
+    "short_commit": "146bfe4"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
+  "to_commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
   "worktree_dirty": true
 }
