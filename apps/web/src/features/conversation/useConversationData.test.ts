@@ -81,6 +81,18 @@ describe('timelineMessagesRefetchInterval', () => {
     })).toBe(1200);
   });
 
+  it('keeps polling when live output is newer than the visible transcript tail', () => {
+    expect(timelineMessagesRefetchInterval({
+      boundSession: session({
+        isWorking: false,
+        lastOutputAt: '2026-07-03T15:52:30.000Z',
+      }),
+      pages: [page([
+        message({ id: 'old-answer', timestamp: '2026-07-03T15:49:41.000Z' }),
+      ])],
+    })).toBe(1200);
+  });
+
   it('stops polling once the assistant transcript tail has caught up with completion', () => {
     expect(timelineMessagesRefetchInterval({
       boundSession: session({

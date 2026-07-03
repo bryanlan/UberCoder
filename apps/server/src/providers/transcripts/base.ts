@@ -300,6 +300,10 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const firstVisibleUser = displayMessages.find((message) => message.role === 'user');
   const lastVisible = [...displayMessages].reverse().find((message) => message.role === 'assistant' || message.role === 'user');
+  const lastDurableVisible = [...displayMessages].reverse().find((message) => (
+    message.lifecycle === 'durable'
+    && (message.role === 'assistant' || message.role === 'user')
+  ));
   const allUserMessages = sortedMessages.filter((message) => message.role === 'user');
   const firstUser = allUserMessages[0];
   const lastUser = allUserMessages.at(-1);
@@ -318,7 +322,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
     projectSlug: input.projectSlug,
     provider: input.provider,
     title,
-    excerpt: lastVisible ? truncate(lastVisible.text, 120) : undefined,
+    excerpt: lastDurableVisible ? truncate(lastDurableVisible.text, 120) : lastVisible ? truncate(lastVisible.text, 120) : undefined,
     createdAt,
     updatedAt,
     transcriptPath: input.filePath,

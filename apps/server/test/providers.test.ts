@@ -307,9 +307,70 @@ describe('provider history discovery', () => {
     expect(parsed.messages).toHaveLength(2);
   });
 
-  it('hides Codex commentary-phase assistant progress from display transcripts', async () => {
+  it('shows only the latest Codex commentary-phase assistant message while the latest turn is unfinished', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
     const transcriptPath = path.join(tempDir, 'rollout-commentary-progress.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Fix the transcript UI.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'I am checking the current build.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:10.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'The build is still running.' }],
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'commentary-progress',
+    });
+
+    expect(parsed.displayMessages.map((message) => ({
+      role: message.role,
+      lifecycle: message.lifecycle,
+      text: message.text,
+    }))).toEqual([
+      {
+        role: 'user',
+        lifecycle: 'durable',
+        text: 'Fix the transcript UI.',
+      },
+      {
+        role: 'assistant',
+        lifecycle: 'pending',
+        text: 'The build is still running.',
+      },
+    ]);
+    expect(parsed.messages.map((message) => message.text)).toContain('I am checking the current build.');
+  });
+
+  it('hides Codex commentary-phase assistant progress once the latest turn has a final answer', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-commentary-final-answer.jsonl');
     await fs.writeFile(transcriptPath, [
       JSON.stringify({
         timestamp: '2026-03-07T00:00:00.000Z',
@@ -346,7 +407,7 @@ describe('provider history discovery', () => {
       filePath: transcriptPath,
       provider: 'codex',
       projectSlug: 'demo',
-      conversationRef: 'commentary-progress',
+      conversationRef: 'commentary-final-answer',
     });
 
     expect(parsed.displayMessages.map((message) => message.text)).toEqual([

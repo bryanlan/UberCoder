@@ -14,6 +14,7 @@ import {
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
 
 const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
+const MAX_PENDING_CODEX_COMMENTARY_MESSAGES = 1;
 
 function isCodexDisplayChromeLine(line: string): boolean {
   const trimmed = line.trim();
@@ -39,11 +40,6 @@ function shouldHideCodexDisplayMessage(message: NormalizedMessage): boolean {
   }
 
   if (message.role === 'assistant') {
-    const record = asObject(message.rawMetadata);
-    const payload = asObject(record?.payload);
-    if (payload?.phase === 'commentary') {
-      return true;
-    }
     const trimmed = message.text.trim();
     return isCodexDisplayChromeLine(trimmed);
   }
@@ -61,6 +57,49 @@ function shouldHideCodexDisplayMessage(message: NormalizedMessage): boolean {
     || trimmed === 'Live session did not accept the typed text into its input buffer. The draft was not submitted'
     || /^#\s*AGENTS\.md instructions for\b[\s\S]*$/i.test(trimmed)
     || /^<INSTRUCTIONS>[\s\S]*<\/INSTRUCTIONS>$/i.test(trimmed);
+}
+
+function codexMessagePhase(message: NormalizedMessage): string | undefined {
+  const record = asObject(message.rawMetadata);
+  const payload = asObject(record?.payload);
+  return typeof payload?.phase === 'string' ? payload.phase : undefined;
+}
+
+function isCodexAssistantCommentaryMessage(message: NormalizedMessage): boolean {
+  return message.role === 'assistant' && codexMessagePhase(message) === 'commentary';
+}
+
+function codexMessageLifecycle(record: Record<string, unknown>, role: NormalizedMessage['role']): NormalizedMessage['lifecycle'] {
+  const payload = asObject(record.payload);
+  return role === 'assistant' && payload?.phase === 'commentary' ? 'pending' : 'durable';
+}
+
+function pendingCommentaryTailIds(messages: NormalizedMessage[]): Set<string> {
+  let lastDurableIndex = -1;
+  messages.forEach((message, index) => {
+    if (message.lifecycle === 'durable') {
+      lastDurableIndex = index;
+    }
+  });
+
+  const pendingTail = messages
+    .slice(lastDurableIndex + 1)
+    .filter(isCodexAssistantCommentaryMessage)
+    .slice(-MAX_PENDING_CODEX_COMMENTARY_MESSAGES);
+  return new Set(pendingTail.map((message) => message.id));
+}
+
+function shouldShowCodexDisplayCandidate(message: NormalizedMessage, pendingCommentaryIds: Set<string>): boolean {
+  if (!isCodexAssistantCommentaryMessage(message)) {
+    return true;
+  }
+  return pendingCommentaryIds.has(message.id);
+}
+
+function toCodexDisplayMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  const candidates = messages.filter((message) => !shouldHideCodexDisplayMessage(message));
+  const pendingCommentaryIds = pendingCommentaryTailIds(candidates);
+  return candidates.filter((message) => shouldShowCodexDisplayCandidate(message, pendingCommentaryIds));
 }
 
 function extractCodexMessage(record: Record<string, unknown>): { role: NormalizedMessage['role']; text: string } | undefined {
@@ -203,7 +242,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
       role: extracted.role,
-      lifecycle: 'durable',
+      lifecycle: codexMessageLifecycle(record, extracted.role),
       text: extracted.text,
       timestamp,
       conversationRef: input.conversationRef,
@@ -213,8 +252,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   }
 
   const dedupedMessages = dedupeCodexEventResponseMessages(messages);
-  const displayMessages = dedupedMessages
-    .filter((message) => !shouldHideCodexDisplayMessage(message))
+  const displayMessages = toCodexDisplayMessages(dedupedMessages)
     .map((message) => ({
       ...message,
       text: sanitizeCodexDisplayText(message.text),

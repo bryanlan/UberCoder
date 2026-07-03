@@ -106,7 +106,7 @@ function latestMessageByTimestamp(pages: ConversationTimeline[]): NormalizedMess
 }
 
 export function timelineMessagesRefetchInterval(input: {
-  boundSession?: Pick<BoundSession, 'isWorking' | 'lastCompletedAt'>;
+  boundSession?: Pick<BoundSession, 'isWorking' | 'lastCompletedAt' | 'lastOutputAt'>;
   pages?: ConversationTimeline[];
 }): number | false {
   const { boundSession } = input;
@@ -122,11 +122,19 @@ export function timelineMessagesRefetchInterval(input: {
     return ACTIVE_TIMELINE_REFETCH_MS;
   }
 
+  const latestMessageMs = latestMessage ? Date.parse(latestMessage.timestamp) : Number.NaN;
+  const lastOutputMs = Date.parse(boundSession.lastOutputAt ?? '');
+  if (
+    Number.isFinite(lastOutputMs)
+    && (!Number.isFinite(latestMessageMs) || lastOutputMs - latestMessageMs > COMPLETED_TRANSCRIPT_TAIL_GRACE_MS)
+  ) {
+    return ACTIVE_TIMELINE_REFETCH_MS;
+  }
+
   const completedMs = Date.parse(boundSession.lastCompletedAt ?? '');
   if (!Number.isFinite(completedMs)) {
     return false;
   }
-  const latestMessageMs = latestMessage ? Date.parse(latestMessage.timestamp) : Number.NaN;
   if (!Number.isFinite(latestMessageMs) || completedMs - latestMessageMs > COMPLETED_TRANSCRIPT_TAIL_GRACE_MS) {
     return ACTIVE_TIMELINE_REFETCH_MS;
   }

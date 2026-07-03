@@ -168,6 +168,9 @@ function messagesShareTranscriptTurn(previous: NormalizedMessage, next: Normaliz
   if (previous.role !== next.role) {
     return false;
   }
+  if (previous.lifecycle !== next.lifecycle) {
+    return false;
+  }
   return previous.role === 'assistant' || previous.role === 'user' || previous.role === 'tool';
 }
 
