@@ -5,10 +5,12 @@ import {
   useQuery,
   type QueryClient,
 } from '@tanstack/react-query';
-import type { ConversationTimeline, ProviderId } from '@agent-console/shared';
+import type { BoundSession, ConversationTimeline, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import { api } from '../../lib/api';
 
 const TIMELINE_MESSAGE_PAGE_SIZE = 80;
+const ACTIVE_TIMELINE_REFETCH_MS = 1200;
+const COMPLETED_TRANSCRIPT_TAIL_GRACE_MS = 10_000;
 
 export function conversationMetaQueryKey(
   projectSlug: string | undefined,
@@ -87,6 +89,51 @@ function timelineMatchesSelection(
   );
 }
 
+function latestMessageByTimestamp(pages: ConversationTimeline[]): NormalizedMessage | undefined {
+  let latest: NormalizedMessage | undefined;
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const page of pages) {
+    for (const message of page.messages) {
+      const timestampMs = Date.parse(message.timestamp);
+      if (!Number.isFinite(timestampMs) || timestampMs <= latestMs) {
+        continue;
+      }
+      latest = message;
+      latestMs = timestampMs;
+    }
+  }
+  return latest;
+}
+
+export function timelineMessagesRefetchInterval(input: {
+  boundSession?: Pick<BoundSession, 'isWorking' | 'lastCompletedAt'>;
+  pages?: ConversationTimeline[];
+}): number | false {
+  const { boundSession } = input;
+  if (!boundSession) {
+    return false;
+  }
+  if (boundSession.isWorking) {
+    return ACTIVE_TIMELINE_REFETCH_MS;
+  }
+
+  const latestMessage = latestMessageByTimestamp(input.pages ?? []);
+  if (latestMessage?.role === 'user') {
+    return ACTIVE_TIMELINE_REFETCH_MS;
+  }
+
+  const completedMs = Date.parse(boundSession.lastCompletedAt ?? '');
+  if (!Number.isFinite(completedMs)) {
+    return false;
+  }
+  const latestMessageMs = latestMessage ? Date.parse(latestMessage.timestamp) : Number.NaN;
+  if (!Number.isFinite(latestMessageMs) || completedMs - latestMessageMs > COMPLETED_TRANSCRIPT_TAIL_GRACE_MS) {
+    return ACTIVE_TIMELINE_REFETCH_MS;
+  }
+
+  return false;
+}
+
 export function useConversationData({
   authenticated,
   selectedProjectSlug,
@@ -148,7 +195,10 @@ export function useConversationData({
     placeholderData: keepPreviousData,
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (lastPage) => lastPage.messagePage?.olderCursor,
-    refetchInterval: selectedBoundSession?.isWorking ? 1200 : false,
+    refetchInterval: (query) => timelineMessagesRefetchInterval({
+      boundSession: selectedBoundSession,
+      pages: query.state.data?.pages,
+    }),
   });
 
   const messagePages = useMemo(() => {
