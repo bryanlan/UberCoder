@@ -222,13 +222,16 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
+  const shouldCollectPathMetadata = input.collectPathMetadata !== false;
   let originator: string | undefined;
   let source: string | undefined;
   let threadSource: string | undefined;
 
   for (const { index, record } of records) {
-    collectProjectPaths(record, projectPaths);
-    collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
+    if (shouldCollectPathMetadata) {
+      collectProjectPaths(record, projectPaths);
+      collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
+    }
     if (record.type === 'session_meta') {
       const payload = asObject(record.payload);
       originator ??= typeof payload?.originator === 'string' ? payload.originator : undefined;

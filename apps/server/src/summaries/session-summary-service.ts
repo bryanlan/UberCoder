@@ -460,7 +460,6 @@ export class SessionSummaryService {
   ) {}
 
   start(): void {
-    void this.runOnce({ bootstrap: true });
     this.timer = setInterval(() => {
       void this.runOnce({ bootstrap: false });
     }, SUMMARY_INTERVAL_MS);

@@ -70,16 +70,19 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
+  const shouldCollectPathMetadata = input.collectPathMetadata !== false;
   let model: string | undefined;
 
   for (const { index, record } of records) {
-    collectProjectPaths(record, projectPaths);
-    collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
-    if (typeof record.cwd === 'string') {
-      projectPaths.add(record.cwd);
-    }
-    if (typeof record.project_path === 'string') {
-      projectPaths.add(record.project_path);
+    if (shouldCollectPathMetadata) {
+      collectProjectPaths(record, projectPaths);
+      collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
+      if (typeof record.cwd === 'string') {
+        projectPaths.add(record.cwd);
+      }
+      if (typeof record.project_path === 'string') {
+        projectPaths.add(record.project_path);
+      }
     }
 
     if (!model) {

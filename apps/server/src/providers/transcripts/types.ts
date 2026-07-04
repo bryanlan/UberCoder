@@ -5,6 +5,7 @@ export interface TranscriptParseInput {
   provider: ProviderId;
   projectSlug: string;
   conversationRef: string;
+  collectPathMetadata?: boolean;
 }
 
 export interface ParsedTranscript {

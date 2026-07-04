@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage, type SessionScreen } from '@agent-console/shared';
+import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage } from '@agent-console/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
@@ -112,19 +112,8 @@ interface TimelineResponse {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
   boundSession: BoundSession | undefined;
-  liveScreen: SessionScreen | undefined;
+  liveScreen: undefined;
   messagePage: MessagePageInfo;
-}
-
-function hideReadableScreenContent(screen: SessionScreen | undefined): SessionScreen | undefined {
-  if (!screen) {
-    return undefined;
-  }
-  return {
-    ...screen,
-    content: '',
-    contentAnsi: '',
-  };
 }
 
 function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
@@ -187,9 +176,7 @@ export async function registerConversationRoutes(
     let summary = adoptedConversationRef ? (cachedSummary ?? pendingSummary) : (pendingSummary ?? cachedSummary);
     const boundSession = db.boundSessions.getRestorableByConversation(projectSlug, providerId, resolvedConversationRef);
 
-    const liveSessionState = boundSession ? await sessions.getSessionScreen(boundSession.id) : undefined;
-    const rawLiveScreen = liveSessionState?.screen;
-    const resolvedBoundSession = liveSessionState?.session;
+    const resolvedBoundSession = boundSession;
 
     if (!summary && resolvedBoundSession) {
       summary = buildSyntheticConversationFromSession(resolvedBoundSession);
@@ -197,7 +184,6 @@ export async function registerConversationRoutes(
 
     if (metadataOnly && summary) {
       const emptyPage = paginateMessages([], parsedQuery.data);
-      const liveScreen = hideReadableScreenContent(rawLiveScreen);
       return {
         conversation: {
           ...summary,
@@ -206,7 +192,7 @@ export async function registerConversationRoutes(
         },
         messages: emptyPage.pageMessages,
         boundSession: resolvedBoundSession,
-        liveScreen,
+        liveScreen: undefined,
         messagePage: emptyPage.pageInfo,
       };
     }
@@ -215,7 +201,11 @@ export async function registerConversationRoutes(
     let allMessages: NormalizedMessage[] = [];
 
     if (!pendingSummary || adoptedConversationRef) {
-      const cachedConversation = summary ? await loadProviderConversationFromSummary(summary) : null;
+      const cachedConversation = summary
+        ? await loadProviderConversationFromSummary(summary, {
+            allowStaleWhileChanging: resolvedBoundSession?.isWorking === true,
+          })
+        : null;
       const conversation = cachedConversation
         ?? await provider.getConversation(project, resolvedConversationRef, providerSettings);
       if (conversation) {
@@ -247,8 +237,6 @@ export async function registerConversationRoutes(
         ...parsedQuery.data,
         samePageRun: messagesShareTimelinePageRun,
       });
-    const liveScreen = hideReadableScreenContent(rawLiveScreen);
-
     if (!summary) {
       reply.code(404).send({ error: 'Conversation not found.' });
       return;
@@ -262,7 +250,7 @@ export async function registerConversationRoutes(
       },
       messages: pagedMessages.pageMessages,
       boundSession: resolvedBoundSession,
-      liveScreen,
+      liveScreen: undefined,
       messagePage: pagedMessages.pageInfo,
     };
   });

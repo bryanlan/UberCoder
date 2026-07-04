@@ -12,6 +12,10 @@ interface CachedProviderConversation {
 
 const transcriptConversationCache = new Map<string, CachedProviderConversation>();
 
+interface LoadProviderConversationOptions {
+  allowStaleWhileChanging?: boolean;
+}
+
 function cacheKey(summary: ConversationSummary): string | undefined {
   if (!summary.transcriptPath) {
     return undefined;
@@ -22,6 +26,7 @@ function cacheKey(summary: ConversationSummary): string | undefined {
 
 export async function loadProviderConversationFromSummary(
   summary: ConversationSummary,
+  options: LoadProviderConversationOptions = {},
 ): Promise<ProviderConversation | null> {
   const key = cacheKey(summary);
   if (!key || !summary.transcriptPath) {
@@ -31,7 +36,13 @@ export async function loadProviderConversationFromSummary(
   try {
     const stat = await fs.stat(summary.transcriptPath);
     const cached = transcriptConversationCache.get(key);
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    if (
+      cached
+      && (
+        options.allowStaleWhileChanging === true
+        || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
+      )
+    ) {
       return cached.conversation;
     }
 
@@ -41,12 +52,14 @@ export async function loadProviderConversationFromSummary(
           provider: summary.provider,
           projectSlug: summary.projectSlug,
           conversationRef: summary.ref,
+          collectPathMetadata: false,
         })
       : await parseCodexConversationFile({
           filePath: summary.transcriptPath,
           provider: summary.provider,
           projectSlug: summary.projectSlug,
           conversationRef: summary.ref,
+          collectPathMetadata: false,
         });
 
     const conversation: ProviderConversation = {

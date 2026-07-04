@@ -89,6 +89,42 @@ describe('SessionSummaryService', () => {
     });
   });
 
+  it('does not bootstrap transcript summaries immediately on startup', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-start-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const listActiveProjects = vi.fn(async () => [project]);
+    const runner = vi.fn(async () => ({
+      chatSummary: 'Summary.',
+      recentChangesSummary: 'Recent summary.',
+    }));
+    const service = new SessionSummaryService(
+      db,
+      {
+        listActiveProjects,
+        getMergedProviderSettings: () => providerSettings,
+      } as never,
+      {
+        get: () => ({
+          getConversation: async () => {
+            throw new Error('Transcript loading should not run during startup.');
+          },
+        }),
+      } as never,
+      tempDir,
+      new RealtimeEventBus(),
+      runner,
+    );
+
+    service.start();
+    await Promise.resolve();
+
+    expect(listActiveProjects).not.toHaveBeenCalled();
+    expect(runner).not.toHaveBeenCalled();
+
+    await service.stop();
+    db.close();
+  });
+
   it('summarizes each active session with sanitized user and assistant prose only', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-summary-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

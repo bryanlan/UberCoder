@@ -52,17 +52,6 @@ function daysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-async function waitForSearchResults(db: AppDatabase, query: string): Promise<ReturnType<AppDatabase["searchIndex"]["search"]>> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const results = db.searchIndex.search(query, 10, { projectSlugs: ['demo'] });
-    if (results.length > 0) {
-      return results;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  return db.searchIndex.search(query, 10, { projectSlugs: ['demo'] });
-}
-
 describe('conversation search', () => {
   it('keeps prose lines that merely start with code-like keywords', () => {
     const prose = [
@@ -788,7 +777,7 @@ describe('conversation search', () => {
     db.close();
   });
 
-  it('backfills missing search rows from the cached conversation index on startup', async () => {
+  it('does not backfill missing search rows from the cached conversation index on startup', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-backfill-'));
     const projectPath = path.join(tempDir, 'project');
     const providerRoot = path.join(tempDir, 'provider-home');
@@ -806,6 +795,7 @@ describe('conversation search', () => {
       degraded: false,
     }]);
     let listConversationCalls = 0;
+    let getConversationCalls = 0;
     const activeProject = { ...project, path: projectPath, rootPath: projectPath, matchPaths: [projectPath] };
     const providerSettings = {
       id: 'codex',
@@ -820,20 +810,23 @@ describe('conversation search', () => {
         listConversationCalls += 1;
         return [];
       },
-      getConversation: async (_project: ActiveProject, conversationRef: string) => ({
-        summary: {
-          ...conversation,
-          ref: conversationRef,
-          title: 'Cached upgrade conversation',
-        },
-        messages: [
-          message({
-            role: 'assistant',
-            timestamp: '2026-06-18T12:00:00.000Z',
-            text: 'The cached upgrade phrase should be searchable after startup.',
-          }),
-        ],
-      }),
+      getConversation: async (_project: ActiveProject, conversationRef: string) => {
+        getConversationCalls += 1;
+        return {
+          summary: {
+            ...conversation,
+            ref: conversationRef,
+            title: 'Cached upgrade conversation',
+          },
+          messages: [
+            message({
+              role: 'assistant',
+              timestamp: '2026-06-18T12:00:00.000Z',
+              text: 'The cached upgrade phrase should be searchable after startup.',
+            }),
+          ],
+        };
+      },
       getLaunchCommand: () => ({ cwd: projectPath, argv: ['codex'], env: {} }),
     };
     const indexing = new IndexingService(
@@ -855,10 +848,11 @@ describe('conversation search', () => {
       await indexing.start();
       const query = buildFtsQuery('cached upgrade phrase');
       expect(query).toBeTruthy();
-      const results = await waitForSearchResults(db, query!);
+      const results = db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] });
 
-      expect(results[0]?.conversationRef).toBe('cached-upgrade');
+      expect(results).toEqual([]);
       expect(listConversationCalls).toBe(0);
+      expect(getConversationCalls).toBe(0);
     } finally {
       await indexing.stop();
       db.close();

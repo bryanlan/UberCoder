@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
-import { IndexingService } from '../src/indexing/indexing-service.js';
+import { getProviderTranscriptWatchPaths, IndexingService } from '../src/indexing/indexing-service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
@@ -40,6 +40,17 @@ const secondProject: ActiveProject = {
 };
 
 describe('IndexingService', () => {
+  it('watches provider transcript paths instead of whole provider homes', () => {
+    expect(getProviderTranscriptWatchPaths('codex', '/state/codex')).toEqual([
+      path.join('/state/codex', 'sessions'),
+      path.join('/state/codex', 'history.jsonl'),
+    ]);
+    expect(getProviderTranscriptWatchPaths('claude', '/state/claude')).toEqual([
+      path.join('/state/claude', 'projects'),
+      path.join('/state/claude', 'history.jsonl'),
+    ]);
+  });
+
   it('starts from cached index data without scanning provider transcripts', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const projectPath = path.join(tempDir, 'project');
@@ -77,6 +88,39 @@ describe('IndexingService', () => {
 
     expect(listConversations).not.toHaveBeenCalled();
     expect(indexing.getTree().projects[0]?.providers.codex.conversations[0]?.ref).toBe('cached-conversation');
+    await indexing.stop();
+    db.close();
+  });
+
+  it('handles scheduled provider-file refreshes without scanning provider transcripts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-refresh-'));
+    const projectPath = path.join(tempDir, 'project');
+    const providerRoot = path.join(tempDir, 'provider-home');
+    await fs.mkdir(projectPath, { recursive: true });
+    await fs.mkdir(providerRoot, { recursive: true });
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const listConversations = vi.fn(async () => [] as ConversationSummary[]);
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [{ ...project, path: projectPath, matchPaths: [projectPath] }],
+        getMergedProviderSettings: () => ({ ...providerSettings, discoveryRoot: providerRoot }),
+      } as never,
+      {
+        get: () => ({
+          listConversations,
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.start();
+    indexing.scheduleRefresh(0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(listConversations).not.toHaveBeenCalled();
+
     await indexing.stop();
     db.close();
   });
@@ -839,17 +883,21 @@ describe('IndexingService', () => {
     db.close();
   });
 
-  it('keeps the earliest scheduled refresh instead of postponing it on repeated change events', async () => {
+  it('keeps the earliest scheduled metadata refresh instead of postponing it on repeated change events', async () => {
     vi.useFakeTimers();
     try {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
       const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+      let metadataCalls = 0;
       let codexCalls = 0;
 
       const indexing = new IndexingService(
         { getProjectsRoot: () => tempDir } as never,
         {
-          listActiveProjects: async () => [project],
+          listActiveProjects: async () => {
+            metadataCalls += 1;
+            return [project];
+          },
           getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
             ...providerSettings,
             id: providerId,
@@ -875,11 +923,13 @@ describe('IndexingService', () => {
       indexing.scheduleRefresh(100);
       await vi.advanceTimersByTimeAsync(49);
 
+      expect(metadataCalls).toBe(0);
       expect(codexCalls).toBe(0);
 
       await vi.advanceTimersByTimeAsync(1);
 
-      expect(codexCalls).toBe(1);
+      expect(metadataCalls).toBe(1);
+      expect(codexCalls).toBe(0);
       await indexing.stop();
       db.close();
     } finally {

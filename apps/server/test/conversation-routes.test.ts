@@ -547,11 +547,9 @@ describe('conversation routes', () => {
         boundSession: {
           id: 'session-live-adopted',
         },
-        liveScreen: {
-          content: '',
-        },
       });
-      expect(getSessionScreen).toHaveBeenCalledWith('session-live-adopted');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
       expect(getConversation).toHaveBeenCalledTimes(1);
     } finally {
       await app.close();
@@ -762,6 +760,133 @@ describe('conversation routes', () => {
           },
         ],
       });
+      expect(getConversation).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
+  it('reuses the cached transcript parse while a bound session is working', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const transcriptPath = path.join(tempDir, 'working-history.jsonl');
+    const writeTranscript = async (assistantText: string) => {
+      await fs.writeFile(transcriptPath, [
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            cwd: '/tmp/demo-project',
+            id: 'working-history',
+          },
+        }),
+        JSON.stringify({
+          role: 'user',
+          text: 'Keep polling cheap while the session is working.',
+          timestamp: '2026-03-14T18:00:00.000Z',
+        }),
+        JSON.stringify({
+          role: 'assistant',
+          text: assistantText,
+          timestamp: '2026-03-14T18:00:05.000Z',
+        }),
+      ].join('\n'));
+    };
+    await writeTranscript('Loaded once from the transcript file.');
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.conversationIndex.replace('demo', 'codex', [{
+      ref: 'working-history',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Working conversation title',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:05.000Z',
+      transcriptPath,
+      providerConversationId: 'working-history',
+      isBound: true,
+      boundSessionId: 'session-working-history',
+      degraded: false,
+      rawMetadata: {
+        projectPaths: ['/tmp/demo-project'],
+      },
+    } satisfies ConversationSummary]);
+    db.boundSessions.upsert({
+      id: 'session-working-history',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'working-history',
+      tmuxSessionName: 'ac-codex-demo-working',
+      status: 'bound',
+      title: 'Working conversation title',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:00:05.000Z',
+      lastActivityAt: '2026-03-14T18:00:05.000Z',
+      isWorking: true,
+    });
+
+    const getConversation = vi.fn(async () => {
+      throw new Error('provider.getConversation should not run when transcriptPath is indexed');
+    });
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionScreen: async () => undefined,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const firstResponse = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/working-history/messages?limit=80',
+      });
+      expect(firstResponse.statusCode).toBe(200);
+      expect(firstResponse.json().messages.map((message: NormalizedMessage) => message.text)).toContain('Loaded once from the transcript file.');
+
+      await writeTranscript('This changed transcript text should wait until the run is no longer working.');
+      const secondResponse = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/working-history/messages?limit=80',
+      });
+
+      expect(secondResponse.statusCode).toBe(200);
+      const secondTexts = secondResponse.json().messages.map((message: NormalizedMessage) => message.text);
+      expect(secondTexts).toContain('Loaded once from the transcript file.');
+      expect(secondTexts).not.toContain('This changed transcript text should wait until the run is no longer working.');
       expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();
@@ -1167,7 +1292,8 @@ describe('conversation routes', () => {
       expect(texts).toContain('One more live follow-up.');
       expect(texts).not.toContain('Fresh live-only follow-up.');
       expect(texts).not.toContain(liveTranscriptTail);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
@@ -1794,7 +1920,8 @@ describe('conversation routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().messages).toEqual([]);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
       expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();
@@ -1923,7 +2050,8 @@ describe('conversation routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().messages).toEqual([]);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
@@ -2087,7 +2215,8 @@ describe('conversation routes', () => {
       expect(messages.filter((message) => message.text.includes('proof-of-read'))).toHaveLength(1);
       expect(messages.some((message) => message.text === 'Ran 1 shell command')).toBe(false);
       expect(messages.filter((message) => message.lifecycle === 'pending')).toHaveLength(0);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
@@ -2218,7 +2347,8 @@ describe('conversation routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().messages).toEqual([]);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
@@ -2369,8 +2499,8 @@ describe('conversation routes', () => {
       expect(response.statusCode).toBe(200);
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain(activeInput);
-      expect(response.json().liveScreen.content).toBe('');
-      expect(response.json().liveScreen.inputText).toBe(activeInput);
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
     } finally {
       await app.close();
       db.close();
@@ -2477,7 +2607,8 @@ describe('conversation routes', () => {
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain('Draft an event-only implementation plan.');
       expect(texts).toContain(eventOnlyAnswer);
-      expect(response.json().liveScreen.content).toBe('');
+      expect(response.json().liveScreen).toBeUndefined();
+      expect(getSessionScreen).not.toHaveBeenCalled();
       expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();

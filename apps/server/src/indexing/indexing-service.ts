@@ -20,6 +20,20 @@ import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 
+export function getProviderTranscriptWatchPaths(providerId: ProviderId, discoveryRoot: string): string[] {
+  if (providerId === 'codex') {
+    return [
+      path.join(discoveryRoot, 'sessions'),
+      path.join(discoveryRoot, 'history.jsonl'),
+    ];
+  }
+
+  return [
+    path.join(discoveryRoot, 'projects'),
+    path.join(discoveryRoot, 'history.jsonl'),
+  ];
+}
+
 function compareConversationTreeOrder(a: ConversationSummary, b: ConversationSummary): number {
   const aPlacedAt = a.createdAt ?? a.updatedAt;
   const bPlacedAt = b.createdAt ?? b.updatedAt;
@@ -55,11 +69,6 @@ export class IndexingService {
 
   async start(): Promise<void> {
     await this.syncWatchers();
-    if (this.db.conversationIndex.hasRows()) {
-      void this.backfillMissingSearchIndexRows().catch(() => {
-        // A failed search backfill should not prevent the cached tree from remaining usable.
-      });
-    }
   }
 
   async stop(): Promise<void> {
@@ -81,7 +90,9 @@ export class IndexingService {
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined;
       this.refreshDueAt = undefined;
-      void this.requestRefresh(true);
+      void this.loadProjectMetadata().catch(() => {
+        // Provider file notifications are advisory; explicit refresh remains available if metadata refresh fails.
+      });
     }, Math.max(0, dueAt - Date.now()));
   }
 
@@ -247,26 +258,31 @@ export class IndexingService {
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp: nowIso() });
   }
 
-  private async collectWatchConfig(): Promise<{ providerRoots: string[] }> {
-    const providerRoots = new Set<string>();
+  private async collectWatchConfig(): Promise<{ watchPaths: string[] }> {
+    const watchPaths = new Set<string>();
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
     for (const project of projects) {
       for (const providerId of PROVIDERS) {
         const settings = this.projectService.getMergedProviderSettings(project, providerId);
-        providerRoots.add(settings.discoveryRoot);
+        if (!settings.enabled) {
+          continue;
+        }
+        for (const watchPath of getProviderTranscriptWatchPaths(providerId, settings.discoveryRoot)) {
+          watchPaths.add(watchPath);
+        }
       }
     }
     return {
-      providerRoots: [...providerRoots],
+      watchPaths: [...watchPaths],
     };
   }
 
   private async syncWatchers(): Promise<void> {
     const config = await this.collectWatchConfig();
     const signature = JSON.stringify({
-      providerRoots: [...config.providerRoots].sort(),
+      watchPaths: [...config.watchPaths].sort(),
     });
     if (signature === this.watchConfigSignature) {
       return;
@@ -276,10 +292,14 @@ export class IndexingService {
     this.watchers = [];
     this.watchConfigSignature = signature;
 
+    if (config.watchPaths.length === 0) {
+      return;
+    }
+
     this.watchers = [
-      chokidar.watch(config.providerRoots, {
+      chokidar.watch(config.watchPaths, {
         ignoreInitial: true,
-        depth: 8,
+        depth: 4,
         ignored: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**'],
       }),
     ];
