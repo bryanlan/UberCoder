@@ -28,6 +28,10 @@ export function timelineMessagesQueryKey(
   return ['timeline-messages', projectSlug, provider, conversationRef] as const;
 }
 
+export function sessionScreenQueryKey(sessionId: string | undefined) {
+  return ['session-screen', sessionId] as const;
+}
+
 export function invalidateConversationData(
   queryClient: QueryClient,
   projectSlug: string | undefined,
@@ -188,6 +192,13 @@ export function useConversationData({
   ]);
   const selectedBoundSession = selectedMetaTimeline?.boundSession;
 
+  const liveScreenQuery = useQuery({
+    queryKey: sessionScreenQueryKey(selectedBoundSession?.id),
+    queryFn: () => api.sessionScreen(selectedBoundSession!.id),
+    enabled: Boolean(selectedBoundSession?.id),
+    refetchInterval: selectedBoundSession ? 1000 : false,
+  });
+
   const messagesQuery = useInfiniteQuery({
     queryKey: timelineMessagesQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
     queryFn: ({ pageParam }) => api.timeline(
@@ -240,14 +251,21 @@ export function useConversationData({
     if (!meta) {
       return undefined;
     }
+    const liveScreenData = liveScreenQuery.data;
+    const refreshedLiveScreen = liveScreenData && liveScreenData.session.id === selectedBoundSession?.id
+      ? liveScreenData.screen
+      : undefined;
     return {
       ...meta,
       messages: pagedTimelineMessages,
+      liveScreen: refreshedLiveScreen ?? meta.liveScreen,
       messagePage: messagePages.at(-1)?.messagePage ?? meta.messagePage,
     };
   }, [
+    liveScreenQuery.data,
     messagePages,
     pagedTimelineMessages,
+    selectedBoundSession?.id,
     selectedMetaTimeline,
   ]);
 

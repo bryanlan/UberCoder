@@ -3,6 +3,7 @@ import type { ConversationTimeline, NormalizedMessage, ProviderId, SessionEvent,
 import {
   conversationMetaQueryKey,
   invalidateConversationData,
+  sessionScreenQueryKey,
   timelineMessagesQueryKey,
 } from '../conversation/useConversationData';
 import {
@@ -69,6 +70,10 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
 
   if (event.type === 'session.screen-updated') {
     if (eventTargetsSelectedConversation(context, event) && hasSelectedConversation(context)) {
+      void context.queryClient.invalidateQueries({
+        queryKey: sessionScreenQueryKey(event.sessionId),
+        exact: true,
+      });
       void context.queryClient.invalidateQueries({
         queryKey: conversationMetaQueryKey(context.selectedProjectSlug, context.selectedProvider, context.selectedConversationRef),
       });

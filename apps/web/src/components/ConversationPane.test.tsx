@@ -1,10 +1,14 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
-import type { BoundSession, ConversationTimeline, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane } from './ConversationPane';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
+
+beforeAll(() => {
+  Element.prototype.scrollTo ??= vi.fn();
+});
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -45,7 +49,12 @@ function boundSession(overrides: Partial<BoundSession> = {}): BoundSession {
   };
 }
 
-function timeline(input: { inputText?: string } = {}): ConversationTimeline {
+function timeline(input: {
+  inputText?: string;
+  messages?: NormalizedMessage[];
+  screenContent?: string;
+  screenContentAnsi?: string;
+} = {}): ConversationTimeline {
   const session = boundSession();
   return {
     conversation: {
@@ -59,10 +68,11 @@ function timeline(input: { inputText?: string } = {}): ConversationTimeline {
       boundSessionId: session.id,
       degraded: false,
     },
-    messages: [],
+    messages: input.messages ?? [],
     boundSession: session,
     liveScreen: {
-      content: '',
+      content: input.screenContent ?? '',
+      contentAnsi: input.screenContentAnsi,
       inputText: input.inputText ?? '',
       status: 'Session active',
       capturedAt: baseTime,
@@ -73,6 +83,8 @@ function timeline(input: { inputText?: string } = {}): ConversationTimeline {
 
 function renderPane(input: {
   inputText?: string;
+  screenContent?: string;
+  screenContentAnsi?: string;
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
 } = {}) {
@@ -84,7 +96,11 @@ function renderPane(input: {
         projects={[project()]}
         project={project()}
         selectedProvider="codex"
-        timeline={timeline({ inputText: input.inputText })}
+        timeline={timeline({
+          inputText: input.inputText,
+          screenContent: input.screenContent,
+          screenContentAnsi: input.screenContentAnsi,
+        })}
         liveMode
         loading={false}
         workMode={false}
@@ -189,5 +205,45 @@ describe('ConversationPane live input bridge', () => {
 
     expect(textbox.value).toBe('');
     send.resolve(true);
+  });
+
+  it('shows the live input buffer in the main transcript for pending sessions', () => {
+    renderPane({ inputText: '/model' });
+
+    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
+    expect(screen.getByText('/model')).toBeInTheDocument();
+  });
+
+  it('shows interactive live screen output for terminal pickers', () => {
+    renderPane({
+      inputText: '/model',
+      screenContent: [
+        'gpt-5.5 default fast · ~/code/demo',
+        '',
+        '  /model  choose what model and reasoning effort to use',
+      ].join('\n'),
+    });
+
+    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
+    expect(screen.getByText('/model')).toBeInTheDocument();
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('choose what model and reasoning effort to use');
+  });
+
+  it('mirrors text-bypass typing into the main transcript before submission', async () => {
+    renderPane();
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+
+    fireEvent.keyDown(textbox, { key: '/' });
+    fireEvent.keyDown(textbox, { key: 'm' });
+    fireEvent.keyDown(textbox, { key: 'o' });
+    fireEvent.keyDown(textbox, { key: 'd' });
+    fireEvent.keyDown(textbox, { key: 'e' });
+    fireEvent.keyDown(textbox, { key: 'l' });
+
+    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
+    expect(screen.getAllByText('/model').length).toBeGreaterThan(0);
   });
 });

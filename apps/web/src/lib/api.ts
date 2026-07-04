@@ -9,6 +9,7 @@ import type {
   EditableProjectSettings,
   RenameConversationRequest,
   SettingsSummary,
+  SessionScreen,
   SessionInputResponse,
   UiPreferences,
   SessionKeystrokeRequest,
@@ -113,6 +114,8 @@ export const api = {
     ),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+  sessionScreen: (sessionId: string) =>
+    request<{ session: BoundSession; screen: SessionScreen }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen?lines=120`),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
   rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
