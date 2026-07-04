@@ -207,11 +207,25 @@ describe('ConversationPane live input bridge', () => {
     send.resolve(true);
   });
 
-  it('shows the live input buffer in the main transcript for pending sessions', () => {
+  it('does not promote server-derived input text into a pending user transcript row', () => {
     renderPane({ inputText: '/model' });
 
-    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
-    expect(screen.getByText('/model')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for session output…')).toBeInTheDocument();
+    expect(screen.queryByText('/model')).not.toBeInTheDocument();
+  });
+
+  it('does not show ordinary terminal scrollback as a live screen panel', () => {
+    renderPane({
+      inputText: 'Giovanni Severini is a real prospect — a referral from my dad',
+      screenContent: [
+        'Hidden risk: CTO failure cluster is live and daily.',
+        'Where do you want to start — the exit math, or the client-acquisition commitment?',
+      ].join('\n'),
+    });
+
+    expect(screen.getByText('Waiting for session output…')).toBeInTheDocument();
+    expect(screen.queryByText(/Giovanni Severini is a real prospect/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
   });
 
   it('shows interactive live screen output for terminal pickers', () => {
@@ -225,7 +239,6 @@ describe('ConversationPane live input bridge', () => {
     });
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
-    expect(screen.getByText('/model')).toBeInTheDocument();
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('choose what model and reasoning effort to use');
   });
 

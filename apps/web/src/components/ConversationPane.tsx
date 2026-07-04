@@ -237,7 +237,6 @@ function LiveSessionInputBridge({
   conversationKey,
   conversationRef,
   provider,
-  inputText,
   onSendKeystrokes,
   onLocalSubmittedText,
   onLocalDraftText,
@@ -257,7 +256,6 @@ function LiveSessionInputBridge({
   conversationKey: string;
   conversationRef: string;
   provider: ConversationTimeline['conversation']['provider'];
-  inputText: string;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
   onLocalDraftText: (sessionId: string, text: string) => void;
@@ -290,7 +288,7 @@ function LiveSessionInputBridge({
   const keepBypassSelectionPinnedRef = useRef(false);
   const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
-  const committedInputRef = useRef(inputText);
+  const committedInputRef = useRef('');
   const bridgeBusyRef = useRef(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
 
@@ -324,7 +322,7 @@ function LiveSessionInputBridge({
     pendingTextRef.current = '';
     textFlushInFlightRef.current = undefined;
     keepBypassSelectionPinnedRef.current = false;
-    committedInputRef.current = inputText;
+    committedInputRef.current = '';
     setTextBypassEnabled(false);
     setBypassPreview(undefined);
     const storedDraft = liveBridgeDraftStore.get(conversationKey);
@@ -336,12 +334,6 @@ function LiveSessionInputBridge({
     setDraftText('');
     setDraftDirty(false);
   }, [conversationKey]);
-
-  useEffect(() => {
-    if (!textBypassEnabled && !draftDirty) {
-      committedInputRef.current = inputText;
-    }
-  }, [inputText, draftDirty, textBypassEnabled]);
 
   useEffect(() => {
     if (textBypassEnabled || (!draftDirty && !draftText)) {
@@ -580,7 +572,7 @@ function LiveSessionInputBridge({
         if (!ok) {
           return;
         }
-        committedInputRef.current = bypassPreviewText ?? inputText;
+        committedInputRef.current = bypassPreviewText ?? '';
         setDraftText('');
         setDraftDirty(false);
         setTextBypassEnabled(false);
@@ -596,7 +588,7 @@ function LiveSessionInputBridge({
           return;
         }
       }
-      const nextPreview = draftDirty ? draftText : inputText;
+      const nextPreview = draftDirty ? draftText : '';
       setBypassPreview(nextPreview);
       setTextBypassEnabled(true);
       keepBypassSelectionPinnedRef.current = true;
@@ -1168,9 +1160,26 @@ function buildLiveDraftMessage(input: {
   };
 }
 
+function screenHasInteractiveControlText(text: string): boolean {
+  const normalized = text
+    .split('\n')
+    .map((line) => line.trim().replace(/\s+/g, ' '))
+    .filter(Boolean)
+    .join('\n');
+  return /Enter to confirm · Esc to exit/i.test(normalized)
+    || /Press enter to confirm or esc to go back/i.test(normalized)
+    || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
+    || /Esc to cancel · Tab to amend/i.test(normalized)
+    || /Enter to select · .*Esc to cancel/i.test(normalized)
+    || /^\/[a-z][\w-]*\s+.+/im.test(normalized);
+}
+
 function shouldShowLiveScreenContent(screen: ConversationTimeline['liveScreen']): boolean {
   const visibleText = (screen?.content ?? screen?.contentAnsi ?? '').trim();
-  return Boolean(visibleText) && visibleText !== WAITING_FOR_SESSION_OUTPUT_TEXT;
+  if (!visibleText || visibleText === WAITING_FOR_SESSION_OUTPUT_TEXT) {
+    return false;
+  }
+  return screenHasInteractiveControlText(`${visibleText}\n${screen?.status ?? ''}`);
 }
 
 export function ConversationPane({
@@ -1233,17 +1242,16 @@ export function ConversationPane({
       return undefined;
     }
     const localText = localLiveDraft?.sessionId === boundSession.id ? localLiveDraft.text : undefined;
-    const fallbackInputText = liveScreen?.inputText;
-    const text = localText ?? fallbackInputText ?? '';
+    const text = localText ?? '';
     if (liveDraftTextDuplicatesHistory(text, baseHistoryMessages)) {
       return undefined;
     }
     return buildLiveDraftMessage({
       session: boundSession,
       text,
-      timestamp: localText ? localLiveDraft?.updatedAt ?? new Date().toISOString() : liveScreen?.capturedAt ?? new Date().toISOString(),
+      timestamp: localLiveDraft?.updatedAt ?? new Date().toISOString(),
     });
-  }, [baseHistoryMessages, boundSession, liveScreen?.capturedAt, liveScreen?.inputText, localLiveDraft]);
+  }, [baseHistoryMessages, boundSession, localLiveDraft]);
   const historyMessages = useMemo(
     () => (liveDraftMessage ? [...baseHistoryMessages, liveDraftMessage] : baseHistoryMessages),
     [baseHistoryMessages, liveDraftMessage],
@@ -1515,7 +1523,6 @@ export function ConversationPane({
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
-          inputText={liveScreen?.inputText ?? ''}
           onSendKeystrokes={onSendKeystrokes}
           onLocalSubmittedText={onLocalSubmittedText}
           onLocalDraftText={updateLocalLiveDraft}
