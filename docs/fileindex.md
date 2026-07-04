@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 146bfe4862378e8b96e3c1c5485c594c2c5eae2c
-current_through_date: 2026-07-02T12:31:45-04:00
+current_through_commit: 6c49fd69971a255984fda8c0659aefaf2abff859
+current_through_date: 2026-07-03T14:36:17-04:00
 ---
 
 # File Index
@@ -79,9 +79,11 @@ current_through_date: 2026-07-02T12:31:45-04:00
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and session metadata options.
 - `apps/web/src/features/conversation/useConversationData.ts` - two-query conversation metadata
-  and timeline-message fetch path with paged history and live refresh behavior.
+  and timeline-message fetch path with paged history, live refresh behavior, and completed-tail
+  polling while durable transcripts catch up after a bound session finishes.
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
-  `ExplorerPane.tsx` - extracted conversation rendering helpers.
+  `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
+  commentary-progress display.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
   404 selection, sidebar ordering, and work-mode derivation.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
@@ -152,6 +154,10 @@ Test and verification anchors:
   `apps/web/src/features/conversation/useConversationData.ts`,
   `apps/web/src/features/realtime/reducers.ts`, `apps/web/src/features/conversation/transcript-turns.tsx`,
   and `apps/web/src/components/ConversationPane.tsx`.
+- Pending Codex progress and stale-bound-timeline polling changes should review
+  `apps/server/src/providers/transcripts/codex.ts`, `apps/server/test/providers.test.ts`,
+  `apps/web/src/features/conversation/useConversationData.ts`,
+  `apps/web/src/features/conversation/transcript-turns.tsx`, and their focused tests together.
 - Conversation search, FTS indexing, live-session search, hidden-conversation filtering, or cached
   search backfill changes should review `apps/server/src/routes/search.ts`,
   `apps/server/src/search/conversation-search.ts`, `apps/server/src/indexing/indexing-service.ts`,

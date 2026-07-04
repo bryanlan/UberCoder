@@ -1,33 +1,24 @@
 {
   "changed_paths": [
-    "AGENTS.md",
-    "apps/server/src/sessions/output-watcher.ts",
-    "apps/server/src/sessions/session-manager.ts",
-    "apps/server/src/sessions/timeline-merge.ts",
-    "apps/server/src/sessions/transcript-watcher.ts",
-    "apps/server/test/conversation-routes.test.ts",
-    "apps/server/test/output-watcher.test.ts",
-    "apps/server/test/timeline-merge.test.ts",
-    "apps/server/test/transcript-watcher.test.ts",
-    "apps/web/src/components/ConversationPane.test.tsx",
-    "apps/web/src/components/ConversationPane.tsx",
+    "apps/server/src/providers/transcripts/base.ts",
+    "apps/server/src/providers/transcripts/codex.ts",
+    "apps/server/test/providers.test.ts",
+    "apps/web/src/features/conversation/transcript-turns.test.ts",
+    "apps/web/src/features/conversation/transcript-turns.tsx",
+    "apps/web/src/features/conversation/useConversationData.test.ts",
     "apps/web/src/features/conversation/useConversationData.ts",
-    "apps/web/src/features/realtime/apply-session-event.test.ts",
-    "apps/web/src/features/realtime/apply-session-event.ts",
-    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md",
-    "packages/shared/src/index.ts"
+    "docs/fileindex.md"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "2e726c384901c732c6c6f34bb42e3d167bbc94c2",
-      "date": "2026-07-02T00:31:58-04:00",
+      "commit": "7cdf22e05233db2afaa87b1465c75bfc84e7126f",
+      "date": "2026-07-03T00:55:38-04:00",
       "files": [
         {
           "paths": [
@@ -66,71 +57,17 @@
           "status": "M"
         }
       ],
-      "short_commit": "2e726c3",
+      "short_commit": "7cdf22e",
       "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "e16cdd2d0260453f701de8ae0988e1831f560442",
-      "date": "2026-07-02T03:33:36-04:00",
+      "commit": "c0a08e3fc7f1381d7ddb15426f651a9e2f0f59fa",
+      "date": "2026-07-03T11:58:25-04:00",
       "files": [
         {
           "paths": [
-            "AGENTS.md"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "docs/agent_docs/agents_md_status.json"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "e16cdd2",
-      "subject": "Refresh AGENTS.md"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "b0b71388bac7624f51225cc0fd16529846a10db4",
-      "date": "2026-07-02T07:35:48-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/output-watcher.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/output-watcher.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "b0b7138",
-      "subject": "Poll raw output logs when watch events drop"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "c9dde57a3e8ff435f37d8b2132001e6f14ee4a83",
-      "date": "2026-07-02T07:53:50-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/session-manager.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/src/sessions/transcript-watcher.ts"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/server/test/transcript-watcher.test.ts"
+            "apps/web/src/features/conversation/useConversationData.test.ts"
           ],
           "status": "A"
         },
@@ -139,92 +76,77 @@
             "apps/web/src/features/conversation/useConversationData.ts"
           ],
           "status": "M"
+        }
+      ],
+      "short_commit": "c0a08e3",
+      "subject": "Poll stale bound timelines until answers appear"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "6c49fd69971a255984fda8c0659aefaf2abff859",
+      "date": "2026-07-03T14:36:17-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/base.ts"
+          ],
+          "status": "M"
         },
         {
           "paths": [
-            "apps/web/src/features/realtime/apply-session-event.test.ts"
+            "apps/server/src/providers/transcripts/codex.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/transcript-turns.test.ts"
           ],
           "status": "A"
         },
         {
           "paths": [
-            "apps/web/src/features/realtime/apply-session-event.ts"
+            "apps/web/src/features/conversation/transcript-turns.tsx"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "packages/shared/src/index.ts"
+            "apps/web/src/features/conversation/useConversationData.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/conversation/useConversationData.ts"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "c9dde57",
-      "subject": "Ensure live transcript updates refresh conversations"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "e7d1051d6f13adff78243499e36d26075407c3fc",
-      "date": "2026-07-02T08:19:47-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.test.tsx"
-          ],
-          "status": "A"
-        },
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.tsx"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "e7d1051",
-      "subject": "Clear live bridge draft on submit"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
-      "date": "2026-07-02T12:31:45-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/timeline-merge.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/timeline-merge.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "146bfe4",
-      "subject": "Keep raw terminal output out of transcript timelines"
+      "short_commit": "6c49fd6",
+      "subject": "Show pending Codex transcript progress"
     }
   ],
   "docs_current_through": {
-    "commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
-    "date": "2026-07-01T21:15:13-04:00"
-  },
-  "from_commit": "25559bbced6c7fe785af3f64fe16004e681a62fd",
-  "generated_at": "2026-07-03T04:52:42+00:00",
-  "head": {
     "commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
-    "date": "2026-07-02T12:31:45-04:00",
-    "short_commit": "146bfe4"
+    "date": "2026-07-02T12:31:45-04:00"
+  },
+  "from_commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
+  "generated_at": "2026-07-04T05:21:39+00:00",
+  "head": {
+    "commit": "6c49fd69971a255984fda8c0659aefaf2abff859",
+    "date": "2026-07-03T14:36:17-04:00",
+    "short_commit": "6c49fd6"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "146bfe4862378e8b96e3c1c5485c594c2c5eae2c",
+  "to_commit": "6c49fd69971a255984fda8c0659aefaf2abff859",
   "worktree_dirty": true
 }

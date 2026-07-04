@@ -1,8 +1,8 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 146bfe4862378e8b96e3c1c5485c594c2c5eae2c
-current_through_date: 2026-07-02T12:31:45-04:00
+current_through_commit: 6c49fd69971a255984fda8c0659aefaf2abff859
+current_through_date: 2026-07-03T14:36:17-04:00
 ---
 
 # Running Tests
@@ -17,6 +17,7 @@ current_through_date: 2026-07-02T12:31:45-04:00
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
+- Pending Codex progress or stale bound timeline polling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- providers && npm run test -w @agent-console/web -- useConversationData transcript-turns`.
 - Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
 - Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`.
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.

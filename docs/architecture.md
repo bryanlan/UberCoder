@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 146bfe4862378e8b96e3c1c5485c594c2c5eae2c
-current_through_date: 2026-07-02T12:31:45-04:00
+current_through_commit: 6c49fd69971a255984fda8c0659aefaf2abff859
+current_through_date: 2026-07-03T14:36:17-04:00
 ---
 
 # Architecture
@@ -56,7 +56,10 @@ conversation route trims the live screen against the durable transcript/event-lo
 returning it, so already-rendered scrollback stays in history bubbles and only the active live tail
 renders as terminal output. Codex transcript parsing prefers response-backed display messages over
 near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
-from the visible transcript while keeping the full parsed message set available for indexing.
+from the visible transcript while keeping the full parsed message set available for indexing. Codex
+commentary-phase assistant records are treated as pending progress, and only the latest pending
+commentary tail is displayed so an in-flight answer can show progress without flooding the durable
+transcript.
 
 Conversation search is a server-owned API at `/api/search/conversations`. The search service builds
 FTS rows from sanitized user/assistant prose, excludes hidden system-invocation conversations, and
@@ -70,6 +73,12 @@ search, because the durable transcript is the source for those conversations.
 provider conversations, while `backfillMissingSearchIndexRows()` fills missing FTS rows from the
 cached conversation index on startup or when cached projects become active without re-listing the
 provider tree. A failed individual transcript load should not break the conversation tree.
+
+The web conversation data hook keeps metadata and paged messages on separate query keys. Active
+bound sessions poll the message timeline; after a session completes, the message query keeps polling
+briefly when the latest durable message is still the user's prompt or when session output/completion
+timestamps are newer than the latest transcript message. This closes the gap where a hidden tmux
+session has finished but the provider transcript has not yet exposed the assistant's final answer.
 
 Session text entry has two paths. Normal `/input` submissions send the text to the bound tmux
 session, but the first user prompt for a pending Codex conversation restarts the placeholder
@@ -113,6 +122,12 @@ stuck composer.
   `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
   and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
   merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
+- Pending Codex transcript progress is a server/parser plus web-rendering contract. Review
+  `apps/server/src/providers/transcripts/codex.ts`,
+  `apps/server/test/providers.test.ts`,
+  `apps/web/src/features/conversation/transcript-turns.tsx`,
+  `apps/web/src/features/conversation/useConversationData.ts`, and their adjacent tests before
+  changing commentary lifecycle, pending assistant display, or completed-tail polling behavior.
 - Conversation search belongs in the server search/index boundary. Review
   `apps/server/src/routes/search.ts`, `apps/server/src/search/conversation-search.ts`,
   `apps/server/src/indexing/indexing-service.ts`, `apps/server/src/db/database.ts`, and
