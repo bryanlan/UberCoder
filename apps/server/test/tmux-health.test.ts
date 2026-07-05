@@ -16,6 +16,12 @@ describe('tmux liveness', () => {
       1,
       'no server running on /tmp/tmux-1000/default',
     ))).toBe(true);
+    expect(isTmuxSessionMissingError(new TmuxError(
+      'error connecting to /tmp/tmux-1000/default (No such file or directory)',
+      ['has-session', '-t', 'agent-console'],
+      1,
+      'error connecting to /tmp/tmux-1000/default (No such file or directory)',
+    ))).toBe(true);
   });
 
   it('does not classify spawn failures or unrelated tmux failures as missing sessions', () => {

@@ -119,15 +119,10 @@ export async function buildApp(options: AppOptions = {}) {
 
   await indexing.loadProjectMetadata();
   await indexing.start();
-  const startupServicesTimer = setTimeout(() => {
-    void sessions.observeSessions().catch((error) => {
-      app.log.warn({ err: error }, 'Failed to observe live sessions during background startup.');
-    });
-  }, 60_000);
+  sessions.startSessionReconciliation();
   sessionSummaries.start();
 
   app.addHook('onClose', async () => {
-    clearTimeout(startupServicesTimer);
     await sessionSummaries.stop();
     await indexing.stop();
     sessions.stop();

@@ -6,10 +6,12 @@ import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
-import { SessionKeystrokeRejectedError, SessionManager, type SessionCommandResult } from '../sessions/session-manager.js';
+import { SessionInputRejectedError, SessionManager, type SessionCommandResult } from '../sessions/session-manager.js';
 import type { BoundSession, SessionInputResponse } from '@agent-console/shared';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
+const RAW_OUTPUT_TAIL_BYTES = 256 * 1024;
+const DEBUG_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 const inputBodySchema = z.object({
   text: z.string().min(1),
@@ -50,6 +52,28 @@ function parseSessionId(params: unknown, reply: FastifyReply): string | undefine
     return undefined;
   }
   return parsed.data.sessionId;
+}
+
+async function readUtf8Tail(filePath: string, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+  const stat = await fs.stat(filePath);
+  const truncated = stat.size > maxBytes;
+  const start = truncated ? stat.size - maxBytes : 0;
+  const length = stat.size - start;
+  const file = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    await file.read(buffer, 0, length, start);
+    return { text: buffer.toString('utf8'), truncated };
+  } finally {
+    await file.close();
+  }
+}
+
+function withTailMarker(label: string, output: { text: string; truncated: boolean }): string {
+  if (!output.truncated) {
+    return output.text;
+  }
+  return `[showing last ${label}]\n${output.text}`;
 }
 
 async function restartFirstPendingCodexTurnIfNeeded(input: {
@@ -130,7 +154,15 @@ export async function registerSessionRoutes(
     if (pendingRestart.kind === 'restarted') {
       return sessionInputResponse(pendingRestart.result);
     }
-    return sessionInputResponse(await sessions.sendInput(sessionId, parsed.data.text));
+    try {
+      return sessionInputResponse(await sessions.sendInput(sessionId, parsed.data.text));
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.post('/api/sessions/:sessionId/release', async (request, reply) => {
@@ -193,11 +225,17 @@ export async function registerSessionRoutes(
       return;
     }
     try {
-      const rawText = await fs.readFile(session.rawLogPath, 'utf8');
+      const rawText = withTailMarker(
+        `${Math.floor(RAW_OUTPUT_TAIL_BYTES / 1024)} KiB of raw session output`,
+        await readUtf8Tail(session.rawLogPath, RAW_OUTPUT_TAIL_BYTES),
+      );
       const debugLogPath = path.join(path.dirname(session.rawLogPath), 'debug.log');
       let debugText = '';
       try {
-        debugText = await fs.readFile(debugLogPath, 'utf8');
+        debugText = withTailMarker(
+          `${Math.floor(DEBUG_OUTPUT_TAIL_BYTES / 1024)} KiB of session debug output`,
+          await readUtf8Tail(debugLogPath, DEBUG_OUTPUT_TAIL_BYTES),
+        );
       } catch {
         debugText = '';
       }
@@ -258,7 +296,7 @@ export async function registerSessionRoutes(
     try {
       return sessionInputResponse(await sessions.sendKeystrokes(sessionId, parsed.data));
     } catch (error) {
-      if (error instanceof SessionKeystrokeRejectedError) {
+      if (error instanceof SessionInputRejectedError) {
         reply.code(error.statusCode).send({ error: error.message });
         return;
       }

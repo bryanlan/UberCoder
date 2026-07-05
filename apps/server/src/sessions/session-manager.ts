@@ -9,7 +9,7 @@ import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
-import type { TmuxClient } from './tmux-client.js';
+import { isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
@@ -54,6 +54,10 @@ const DEFERRED_TEXT_READY_TTL_MS = 15_000;
 const RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS = 500;
 const SESSION_MODEL_METADATA_KEY = 'lastLiveModel';
 const SESSION_MODEL_LOG_TAIL_BYTES = 2 * 1024 * 1024;
+const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
+const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
+const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
+const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -69,9 +73,16 @@ interface AppendedSessionEvent {
 
 export type SessionCommandResult = BoundSession & SessionInputResponse;
 
-export class SessionKeystrokeRejectedError extends Error {
+export class SessionInputRejectedError extends Error {
   readonly statusCode = 409;
 
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionInputRejectedError';
+  }
+}
+
+export class SessionKeystrokeRejectedError extends SessionInputRejectedError {
   constructor(message: string) {
     super(message);
     this.name = 'SessionKeystrokeRejectedError';
@@ -121,6 +132,31 @@ function readLastUserInput(eventLogPath: string | undefined): string | undefined
     }
   } catch {
     return undefined;
+  }
+
+  return undefined;
+}
+
+function readLastStatusEventText(eventLogPath: string | undefined): string | undefined {
+  const text = readTextTailSync(eventLogPath, RESTORE_FAILURE_STATUS_TAIL_BYTES);
+  if (!text) {
+    return undefined;
+  }
+
+  const lines = text.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line) {
+      continue;
+    }
+    try {
+      const event = JSON.parse(line) as { type?: unknown; text?: unknown };
+      if (event.type === 'status' && typeof event.text === 'string') {
+        return event.text;
+      }
+    } catch {
+      continue;
+    }
   }
 
   return undefined;
@@ -184,6 +220,9 @@ export class SessionManager {
   private readonly transcriptWatchers = new TranscriptWatcherRegistry();
   private readonly unsubscribeRealtimeEvents: () => void;
   private readonly runtimes: SessionRuntimeRegistry;
+  private reconciliationTimer?: ReturnType<typeof setInterval>;
+  private reconciliationStartupTimer?: ReturnType<typeof setTimeout>;
+  private reconciliationRun?: Promise<void>;
   private stopped = false;
 
   constructor(
@@ -216,6 +255,14 @@ export class SessionManager {
 
   stop(): void {
     this.stopped = true;
+    if (this.reconciliationStartupTimer) {
+      clearTimeout(this.reconciliationStartupTimer);
+      this.reconciliationStartupTimer = undefined;
+    }
+    if (this.reconciliationTimer) {
+      clearInterval(this.reconciliationTimer);
+      this.reconciliationTimer = undefined;
+    }
     this.unsubscribeRealtimeEvents();
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
@@ -289,9 +336,102 @@ export class SessionManager {
     }
   }
 
+  async reconcileSessions(): Promise<void> {
+    for (const session of this.listRestorableSessions()) {
+      await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session, { restoreMissing: true }));
+    }
+  }
+
+  startSessionReconciliation(options: { intervalMs?: number; initialDelayMs?: number } = {}): void {
+    if (this.reconciliationTimer || this.reconciliationStartupTimer) {
+      return;
+    }
+
+    const intervalMs = options.intervalMs ?? SESSION_RECONCILIATION_INTERVAL_MS;
+    const initialDelayMs = options.initialDelayMs ?? SESSION_RECONCILIATION_INITIAL_DELAY_MS;
+    const run = () => {
+      if (this.stopped || this.reconciliationRun) {
+        return;
+      }
+      this.reconciliationRun = this.reconcileSessions()
+        .catch((error) => {
+          this.logger?.warn({ err: error }, 'Failed to reconcile live sessions.');
+        })
+        .finally(() => {
+          this.reconciliationRun = undefined;
+        });
+    };
+
+    this.reconciliationStartupTimer = setTimeout(() => {
+      this.reconciliationStartupTimer = undefined;
+      run();
+      if (this.stopped) {
+        return;
+      }
+      this.reconciliationTimer = setInterval(run, intervalMs);
+      this.reconciliationTimer.unref?.();
+    }, initialDelayMs);
+    this.reconciliationStartupTimer.unref?.();
+  }
+
   private async sendLiteralTextToSession(sessionName: string, text: string): Promise<void> {
     for (const chunk of splitLiteralTextForTmux(text)) {
       await this.tmuxClient.sendLiteralText(sessionName, chunk);
+    }
+  }
+
+  private recordRestoreFailure(session: BoundSession, text: string): BoundSession {
+    if (session.status === 'error') {
+      if (readLastStatusEventText(session.eventLogPath) === text) {
+        return session;
+      }
+      const failed = { ...session, isWorking: false };
+      if (session.isWorking) {
+        this.db.boundSessions.upsert(failed);
+      }
+      this.appendEvent(failed, { type: 'status', text, timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      return failed;
+    }
+    const failedAt = nowIso();
+    const failed = { ...session, status: 'error' as const, updatedAt: failedAt, isWorking: false };
+    this.db.boundSessions.upsert(failed);
+    this.appendEvent(failed, { type: 'status', text, timestamp: failedAt });
+    this.eventBus.emit({ type: 'session.updated', session: failed });
+    return failed;
+  }
+
+  private markSessionMissingDuringInput(session: BoundSession): void {
+    this.stopWatching(session.id);
+    this.runtimes.clearEphemeral(session.id);
+    const current = this.db.boundSessions.getById(session.id) ?? session;
+    if (current.status === 'error' || current.status === 'ended') {
+      return;
+    }
+    const failedAt = nowIso();
+    const failed = { ...current, status: 'error' as const, updatedAt: failedAt, isWorking: false };
+    this.db.boundSessions.upsert(failed);
+    this.appendEvent(failed, {
+      type: 'status',
+      text: 'Session exited before input could be delivered.',
+      timestamp: failedAt,
+    });
+    this.eventBus.emit({ type: 'session.updated', session: failed });
+  }
+
+  private rejectMissingSessionInputError(session: BoundSession, error: unknown): never {
+    if (isTmuxSessionMissingError(error)) {
+      this.markSessionMissingDuringInput(session);
+      throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
+    }
+    throw error;
+  }
+
+  private async runInputTmuxAction<T>(session: BoundSession, action: () => Promise<T>): Promise<T> {
+    try {
+      return await action();
+    } catch (error) {
+      return this.rejectMissingSessionInputError(session, error);
     }
   }
 
@@ -417,20 +557,14 @@ export class SessionManager {
 
     const project = await dependencies.projectService.getProjectBySlug(session.projectSlug);
     if (!project) {
-      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.boundSessions.upsert(failed);
-      this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: project not found.', timestamp: nowIso() });
-      this.eventBus.emit({ type: 'session.updated', session: failed });
+      this.recordRestoreFailure(session, 'Failed to restore session: project not found.');
       return undefined;
     }
 
     const provider = dependencies.providerRegistry.get(session.provider);
     const providerSettings = dependencies.projectService.getMergedProviderSettings(project, session.provider);
     if (!providerSettings.enabled) {
-      const failed = { ...session, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.boundSessions.upsert(failed);
-      this.appendEvent(failed, { type: 'status', text: 'Failed to restore session: provider is disabled.', timestamp: nowIso() });
-      this.eventBus.emit({ type: 'session.updated', session: failed });
+      this.recordRestoreFailure(session, 'Failed to restore session: provider is disabled.');
       return undefined;
     }
 
@@ -454,21 +588,12 @@ export class SessionManager {
         this.eventBus.emit({ type: 'session.updated', session: ended });
         return undefined;
       }
-      const failed = { ...resolvedSession, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      const shouldEmitFailure = resolvedSession.status !== 'error';
-      this.db.boundSessions.upsert(failed);
-      if (shouldEmitFailure) {
-        this.appendEvent(failed, {
-          type: 'status',
-          text: 'Failed to restore session: no resumable conversation reference is available yet.',
-          timestamp: nowIso(),
-        });
-        this.eventBus.emit({ type: 'session.updated', session: failed });
-      }
+      this.recordRestoreFailure(resolvedSession, 'Failed to restore session: no resumable conversation reference is available yet.');
       return undefined;
     }
 
     const prepared = this.ensureSessionLogPaths(resolvedSession);
+    const shouldEmitRestoreAttempt = prepared.status !== 'error';
     const restoring = {
       ...prepared,
       status: 'starting' as const,
@@ -476,9 +601,11 @@ export class SessionManager {
       isWorking: false,
       pid: undefined,
     };
-    this.db.boundSessions.upsert(restoring);
-    this.eventBus.emit({ type: 'session.updated', session: restoring });
-    this.appendEvent(restoring, { type: 'status', text: 'Restoring bound session.', timestamp: nowIso() });
+    if (shouldEmitRestoreAttempt) {
+      this.db.boundSessions.upsert(restoring);
+      this.eventBus.emit({ type: 'session.updated', session: restoring });
+      this.appendEvent(restoring, { type: 'status', text: 'Restoring bound session.', timestamp: nowIso() });
+    }
 
     let tmuxCreated = false;
     try {
@@ -512,19 +639,10 @@ export class SessionManager {
           void cleanupError;
         }
       }
-      const failed = {
-        ...restoring,
-        status: 'error' as const,
-        updatedAt: nowIso(),
-        isWorking: false,
-      };
-      this.db.boundSessions.upsert(failed);
-      this.appendEvent(failed, {
-        type: 'status',
-        text: `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
-        timestamp: nowIso(),
-      });
-      this.eventBus.emit({ type: 'session.updated', session: failed });
+      this.recordRestoreFailure(
+        shouldEmitRestoreAttempt ? restoring : prepared,
+        `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+      );
       return undefined;
     }
   }
@@ -672,9 +790,9 @@ export class SessionManager {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
-      throw new Error('Session is no longer running.');
+      throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
-    await this.submitTextToSession(liveSession.tmuxSessionName, text);
+    await this.runInputTmuxAction(liveSession, () => this.submitTextToSession(liveSession.tmuxSessionName, text));
     const activityAt = nowIso();
     const updated = this.updateBoundSessionFields(liveSession.id, {
       updatedAt: activityAt,
@@ -714,7 +832,7 @@ export class SessionManager {
     const session = this.mustGetSession(sessionId);
     const liveSession = await this.refreshSessionState(session);
     if (!liveSession) {
-      throw new Error('Session is no longer running.');
+      throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
 
     let plan = planKeystrokeSend(undefined, payload, liveSession.provider, {
@@ -734,7 +852,11 @@ export class SessionManager {
           || screenShowsQueuedMessageHint(preparedScreen)
           || (plan.shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen))
         ) {
-          preparedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, preparedScreen);
+          const screenToPrepare = preparedScreen;
+          preparedScreen = await this.runInputTmuxAction(
+            liveSession,
+            () => this.prepareScreenForCombinedTextSubmit(liveSession, screenToPrepare),
+          );
         }
         if (plan.shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen)) {
           throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
@@ -746,10 +868,17 @@ export class SessionManager {
           expiresAt: Date.now() + DEFERRED_TEXT_READY_TTL_MS,
         };
       }
+      const transportText = plan.transportText;
       if (plan.useBracketedPasteTransport) {
-        await this.tmuxClient.pasteText(liveSession.tmuxSessionName, plan.transportText);
+        await this.runInputTmuxAction(
+          liveSession,
+          () => this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText),
+        );
       } else {
-        await this.sendLiteralTextToSession(liveSession.tmuxSessionName, plan.transportText);
+        await this.runInputTmuxAction(
+          liveSession,
+          () => this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText),
+        );
       }
 
       const activityAt = nowIso();
@@ -787,7 +916,10 @@ export class SessionManager {
       const useBracketedPasteTransport = plan.useBracketedPasteTransport;
       const shouldPrepareClaudeResumePrompt = plan.shouldPrepareClaudeResumePrompt;
       if ((plan.hasSpecialKeys || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt)) {
-        latestObservedScreen = await this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen);
+        latestObservedScreen = await this.runInputTmuxAction(
+          liveSession,
+          () => this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen),
+        );
         latestObservedHash = hashScreen(latestObservedScreen);
         if (shouldPrepareClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(latestObservedScreen)) {
           throw new SessionKeystrokeRejectedError('Claude resume choice was not resolved before text entry. The draft was not submitted.');
@@ -801,9 +933,15 @@ export class SessionManager {
       const transportTextShouldCreateUserTurn = plan.transportTextShouldCreateUserTurn;
       if (!textAlreadyVisible) {
         if (useBracketedPasteTransport) {
-          await this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText);
+          await this.runInputTmuxAction(
+            liveSession,
+            () => this.tmuxClient.pasteText(liveSession.tmuxSessionName, transportText),
+          );
         } else {
-          await this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText);
+          await this.runInputTmuxAction(
+            liveSession,
+            () => this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText),
+          );
         }
         if (plan.hasSpecialKeys || useBracketedPasteTransport) {
           const textSettledScreen = await this.waitForInputTextChange(
@@ -831,7 +969,10 @@ export class SessionManager {
       }
     }
     if (plan.hasSpecialKeys) {
-      await this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys ?? []);
+      await this.runInputTmuxAction(
+        liveSession,
+        () => this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys ?? []),
+      );
     }
 
     const activityAt = nowIso();

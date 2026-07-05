@@ -23,7 +23,7 @@ export function isTmuxSessionMissingError(error: unknown): boolean {
   if (!(error instanceof TmuxError) || error.exitCode !== 1) {
     return false;
   }
-  return /(?:can't find session|no server running)/i.test(error.stderr);
+  return /(?:can't find session|no server running|error connecting to .*No such file or directory)/i.test(error.stderr);
 }
 
 async function runTmux(args: string[]): Promise<string> {

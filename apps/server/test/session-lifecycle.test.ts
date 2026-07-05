@@ -4,7 +4,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
-import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
+import { SessionInputRejectedError, SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
+import { TmuxError } from '../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
@@ -242,6 +243,112 @@ describe('SessionManager lifecycle', () => {
 
     expect(restored?.id).toBe(session.id);
     expect(tmux.created).toHaveLength(2);
+    db.close();
+  });
+
+  it('actively reconciles dead restorable sessions by restoring them', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:reconcile',
+      title: 'Reconcile restore',
+      kind: 'history',
+    });
+    tmux.alive.clear();
+
+    await manager.reconcileSessions();
+
+    expect(db.boundSessions.getById(session.id)?.status).toBe('bound');
+    expect(tmux.created).toHaveLength(2);
+    db.close();
+  });
+
+  it('keeps repeated restore failures from refreshing session recency or duplicating status events', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const recoveryProviderSettings = { ...providerSettings, enabled: true as boolean };
+    const manager = createRecoveryManager(
+      db,
+      tmux,
+      path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(),
+      provider,
+      recoveryProviderSettings,
+    );
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:reconcile-failure',
+      title: 'Reconcile failure',
+      kind: 'history',
+    });
+    tmux.alive.clear();
+    tmux.failPipePane = true;
+
+    await manager.reconcileSessions();
+    const firstFailure = db.boundSessions.getById(session.id);
+    const firstEventLog = await fs.readFile(firstFailure?.eventLogPath ?? '', 'utf8');
+
+    await manager.reconcileSessions();
+    const secondFailure = db.boundSessions.getById(session.id);
+    const secondEventLog = await fs.readFile(secondFailure?.eventLogPath ?? '', 'utf8');
+
+    expect(firstFailure?.status).toBe('error');
+    expect(secondFailure?.status).toBe('error');
+    expect(secondFailure?.updatedAt).toBe(firstFailure?.updatedAt);
+    expect(secondEventLog).toBe(firstEventLog);
+    expect(tmux.created).toHaveLength(3);
+
+    recoveryProviderSettings.enabled = false;
+    await manager.reconcileSessions();
+    const changedFailure = db.boundSessions.getById(session.id);
+    const changedEventLog = await fs.readFile(changedFailure?.eventLogPath ?? '', 'utf8');
+
+    expect(changedFailure?.updatedAt).toBe(firstFailure?.updatedAt);
+    expect(changedEventLog).toContain('Failed to restore session: provider is disabled.');
+    expect(changedEventLog.length).toBeGreaterThan(secondEventLog.length);
+    db.close();
+  });
+
+  it('rejects input without recording activity when tmux disappears during the write', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    class VanishingTmux extends FakeTmux {
+      override async sendLiteralText(sessionName: string, _text: string): Promise<void> {
+        this.alive.delete(sessionName);
+        throw new TmuxError(
+          `can't find session: ${sessionName}`,
+          ['send-keys', '-t', sessionName],
+          1,
+          `can't find session: ${sessionName}`,
+        );
+      }
+    }
+    const tmux = new VanishingTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:vanishing-input',
+      title: 'Vanishing input',
+      kind: 'history',
+    });
+
+    await expect(manager.sendInput(session.id, 'Hello agent')).rejects.toThrow(SessionInputRejectedError);
+    const failed = db.boundSessions.getById(session.id);
+    expect(failed?.status).toBe('error');
+    expect(failed?.lastActivityAt).toBeUndefined();
     db.close();
   });
 
