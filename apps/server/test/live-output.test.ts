@@ -1024,6 +1024,68 @@ describe('readLiveMessages', () => {
     ]);
   });
 
+  it('keeps Codex cursor repaint and tool chatter out of pending assistant prose', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'scan the fee model change end to end',
+        timestamp: '2026-07-05T19:50:36.635Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'g50 WWo or1rkki',
+          'g4 WWo',
+          'Search AGENTS.md in waltium-ops',
+          'Search billing|fee|invoice|ibkr|custody in waltium-ops',
+          'import json',
+          "p='/tmp/claude_fee_model_scan.json'",
+          'with open(p) as f:',
+          'data=json.load(f)',
+          'PY',
+          'python3 /home/bryan/code/ai-skills/codex/claude-opus-second-opinion/scripts/run_claude_second_opinion.py --spec-file /tmp/claude_fee_model_scan.json',
+          'quarterly_fee_deduction.py',
+          '4 WWoor5rkkiin',
+          'I’m reading that upstream contract now, then I’ll run a read-only research pass and distill the billing patterns. WWo',
+          'The existing code is already using client_portfolio_snapshot weekly',
+          'observations for both IBKR and held-away draft estimates.',
+          'inng g',
+          '20',
+        ].join('\n'),
+        timestamp: '2026-07-05T19:53:01.811Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-codex-tool-chatter-repaint',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:codex-tool-chatter-repaint',
+      tmuxSessionName: 'ac-codex-demo-tool-chatter-repaint',
+      status: 'bound',
+      startedAt: '2026-07-05T19:50:36.000Z',
+      updatedAt: '2026-07-05T19:53:01.000Z',
+      eventLogPath,
+    };
+
+    const messages = (await readLiveMessages(session))
+      .filter((message) => message.role === 'user' || message.role === 'assistant');
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'scan the fee model change end to end' },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: [
+          'I’m reading that upstream contract now, then I’ll run a read-only research pass and distill the billing patterns.',
+          'The existing code is already using client_portfolio_snapshot weekly',
+          'observations for both IBKR and held-away draft estimates.',
+        ].join('\n'),
+      },
+    ]);
+  });
+
   it('does not render Claude slash-command screens as assistant transcript content', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

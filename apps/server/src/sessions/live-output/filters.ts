@@ -5,24 +5,49 @@ export function classifyChunk(text: string): MessageRole {
   const trimmed = text.trim();
   if (!trimmed) return 'status';
   if (
-    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|openai codex|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed|explored(?:\s|$)|searched the web(?:\s|$)|searching the web(?:\s|$)|waiting for background terminal)/i.test(trimmed)
-    || /^ran\s+(?:[\w./-]+|mkdir|pwd|codex|npm|git|python|node|rg|sed|cat|ls|find)(?:\s|$)/i.test(trimmed)
+    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|openai codex|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed|explored(?:\s|$)|search(?:ed|ing)?(?:\s|$)|searched the web(?:\s|$)|searching the web(?:\s|$)|waiting for background terminal)/i.test(trimmed)
+    || /^ran\s+(?:[\w./-]+|mkdir|pwd|codex|npm|npx|git|python3?|node|rg|sed|cat|ls|find|curl)(?:\s|$)/i.test(trimmed)
+    || /^(?:mkdir|pwd|codex|npm|npx|git|python3?|node|rg|sed|cat|ls|find|curl|repo-check|check)(?:\s|$)/i.test(trimmed)
     || /^(?:ran \d+ shell commands?|background command\b)/i.test(trimmed)
+    || /^(?:run codex non-interactively|print version|-V,\s*--version|for more information, try '--help'\.?)/i.test(trimmed)
     || /^(?:baked for|cooked for|gusting\b|code \d+$)/i.test(trimmed)
+    || /^(?:import\s+\w+|from\s+\S+\s+import|with\s+open\(|for\s+\w+\s+in\s+|if\s+.*:|[A-Za-z_]\w*\s*=|json\.dump|raise\s+\w+|traceback\b|file\s+["'])/i.test(trimmed)
+    || looksLikeToolFileListLine(trimmed)
+    || looksLikeSearchContinuationLine(trimmed)
+    || /^… \+\d+ lines(?: \(ctrl \+ t to view transcript\))?$/i.test(trimmed)
     || /(booting mcp server|esc to interrupt|\b\d+% left\b)/i.test(trimmed)
     || /^~\/|^\/home\//.test(trimmed)
+    || /\/home\/bryan\/code\//.test(trimmed)
   ) {
     return 'status';
   }
   return 'assistant';
 }
 
+function looksLikeToolFileListLine(line: string): boolean {
+  const tokens = line
+    .split(/[,\s]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (tokens.length === 0 || tokens.length > 12) return false;
+  const fileTokenCount = tokens.filter((token) => /^[\w./-]+\.(?:py|ts|tsx|js|md|toml|json|yml|yaml|sql)(?::\d+)?$/i.test(token)).length;
+  return fileTokenCount > 0 && fileTokenCount / tokens.length >= 0.5;
+}
+
+function looksLikeSearchContinuationLine(line: string): boolean {
+  const pipeCount = (line.match(/\|/g) ?? []).length;
+  if (pipeCount < 2) return false;
+  return !/[.!?]\s+[A-Z]/.test(line);
+}
+
 function looksLikeNoise(line: string): boolean {
   if (!/[A-Za-z0-9]/.test(line)) return true;
   if (/^[>\-_+=|/\\[\]{}()<>.:;,*'"`~!?@#$%^&]+$/.test(line)) return true;
   if (/^[▐▛▜▘▝▪•─│╭╰]+$/.test(line)) return true;
-  if (/^[A-Z]$/.test(line)) return true;
+  if (/^[A-Za-z]$/.test(line)) return true;
+  if (/^PY$/.test(line)) return true;
   if (/^[*·]\d+$/.test(line)) return true;
+  if (/^… \+\d+ lines(?: \(ctrl \+ t to view transcript\))?$/i.test(line)) return true;
   if (line.endsWith('…') && line.length <= 24) return true;
   if (/^(?:thinking|unravelling|scampering|gallivanting|brewed|churned|cooked|crunched|worked|saut(?:é|e)ed|baked|cogitated)(?:\s+for\s+\d+s)?\.?$/i.test(line)) return true;
   if (/^thought\s+for\s+\d+s\.?$/i.test(line)) return true;
@@ -56,11 +81,30 @@ function collapseRepeatedLetters(text: string): string {
 function looksLikeProviderStatusRepaint(line: string): boolean {
   const compact = normalizeFragmentToken(line);
   if (!compact) return true;
-  if (/^(?:ngg|kiin|rkkiinngg|rkkiin|wogor|woorrk)$/.test(compact)) {
+  if (/^(?:ngg|kiin|inng|rkkiinngg|rkkiin|rkki|wogor|woorrk|wo)$/.test(compact)) {
     return true;
   }
 
   const collapsed = collapseRepeatedLetters(compact);
+  const hasRepaintMarker = /\d/.test(compact)
+    || adjacentDuplicateLetterRatio(line) >= 0.18
+    || /(?:ww|oo|rr|kk|ii|nn|gg)/.test(compact);
+  if (
+    compact.length <= 28
+    && hasRepaintMarker
+    && (
+      /w{1,2}o{1,2}r+\d*r?k?/.test(compact)
+      || /r+k+i+n+g?/.test(compact)
+      || /k+i+n+g+/.test(compact)
+      || /^(?:i*n+g+\d*|g+\d*|e?r+l*r*m+i+n+a+l+|t*e*a*l*e?r+l*r*m+i+n+a+l+)$/.test(compact)
+      || /^\d+w$/.test(compact)
+      || /^g\d+(?:w|wo|wor|work|rk|ki|in|ng)/.test(collapsed)
+      || /(?:wo|wor|ork|rki|kin|ing)\d+(?:wo|wor|ork|rki|kin|ing)/.test(collapsed)
+    )
+  ) {
+    return true;
+  }
+
   if (
     /mcp/.test(collapsed)
     && /(?:serv|sers|start|stin|stng|esc|interrupt|chrome|playwright|codexapps|openaideveloperdocs)/.test(collapsed)
@@ -80,6 +124,25 @@ function looksLikeProviderStatusRepaint(line: string): boolean {
   }
 
   return /(?:fockork|fitfotior|baou|acuncknd|troteouer|tnateal|lrmmiinnaall|unrmndmid)/.test(collapsed);
+}
+
+function looksLikeShortCursorFragment(line: string): boolean {
+  const trimmed = line.trim().replace(/^[*·✻✽✢✶]+/u, '');
+  if (/%/.test(trimmed)) return false;
+  const compact = normalizeFragmentToken(line);
+  if (!compact) return true;
+  if (/^\d+$/.test(compact)) return true;
+  if (compact.length <= 4 && /\d/.test(compact)) return true;
+  if (compact.length <= 3 && /^[a-z]{1,3}$/i.test(trimmed)) return true;
+  if (compact.length > 4) return false;
+  return /^[a-z]{1,4}(?:\.+|…+)?$/.test(trimmed);
+}
+
+function removeTrailingProviderRepaintSuffix(line: string): string {
+  return line
+    .replace(/\s+WWo$/u, '')
+    .replace(/(?:\.?\s*)(?:ngg|WWo+|Wo+\s*or|Worr?k+|orrk|rkki+|kiin(?:gg?)?|inngg?|in\s+ngg|erl\s*rmmiinnaall|tealerlrmmi\s*innaall)(?:\s+\d+)?$/iu, '')
+    .trim();
 }
 
 function looksLikeFragmentCluster(lines: string[]): boolean {
@@ -375,6 +438,7 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
   const candidateLines = cleaned
     .split(/\n+/)
     .map((rawLine) => normalizeTerminalLine(rawLine))
+    .map((line) => removeTrailingProviderRepaintSuffix(line))
     .filter(Boolean);
   if (candidateLines.length >= 4 && candidateLines.every((line) => /^[A-Za-z]{1,4}$/.test(line))) {
     return [];
@@ -402,6 +466,7 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
       !line
       || looksLikeNoise(line)
       || looksLikeProviderStatusRepaint(line)
+      || (candidateLines.length > 1 && looksLikeShortCursorFragment(line))
       || looksLikeTerminalChrome(line)
       || looksLikeIdleHousekeeping(line)
       || looksLikeProviderMenuLine(line)
@@ -436,5 +501,7 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
     return [];
   }
 
-  return normalized;
+  return normalized
+    .map((line) => line.replace(/\s+WWo$/u, '').trim())
+    .filter(Boolean);
 }
