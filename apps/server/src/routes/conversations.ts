@@ -422,28 +422,17 @@ export async function registerConversationRoutes(
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
     const cached = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
-    if (!cached) {
-      if (pendingSummary && !parsedBody.data.force) {
-        const existingSession = pendingSummary.boundSessionId
-          ? sessions.getSessionById(pendingSummary.boundSessionId)
-          : sessions.getSessionByConversation(projectSlug, providerId, conversationRef);
-        if (existingSession?.shouldRestore) {
-          const liveSession = await sessions.ensureSession(existingSession.id);
-          if (liveSession) {
-            return { session: liveSession };
-          }
-          const refreshedSession = sessions.getSessionById(existingSession.id);
-          if (refreshedSession?.shouldRestore) {
-            reply.code(409).send({ error: 'Pending conversation is already bound but could not be restored.' });
-            return;
-          }
-        }
-      }
-      reply.code(404).send({ error: 'Conversation not indexed.' });
-      return;
-    }
+    const providerConversation = cached
+      ? null
+      : await provider.getConversation(project, resolvedConversationRef, providerSettings);
+    const bindableSummary = cached ?? providerConversation?.summary;
     if (!parsedBody.data.force) {
-      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef);
+      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef)
+        ?? (
+          pendingSummary?.boundSessionId
+            ? sessions.getSessionById(pendingSummary.boundSessionId)
+            : undefined
+        );
       if (existingSession?.shouldRestore) {
         const liveSession = await sessions.ensureSession(existingSession.id);
         if (liveSession) {
@@ -451,10 +440,18 @@ export async function registerConversationRoutes(
         }
         const refreshedSession = sessions.getSessionById(existingSession.id);
         if (refreshedSession?.shouldRestore) {
-          reply.code(409).send({ error: 'Conversation is already bound but could not be restored.' });
+          reply.code(409).send({
+            error: pendingSummary
+              ? 'Pending conversation is already bound but could not be restored.'
+              : 'Conversation is already bound but could not be restored.',
+          });
           return;
         }
       }
+    }
+    if (!bindableSummary) {
+      reply.code(404).send({ error: 'Conversation not indexed.' });
+      return;
     }
     if (parsedBody.data.force) {
       const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef);
@@ -467,7 +464,7 @@ export async function registerConversationRoutes(
       provider,
       providerSettings,
       conversationRef: resolvedConversationRef,
-      title: cached.title,
+      title: bindableSummary.title,
       kind: 'history',
       initialPrompt: parsedBody.data.initialPrompt,
     });

@@ -225,6 +225,124 @@ describe('conversation routes', () => {
     }
   });
 
+  it('force rebinds a provider-readable conversation that is missing from the local index', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const realSummary: ConversationSummary = {
+      ref: 'real-provider-only',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Provider only transcript',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:12:00.000Z',
+      isBound: false,
+      degraded: false,
+    };
+    const existingSession: BoundSession = {
+      id: 'session-old-provider-only',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'real-provider-only',
+      resumeConversationRef: 'real-provider-only',
+      tmuxSessionName: 'ac-codex-demo-provider-only-old',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Provider only transcript',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T18:10:00.000Z',
+    };
+    const reboundSession: BoundSession = {
+      ...existingSession,
+      id: 'session-new-provider-only',
+      tmuxSessionName: 'ac-codex-demo-provider-only-new',
+      updatedAt: '2026-03-14T18:13:00.000Z',
+    };
+    const getConversation = vi.fn(async () => ({
+      summary: realSummary,
+      messages: [],
+      allMessages: [],
+    }));
+    const releaseSession = vi.fn(async () => undefined);
+    const bindConversation = vi.fn(async () => reboundSession);
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          getConversation,
+        }),
+      } as never,
+      {
+        bindConversation,
+        getSessionByConversation: vi.fn(() => existingSession),
+        releaseSession,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/codex/real-provider-only/bind',
+        payload: {
+          force: true,
+          initialPrompt: 'continue with the billing workflow',
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(getConversation).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'demo' }),
+        'real-provider-only',
+        expect.any(Object),
+      );
+      expect(releaseSession).toHaveBeenCalledWith('session-old-provider-only');
+      expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
+        conversationRef: 'real-provider-only',
+        title: 'Provider only transcript',
+        kind: 'history',
+        initialPrompt: 'continue with the billing workflow',
+      }));
+      expect(response.json()).toMatchObject({
+        session: {
+          id: 'session-new-provider-only',
+          conversationRef: 'real-provider-only',
+        },
+      });
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('adopts a completed pending conversation on message read before using event-log history', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
