@@ -8,6 +8,20 @@ import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/s
 import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1_500,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(predicate()).toBe(true);
+}
+
 describe('SessionManager recency', () => {
   it('does not refresh completion recency just because the screen leaves Working', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
@@ -349,7 +363,7 @@ describe('SessionManager recency', () => {
     });
 
     await fs.appendFile(session.rawLogPath!, '\nRestored session startup output.\n', 'utf8');
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 750));
 
     const afterRestoreOutput = db.boundSessions.getById(session.id);
     expect(afterRestoreOutput?.lastOutputAt).toBeUndefined();
@@ -359,7 +373,7 @@ describe('SessionManager recency', () => {
 
     await manager.sendInput(session.id, 'continue');
     await fs.appendFile(session.rawLogPath!, '\nReal response after user input.\n', 'utf8');
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitFor(() => db.boundSessions.getById(session.id)?.lastOutputAt !== undefined);
 
     const afterUserOutput = db.boundSessions.getById(session.id);
     expect(afterUserOutput?.lastOutputAt).toBeTruthy();
@@ -401,7 +415,7 @@ describe('SessionManager recency', () => {
 
     await manager.sendInput(session.id, 'review current changes');
     await fs.appendFile(session.rawLogPath!, '\n› review current changes\n', 'utf8');
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 750));
 
     const afterEcho = db.boundSessions.getById(session.id);
     expect(afterEcho?.lastOutputAt).toBeUndefined();

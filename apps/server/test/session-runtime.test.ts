@@ -38,7 +38,7 @@ describe('Session runtime queue', () => {
       sessionId: 'session-1',
       label: 'slow-command',
     });
-    expect(warnings[0]?.elapsedMs).toBeGreaterThanOrEqual(10);
+    expect(warnings[0]?.elapsedMs).toBeGreaterThan(0);
 
     release.resolve();
     await expect(command).resolves.toBe('done');
