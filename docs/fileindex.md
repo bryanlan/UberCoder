@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 6c49fd69971a255984fda8c0659aefaf2abff859
-current_through_date: 2026-07-03T14:36:17-04:00
+current_through_commit: 4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1
+current_through_date: 2026-07-05T00:30:34-04:00
 ---
 
 # File Index
@@ -84,6 +84,9 @@ current_through_date: 2026-07-03T14:36:17-04:00
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
+- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` -
+  conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
+  and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
   404 selection, sidebar ordering, and work-mode derivation.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
@@ -154,6 +157,12 @@ Test and verification anchors:
   `apps/web/src/features/conversation/useConversationData.ts`,
   `apps/web/src/features/realtime/reducers.ts`, `apps/web/src/features/conversation/transcript-turns.tsx`,
   and `apps/web/src/components/ConversationPane.tsx`.
+- Raw terminal/screen rendering changes should review `apps/server/src/routes/sessions.ts`,
+  `apps/server/src/sessions/session-screen.ts`, `apps/server/src/sessions/live-output/reader.ts`,
+  `apps/web/src/components/ConversationPane.tsx`,
+  `apps/web/src/features/realtime/apply-session-event.ts`, `apps/web/src/lib/api.ts`, and
+  `apps/web/src/components/ConversationPane.test.tsx`. Raw screen and debug tails are inspection
+  surfaces; event-log/provided transcript messages are the conversation surface.
 - Pending Codex progress and stale-bound-timeline polling changes should review
   `apps/server/src/providers/transcripts/codex.ts`, `apps/server/test/providers.test.ts`,
   `apps/web/src/features/conversation/useConversationData.ts`,

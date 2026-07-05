@@ -9,6 +9,7 @@ This repo is an npm workspace for a local, server-first Codex/Claude Agent Conso
 - Keep localhost proxy access authenticated and allowlisted per project/port.
 - Recency should move only from new user/agent activity and completed output after the idle window; old transcripts, restore events, repaint noise, and idle status changes do not count.
 - Live output shown in the conversation pane should come through the event-log normalization path, not directly from raw tmux screen text.
+- Treat raw tmux screen content, raw-output debug tails, event-log live messages, and provider transcripts as separate surfaces. Do not promote terminal input, picker text, restore repaint output, or debug/raw-output tails into transcript rows unless the event-log/provider parser explicitly classifies them as user or assistant conversation content.
 - Never commit real secrets or local runtime config; use `config/agent-console.example.json` as the template.
 
 ## Build / Test / Verify

@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 6c49fd69971a255984fda8c0659aefaf2abff859
-current_through_date: 2026-07-03T14:36:17-04:00
+current_through_commit: 4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1
+current_through_date: 2026-07-05T00:30:34-04:00
 ---
 
 # Architecture
@@ -60,6 +60,13 @@ from the visible transcript while keeping the full parsed message set available 
 commentary-phase assistant records are treated as pending progress, and only the latest pending
 commentary tail is displayed so an in-flight answer can show progress without flooding the durable
 transcript.
+
+The console intentionally keeps four text channels separate. `/screen` exposes parsed tmux screen
+state for interactive pickers and status, `/raw-output` exposes debug tails for inspection only,
+event-log readers produce temporary live conversation messages, and provider transcript adapters
+produce durable conversation history. The web conversation pane may mirror local text-bypass typing
+optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
+pending user transcript row.
 
 Conversation search is a server-owned API at `/api/search/conversations`. The search service builds
 FTS rows from sanitized user/assistant prose, excludes hidden system-invocation conversations, and
@@ -122,6 +129,12 @@ stuck composer.
   `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
   and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
   merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
+- Raw screen rendering belongs to interactive/status display, not durable transcript construction.
+  Review `apps/web/src/components/ConversationPane.tsx`,
+  `apps/web/src/components/ConversationPane.test.tsx`,
+  `apps/web/src/lib/api.ts`, `apps/web/src/features/realtime/apply-session-event.ts`,
+  `apps/server/src/routes/sessions.ts`, and the live-output tests before changing text-bypass
+  preview, screen panels, raw-output panels, or server-derived input display.
 - Pending Codex transcript progress is a server/parser plus web-rendering contract. Review
   `apps/server/src/providers/transcripts/codex.ts`,
   `apps/server/test/providers.test.ts`,
