@@ -54,6 +54,8 @@ function timeline(input: {
   messages?: NormalizedMessage[];
   screenContent?: string;
   screenContentAnsi?: string;
+  screenStatus?: string;
+  screenStatusAnsi?: string;
 } = {}): ConversationTimeline {
   const session = boundSession();
   return {
@@ -74,7 +76,8 @@ function timeline(input: {
       content: input.screenContent ?? '',
       contentAnsi: input.screenContentAnsi,
       inputText: input.inputText ?? '',
-      status: 'Session active',
+      status: input.screenStatus ?? 'Session active',
+      statusAnsi: input.screenStatusAnsi,
       capturedAt: baseTime,
     },
     messagePage: { hasOlder: false, total: 0 },
@@ -85,6 +88,8 @@ function renderPane(input: {
   inputText?: string;
   screenContent?: string;
   screenContentAnsi?: string;
+  screenStatus?: string;
+  screenStatusAnsi?: string;
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
 } = {}) {
@@ -100,6 +105,8 @@ function renderPane(input: {
           inputText: input.inputText,
           screenContent: input.screenContent,
           screenContentAnsi: input.screenContentAnsi,
+          screenStatus: input.screenStatus,
+          screenStatusAnsi: input.screenStatusAnsi,
         })}
         liveMode
         loading={false}
@@ -240,6 +247,28 @@ describe('ConversationPane live input bridge', () => {
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('choose what model and reasoning effort to use');
+  });
+
+  it('shows provider progress while Claude is still thinking', () => {
+    renderPane({
+      screenContent: [
+        '* Fluttering… (6m 29s · almost done thinking with medium effort)',
+        '⎿ Tip: Try setting environment variable COLORTERM=truecolor for richer colors',
+      ].join('\n'),
+    });
+
+    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('almost done thinking with medium effort');
+  });
+
+  it('shows provider progress when only the status line is active', () => {
+    renderPane({
+      screenStatus: '* still thinking with medium effort',
+      screenStatusAnsi: '\u001b[33m* still thinking with medium effort\u001b[39m',
+    });
+
+    expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('still thinking with medium effort');
   });
 
   it('mirrors text-bypass typing into the main transcript before submission', async () => {
