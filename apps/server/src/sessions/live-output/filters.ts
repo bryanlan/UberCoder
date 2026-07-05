@@ -5,7 +5,8 @@ export function classifyChunk(text: string): MessageRole {
   const trimmed = text.trim();
   if (!trimmed) return 'status';
   if (
-    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|openai codex|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed)/i.test(trimmed)
+    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|openai codex|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed|explored(?:\s|$)|searched the web(?:\s|$)|searching the web(?:\s|$)|waiting for background terminal)/i.test(trimmed)
+    || /^ran\s+(?:[\w./-]+|mkdir|pwd|codex|npm|git|python|node|rg|sed|cat|ls|find)(?:\s|$)/i.test(trimmed)
     || /^(?:ran \d+ shell commands?|background command\b)/i.test(trimmed)
     || /^(?:baked for|cooked for|gusting\b|code \d+$)/i.test(trimmed)
     || /(booting mcp server|esc to interrupt|\b\d+% left\b)/i.test(trimmed)
@@ -34,6 +35,51 @@ function looksLikeNoise(line: string): boolean {
     if (shortTokenCount / tokens.length > 0.75) return true;
   }
   return false;
+}
+
+function adjacentDuplicateLetterRatio(text: string): number {
+  const letters = text.match(/[A-Za-z]/g)?.join('').toLowerCase() ?? '';
+  if (!letters) return 0;
+  let duplicateCount = 0;
+  for (let index = 1; index < letters.length; index += 1) {
+    if (letters[index] === letters[index - 1]) {
+      duplicateCount += 1;
+    }
+  }
+  return duplicateCount / letters.length;
+}
+
+function collapseRepeatedLetters(text: string): string {
+  return text.replace(/([a-z])\1+/g, '$1');
+}
+
+function looksLikeProviderStatusRepaint(line: string): boolean {
+  const compact = normalizeFragmentToken(line);
+  if (!compact) return true;
+  if (/^(?:ngg|kiin|rkkiinngg|rkkiin|wogor|woorrk)$/.test(compact)) {
+    return true;
+  }
+
+  const collapsed = collapseRepeatedLetters(compact);
+  if (
+    /mcp/.test(collapsed)
+    && /(?:serv|sers|start|stin|stng|esc|interrupt|chrome|playwright|codexapps|openaideveloperdocs)/.test(collapsed)
+  ) {
+    return true;
+  }
+
+  if (
+    /(?:working|workin|rking|waiting|waitin|background|terminal|searchingtheweb|summarizerecentcommits)/.test(collapsed)
+    && (
+      /[\d•◦·]/u.test(line)
+      || adjacentDuplicateLetterRatio(line) >= 0.18
+      || compact.length <= 32
+    )
+  ) {
+    return true;
+  }
+
+  return /(?:fockork|fitfotior|baou|acuncknd|troteouer|tnateal|lrmmiinnaall|unrmndmid)/.test(collapsed);
 }
 
 function looksLikeFragmentCluster(lines: string[]): boolean {
@@ -154,6 +200,7 @@ function looksLikeIdleHousekeeping(line: string): boolean {
   if (/^setmodelto(?:haiku|opus|sonnet|fable|default)/.test(compact)) return true;
   if (/^tip:connectclaudetoyouride/.test(compact)) return true;
   return /^(?:Checking for updates|How is Claude doing this session\? \(optional\)|Set model to .+)$/i.test(line)
+    || /^free up context\.?$/i.test(line)
     || /^(?:\d+\s*:\s*Bad\s+\d+\s*:\s*Fine\s+\d+\s*:\s*Good\s+\d+\s*:\s*Dismiss)$/i.test(line)
     || /^(?:Select model|Switch between Claude models\.?|Your pick becomes the default|For other\/previous model names|Enter to confirm(?:\s*·\s*Esc to exit)?|Press enter to confirm or esc to go back|Enter to set as default.*Esc to cancel|Esc to exit|Cancelled)$/i.test(line)
     || /(?:Switch between Claude models|Your pick becomes the default|For other\/previous model names|Fable.+unavailable|Sonnet 5|Efficient for routine tasks)/i.test(line)
@@ -254,6 +301,7 @@ function lineEchoesUserInput(comparableLine: string, compactLine: string, compar
   if (!comparable || !compact) return false;
   if (comparableLine === comparable || compactLine === compact) return true;
   if (comparable.length >= 16 && (comparableLine.startsWith(comparable) || compactLine.startsWith(compact))) return true;
+  if (compactLine.length >= 16 && compact.includes(compactLine)) return true;
   return false;
 }
 
@@ -353,6 +401,7 @@ export function normalizeRawOutputLines(text: string, lastUserInput?: string, us
     if (
       !line
       || looksLikeNoise(line)
+      || looksLikeProviderStatusRepaint(line)
       || looksLikeTerminalChrome(line)
       || looksLikeIdleHousekeeping(line)
       || looksLikeProviderMenuLine(line)

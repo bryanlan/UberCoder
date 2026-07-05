@@ -965,6 +965,65 @@ describe('readLiveMessages', () => {
     ]);
   });
 
+  it('drops interleaved Codex MCP startup repaint text before live assistant updates', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({
+        type: 'user-input',
+        text: 'research held away asset billing',
+        timestamp: '2026-07-05T15:21:20.259Z',
+      }),
+      JSON.stringify({
+        type: 'raw-output',
+        text: [
+          'Tip: Use /compact when the conversation gets long to summarize history and',
+          'free up context.',
+          'research held away asset billing',
+          'Starting MCP servers (0/4): chrome-devtools, codex_apps, openaiDeveloperDocs,...1playwright (0s * ecSStaarrtiti2playwright (0s * esc o interrup',
+          'StinStngtag ar MrtiMCPinP ng sg se MCervCPveP er sers er (rv(2ve2/er/4rs 4):rvers (3/4): (0s * esc o interrupt)rv(3ver3/4rs4)1s ): (: (3 c3/ch',
+          'rkkiin◦ngg•6',
+          '• I will use the advisor-web-research skill because this is current RIA/practice research.',
+          'Explored',
+          'Ran pwd && rg --files',
+          'Searched the web for RIA held away billing',
+          'W◦WoorrkkiinWng7Wogor•rkkiin',
+          'ngg',
+          '• The local wrapper delegates to the global web-research skill and requires source links plus an audit handle.',
+        ].join('\n'),
+        timestamp: '2026-07-05T15:21:31.566Z',
+      }),
+    ].join('\n'));
+
+    const session: BoundSession = {
+      id: 'session-codex-interleaved-mcp-repaint',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:codex-interleaved-mcp-repaint',
+      tmuxSessionName: 'ac-codex-demo-interleaved-mcp-repaint',
+      status: 'bound',
+      startedAt: '2026-07-05T15:21:20.000Z',
+      updatedAt: '2026-07-05T15:21:31.000Z',
+      eventLogPath,
+    };
+
+    const messages = (await readLiveMessages(session))
+      .filter((message) => message.role === 'user' || message.role === 'assistant');
+    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
+      { role: 'user', source: 'user-input', text: 'research held away asset billing' },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: 'I will use the advisor-web-research skill because this is current RIA/practice research.',
+      },
+      {
+        role: 'assistant',
+        source: 'live-output',
+        text: 'The local wrapper delegates to the global web-research skill and requires source links plus an audit handle.',
+      },
+    ]);
+  });
+
   it('does not render Claude slash-command screens as assistant transcript content', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

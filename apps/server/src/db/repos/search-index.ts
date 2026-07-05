@@ -214,6 +214,18 @@ export class SearchIndexRepo {
         and bs.provider = ranked_matches.provider
         and bs.conversation_ref = ranked_matches.conversation_ref
         and ${treeVisibleBoundSessionSql('bs')}
+        and not exists (
+          select 1
+          from bound_sessions newer
+          where newer.project_slug = bs.project_slug
+            and newer.provider = bs.provider
+            and newer.conversation_ref = bs.conversation_ref
+            and ${treeVisibleBoundSessionSql('newer')}
+            and (
+              newer.updated_at > bs.updated_at
+              or (newer.updated_at = bs.updated_at and newer.id > bs.id)
+            )
+        )
       where ranked_matches.conversation_rank = 1
       order by ranked_matches.recency_bucket asc, ranked_matches.rank asc, ranked_matches.conversation_updated_at desc
       limit ?

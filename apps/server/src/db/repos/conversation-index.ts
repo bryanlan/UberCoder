@@ -72,7 +72,22 @@ export class ConversationIndexRepo {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and ${treeVisibleBoundSessionSql('bs')}
+        on bs.project_slug = ci.project_slug
+        and bs.provider = ci.provider
+        and bs.conversation_ref = ci.ref
+        and ${treeVisibleBoundSessionSql('bs')}
+        and not exists (
+          select 1
+          from bound_sessions newer
+          where newer.project_slug = bs.project_slug
+            and newer.provider = bs.provider
+            and newer.conversation_ref = bs.conversation_ref
+            and ${treeVisibleBoundSessionSql('newer')}
+            and (
+              newer.updated_at > bs.updated_at
+              or (newer.updated_at = bs.updated_at and newer.id > bs.id)
+            )
+        )
       order by coalesce(ci.created_at, ci.updated_at) desc, ci.ref asc
     `).all() as SqliteRow[];
     return rows.map(mapConversationIndexRow);
@@ -85,7 +100,22 @@ export class ConversationIndexRepo {
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
-        on bs.project_slug = ci.project_slug and bs.provider = ci.provider and bs.conversation_ref = ci.ref and ${treeVisibleBoundSessionSql('bs')}
+        on bs.project_slug = ci.project_slug
+        and bs.provider = ci.provider
+        and bs.conversation_ref = ci.ref
+        and ${treeVisibleBoundSessionSql('bs')}
+        and not exists (
+          select 1
+          from bound_sessions newer
+          where newer.project_slug = bs.project_slug
+            and newer.provider = bs.provider
+            and newer.conversation_ref = bs.conversation_ref
+            and ${treeVisibleBoundSessionSql('newer')}
+            and (
+              newer.updated_at > bs.updated_at
+              or (newer.updated_at = bs.updated_at and newer.id > bs.id)
+            )
+        )
       where ci.project_slug = ? and ci.provider = ? and ci.ref = ?
       limit 1
     `).get(projectSlug, provider, ref) as SqliteRow | undefined;

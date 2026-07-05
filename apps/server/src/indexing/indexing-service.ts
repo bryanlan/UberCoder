@@ -161,7 +161,7 @@ export class IndexingService {
   }
 
   getTree(): TreeResponse {
-    const activeSessions = this.db.boundSessions.list()
+    const activeSessions = this.db.boundSessions.listTreeVisible()
       .filter((session) => isTreeVisibleBoundSession(session) && isBoundSessionVisibleInDiscovery(session, {
         getPendingConversation: (ref) => this.db.pendingConversations.get(ref),
         getIndexedConversation: (projectSlug, provider, conversationRef) => this.db.conversationIndex.get(projectSlug, provider, conversationRef),

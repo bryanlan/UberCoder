@@ -3,8 +3,32 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
+import type { BoundSession } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import { CURRENT_SCHEMA_VERSION } from '../src/db/schema.js';
+
+function boundSession(input: Partial<BoundSession> & { id: string; conversationRef: string; updatedAt: string }): BoundSession {
+  return {
+    id: input.id,
+    provider: input.provider ?? 'codex',
+    projectSlug: input.projectSlug ?? 'demo',
+    conversationRef: input.conversationRef,
+    resumeConversationRef: input.resumeConversationRef ?? input.conversationRef,
+    tmuxSessionName: input.tmuxSessionName ?? `ac-codex-demo-${input.id}`,
+    status: input.status ?? 'bound',
+    shouldRestore: input.shouldRestore ?? true,
+    title: input.title ?? 'Bound conversation',
+    startedAt: input.startedAt ?? '2026-03-07T00:00:00.000Z',
+    updatedAt: input.updatedAt,
+    lastActivityAt: input.lastActivityAt,
+    lastOutputAt: input.lastOutputAt,
+    lastCompletedAt: input.lastCompletedAt,
+    isWorking: input.isWorking ?? false,
+    pid: input.pid,
+    rawLogPath: input.rawLogPath,
+    eventLogPath: input.eventLogPath,
+  };
+}
 
 describe('AppDatabase', () => {
   it('records the current schema version for a fresh database', async () => {
@@ -99,6 +123,65 @@ describe('AppDatabase', () => {
     const conversations = db.conversationIndex.list();
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.title).toBe('Newer transcript');
+    db.close();
+  });
+
+  it('uses the newest visible bound session for legacy duplicate session rows', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.conversationIndex.replace('demo', 'codex', [{
+      ref: 'conversation-1',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Conversation',
+      updatedAt: '2026-03-07T00:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    }]);
+    const insert = db.sqlite.prepare(`
+      insert into bound_sessions (
+        id, provider, project_slug, conversation_ref, resume_conversation_ref,
+        tmux_session_name, status, should_restore, title, started_at, updated_at,
+        is_working
+      ) values (?, 'codex', 'demo', 'conversation-1', 'conversation-1', ?, 'bound', 1, 'Conversation', ?, ?, 0)
+    `);
+    insert.run('older-session', 'ac-codex-demo-older', '2026-03-07T00:00:00.000Z', '2026-03-07T00:01:00.000Z');
+    insert.run('newer-session', 'ac-codex-demo-newer', '2026-03-07T00:00:00.000Z', '2026-03-07T00:02:00.000Z');
+
+    const conversations = db.conversationIndex.list();
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]).toMatchObject({
+      ref: 'conversation-1',
+      isBound: true,
+      boundSessionId: 'newer-session',
+    });
+    expect(db.boundSessions.listTreeVisible().map((session) => session.id)).toEqual(['newer-session']);
+    db.close();
+  });
+
+  it('retires older visible sessions when a newer session is upserted for the same conversation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.boundSessions.upsert(boundSession({
+      id: 'older-session',
+      conversationRef: 'conversation-1',
+      updatedAt: '2026-03-07T00:01:00.000Z',
+    }));
+    db.boundSessions.upsert(boundSession({
+      id: 'newer-session',
+      conversationRef: 'conversation-1',
+      updatedAt: '2026-03-07T00:02:00.000Z',
+    }));
+
+    expect(db.boundSessions.getById('older-session')).toMatchObject({
+      status: 'ended',
+      shouldRestore: false,
+      isWorking: false,
+    });
+    expect(db.boundSessions.listTreeVisible().map((session) => session.id)).toEqual(['newer-session']);
     db.close();
   });
 
