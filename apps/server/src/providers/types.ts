@@ -18,6 +18,11 @@ export interface ProviderAdapter {
   readonly id: ProviderId;
   discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>>;
   listConversations(project: ActiveProject, settings: MergedProviderSettings): Promise<ConversationSummary[]>;
+  listPendingAdoptionCandidates?(
+    project: ActiveProject,
+    pending: ConversationSummary,
+    settings: MergedProviderSettings,
+  ): Promise<ConversationSummary[]>;
   getConversation(project: ActiveProject, conversationRef: string, settings: MergedProviderSettings): Promise<ProviderConversation | null>;
   getLaunchCommand(
     project: ActiveProject,

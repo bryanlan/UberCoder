@@ -46,3 +46,16 @@ export async function readTextHead(filePath: string, maxBytes = 65_536): Promise
     await handle.close();
   }
 }
+
+export async function readTextTail(filePath: string, maxBytes = 1_048_576): Promise<string> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, maxBytes);
+    const tail = Buffer.alloc(length);
+    await handle.read(tail, 0, length, Math.max(0, stat.size - length));
+    return tail.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}

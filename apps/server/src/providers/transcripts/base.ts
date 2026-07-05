@@ -338,6 +338,8 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
       threadSource: input.metadata?.threadSource,
       firstUserTextHash: firstUser ? stableTextHash(normalizeComparableText(firstUser.text)) : undefined,
       lastUserTextHash: lastUser ? stableTextHash(normalizeComparableText(lastUser.text)) : undefined,
+      firstUserAt: firstUser?.timestamp,
+      lastUserAt: lastUser?.timestamp,
     },
   };
 

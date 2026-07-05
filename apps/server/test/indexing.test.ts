@@ -100,4 +100,68 @@ describe('IndexingService', () => {
     expect(db.boundSessions.getById('session-1')?.conversationRef).toBe('real-session');
     db.close();
   });
+
+  it('matches later pending turns against the transcript update time instead of conversation creation time', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const longRunningConversation = {
+      ...conversation,
+      ref: 'long-running-session',
+      createdAt: '2026-03-07T00:01:00.000Z',
+      updatedAt: '2026-03-07T04:12:00.000Z',
+      rawMetadata: {
+        firstUserTextHash: 'first-turn-hash',
+        lastUserTextHash: 'later-turn-hash',
+      },
+    };
+    db.pendingConversations.put({
+      ref: 'pending:later-turn',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Pending later turn',
+      createdAt: '2026-03-07T04:10:00.000Z',
+      updatedAt: '2026-03-07T04:10:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-later-turn',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'later-turn-hash',
+        lastUserInputAt: '2026-03-07T04:10:00.000Z',
+      },
+    });
+    db.boundSessions.upsert({
+      id: 'session-later-turn',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:later-turn',
+      tmuxSessionName: 'tmux-demo-later',
+      status: 'bound',
+      title: 'Pending later turn',
+      startedAt: '2026-03-07T04:10:00.000Z',
+      updatedAt: '2026-03-07T04:10:00.000Z',
+    });
+
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: 'codex' | 'claude') => ({
+          enabled: providerId === 'codex',
+          discoveryRoot: tempDir,
+          commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+        }),
+      } as never,
+      { get: () => ({ ...provider, listConversations: async () => [longRunningConversation] }) } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshAll();
+
+    expect(db.pendingConversations.get('pending:later-turn')?.rawMetadata?.adoptedConversationRef).toBe('long-running-session');
+    expect(db.boundSessions.getById('session-later-turn')?.conversationRef).toBe('long-running-session');
+    db.close();
+  });
 });

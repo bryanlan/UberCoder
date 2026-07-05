@@ -56,6 +56,42 @@ export function scorePendingMatch(
   return -1;
 }
 
+function coerceTimestamp(value: unknown): number {
+  return typeof value === 'string' ? Date.parse(value) : NaN;
+}
+
+function getCandidateMatchTimestamp(
+  pendingLastUserHash: string,
+  conversation: ConversationSummary,
+): number {
+  const rawMetadata = conversation.rawMetadata ?? {};
+  if (rawMetadata.lastUserTextHash === pendingLastUserHash) {
+    const lastUserAt = coerceTimestamp(rawMetadata.lastUserAt);
+    if (Number.isFinite(lastUserAt)) {
+      return lastUserAt;
+    }
+
+    const updatedAt = Date.parse(conversation.updatedAt);
+    if (Number.isFinite(updatedAt)) {
+      return updatedAt;
+    }
+  }
+
+  if (rawMetadata.firstUserTextHash === pendingLastUserHash) {
+    const firstUserAt = coerceTimestamp(rawMetadata.firstUserAt);
+    if (Number.isFinite(firstUserAt)) {
+      return firstUserAt;
+    }
+
+    const createdAt = Date.parse(conversation.createdAt ?? conversation.updatedAt);
+    if (Number.isFinite(createdAt)) {
+      return createdAt;
+    }
+  }
+
+  return Date.parse(conversation.createdAt ?? conversation.updatedAt);
+}
+
 export function findPendingAdoptionMatch(
   pending: ConversationSummary,
   conversations: ConversationSummary[],
@@ -73,7 +109,7 @@ export function findPendingAdoptionMatch(
     .filter((conversation) => !options.claimedRefs?.has(conversation.ref) && conversation.ref !== pending.ref)
     .map((conversation) => ({
       conversation,
-      delta: Math.abs(Date.parse(conversation.createdAt ?? conversation.updatedAt) - pendingTimestamp),
+      delta: Math.abs(getCandidateMatchTimestamp(pendingLastUserHash, conversation) - pendingTimestamp),
       score: scorePendingMatch(pendingLastUserHash, conversation),
     }))
     .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= PENDING_ADOPTION_MATCH_WINDOW_MS)

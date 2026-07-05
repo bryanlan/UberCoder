@@ -225,6 +225,138 @@ describe('conversation routes', () => {
     }
   });
 
+  it('adopts a completed pending conversation on message read before using event-log history', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    db.pendingConversations.put({
+      ref: 'pending:stale-read',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Pending stale read',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T20:10:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-stale-read',
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: 'latest-user-hash',
+        lastUserInputAt: '2026-03-14T20:10:00.000Z',
+      },
+    });
+    db.boundSessions.upsert({
+      id: 'session-stale-read',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:stale-read',
+      tmuxSessionName: 'ac-codex-demo-stale-read',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Pending stale read',
+      startedAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T20:12:00.000Z',
+      isWorking: false,
+    });
+    const realSummary: ConversationSummary = {
+      ref: 'real-stale-read',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Real stale read',
+      createdAt: '2026-03-14T18:00:00.000Z',
+      updatedAt: '2026-03-14T20:12:00.000Z',
+      isBound: false,
+      degraded: false,
+      rawMetadata: {
+        firstUserTextHash: 'first-user-hash',
+        lastUserTextHash: 'latest-user-hash',
+        lastUserAt: '2026-03-14T20:10:00.000Z',
+      },
+    };
+    const durableMessages: NormalizedMessage[] = [{
+      id: 'durable-answer',
+      provider: 'codex',
+      role: 'assistant',
+      lifecycle: 'durable',
+      text: 'Durable provider transcript answer.',
+      timestamp: '2026-03-14T20:12:00.000Z',
+      conversationRef: 'real-stale-read',
+      source: 'history-file',
+    }];
+    const listPendingAdoptionCandidates = vi.fn(async () => [realSummary]);
+    const getConversation = vi.fn(async () => ({
+      summary: realSummary,
+      messages: durableMessages,
+      allMessages: durableMessages,
+    }));
+
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      {
+        ensureAuthenticated: async () => undefined,
+      } as never,
+      db,
+      {
+        getProjectBySlug: async (projectSlug: string) => (
+          projectSlug === 'demo'
+            ? {
+                slug: 'demo',
+                displayName: 'Demo',
+              }
+            : undefined
+        ),
+        getMergedProviderSettings: () => ({
+          id: 'codex',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: {
+            newCommand: ['codex'],
+            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+            continueCommand: ['codex', 'resume', '--last'],
+            env: {},
+          },
+        }),
+      } as never,
+      {
+        get: () => ({
+          listPendingAdoptionCandidates,
+          listConversations: async () => [],
+          getConversation,
+        }),
+      } as never,
+      {
+        getSessionByConversation: vi.fn(() => undefined),
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/conversations/demo/codex/pending%3Astale-read/messages',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(listPendingAdoptionCandidates).toHaveBeenCalledOnce();
+      expect(getConversation).toHaveBeenCalledWith(
+        expect.objectContaining({ slug: 'demo' }),
+        'real-stale-read',
+        expect.any(Object),
+      );
+      expect(response.json().messages.map((message: NormalizedMessage) => message.text)).toEqual([
+        'Durable provider transcript answer.',
+      ]);
+      expect(db.pendingConversations.get('pending:stale-read')?.rawMetadata?.adoptedConversationRef).toBe('real-stale-read');
+      expect(db.boundSessions.getById('session-stale-read')?.conversationRef).toBe('real-stale-read');
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('creates a new pending conversation when the old zero-turn pending bind cannot be restored and gets cleared', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

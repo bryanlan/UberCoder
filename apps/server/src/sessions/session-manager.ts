@@ -497,7 +497,9 @@ export class SessionManager {
       return session;
     }
 
-    const conversations = await provider.listConversations(project, providerSettings);
+    const conversations = provider.listPendingAdoptionCandidates
+      ? await provider.listPendingAdoptionCandidates(project, pending, providerSettings)
+      : await provider.listConversations(project, providerSettings);
     const matchedConversation = findPendingAdoptionMatch(pending, conversations);
     if (!matchedConversation) {
       return session;

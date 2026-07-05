@@ -11,6 +11,7 @@ import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { AuthService } from '../security/auth-service.js';
 import { LiveOutputReader } from '../sessions/live-output/reader.js';
 import { SessionManager } from '../sessions/session-manager.js';
+import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 import { nowIso } from '../lib/time.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
 
@@ -134,6 +135,59 @@ function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationS
   });
 }
 
+async function resolvePendingAdoptionForRead(input: {
+  db: AppDatabase;
+  project: Awaited<ReturnType<ProjectService['getProjectBySlug']>>;
+  projectSlug: string;
+  providerId: ConversationSummary['provider'];
+  provider: ReturnType<ProviderRegistry['get']>;
+  providerSettings: ReturnType<ProjectService['getMergedProviderSettings']>;
+  pending: ConversationSummary | undefined;
+  eventBus: RealtimeEventBus;
+}): Promise<ConversationSummary | undefined> {
+  const { db, project, projectSlug, providerId, provider, providerSettings, pending, eventBus } = input;
+  if (
+    !project
+    || !pending
+    || typeof pending.rawMetadata?.adoptedConversationRef === 'string'
+    || typeof pending.rawMetadata?.lastUserInputHash !== 'string'
+  ) {
+    return pending;
+  }
+
+  const boundSession = pending.boundSessionId
+    ? db.boundSessions.getById(pending.boundSessionId)
+    : db.boundSessions.getRestorableByConversation(projectSlug, providerId, pending.ref);
+  if (boundSession?.isWorking === true) {
+    return pending;
+  }
+
+  const indexedCandidates = db.conversationIndex.list()
+    .filter((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId);
+  const indexedMatch = findPendingAdoptionMatch(pending, indexedCandidates);
+  const providerCandidates = indexedMatch
+    ? []
+    : provider.listPendingAdoptionCandidates
+      ? await provider.listPendingAdoptionCandidates(project, pending, providerSettings)
+      : await provider.listConversations(project, providerSettings);
+  const matchedConversation = indexedMatch ?? findPendingAdoptionMatch(pending, providerCandidates);
+  if (!matchedConversation) {
+    return pending;
+  }
+
+  const adoption = adoptPendingConversation({
+    db,
+    projectSlug,
+    providerId,
+    pendingRef: pending.ref,
+    matchedConversation,
+  });
+  if (adoption.reboundSession) {
+    eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
+  }
+  return db.pendingConversations.get(pending.ref) ?? pending;
+}
+
 export async function registerConversationRoutes(
   app: FastifyInstance,
   authService: AuthService,
@@ -169,7 +223,17 @@ export async function registerConversationRoutes(
     const providerSettings = projectService.getMergedProviderSettings(project, providerId);
     const provider = providerRegistry.get(providerId);
 
-    const pendingSummary = db.pendingConversations.get(conversationRef);
+    let pendingSummary = db.pendingConversations.get(conversationRef);
+    pendingSummary = await resolvePendingAdoptionForRead({
+      db,
+      project,
+      projectSlug,
+      providerId,
+      provider,
+      providerSettings,
+      pending: pendingSummary,
+      eventBus,
+    });
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
     const cachedSummary = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
