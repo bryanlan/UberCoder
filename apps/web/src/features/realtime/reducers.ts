@@ -83,7 +83,10 @@ export function applySessionUpdateToTree(current: TreeResponse | undefined, sess
                   }];
                 }
                 if (conversation.boundSessionId === session.id) {
-                  if (isSyntheticSessionPlaceholder(conversation)) {
+                  if (
+                    isSyntheticSessionPlaceholder(conversation)
+                    || (conversation.kind === 'pending' && !session.conversationRef.startsWith('pending:'))
+                  ) {
                     return [];
                   }
                   return [{

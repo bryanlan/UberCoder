@@ -157,7 +157,7 @@ describe('realtime reducers', () => {
     });
   });
 
-  it('removes stale pending placeholders when a bound session adopts history', () => {
+  it('removes stale pending aliases when a bound session adopts history', () => {
     const activeSession = session({ conversationRef: 'pending:one' });
     const current = tree([
       {
@@ -170,7 +170,7 @@ describe('realtime reducers', () => {
         isBound: true,
         boundSessionId: 'session-1',
         degraded: false,
-        rawMetadata: { syntheticSessionPlaceholder: true },
+        rawMetadata: { pending: true },
       },
       {
         ref: 'history-one',
