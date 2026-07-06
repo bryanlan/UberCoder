@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repo is an npm workspace for a local, server-first Codex/Claude Agent Console with a Fastify backend, React PWA, shared contracts, and tmux-backed live sessions.
+This repo is a local, server-first Codex/Claude Agent Console with a Fastify backend, React PWA, shared contracts, and tmux-backed live sessions.
 
 ## Quick Rules
 - Treat the backend as the source of truth for project, conversation, session, proxy, auth, and config state; the frontend must not become a raw terminal controller.
@@ -10,6 +10,7 @@ This repo is an npm workspace for a local, server-first Codex/Claude Agent Conso
 - Recency should move only from new user/agent activity and completed output after the idle window; old transcripts, restore events, repaint noise, and idle status changes do not count.
 - Live output shown in the conversation pane should come through the event-log normalization path, not directly from raw tmux screen text.
 - Treat raw tmux screen content, raw-output debug tails, event-log live messages, and provider transcripts as separate surfaces. Do not promote terminal input, picker text, restore repaint output, or debug/raw-output tails into transcript rows unless the event-log/provider parser explicitly classifies them as user or assistant conversation content.
+- Keep conversation search server-owned: index sanitized provider transcript content and approved live pending-session text, not raw screen/debug surfaces.
 - Never commit real secrets or local runtime config; use `config/agent-console.example.json` as the template.
 
 ## Build / Test / Verify

@@ -1,6 +1,6 @@
 {
-  "agents_md_current_through_commit": "2e726c384901c732c6c6f34bb42e3d167bbc94c2",
-  "agents_md_last_synced_at": "2026-07-02T07:33:27.321011+00:00",
+  "agents_md_current_through_commit": "7322e1196501f292f44102a24369c7e0b5f4139c",
+  "agents_md_last_synced_at": "2026-07-06T06:09:41.104274+00:00",
   "alias": {
     "exists": true,
     "is_symlink": true,
@@ -15,7 +15,7 @@
     "template_sha256": "08c278e2b4e4a22acd24bf0b43db03813de078515e3efde82c8c7a0a0df30e30"
   },
   "canonical_path": "AGENTS.md",
-  "canonical_sha256": "04252473d4833b600c4d4cbe5d5e1edb74a898ca92d8530f9f3b08c9ed3daad2",
+  "canonical_sha256": "6226a7e8f4c6c0ee4cf4d1705867f1d7adab095ed64599c2f535759e0685c1da",
   "git_ignore": {
     "status": null
   },
@@ -25,7 +25,9 @@
     "status": null
   },
   "managed_by": "roll-agents-md",
-  "notes": [],
+  "notes": [
+    "Preserved server-owned state, explicit project config, hidden tmux session model, proxy/auth allowlists, recency rules, transcript boundaries, and search ownership."
+  ],
   "referenced_calibration_docs": [
     "docs/architecture.md",
     "docs/fileindex.md",
