@@ -307,7 +307,7 @@ describe('provider history discovery', () => {
     expect(parsed.messages).toHaveLength(2);
   });
 
-  it('shows only the latest Codex commentary-phase assistant message while the latest turn is unfinished', async () => {
+  it('shows Codex commentary-phase assistant progress messages while the latest turn is unfinished', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
     const transcriptPath = path.join(tempDir, 'rollout-commentary-progress.jsonl');
     await fs.writeFile(transcriptPath, [
@@ -358,6 +358,11 @@ describe('provider history discovery', () => {
         role: 'user',
         lifecycle: 'durable',
         text: 'Fix the transcript UI.',
+      },
+      {
+        role: 'assistant',
+        lifecycle: 'pending',
+        text: 'I am checking the current build.',
       },
       {
         role: 'assistant',

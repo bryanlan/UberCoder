@@ -14,7 +14,6 @@ import {
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
 
 const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
-const MAX_PENDING_CODEX_COMMENTARY_MESSAGES = 1;
 
 function isCodexDisplayChromeLine(line: string): boolean {
   const trimmed = line.trim();
@@ -74,7 +73,7 @@ function codexMessageLifecycle(record: Record<string, unknown>, role: Normalized
   return role === 'assistant' && payload?.phase === 'commentary' ? 'pending' : 'durable';
 }
 
-function pendingCommentaryTailIds(messages: NormalizedMessage[]): Set<string> {
+function pendingCommentaryIdsAfterLastDurableMessage(messages: NormalizedMessage[]): Set<string> {
   let lastDurableIndex = -1;
   messages.forEach((message, index) => {
     if (message.lifecycle === 'durable') {
@@ -84,8 +83,7 @@ function pendingCommentaryTailIds(messages: NormalizedMessage[]): Set<string> {
 
   const pendingTail = messages
     .slice(lastDurableIndex + 1)
-    .filter(isCodexAssistantCommentaryMessage)
-    .slice(-MAX_PENDING_CODEX_COMMENTARY_MESSAGES);
+    .filter(isCodexAssistantCommentaryMessage);
   return new Set(pendingTail.map((message) => message.id));
 }
 
@@ -98,7 +96,7 @@ function shouldShowCodexDisplayCandidate(message: NormalizedMessage, pendingComm
 
 function toCodexDisplayMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
   const candidates = messages.filter((message) => !shouldHideCodexDisplayMessage(message));
-  const pendingCommentaryIds = pendingCommentaryTailIds(candidates);
+  const pendingCommentaryIds = pendingCommentaryIdsAfterLastDurableMessage(candidates);
   return candidates.filter((message) => shouldShowCodexDisplayCandidate(message, pendingCommentaryIds));
 }
 
