@@ -253,7 +253,12 @@ export class SessionManager {
     return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
+    if (this.stopped) {
+      return;
+    }
+    const sessionsToDetach = this.listRestorableSessions()
+      .filter((session) => session.rawLogPath && (session.status === 'starting' || session.status === 'bound'));
     this.stopped = true;
     if (this.reconciliationStartupTimer) {
       clearTimeout(this.reconciliationStartupTimer);
@@ -264,6 +269,7 @@ export class SessionManager {
       this.reconciliationTimer = undefined;
     }
     this.unsubscribeRealtimeEvents();
+    await this.closeRawLogPipes(sessionsToDetach);
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
     }
@@ -282,6 +288,36 @@ export class SessionManager {
       }
     }
     this.runtimes.clear();
+  }
+
+  private async closeRawLogPipes(sessions: BoundSession[]): Promise<void> {
+    await Promise.all(sessions.map(async (session) => {
+      try {
+        await this.tmuxClient.closePanePipe(session.tmuxSessionName);
+      } catch (error) {
+        if (isTmuxSessionMissingError(error)) {
+          return;
+        }
+        this.logger?.warn(
+          { err: error, sessionId: session.id, tmuxSessionName: session.tmuxSessionName },
+          'Failed to close tmux raw-log pipe during shutdown.',
+        );
+      }
+    }));
+  }
+
+  private async tryEnsureRawLogPipe(session: BoundSession): Promise<void> {
+    if (!session.rawLogPath) {
+      return;
+    }
+    try {
+      await this.tmuxClient.pipePaneToFile(session.tmuxSessionName, session.rawLogPath);
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, sessionId: session.id, tmuxSessionName: session.tmuxSessionName },
+        'Failed to attach tmux raw-log pipe.',
+      );
+    }
   }
 
   private runtimeState(sessionId: string): SessionRuntimeState {
@@ -1251,18 +1287,24 @@ export class SessionManager {
       return undefined;
     }
 
-    const nextStatus = session.status === 'starting' || session.status === 'error' ? 'bound' : session.status;
-    const refreshed: BoundSession = nextStatus === session.status
-      ? session
+    const logReadySession = this.ensureSessionLogPaths(session);
+    const nextStatus = logReadySession.status === 'starting' || logReadySession.status === 'error' ? 'bound' : logReadySession.status;
+    const refreshed: BoundSession = nextStatus === logReadySession.status
+      ? logReadySession
       : {
-          ...session,
+          ...logReadySession,
           status: nextStatus,
           updatedAt: nowIso(),
         };
-    if (refreshed !== session) {
+    if (
+      refreshed !== logReadySession
+      || logReadySession.rawLogPath !== session.rawLogPath
+      || logReadySession.eventLogPath !== session.eventLogPath
+    ) {
       this.db.boundSessions.upsert(refreshed);
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
+    await this.tryEnsureRawLogPipe(refreshed);
     this.watchSessionOutput(refreshed);
     if (!this.runtimeState(refreshed.id).lastScreenHash) {
       await this.emitScreenUpdate(refreshed);

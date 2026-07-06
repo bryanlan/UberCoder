@@ -6,6 +6,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { shellEscape } from '../lib/shell.js';
 
+const DEFAULT_TMUX_SOCKET_NAME = 'agent-console';
+
 export class TmuxError extends Error {
   constructor(
     message: string,
@@ -23,12 +25,22 @@ export function isTmuxSessionMissingError(error: unknown): boolean {
   if (!(error instanceof TmuxError) || error.exitCode !== 1) {
     return false;
   }
-  return /(?:can't find session|no server running|error connecting to .*No such file or directory)/i.test(error.stderr);
+  return /(?:can't find session|can't find pane|no server running|error connecting to .*No such file or directory)/i.test(error.stderr);
 }
 
-async function runTmux(args: string[]): Promise<string> {
+function tmuxSocketArgs(): string[] {
+  const socketName = process.env.AGENT_CONSOLE_TMUX_SOCKET ?? DEFAULT_TMUX_SOCKET_NAME;
+  return socketName ? ['-L', socketName] : [];
+}
+
+function scopedTmuxUnitName(sessionName: string): string {
+  const safeSessionName = sessionName.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 50);
+  return `agent-console-tmux-${safeSessionName}-${randomUUID().slice(0, 8)}`;
+}
+
+async function runCommand(command: string, args: string[], errorArgs = args): Promise<string> {
   return await new Promise((resolve, reject) => {
-    const child = spawn('tmux', args, {
+    const child = spawn(command, args, {
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -47,8 +59,8 @@ async function runTmux(args: string[]): Promise<string> {
       if (settled) return;
       settled = true;
       reject(new TmuxError(
-        error instanceof Error ? error.message : 'Failed to run tmux.',
-        args,
+        error instanceof Error ? error.message : `Failed to run ${command}.`,
+        errorArgs,
         undefined,
         stderr.trim(),
         { cause: error },
@@ -63,8 +75,8 @@ async function runTmux(args: string[]): Promise<string> {
       }
       const trimmedStderr = stderr.trim();
       reject(new TmuxError(
-        trimmedStderr || `tmux exited with code ${code ?? 'unknown'}`,
-        args,
+        trimmedStderr || `${command} exited with code ${code ?? 'unknown'}`,
+        errorArgs,
         code ?? undefined,
         trimmedStderr,
       ));
@@ -72,9 +84,30 @@ async function runTmux(args: string[]): Promise<string> {
   });
 }
 
+async function runTmux(args: string[]): Promise<string> {
+  const tmuxArgs = [...tmuxSocketArgs(), ...args];
+  return await runCommand('tmux', tmuxArgs, tmuxArgs);
+}
+
+async function runScopedTmux(sessionName: string, args: string[]): Promise<string> {
+  const tmuxArgs = [...tmuxSocketArgs(), ...args];
+  const systemdRunArgs = [
+    '--user',
+    '--scope',
+    '--quiet',
+    '--collect',
+    '--unit',
+    scopedTmuxUnitName(sessionName),
+    'tmux',
+    ...tmuxArgs,
+  ];
+  return await runCommand('systemd-run', systemdRunArgs, tmuxArgs);
+}
+
 export interface TmuxClient {
   newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void>;
   pipePaneToFile(sessionName: string, filePath: string): Promise<void>;
+  closePanePipe(sessionName: string): Promise<void>;
   sendLiteralText(sessionName: string, text: string): Promise<void>;
   pasteText(sessionName: string, text: string): Promise<void>;
   sendKeys(sessionName: string, keys: string[]): Promise<void>;
@@ -88,12 +121,21 @@ export interface TmuxClient {
 
 export class ShellTmuxClient implements TmuxClient {
   async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
-    await runTmux(['new-session', '-d', '-s', sessionName, '-c', cwd, shellCommand]);
+    const args = ['new-session', '-d', '-s', sessionName, '-c', cwd, shellCommand];
+    try {
+      await runScopedTmux(sessionName, args);
+    } catch {
+      await runTmux(args);
+    }
   }
 
   async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     await runTmux(['pipe-pane', '-o', '-t', sessionName, `cat >> ${shellEscape(filePath)}`]);
+  }
+
+  async closePanePipe(sessionName: string): Promise<void> {
+    await runTmux(['pipe-pane', '-t', sessionName]);
   }
 
   async sendLiteralText(sessionName: string, text: string): Promise<void> {

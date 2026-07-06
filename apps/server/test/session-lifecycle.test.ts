@@ -497,4 +497,57 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('closes tmux raw-log pipes on shutdown without killing restorable sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-shutdown-pipe-cleanup',
+      title: 'Conversation',
+      kind: 'history',
+    });
+
+    await manager.stop();
+
+    expect(tmux.closedPipes).toEqual([session.tmuxSessionName]);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('bound');
+    db.close();
+  });
+
+  it('reattaches raw-log pipes when refreshing already-live sessions after restart', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const firstManager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await firstManager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-restart-pipe-reattach',
+      title: 'Conversation',
+      kind: 'history',
+    });
+    await firstManager.stop();
+    const pipeCountAfterShutdown = tmux.pipedToFiles.length;
+    const recoveredManager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const refreshed = await recoveredManager.ensureSession(session.id);
+
+    expect(refreshed?.status).toBe('bound');
+    expect(tmux.pipedToFiles).toHaveLength(pipeCountAfterShutdown + 1);
+    expect(tmux.pipedToFiles.at(-1)).toEqual({
+      sessionName: session.tmuxSessionName,
+      filePath: session.rawLogPath,
+    });
+    await recoveredManager.stop();
+    db.close();
+  });
+
 });

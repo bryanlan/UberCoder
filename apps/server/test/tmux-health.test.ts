@@ -22,6 +22,12 @@ describe('tmux liveness', () => {
       1,
       'error connecting to /tmp/tmux-1000/default (No such file or directory)',
     ))).toBe(true);
+    expect(isTmuxSessionMissingError(new TmuxError(
+      "can't find pane: agent-console",
+      ['pipe-pane', '-t', 'agent-console'],
+      1,
+      "can't find pane: agent-console",
+    ))).toBe(true);
   });
 
   it('does not classify spawn failures or unrelated tmux failures as missing sessions', () => {

@@ -12,8 +12,11 @@ export class FakeTmux implements TmuxClient {
   sent: string[] = [];
   pasted: string[] = [];
   sentKeys: string[][] = [];
+  pipedToFiles: Array<{ sessionName: string; filePath: string }> = [];
+  closedPipes: string[] = [];
   alive = new Set<string>();
   failPipePane = false;
+  failClosePipe = false;
   failKill = false;
   paneText = '';
   captureSequence: string[] = [];
@@ -26,10 +29,17 @@ export class FakeTmux implements TmuxClient {
     this.createdCommands.push(shellCommand);
     this.alive.add(sessionName);
   }
-  async pipePaneToFile(): Promise<void> {
+  async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
     if (this.failPipePane) {
       throw new Error('pipe-pane failed');
     }
+    this.pipedToFiles.push({ sessionName, filePath });
+  }
+  async closePanePipe(sessionName: string): Promise<void> {
+    if (this.failClosePipe) {
+      throw new Error('close pipe failed');
+    }
+    this.closedPipes.push(sessionName);
   }
   async sendLiteralText(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
   async pasteText(_sessionName: string, text: string): Promise<void> {
