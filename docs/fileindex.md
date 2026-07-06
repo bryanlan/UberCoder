@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1
-current_through_date: 2026-07-05T00:30:34-04:00
+current_through_commit: 6c0c76e8fb45eb59070431cd89e6ea8b78f02082
+current_through_date: 2026-07-05T18:31:15-04:00
 ---
 
 # File Index
@@ -66,6 +66,8 @@ current_through_date: 2026-07-05T00:30:34-04:00
   live pending-session search, and transcript-backed live-output exclusions.
 - `apps/server/src/indexing/indexing-service.ts` - provider conversation indexing plus missing
   search-index row backfill from cached conversation summaries on startup or metadata priming.
+- `apps/server/src/sessions/pending-adoption.ts` - pending session adoption helper that can bind a
+  live session to provider-readable conversations even before search indexing has caught up.
 - `apps/server/src/db/database.ts` - SQLite schema and persistence methods for
   `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
@@ -171,6 +173,10 @@ Test and verification anchors:
   search backfill changes should review `apps/server/src/routes/search.ts`,
   `apps/server/src/search/conversation-search.ts`, `apps/server/src/indexing/indexing-service.ts`,
   `apps/server/src/db/database.ts`, and `apps/server/test/search.test.ts`.
+- Provider-readable unindexed conversation binding changes should review
+  `apps/server/src/routes/conversations.ts`, `apps/server/src/indexing/indexing-service.ts`,
+  provider transcript adapters, `apps/server/src/sessions/pending-adoption.ts`, and
+  `apps/server/test/conversation-routes.test.ts`.
 - Settings/project-discovery changes should review `apps/server/src/config/service.ts`,
   `apps/server/src/projects/project-service.ts`, `apps/server/src/routes/settings.ts`,
   `apps/web/src/pages/SettingsPage.tsx`, and the Playwright settings e2e tests together.

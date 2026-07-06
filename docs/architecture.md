@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1
-current_through_date: 2026-07-05T00:30:34-04:00
+current_through_commit: 6c0c76e8fb45eb59070431cd89e6ea8b78f02082
+current_through_date: 2026-07-05T18:31:15-04:00
 ---
 
 # Architecture
@@ -86,6 +86,10 @@ bound sessions poll the message timeline; after a session completes, the message
 briefly when the latest durable message is still the user's prompt or when session output/completion
 timestamps are newer than the latest transcript message. This closes the gap where a hidden tmux
 session has finished but the provider transcript has not yet exposed the assistant's final answer.
+Binding a session to a provider-readable conversation does not require that conversation to already
+have a search-index row. The conversations route can load the provider transcript directly for a
+known conversation id, then the indexing service backfills search rows later without blocking the
+binding flow.
 
 Session text entry has two paths. Normal `/input` submissions send the text to the bound tmux
 session, but the first user prompt for a pending Codex conversation restarts the placeholder
@@ -146,6 +150,10 @@ stuck composer.
   `apps/server/src/indexing/indexing-service.ts`, `apps/server/src/db/database.ts`, and
   `apps/server/test/search.test.ts` before changing FTS query construction, result ranking,
   live-session search, hidden-conversation filtering, or cached-index backfill.
+- Provider-readable unindexed conversation binding should keep
+  `apps/server/src/routes/conversations.ts`, `apps/server/src/indexing/indexing-service.ts`,
+  provider transcript adapters, `apps/server/src/sessions/pending-adoption.ts`, and
+  conversation/indexing tests aligned.
 - The web app keeps paged history separately from metadata polling. `limit=0` refreshes live
   metadata and screen state, while the infinite history query loads durable messages in pages and
   retains prior pages during transient refreshes.
