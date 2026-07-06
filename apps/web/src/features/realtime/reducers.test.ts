@@ -157,6 +157,49 @@ describe('realtime reducers', () => {
     });
   });
 
+  it('removes stale pending aliases when a bound session adopts history', () => {
+    const activeSession = session({ conversationRef: 'pending:one' });
+    const current = tree([
+      {
+        ref: 'pending:one',
+        kind: 'pending',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Live pending',
+        updatedAt: baseTime,
+        isBound: true,
+        boundSessionId: 'session-1',
+        degraded: false,
+        rawMetadata: { pending: true },
+      },
+      {
+        ref: 'history-one',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'History transcript',
+        updatedAt: baseTime,
+        isBound: false,
+        degraded: false,
+      },
+    ], [activeSession]);
+
+    const updated = applySessionUpdateToTree(current, session({
+      conversationRef: 'history-one',
+      title: 'Adopted history',
+      lastCompletedAt: '2026-03-07T00:04:00.000Z',
+    }));
+
+    expect(updated?.projects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['history-one']);
+    expect(updated?.projects[0]?.providers.codex.conversations[0]).toMatchObject({
+      ref: 'history-one',
+      title: 'Adopted history',
+      updatedAt: '2026-03-07T00:04:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-1',
+    });
+  });
+
   it('does not merge nearby user text without a stable id match', () => {
     const optimistic = message({
       id: 'optimistic:session-1',
