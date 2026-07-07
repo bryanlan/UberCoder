@@ -10,6 +10,20 @@ export async function pathExists(input: string): Promise<boolean> {
   }
 }
 
+export interface FileFingerprint {
+  size: number;
+  mtimeMs: number;
+}
+
+export async function statFileSafe(filePath: string): Promise<FileFingerprint | undefined> {
+  try {
+    const stat = await fs.stat(filePath);
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function listFilesRecursive(root: string, predicate: (absolutePath: string) => boolean): Promise<string[]> {
   const results: string[] = [];
 

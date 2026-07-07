@@ -158,6 +158,13 @@ function timestampMs(message: NormalizedMessage): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+interface DedupeSlot {
+  message: NormalizedMessage;
+  comparable: string;
+  timestampMs: number | undefined;
+  kind: ReturnType<typeof codexRecordKind>;
+}
+
 function codexRecordKind(message: NormalizedMessage): 'response-message' | 'event-message' | 'other' {
   const record = asObject(message.rawMetadata);
   const payload = asObject(record?.payload);
@@ -173,46 +180,59 @@ function codexRecordKind(message: NormalizedMessage): 'response-message' | 'even
   return 'other';
 }
 
-function isCodexEventResponseDuplicate(a: NormalizedMessage, b: NormalizedMessage): boolean {
-  if (a.role !== b.role) {
+function isCodexEventResponseDuplicate(existing: DedupeSlot, candidate: DedupeSlot): boolean {
+  if (
+    existing.timestampMs === undefined
+    || candidate.timestampMs === undefined
+    || Math.abs(existing.timestampMs - candidate.timestampMs) > CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS
+  ) {
     return false;
   }
 
-  const comparableA = normalizeComparableText(a.text);
-  if (!comparableA || comparableA !== normalizeComparableText(b.text)) {
-    return false;
-  }
-
-  const aMs = timestampMs(a);
-  const bMs = timestampMs(b);
-  if (aMs === undefined || bMs === undefined || Math.abs(aMs - bMs) > CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS) {
-    return false;
-  }
-
-  const kinds = new Set([codexRecordKind(a), codexRecordKind(b)]);
-  return kinds.has('event-message') && kinds.has('response-message');
-}
-
-function preferCodexDisplayMessage(existing: NormalizedMessage, candidate: NormalizedMessage): NormalizedMessage {
-  const existingKind = codexRecordKind(existing);
-  const candidateKind = codexRecordKind(candidate);
-  if (existingKind !== 'response-message' && candidateKind === 'response-message') {
-    return candidate;
-  }
-  return existing;
+  return (existing.kind === 'event-message' && candidate.kind === 'response-message')
+    || (existing.kind === 'response-message' && candidate.kind === 'event-message');
 }
 
 function dedupeCodexEventResponseMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
-  const deduped: NormalizedMessage[] = [];
+  const slots: DedupeSlot[] = [];
+  const slotIndexesByKey = new Map<string, number[]>();
+
   for (const message of messages) {
-    const duplicateIndex = deduped.findIndex((existing) => isCodexEventResponseDuplicate(existing, message));
-    if (duplicateIndex === -1) {
-      deduped.push(message);
+    const comparable = normalizeComparableText(message.text);
+    const slot: DedupeSlot = {
+      message,
+      comparable,
+      timestampMs: timestampMs(message),
+      kind: codexRecordKind(message),
+    };
+
+    // Empty comparable text never participates in event/response deduplication.
+    if (!comparable) {
+      slots.push(slot);
       continue;
     }
-    deduped[duplicateIndex] = preferCodexDisplayMessage(deduped[duplicateIndex]!, message);
+
+    const key = `${message.role}:${comparable}`;
+    const candidateIndexes = slotIndexesByKey.get(key);
+    const duplicateIndex = candidateIndexes?.find((index) => isCodexEventResponseDuplicate(slots[index]!, slot));
+    if (duplicateIndex === undefined) {
+      const index = slots.length;
+      slots.push(slot);
+      if (candidateIndexes) {
+        candidateIndexes.push(index);
+      } else {
+        slotIndexesByKey.set(key, [index]);
+      }
+      continue;
+    }
+
+    const existing = slots[duplicateIndex]!;
+    if (existing.kind !== 'response-message' && slot.kind === 'response-message') {
+      slots[duplicateIndex] = slot;
+    }
   }
-  return deduped;
+
+  return slots.map((slot) => slot.message);
 }
 
 export async function parseCodexConversationFile(input: TranscriptParseInput): Promise<ParsedTranscript> {

@@ -5,15 +5,15 @@ import { migrateDatabase } from './schema.js';
 import { AuthSessionsRepo } from './repos/auth-sessions.js';
 import { BoundSessionsRepo } from './repos/bound-sessions.js';
 import { ConversationIndexRepo, pickPreferredConversation } from './repos/conversation-index.js';
-import { InteractionSummariesRepo } from './repos/interaction-summaries.js';
 import { MetaRepo } from './repos/meta.js';
 import { PendingConversationsRepo } from './repos/pending-conversations.js';
 import { SearchIndexRepo } from './repos/search-index.js';
 import { TitleOverridesRepo } from './repos/title-overrides.js';
+import { TranscriptParseCacheRepo } from './repos/transcript-parse-cache.js';
 import { UiPreferencesRepo } from './repos/ui-preferences.js';
 
 export { pickPreferredConversation };
-export type { ConversationSearchIndexChunk } from './repos/search-index.js';
+export type { ConversationSearchIndexChunk, ConversationSearchStateRow } from './repos/search-index.js';
 
 export class AppDatabase {
   readonly sqlite: Database.Database;
@@ -25,7 +25,7 @@ export class AppDatabase {
   readonly boundSessions: BoundSessionsRepo;
   readonly authSessions: AuthSessionsRepo;
   readonly uiPreferences: UiPreferencesRepo;
-  readonly interactionSummaries: InteractionSummariesRepo;
+  readonly transcriptParseCache: TranscriptParseCacheRepo;
 
   constructor(databasePath: string) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -42,7 +42,7 @@ export class AppDatabase {
     this.boundSessions = new BoundSessionsRepo(this.sqlite);
     this.authSessions = new AuthSessionsRepo(this.sqlite);
     this.uiPreferences = new UiPreferencesRepo(this.sqlite);
-    this.interactionSummaries = new InteractionSummariesRepo(this.sqlite);
+    this.transcriptParseCache = new TranscriptParseCacheRepo(this.sqlite);
   }
 
   close(): void {

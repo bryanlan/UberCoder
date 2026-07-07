@@ -246,6 +246,82 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('suspends idle history sessions during reconciliation while keeping them restorable', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:idle-suspend',
+      title: 'Idle suspend',
+      kind: 'history',
+    });
+    const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: sixDaysAgo,
+      lastOutputAt: sixDaysAgo,
+      lastCompletedAt: sixDaysAgo,
+      isWorking: false,
+    });
+    // started_at is insert-only in the repo; backdate it directly.
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(sixDaysAgo, session.id);
+
+    await manager.reconcileSessions();
+
+    const suspended = db.boundSessions.getById(session.id);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+    expect(suspended?.status).toBe('bound');
+    expect(suspended?.shouldRestore).toBe(true);
+
+    // Repeated reconciliation must not resurrect the suspended session.
+    await manager.reconcileSessions();
+    expect(tmux.created).toHaveLength(1);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+
+    // Selecting the conversation restores on demand, and the restore grace keeps
+    // the reaper from immediately re-suspending it.
+    const restored = await manager.ensureSession(session.id);
+    expect(restored?.id).toBe(session.id);
+    expect(tmux.created).toHaveLength(2);
+
+    await manager.reconcileSessions();
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    db.close();
+  });
+
+  it('never suspends idle pending sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:idle-pending',
+      title: 'Idle pending',
+      kind: 'pending',
+    });
+    const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: sixDaysAgo,
+      isWorking: false,
+    });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(sixDaysAgo, session.id);
+
+    await manager.reconcileSessions();
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    db.close();
+  });
+
   it('actively reconciles dead restorable sessions by restoring them', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

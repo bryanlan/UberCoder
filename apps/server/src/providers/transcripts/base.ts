@@ -3,7 +3,55 @@ import path from 'node:path';
 import type { ConversationSummary, MessageRole, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import { samePath } from '../../lib/path-utils.js';
 import { coerceText, normalizeComparableText, stableTextHash, truncate } from '../../lib/text.js';
+import type { FileFingerprint } from '../file-utils.js';
+import type { TranscriptParseCache, TranscriptParseCacheEntry } from '../types.js';
 import type { ParsedTranscript, TranscriptMetadata, TranscriptParseInput } from './types.js';
+
+export interface CachedTranscriptParse {
+  summary: ConversationSummary;
+  projectPaths: Set<string>;
+  authoritativeProjectPaths: Set<string>;
+}
+
+/**
+ * Returns the summary-level parse artifacts for a transcript file, serving them
+ * from the persistent parse cache when the file's fingerprint matches and
+ * upgrading the cache row to a full parse otherwise.
+ */
+export async function loadCachedTranscriptParse(input: {
+  cache: TranscriptParseCache | undefined;
+  filePath: string;
+  fingerprint: FileFingerprint | undefined;
+  /** Pass a cache entry the caller already fetched to avoid a second lookup. */
+  cached?: TranscriptParseCacheEntry;
+  parse: () => Promise<ParsedTranscript>;
+}): Promise<CachedTranscriptParse> {
+  const { cache, filePath, fingerprint } = input;
+  const cached = input.cached
+    ?? (fingerprint ? cache?.get(filePath, fingerprint.size, fingerprint.mtimeMs) : undefined);
+  if (cached?.scope === 'full' && cached.summary) {
+    return {
+      summary: cached.summary,
+      projectPaths: new Set(cached.projectPaths),
+      authoritativeProjectPaths: new Set(cached.authoritativeProjectPaths),
+    };
+  }
+
+  const parsed = await input.parse();
+  if (fingerprint) {
+    cache?.put(filePath, fingerprint.size, fingerprint.mtimeMs, {
+      scope: 'full',
+      summary: parsed.summary,
+      projectPaths: [...parsed.projectPaths],
+      authoritativeProjectPaths: [...parsed.authoritativeProjectPaths],
+    });
+  }
+  return {
+    summary: parsed.summary,
+    projectPaths: parsed.projectPaths,
+    authoritativeProjectPaths: parsed.authoritativeProjectPaths,
+  };
+}
 
 type JsonRecord = Record<string, unknown>;
 

@@ -109,6 +109,19 @@ function paginateMessages<T>(
 
 type MessagePageInfo = ReturnType<typeof paginateMessages<NormalizedMessage>>['pageInfo'];
 
+/**
+ * Raw provider records dwarf the message text (observed ~97% of page bytes) and
+ * the web client never reads them from timeline responses — drop them at the
+ * response boundary.
+ */
+function toTimelineResponseMessage(message: NormalizedMessage): NormalizedMessage {
+  if (message.rawMetadata === undefined) {
+    return message;
+  }
+  const { rawMetadata: _rawMetadata, ...rest } = message;
+  return rest;
+}
+
 interface TimelineResponse {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
@@ -312,7 +325,7 @@ export async function registerConversationRoutes(
         isBound: Boolean(resolvedBoundSession),
         boundSessionId: resolvedBoundSession?.id,
       },
-      messages: pagedMessages.pageMessages,
+      messages: pagedMessages.pageMessages.map(toTimelineResponseMessage),
       boundSession: resolvedBoundSession,
       liveScreen: undefined,
       messagePage: pagedMessages.pageInfo,

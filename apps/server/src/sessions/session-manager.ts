@@ -56,6 +56,13 @@ const SESSION_MODEL_METADATA_KEY = 'lastLiveModel';
 const SESSION_MODEL_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
+// Sessions idle this long stop being kept alive (and stop being auto-restored by
+// reconciliation). Their rows stay bound and tree-visible, so work-mode
+// conversations never disappear; selecting one restores its tmux session on demand.
+const SESSION_IDLE_SUSPEND_MS = 5 * 24 * 60 * 60 * 1000;
+// Restoring a session does not move recency, so a freshly restored idle session
+// gets this long before the reaper may suspend it again.
+const SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
 interface SessionRecoveryDependencies {
@@ -222,6 +229,10 @@ export class SessionManager {
   private readonly runtimes: SessionRuntimeRegistry;
   private reconciliationTimer?: ReturnType<typeof setInterval>;
   private reconciliationStartupTimer?: ReturnType<typeof setTimeout>;
+  // Sessions confirmed suspended (tmux dead) this process lifetime, so each
+  // reconciliation cycle does not re-check tmux liveness for every idle session.
+  private readonly suspendedSessionIds = new Set<string>();
+  private readonly suspensionGraceUntilMs = new Map<string, number>();
   private reconciliationRun?: Promise<void>;
   private stopped = false;
 
@@ -372,9 +383,105 @@ export class SessionManager {
     }
   }
 
+  private cleanupSessionRuntimeDir(sessionId: string): void {
+    const sessionDir = path.join(this.runtimeDir, sessionId);
+    void fs.promises.rm(sessionDir, { recursive: true, force: true }).catch((error: unknown) => {
+      this.logger?.warn({ err: error, sessionId }, 'Failed to remove ended session runtime directory.');
+    });
+  }
+
+  /**
+   * Removes runtime log directories that no longer serve a live or restorable
+   * session: dirs for ended non-restorable sessions and dirs with no session row.
+   */
+  async cleanupEndedSessionRuntimeDirs(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.promises.readdir(this.runtimeDir);
+    } catch {
+      return;
+    }
+    const sessions = new Map(this.db.boundSessions.list().map((session) => [session.id, session]));
+    for (const entry of entries) {
+      if (!/^[0-9a-f-]{36}$/i.test(entry)) {
+        continue;
+      }
+      const session = sessions.get(entry);
+      if (session && !(session.status === 'ended' && !session.shouldRestore)) {
+        continue;
+      }
+      await fs.promises.rm(path.join(this.runtimeDir, entry), { recursive: true, force: true }).catch((error: unknown) => {
+        this.logger?.warn({ err: error, sessionId: entry }, 'Failed to sweep ended session runtime directory.');
+      });
+    }
+  }
+
   async reconcileSessions(): Promise<void> {
     for (const session of this.listRestorableSessions()) {
+      if (this.isIdleSuspendable(session)) {
+        await this.runtimes.run(session.id, 'reconcileSession', () => this.suspendIdleSession(session));
+        continue;
+      }
+      this.suspendedSessionIds.delete(session.id);
       await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session, { restoreMissing: true }));
+    }
+  }
+
+  private sessionIdleTimestampMs(session: BoundSession): number {
+    const candidates = [session.lastActivityAt, session.lastOutputAt, session.lastCompletedAt, session.startedAt];
+    let latest = 0;
+    for (const candidate of candidates) {
+      const parsed = candidate ? Date.parse(candidate) : Number.NaN;
+      if (Number.isFinite(parsed) && parsed > latest) {
+        latest = parsed;
+      }
+    }
+    return latest;
+  }
+
+  private isIdleSuspendable(session: BoundSession): boolean {
+    if (session.isWorking || session.conversationRef.startsWith('pending:')) {
+      return false;
+    }
+    const graceUntilMs = this.suspensionGraceUntilMs.get(session.id);
+    if (graceUntilMs !== undefined && Date.now() < graceUntilMs) {
+      return false;
+    }
+    const idleSinceMs = this.sessionIdleTimestampMs(session);
+    return idleSinceMs > 0 && Date.now() - idleSinceMs >= SESSION_IDLE_SUSPEND_MS;
+  }
+
+  private async suspendIdleSession(session: BoundSession): Promise<void> {
+    if (this.suspendedSessionIds.has(session.id)) {
+      return;
+    }
+    const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (liveness === 'unknown') {
+      return;
+    }
+    if (liveness === 'alive') {
+      try {
+        await this.tmuxClient.killSession(session.tmuxSessionName);
+      } catch {
+        return;
+      }
+      const finalLiveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+      if (finalLiveness !== 'dead') {
+        return;
+      }
+      this.appendEvent(session, {
+        type: 'status',
+        text: 'Session suspended after extended idle; it will restore on next use.',
+        timestamp: nowIso(),
+      });
+    }
+    this.stopWatching(session.id);
+    this.runtimes.clearEphemeral(session.id);
+    this.suspendedSessionIds.add(session.id);
+    if (session.isWorking || session.pid !== undefined) {
+      const suspended: BoundSession = { ...session, isWorking: false, pid: undefined, updatedAt: nowIso() };
+      this.db.boundSessions.upsert(suspended);
+      this.eventBus.emit({ type: 'session.updated', session: suspended });
     }
   }
 
@@ -587,6 +694,10 @@ export class SessionManager {
     if (!session.shouldRestore || session.status === 'releasing') {
       return undefined;
     }
+    // Restores do not move recency, so grant an explicit grace window before the
+    // idle reaper may suspend this session again.
+    this.suspendedSessionIds.delete(session.id);
+    this.suspensionGraceUntilMs.set(session.id, Date.now() + SESSION_IDLE_RESTORE_GRACE_MS);
 
     const dependencies = this.recoveryDependencies;
     if (!dependencies) {
@@ -1165,6 +1276,7 @@ export class SessionManager {
     }
     this.eventBus.emit({ type: 'session.released', sessionId: session.id, conversationRef: session.conversationRef, projectSlug: session.projectSlug, provider: session.provider, timestamp: nowIso() });
     this.eventBus.emit({ type: 'session.updated', session: ended });
+    this.cleanupSessionRuntimeDir(session.id);
   }
 
   getSessionById(sessionId: string): BoundSession | undefined {
@@ -1284,6 +1396,9 @@ export class SessionManager {
         });
       }
       this.eventBus.emit({ type: 'session.updated', session: ended });
+      if (terminalStatus === 'ended' && !ended.shouldRestore) {
+        this.cleanupSessionRuntimeDir(ended.id);
+      }
       return undefined;
     }
 

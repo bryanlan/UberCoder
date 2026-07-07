@@ -5,10 +5,10 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { toPosixPath } from '../lib/path-utils.js';
-import { listFilesRecursive, pathExists } from './file-utils.js';
+import { listFilesRecursive, pathExists, statFileSafe } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './types.js';
-import { conversationBelongsToProject, deriveConversationRef } from './transcripts/base.js';
+import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache } from './types.js';
+import { conversationBelongsToProject, deriveConversationRef, loadCachedTranscriptParse } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
@@ -56,6 +56,8 @@ async function readClaudeHistory(projectPaths: string[], claudeHome: string): Pr
 export class ClaudeProvider implements ProviderAdapter {
   readonly id = 'claude' as const;
 
+  constructor(private readonly parseCache?: TranscriptParseCache) {}
+
   async discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>> {
     const claudeHome = settings.discoveryRoot;
     const projectsRoot = path.join(claudeHome, 'projects');
@@ -93,18 +95,26 @@ export class ClaudeProvider implements ProviderAdapter {
     const files = await this.resolveTranscriptFiles(project, settings);
     const summaries: ConversationSummary[] = [];
     for (const filePath of files) {
-      if (!(await pathExists(filePath))) continue;
-      const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseClaudeConversationFile({
+      const fingerprint = await statFileSafe(filePath);
+      if (!fingerprint) continue;
+
+      const parsed = await loadCachedTranscriptParse({
+        cache: this.parseCache,
         filePath,
-        provider: this.id,
-        projectSlug: project.slug,
-        conversationRef,
+        fingerprint,
+        parse: () => parseClaudeConversationFile({
+          filePath,
+          provider: this.id,
+          projectSlug: project.slug,
+          conversationRef: deriveConversationRef(filePath),
+        }),
       });
+
       const belongs = parsed.projectPaths.size === 0 || conversationBelongsToProject(project.matchPaths, parsed.projectPaths);
       if (!belongs) continue;
       summaries.push({
         ...parsed.summary,
+        projectSlug: project.slug,
         degraded: parsed.summary.degraded || parsed.projectPaths.size === 0,
       });
     }

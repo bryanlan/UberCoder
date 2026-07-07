@@ -3,14 +3,12 @@ import { Link, useLocation } from 'react-router-dom';
 import type { ConversationSearchResult, ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
-import { createPortal } from 'react-dom';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
-const summaryPanelMargin = 12;
 
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
@@ -44,12 +42,7 @@ interface SidebarProps {
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
 
-interface SummaryPanelLayout {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}
+const ANCIENT_CONVERSATION_MINUTES = 7 * 24 * 60;
 
 function getConversationFreshnessClass(
   isBound: boolean,
@@ -57,16 +50,18 @@ function getConversationFreshnessClass(
   thresholds: SessionFreshnessThresholds,
   nowMs: number,
 ): string {
+  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
+  const ageMinutes = Number.isFinite(parsedTime) ? Math.max(0, nowMs - parsedTime) / 60_000 : undefined;
+
+  if (ageMinutes !== undefined && ageMinutes >= ANCIENT_CONVERSATION_MINUTES) {
+    return isBound ? 'bg-violet-500' : 'border border-violet-500/70 bg-violet-500/25';
+  }
   if (!isBound) {
     return 'border border-slate-700 bg-transparent';
   }
-
-  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
-  if (!Number.isFinite(parsedTime)) {
+  if (ageMinutes === undefined) {
     return 'bg-emerald-400';
   }
-
-  const ageMinutes = Math.max(0, nowMs - parsedTime) / 60_000;
   if (ageMinutes >= thresholds.redMinutes) {
     return 'bg-rose-500';
   }
@@ -139,21 +134,6 @@ function renderHighlightedText(text: string, query: string): ReactNode {
       ? <span key={`${part}:${index}`} className="rounded bg-sky-400/20 text-sky-100">{part}</span>
       : part
   ));
-}
-
-function calculateSummaryPanelLayout(panelElement: HTMLElement): SummaryPanelLayout {
-  const panelRect = panelElement.getBoundingClientRect();
-  const panelTop = Math.max(summaryPanelMargin, panelRect.top + summaryPanelMargin);
-  const panelBottom = Math.min(window.innerHeight - summaryPanelMargin, panelRect.bottom - summaryPanelMargin);
-  const left = Math.max(summaryPanelMargin, panelRect.left + summaryPanelMargin);
-  const right = Math.min(window.innerWidth - summaryPanelMargin, panelRect.right - summaryPanelMargin);
-  const width = Math.max(240, right - left);
-  return {
-    top: Math.round(panelTop),
-    left: Math.round(left),
-    width: Math.round(width),
-    height: Math.max(0, Math.round(panelBottom - panelTop)),
-  };
 }
 
 function SearchResultsPanel({
@@ -252,10 +232,8 @@ function ConversationLink({
   onRenameConversation,
   rebinding,
   renaming,
-  sessionSummary,
   lastInteractionAt,
   sessionFreshnessThresholds,
-  summaryPanelRef,
 }: {
   project: ProjectSummary;
   provider: ProviderId;
@@ -269,93 +247,24 @@ function ConversationLink({
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
   rebinding: boolean;
   renaming: boolean;
-  sessionSummary?: ConversationItem['sessionSummary'];
   lastInteractionAt?: string;
   sessionFreshnessThresholds: SessionFreshnessThresholds;
-  summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
   const nowMs = useNowMs();
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState(title);
-  const [summaryOpen, setSummaryOpen] = useState(false);
-  const [summaryLayout, setSummaryLayout] = useState<SummaryPanelLayout>();
   const rowRef = useRef<HTMLDivElement | null>(null);
-  const summaryTimerRef = useRef<number | undefined>(undefined);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
-  const summaryTimestamp = sessionSummary?.lastInteractionAt ?? lastInteractionAt;
-  const indicatorClassName = getConversationFreshnessClass(isBound, summaryTimestamp, sessionFreshnessThresholds, nowMs);
-  const summaryReady = sessionSummary?.status === 'ready';
-  const lastHourSummaryTimestamp = sessionSummary?.windowEndAt;
-  const lastHourSummaryAge = lastHourSummaryTimestamp ? formatRelativeAge(lastHourSummaryTimestamp, nowMs) : undefined;
-  const lastHourSummaryLabel = lastHourSummaryAge
-    ? `Last hour summary from ${lastHourSummaryAge}`
-    : 'Last hour summary pending';
-  const mainSummaryText = summaryReady
-    ? sessionSummary.chatSummary ?? 'No user or agent conversation summary is available yet.'
-    : sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.';
-  const lastHourSummaryText = summaryReady
-    ? sessionSummary.recentChangesSummary ?? 'No transcript activity in the last hour.'
-    : sessionSummary?.status === 'failed' ? 'Summary unavailable.' : 'Summary pending.';
-
-  const updateSummaryLayout = useCallback(() => {
-    const panelElement = summaryPanelRef.current;
-    if (!panelElement) {
-      setSummaryOpen(false);
-      return;
-    }
-    setSummaryLayout(calculateSummaryPanelLayout(panelElement));
-  }, [summaryPanelRef]);
+  const indicatorClassName = getConversationFreshnessClass(isBound, lastInteractionAt, sessionFreshnessThresholds, nowMs);
 
   useEffect(() => {
     if (!editing) {
       setDraftTitle(title);
     }
   }, [editing, title]);
-
-  useEffect(() => () => {
-    if (summaryTimerRef.current !== undefined) {
-      window.clearTimeout(summaryTimerRef.current);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!summaryOpen) {
-      return undefined;
-    }
-    updateSummaryLayout();
-    const panelElement = summaryPanelRef.current;
-    window.addEventListener('resize', updateSummaryLayout);
-    panelElement?.addEventListener('scroll', updateSummaryLayout, { passive: true });
-    return () => {
-      window.removeEventListener('resize', updateSummaryLayout);
-      panelElement?.removeEventListener('scroll', updateSummaryLayout);
-    };
-  }, [summaryOpen, summaryPanelRef, updateSummaryLayout]);
-
-  function scheduleSummaryOpen(): void {
-    if (!isBound) {
-      return;
-    }
-    if (summaryTimerRef.current !== undefined) {
-      window.clearTimeout(summaryTimerRef.current);
-    }
-    summaryTimerRef.current = window.setTimeout(() => {
-      updateSummaryLayout();
-      setSummaryOpen(true);
-    }, 1000);
-  }
-
-  function closeSummary(): void {
-    if (summaryTimerRef.current !== undefined) {
-      window.clearTimeout(summaryTimerRef.current);
-      summaryTimerRef.current = undefined;
-    }
-    setSummaryOpen(false);
-    setSummaryLayout(undefined);
-  }
 
   async function submitRename(): Promise<void> {
     const nextTitle = draftTitle.trim();
@@ -422,14 +331,7 @@ function ConversationLink({
   }
 
   return (
-    <div
-      ref={rowRef}
-      className="group relative flex items-center gap-1"
-      onMouseEnter={scheduleSummaryOpen}
-      onMouseLeave={closeSummary}
-      onFocus={scheduleSummaryOpen}
-      onBlur={closeSummary}
-    >
+    <div ref={rowRef} className="group relative flex items-center gap-1">
       <Link
         to={href}
         onClick={onClose}
@@ -438,7 +340,10 @@ function ConversationLink({
           active ? 'bg-sky-500/15 text-sky-100' : 'text-slate-300 hover:bg-slate-800/70 hover:text-white',
         )}
       >
-        <span className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)} />
+        <span
+          className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
+          title={`Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`}
+        />
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
@@ -481,31 +386,6 @@ function ConversationLink({
           </div>
         )}
       </div>
-      {summaryOpen && isBound && summaryLayout ? createPortal(
-        <div
-          role="tooltip"
-          style={{
-            top: summaryLayout.top,
-            left: summaryLayout.left,
-            width: summaryLayout.width,
-            height: summaryLayout.height,
-          }}
-          className="pointer-events-none fixed z-50 flex flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-950 p-4 text-sm text-slate-300 shadow-panel"
-        >
-          <p className="shrink-0 font-medium leading-5 text-slate-100">Last interaction: {formatRelativeAge(summaryTimestamp, nowMs)}</p>
-          <p className={clsx(
-            'mt-3 min-h-0 shrink overflow-y-auto break-words leading-6',
-            !summaryReady && 'text-slate-400',
-          )}>
-            {mainSummaryText}
-          </p>
-          <div className="mt-3 shrink-0 border-t border-slate-800 pt-2">
-            <p className="text-[11px] font-semibold uppercase text-slate-500">{lastHourSummaryLabel}</p>
-            <p className="mt-1 break-words leading-6 text-slate-400">{lastHourSummaryText}</p>
-          </div>
-        </div>,
-        document.body,
-      ) : null}
     </div>
   );
 }
@@ -537,7 +417,6 @@ function ProjectSection({
   renamingConversationKey,
   tailscaleIpv4,
   sessionFreshnessThresholds,
-  summaryPanelRef,
 }: {
   project: SidebarProject;
   workMode: boolean;
@@ -559,7 +438,6 @@ function ProjectSection({
   renamingConversationKey?: string;
   tailscaleIpv4?: string;
   sessionFreshnessThresholds: SessionFreshnessThresholds;
-  summaryPanelRef: RefObject<HTMLDivElement | null>;
 }) {
   const location = useLocation();
   const [editingProject, setEditingProject] = useState(false);
@@ -807,10 +685,8 @@ function ProjectSection({
                 onRenameConversation={onRenameConversation}
                 rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
-                sessionSummary={conversation.sessionSummary}
                 lastInteractionAt={freshnessTimestamp}
                 sessionFreshnessThresholds={sessionFreshnessThresholds}
-                summaryPanelRef={summaryPanelRef}
               />
             ))}
             {hasHiddenConversations ? (
@@ -862,7 +738,6 @@ export function Sidebar({
   const [searchQuery, setSearchQuery] = useState('');
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('');
   const [searchSubmissionVersion, setSearchSubmissionVersion] = useState(0);
-  const summaryPanelRef = useRef<HTMLDivElement | null>(null);
   const trimmedSearchQuery = searchQuery.trim();
   const trimmedSubmittedSearchQuery = submittedSearchQuery.trim();
   const showingSubmittedSearchResults = Boolean(
@@ -996,7 +871,7 @@ export function Sidebar({
               ) : null}
             </div>
           </div>
-          <div ref={summaryPanelRef} className="scrollbar-thin flex-1 overflow-y-auto p-3">
+          <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
             {showingSubmittedSearchResults ? (
               <SearchResultsPanel
                 query={trimmedSubmittedSearchQuery}
@@ -1037,7 +912,6 @@ export function Sidebar({
                 renamingConversationKey={renamingConversationKey}
                 tailscaleIpv4={tailscaleIpv4}
                 sessionFreshnessThresholds={sessionFreshnessThresholds}
-                summaryPanelRef={summaryPanelRef}
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">

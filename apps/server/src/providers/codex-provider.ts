@@ -4,14 +4,51 @@ import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { normalizeWhitespace, stripAnsiAndControl } from '../lib/text.js';
-import { listFilesRecursive, pathExists, readTextHead, readTextTail } from './file-utils.js';
+import { listFilesRecursive, pathExists, readTextHead, readTextTail, statFileSafe, type FileFingerprint } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation } from './types.js';
-import { conversationBelongsToProject, deriveConversationRef, extractAuthoritativeProjectPathsFromJsonlText } from './transcripts/base.js';
+import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
+import {
+  conversationBelongsToProject,
+  deriveConversationRef,
+  extractAuthoritativeProjectPathsFromJsonlText,
+  loadCachedTranscriptParse,
+  type CachedTranscriptParse,
+} from './transcripts/base.js';
 import { parseCodexConversationFile } from './transcripts/codex.js';
+
+const PENDING_PREVIEW_MEMO_MAX_ENTRIES = 4096;
+
+interface PendingPreviewMatchMemoEntry {
+  size: number;
+  mtimeMs: number;
+  needle: string;
+  matches: boolean;
+}
 
 export class CodexProvider implements ProviderAdapter {
   readonly id = 'codex' as const;
+
+  constructor(private readonly parseCache?: TranscriptParseCache) {}
+
+  private async loadOrParseFile(
+    filePath: string,
+    fingerprint: FileFingerprint | undefined,
+    projectSlug: string,
+    cached?: TranscriptParseCacheEntry,
+  ): Promise<CachedTranscriptParse> {
+    return loadCachedTranscriptParse({
+      cache: this.parseCache,
+      filePath,
+      fingerprint,
+      cached,
+      parse: () => parseCodexConversationFile({
+        filePath,
+        provider: this.id,
+        projectSlug,
+        conversationRef: deriveConversationRef(filePath),
+      }),
+    });
+  }
 
   private candidateSessionDayDirs(
     sessionsRoot: string,
@@ -48,13 +85,8 @@ export class CodexProvider implements ProviderAdapter {
   ): Promise<ConversationSummary[]> {
     const conversations: ConversationSummary[] = [];
     for (const filePath of files) {
-      const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseCodexConversationFile({
-        filePath,
-        provider: this.id,
-        projectSlug: project.slug,
-        conversationRef,
-      });
+      const fingerprint = await statFileSafe(filePath);
+      const parsed = await this.loadOrParseFile(filePath, fingerprint, project.slug);
       const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
       if (projectPaths.size === 0 || !conversationBelongsToProject(project.matchPaths, projectPaths)) {
         continue;
@@ -78,16 +110,42 @@ export class CodexProvider implements ProviderAdapter {
     return normalized.length >= 20 ? normalized : undefined;
   }
 
+  private readonly pendingPreviewMatchMemo = new Map<string, PendingPreviewMatchMemoEntry>();
+
   private async fileContainsPendingPreview(filePath: string, needle: string | undefined): Promise<boolean> {
     if (!needle) {
       return true;
+    }
+
+    const fingerprint = await statFileSafe(filePath);
+    const memoized = fingerprint ? this.pendingPreviewMatchMemo.get(filePath) : undefined;
+    if (
+      memoized
+      && memoized.size === fingerprint!.size
+      && memoized.mtimeMs === fingerprint!.mtimeMs
+      && memoized.needle === needle
+    ) {
+      return memoized.matches;
     }
 
     const haystack = normalizeWhitespace(stripAnsiAndControl([
       await readTextHead(filePath),
       await readTextTail(filePath),
     ].join('\n'))).toLowerCase();
-    return haystack.includes(needle);
+    const matches = haystack.includes(needle);
+    if (fingerprint) {
+      // Keyed by path so a changed file replaces its own entry; evict the oldest
+      // entries (insertion order) rather than clearing the whole memo.
+      this.pendingPreviewMatchMemo.delete(filePath);
+      this.pendingPreviewMatchMemo.set(filePath, { ...fingerprint, needle, matches });
+      for (const oldestPath of this.pendingPreviewMatchMemo.keys()) {
+        if (this.pendingPreviewMatchMemo.size <= PENDING_PREVIEW_MEMO_MAX_ENTRIES) {
+          break;
+        }
+        this.pendingPreviewMatchMemo.delete(oldestPath);
+      }
+    }
+    return matches;
   }
 
   async listConversationsForProjects(
@@ -108,27 +166,38 @@ export class CodexProvider implements ProviderAdapter {
     const fallbackProject = projects[0]!;
 
     for (const filePath of files) {
-      const authoritativeProjectPaths = extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
-      const candidateProjects = authoritativeProjectPaths.size > 0
-        ? projects.filter((project) => conversationBelongsToProject(project.matchPaths, authoritativeProjectPaths))
-        : projects;
-      if (candidateProjects.length === 0) {
+      const fingerprint = await statFileSafe(filePath);
+      const cached = fingerprint
+        ? this.parseCache?.get(filePath, fingerprint.size, fingerprint.mtimeMs)
+        : undefined;
+
+      // Authoritative paths gate whether the file is worth a full parse at all.
+      // Cached rows may carry full-file paths (a superset of the head's), which
+      // only widens this gate; final project assignment below always uses the
+      // full parse's paths, so cold and warm passes assign identically.
+      const knownAuthoritativePaths = cached
+        ? new Set(cached.authoritativeProjectPaths)
+        : extractAuthoritativeProjectPathsFromJsonlText(await readTextHead(filePath));
+      const worthParsing = knownAuthoritativePaths.size === 0
+        || projects.some((project) => conversationBelongsToProject(project.matchPaths, knownAuthoritativePaths));
+      if (!worthParsing) {
+        if (fingerprint && !cached) {
+          this.parseCache?.put(filePath, fingerprint.size, fingerprint.mtimeMs, {
+            scope: 'head',
+            projectPaths: [],
+            authoritativeProjectPaths: [...knownAuthoritativePaths],
+          });
+        }
         continue;
       }
 
-      const conversationRef = deriveConversationRef(filePath);
-      const parsed = await parseCodexConversationFile({
-        filePath,
-        provider: this.id,
-        projectSlug: candidateProjects[0]?.slug ?? fallbackProject.slug,
-        conversationRef,
-      });
+      const parsed = await this.loadOrParseFile(filePath, fingerprint, fallbackProject.slug, cached);
       const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
       if (projectPaths.size === 0) {
         continue;
       }
 
-      for (const project of candidateProjects) {
+      for (const project of projects) {
         if (!conversationBelongsToProject(project.matchPaths, projectPaths)) {
           continue;
         }
@@ -139,6 +208,8 @@ export class CodexProvider implements ProviderAdapter {
         });
       }
     }
+
+    this.parseCache?.retainUnderPrefix?.(sessionsRoot + path.sep, files);
 
     for (const [projectSlug, conversations] of results) {
       results.set(projectSlug, conversations.sort(compareConversationDiscoveryOrder));

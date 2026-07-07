@@ -7,7 +7,7 @@ import {
   type ProviderId,
 } from '@agent-console/shared';
 import { treeVisibleBoundSessionSql } from '../../lib/bound-session-state.js';
-import { boolAsInt, optionalString, type SqliteRow } from '../utils.js';
+import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 
 export interface ConversationSearchIndexChunk {
   projectSlug: string;
@@ -66,8 +66,47 @@ function scorePersistedResult(input: {
   return textScore + titleScore + projectScore;
 }
 
+export interface ConversationSearchStateRow {
+  transcriptPath?: string;
+  size?: number;
+  mtimeMs?: number;
+}
+
 export class SearchIndexRepo {
-  constructor(private readonly sqlite: Database.Database) {}
+  private readonly insertChunkStatement: Database.Statement;
+  private readonly deleteConversationChunksStatement: Database.Statement;
+  private readonly deleteConversationStateStatement: Database.Statement;
+  private readonly upsertConversationStateStatement: Database.Statement;
+
+  constructor(private readonly sqlite: Database.Database) {
+    this.insertChunkStatement = sqlite.prepare(`
+      insert into conversation_search_fts (
+        conversation_title, project_display_name, project_tags, text, project_slug, project_path,
+        provider, conversation_ref, conversation_kind, conversation_updated_at, is_bound,
+        message_id, role, timestamp
+      ) values (
+        @conversation_title, @project_display_name, @project_tags, @text, @project_slug, @project_path,
+        @provider, @conversation_ref, @conversation_kind, @conversation_updated_at, @is_bound,
+        @message_id, @role, @timestamp
+      )
+    `);
+    this.deleteConversationChunksStatement = sqlite.prepare(`
+      delete from conversation_search_fts
+      where project_slug = ? and provider = ? and conversation_ref = ?
+    `);
+    this.deleteConversationStateStatement = sqlite.prepare(`
+      delete from conversation_search_state
+      where project_slug = ? and provider = ? and ref = ?
+    `);
+    this.upsertConversationStateStatement = sqlite.prepare(`
+      insert into conversation_search_state (project_slug, provider, ref, transcript_path, size, mtime_ms)
+      values (?, ?, ?, ?, ?, ?)
+      on conflict(project_slug, provider, ref) do update set
+        transcript_path = excluded.transcript_path,
+        size = excluded.size,
+        mtime_ms = excluded.mtime_ms
+    `);
+  }
 
   hasRows(): boolean {
     const row = this.sqlite.prepare(`select 1 from conversation_search_fts limit 1`).get() as { 1: number } | undefined;
@@ -86,37 +125,77 @@ export class SearchIndexRepo {
 
   replace(projectSlug: string, provider: ProviderId, chunks: ConversationSearchIndexChunk[]): void {
     const clear = this.sqlite.prepare(`delete from conversation_search_fts where project_slug = ? and provider = ?`);
-    const insert = this.sqlite.prepare(`
-      insert into conversation_search_fts (
-        conversation_title, project_display_name, project_tags, text, project_slug, project_path,
-        provider, conversation_ref, conversation_kind, conversation_updated_at, is_bound,
-        message_id, role, timestamp
-      ) values (
-        @conversation_title, @project_display_name, @project_tags, @text, @project_slug, @project_path,
-        @provider, @conversation_ref, @conversation_kind, @conversation_updated_at, @is_bound,
-        @message_id, @role, @timestamp
-      )
-    `);
+    const clearState = this.sqlite.prepare(`delete from conversation_search_state where project_slug = ? and provider = ?`);
     const tx = this.sqlite.transaction(() => {
       clear.run(projectSlug, provider);
+      clearState.run(projectSlug, provider);
       for (const chunk of chunks) {
-        insert.run({
-          conversation_title: chunk.conversationTitle,
-          project_display_name: chunk.projectDisplayName,
-          project_tags: chunk.projectTags.join(' '),
-          text: chunk.text,
-          project_slug: chunk.projectSlug,
-          project_path: chunk.projectPath ?? null,
-          provider: chunk.provider,
-          conversation_ref: chunk.conversationRef,
-          conversation_kind: chunk.conversationKind,
-          conversation_updated_at: chunk.conversationUpdatedAt,
-          is_bound: boolAsInt(chunk.isBound),
-          message_id: chunk.messageId,
-          role: chunk.role,
-          timestamp: chunk.timestamp,
-        });
+        this.insertChunk(chunk);
       }
+    });
+    tx();
+  }
+
+  private insertChunk(chunk: ConversationSearchIndexChunk): void {
+    this.insertChunkStatement.run({
+      conversation_title: chunk.conversationTitle,
+      project_display_name: chunk.projectDisplayName,
+      project_tags: chunk.projectTags.join(' '),
+      text: chunk.text,
+      project_slug: chunk.projectSlug,
+      project_path: chunk.projectPath ?? null,
+      provider: chunk.provider,
+      conversation_ref: chunk.conversationRef,
+      conversation_kind: chunk.conversationKind,
+      conversation_updated_at: chunk.conversationUpdatedAt,
+      is_bound: boolAsInt(chunk.isBound),
+      message_id: chunk.messageId,
+      role: chunk.role,
+      timestamp: chunk.timestamp,
+    });
+  }
+
+  getConversationStates(projectSlug: string, provider: ProviderId): Map<string, ConversationSearchStateRow> {
+    const rows = this.sqlite.prepare(`
+      select ref, transcript_path, size, mtime_ms
+      from conversation_search_state
+      where project_slug = ? and provider = ?
+    `).all(projectSlug, provider) as SqliteRow[];
+    return new Map(rows.map((row) => [String(row.ref), {
+      transcriptPath: optionalString(row.transcript_path),
+      size: numberOrUndefined(row.size),
+      mtimeMs: numberOrUndefined(row.mtime_ms),
+    }]));
+  }
+
+  replaceConversation(
+    projectSlug: string,
+    provider: ProviderId,
+    conversationRef: string,
+    chunks: ConversationSearchIndexChunk[],
+    state: ConversationSearchStateRow,
+  ): void {
+    const tx = this.sqlite.transaction(() => {
+      this.deleteConversationChunksStatement.run(projectSlug, provider, conversationRef);
+      for (const chunk of chunks) {
+        this.insertChunk(chunk);
+      }
+      this.upsertConversationStateStatement.run(
+        projectSlug,
+        provider,
+        conversationRef,
+        state.transcriptPath ?? null,
+        state.size ?? null,
+        state.mtimeMs ?? null,
+      );
+    });
+    tx();
+  }
+
+  deleteConversation(projectSlug: string, provider: ProviderId, conversationRef: string): void {
+    const tx = this.sqlite.transaction(() => {
+      this.deleteConversationChunksStatement.run(projectSlug, provider, conversationRef);
+      this.deleteConversationStateStatement.run(projectSlug, provider, conversationRef);
     });
     tx();
   }

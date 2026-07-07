@@ -10,7 +10,45 @@ interface CachedProviderConversation {
   size: number;
 }
 
+// Parsed conversations retain every raw transcript record, so in-memory cost is a
+// multiple (roughly 3-5x) of the file size. Cap the cache by total transcript bytes
+// (LRU), always keeping the most recently used entry so the active conversation
+// stays warm even when it alone exceeds the cap.
+const MAX_CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+
 const transcriptConversationCache = new Map<string, CachedProviderConversation>();
+
+let cachedTranscriptBytes = 0;
+
+function refreshCacheRecency(key: string, entry: CachedProviderConversation): void {
+  transcriptConversationCache.delete(key);
+  transcriptConversationCache.set(key, entry);
+}
+
+function insertCacheEntry(key: string, entry: CachedProviderConversation): void {
+  const previous = transcriptConversationCache.get(key);
+  if (previous) {
+    cachedTranscriptBytes -= previous.size;
+    transcriptConversationCache.delete(key);
+  }
+  transcriptConversationCache.set(key, entry);
+  cachedTranscriptBytes += entry.size;
+  for (const oldestKey of transcriptConversationCache.keys()) {
+    if (cachedTranscriptBytes <= MAX_CACHED_TRANSCRIPT_BYTES || oldestKey === key) {
+      break;
+    }
+    cachedTranscriptBytes -= transcriptConversationCache.get(oldestKey)!.size;
+    transcriptConversationCache.delete(oldestKey);
+  }
+}
+
+function deleteCacheEntry(key: string): void {
+  const existing = transcriptConversationCache.get(key);
+  if (existing) {
+    cachedTranscriptBytes -= existing.size;
+    transcriptConversationCache.delete(key);
+  }
+}
 
 interface LoadProviderConversationOptions {
   allowStaleWhileChanging?: boolean;
@@ -43,6 +81,7 @@ export async function loadProviderConversationFromSummary(
         || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
       )
     ) {
+      refreshCacheRecency(key, cached);
       return cached.conversation;
     }
 
@@ -68,14 +107,14 @@ export async function loadProviderConversationFromSummary(
       allMessages: parsed.messages,
     };
 
-    transcriptConversationCache.set(key, {
+    insertCacheEntry(key, {
       conversation,
       mtimeMs: stat.mtimeMs,
       size: stat.size,
     });
     return conversation;
   } catch {
-    transcriptConversationCache.delete(key);
+    deleteCacheEntry(key);
     return null;
   }
 }

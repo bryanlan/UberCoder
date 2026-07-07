@@ -1,9 +1,6 @@
-import type { BoundSession, ConversationSummary, SessionInteractionSummary } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary } from '@agent-console/shared';
 
-export function buildSyntheticConversationFromSession(
-  session: BoundSession,
-  sessionSummary?: SessionInteractionSummary,
-): ConversationSummary {
+export function buildSyntheticConversationFromSession(session: BoundSession): ConversationSummary {
   return {
     ref: session.conversationRef,
     kind: session.conversationRef.startsWith('pending:') ? 'pending' : 'history',
@@ -18,6 +15,5 @@ export function buildSyntheticConversationFromSession(
     rawMetadata: {
       syntheticSessionPlaceholder: true,
     },
-    sessionSummary,
   };
 }

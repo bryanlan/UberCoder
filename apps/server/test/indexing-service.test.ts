@@ -125,42 +125,31 @@ describe('IndexingService', () => {
     db.close();
   });
 
-  it('attaches session summaries to each bound conversation row', async () => {
+  it('marks conversations bound when a restorable session exists for them', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     db.conversationIndex.replace('demo', 'codex', [{
-      ref: 'conversation-with-summary',
+      ref: 'conversation-with-session',
       kind: 'history',
       projectSlug: 'demo',
       provider: 'codex',
-      title: 'Conversation with summary',
+      title: 'Conversation with session',
       updatedAt: '2026-06-17T18:31:00.000Z',
       isBound: false,
       degraded: false,
     }]);
     db.boundSessions.upsert({
-      id: 'session-with-summary',
+      id: 'session-for-conversation',
       provider: 'codex',
       projectSlug: 'demo',
-      conversationRef: 'conversation-with-summary',
-      tmuxSessionName: 'ac-codex-demo-summary',
+      conversationRef: 'conversation-with-session',
+      tmuxSessionName: 'ac-codex-demo-session',
       status: 'bound',
       shouldRestore: true,
-      title: 'Conversation with summary',
+      title: 'Conversation with session',
       startedAt: '2026-06-17T18:00:00.000Z',
       updatedAt: '2026-06-17T18:31:00.000Z',
       lastActivityAt: '2026-06-17T18:30:00.000Z',
-    });
-    db.interactionSummaries.upsert({
-      sessionId: 'session-with-summary',
-      projectSlug: 'demo',
-      provider: 'codex',
-      conversationRef: 'conversation-with-summary',
-      status: 'ready',
-      generatedAt: '2026-06-17T18:35:00.000Z',
-      lastInteractionAt: '2026-06-17T18:30:00.000Z',
-      chatSummary: 'This chat is about the active session.',
-      recentChangesSummary: 'The last hour focused on the latest session activity.',
     });
     const indexing = new IndexingService(
       { getProjectsRoot: () => '/tmp/projects' } as never,
@@ -180,12 +169,8 @@ describe('IndexingService', () => {
     await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
     const conversation = indexing.getTree().projects[0]?.providers.codex.conversations[0];
-    expect(conversation?.boundSessionId).toBe('session-with-summary');
-    expect(conversation?.sessionSummary).toMatchObject({
-      sessionId: 'session-with-summary',
-      status: 'ready',
-      chatSummary: 'This chat is about the active session.',
-    });
+    expect(conversation?.boundSessionId).toBe('session-for-conversation');
+    expect(conversation?.isBound).toBe(true);
     db.close();
   });
 

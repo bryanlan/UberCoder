@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 interface Migration {
   version: number;
@@ -106,24 +106,6 @@ const MIGRATIONS: Migration[] = [
           value text not null
         );
 
-        create table if not exists session_interaction_summaries (
-          session_id text primary key,
-          project_slug text not null,
-          provider text not null,
-          conversation_ref text not null,
-          status text not null,
-          chat_summary text,
-          recent_changes_summary text,
-          generated_at text,
-          window_start_at text,
-          window_end_at text,
-          last_interaction_at text,
-          failed_at text,
-          last_error text,
-          title_suggestion text,
-          title_suggested_at text
-        );
-
         create virtual table if not exists conversation_search_fts using fts5(
           conversation_title unindexed,
           project_display_name unindexed,
@@ -163,6 +145,64 @@ const MIGRATIONS: Migration[] = [
             and conversation_ref not like 'pending:%'
         `);
       }
+    },
+  },
+  {
+    version: 2,
+    name: 'transcript-parse-cache-and-search-index-state',
+    up(sqlite) {
+      sqlite.exec(`
+        create table if not exists transcript_parse_cache (
+          path text primary key,
+          size integer not null,
+          mtime_ms real not null,
+          scope text not null,
+          summary_json text,
+          project_paths_json text not null,
+          authoritative_project_paths_json text not null,
+          updated_at text not null
+        );
+
+        create table if not exists conversation_search_state (
+          project_slug text not null,
+          provider text not null,
+          ref text not null,
+          transcript_path text,
+          size integer,
+          mtime_ms real,
+          primary key (project_slug, provider, ref)
+        );
+      `);
+    },
+  },
+  {
+    version: 3,
+    name: 'parse-cache-parser-version-and-search-state-reconciliation',
+    up(sqlite) {
+      // Default matches the current TRANSCRIPT_PARSER_VERSION so rows written by
+      // the same parser stay valid; future parser changes bump the constant and
+      // naturally miss these rows.
+      addColumnIfMissing(sqlite, 'transcript_parse_cache', 'parser_version', 'parser_version integer not null default 1');
+      // Incremental search indexing purges vanished conversations via
+      // conversation_search_state; FTS rows indexed before that table existed
+      // have no state row and would otherwise never be reconciled.
+      sqlite.exec(`
+        delete from conversation_search_fts
+        where not exists (
+          select 1
+          from conversation_search_state s
+          where s.project_slug = conversation_search_fts.project_slug
+            and s.provider = conversation_search_fts.provider
+            and s.ref = conversation_search_fts.conversation_ref
+        );
+      `);
+    },
+  },
+  {
+    version: 4,
+    name: 'drop-session-interaction-summaries',
+    up(sqlite) {
+      sqlite.exec(`drop table if exists session_interaction_summaries;`);
     },
   },
 ];

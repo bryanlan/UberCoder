@@ -307,6 +307,79 @@ describe('provider history discovery', () => {
     expect(parsed.messages).toHaveLength(2);
   });
 
+  it('keeps Codex event and response messages separate outside the duplicate window and for same-kind repeats', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-non-duplicate-messages.jsonl');
+    await fs.writeFile(transcriptPath, [
+      // Same text but 5s apart: outside the 1s duplicate window, both kept.
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'Working on the auth flow now.' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Working on the auth flow now.' }],
+        },
+      }),
+      // Same text, same kind, within 1s: kinds do not pair, both kept.
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'Retrying the flaky step.' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:00.500Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'Retrying the flaky step.' },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'non-duplicate-messages',
+    });
+
+    expect(parsed.messages).toHaveLength(4);
+  });
+
+  it('prefers the Codex response_item version when it arrives before the event_msg duplicate', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-response-first-duplicate.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'Server-owned sessions are the safer default.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.400Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'Server-owned sessions are the safer default.' },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'response-first-duplicate',
+    });
+
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0]?.rawMetadata?.type).toBe('response_item');
+  });
+
   it('shows Codex commentary-phase assistant progress messages while the latest turn is unfinished', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
     const transcriptPath = path.join(tempDir, 'rollout-commentary-progress.jsonl');

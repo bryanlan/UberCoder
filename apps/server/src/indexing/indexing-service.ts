@@ -3,7 +3,8 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
 import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService, MergedProviderSettings } from '../config/service.js';
-import { AppDatabase, pickPreferredConversation, type ConversationSearchIndexChunk } from '../db/database.js';
+import { AppDatabase, pickPreferredConversation, type ConversationSearchIndexChunk, type ConversationSearchStateRow } from '../db/database.js';
+import { statFileSafe } from '../providers/file-utils.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { nowIso } from '../lib/time.js';
@@ -167,7 +168,6 @@ export class IndexingService {
         getIndexedConversation: (projectSlug, provider, conversationRef) => this.db.conversationIndex.get(projectSlug, provider, conversationRef),
       }));
     const activeSessionIds = new Set(activeSessions.map((session) => session.id));
-    const sessionSummaryMap = this.db.interactionSummaries.listBySessionIds(activeSessions.map((session) => session.id));
     const history = this.db.conversationIndex.list().filter(isConversationVisibleInDiscovery);
     const pending = this.db.pendingConversations.list()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string')
@@ -205,23 +205,15 @@ export class IndexingService {
       const project = projectMap.get(session.projectSlug);
       if (!project) continue;
       const conversations = project.providers[session.provider].conversations;
-      const storedSessionSummary = sessionSummaryMap.get(session.id);
-      const sessionSummary = storedSessionSummary ? {
-        ...storedSessionSummary,
-        projectSlug: session.projectSlug,
-        provider: session.provider,
-        conversationRef: session.conversationRef,
-      } : undefined;
       const existingIndex = conversations.findIndex((conversation) => conversation.ref === session.conversationRef);
       if (existingIndex === -1) {
-        conversations.push(buildSyntheticConversationFromSession(session, sessionSummary));
+        conversations.push(buildSyntheticConversationFromSession(session));
         continue;
       }
       conversations[existingIndex] = {
         ...conversations[existingIndex]!,
         isBound: true,
         boundSessionId: session.id,
-        sessionSummary,
       };
     }
 
@@ -384,36 +376,71 @@ export class IndexingService {
     conversations: ConversationSummary[],
     options: { shouldCommit?: () => boolean } = {},
   ): Promise<void> {
-    const chunks: ConversationSearchIndexChunk[] = [];
     const deduped = new Map<string, ConversationSummary>();
     for (const summary of conversations.filter(isConversationVisibleInDiscovery)) {
       deduped.set(summary.ref, pickPreferredConversation(deduped.get(summary.ref), summary));
     }
+
+    const indexedStates = this.db.searchIndex.getConversationStates(project.slug, providerId);
+    const updates: Array<{
+      ref: string;
+      chunks: ConversationSearchIndexChunk[];
+      state: ConversationSearchStateRow;
+    }> = [];
+    const failedRefs: string[] = [];
     for (const summary of deduped.values()) {
+      const stat = summary.transcriptPath ? await statFileSafe(summary.transcriptPath) : undefined;
+      const indexed = indexedStates.get(summary.ref);
+      if (
+        indexed
+        && indexed.transcriptPath === summary.transcriptPath
+        && stat
+        && indexed.size === stat.size
+        && indexed.mtimeMs === stat.mtimeMs
+      ) {
+        continue;
+      }
       try {
         const conversation = await loadProviderConversationFromSummary(summary)
           ?? await provider.getConversation(project, summary.ref, settings);
         if (!conversation) {
+          failedRefs.push(summary.ref);
           continue;
         }
-        chunks.push(...buildConversationSearchChunks({
-          project,
-          conversation: {
-            ...conversation.summary,
-            title: summary.title,
-            isBound: summary.isBound,
-            boundSessionId: summary.boundSessionId,
-          },
-          messages: conversation.messages,
-        }));
+        updates.push({
+          ref: summary.ref,
+          chunks: buildConversationSearchChunks({
+            project,
+            conversation: {
+              ...conversation.summary,
+              title: summary.title,
+              isBound: summary.isBound,
+              boundSessionId: summary.boundSessionId,
+            },
+            messages: conversation.messages,
+          }),
+          state: { transcriptPath: summary.transcriptPath, size: stat?.size, mtimeMs: stat?.mtimeMs },
+        });
       } catch {
+        failedRefs.push(summary.ref);
         continue;
       }
     }
+    const vanishedRefs = [...indexedStates.keys()].filter((ref) => !deduped.has(ref));
+
     if (options.shouldCommit && !options.shouldCommit()) {
       return;
     }
-    this.db.searchIndex.replace(project.slug, providerId, chunks);
+    this.db.transaction(() => {
+      // Conversations that failed to load had no chunks under the old wholesale
+      // rebuild either — drop any stale rows instead of serving old content.
+      for (const ref of [...vanishedRefs, ...failedRefs]) {
+        this.db.searchIndex.deleteConversation(project.slug, providerId, ref);
+      }
+      for (const update of updates) {
+        this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
+      }
+    });
   }
 
   private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {

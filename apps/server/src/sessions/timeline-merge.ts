@@ -1,5 +1,5 @@
 import type { NormalizedMessage } from '@agent-console/shared';
-import { normalizeComparableText, uniqueBy } from '../lib/text.js';
+import { normalizeComparableText } from '../lib/text.js';
 import { filterUserVisibleMessages } from '../providers/transcripts/base.js';
 
 const LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
@@ -23,19 +23,49 @@ interface TranscriptMessageIndex {
   untimedByRole: Map<NormalizedMessage['role'], ComparableMessage[]>;
 }
 
+function messageTimestampMs(message: NormalizedMessage): number | undefined {
+  const timestampMs = Date.parse(message.timestamp);
+  return Number.isFinite(timestampMs) ? timestampMs : undefined;
+}
+
 function toComparableMessage(message: NormalizedMessage): ComparableMessage | undefined {
   const comparable = normalizeComparableText(message.text);
   if (!comparable) {
     return undefined;
   }
 
-  const timestampMs = Date.parse(message.timestamp);
   return {
     role: message.role,
-    timestampMs: Number.isFinite(timestampMs) ? timestampMs : undefined,
+    timestampMs: messageTimestampMs(message),
     comparable,
     compact: comparable.replace(/[^a-z0-9]+/g, ''),
   };
+}
+
+/**
+ * Removes messages that share (source, timestamp, role) and trimmed text with an
+ * earlier message, preserving order. Equivalent to keying on the full text, but
+ * avoids building a large text-bearing key string per message.
+ */
+function dedupeTimelineMessages(messages: NormalizedMessage[]): NormalizedMessage[] {
+  const groups = new Map<string, NormalizedMessage[]>();
+  const deduped: NormalizedMessage[] = [];
+  for (const message of messages) {
+    const key = `${message.source}:${message.timestamp}:${message.role}`;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, [message]);
+      deduped.push(message);
+      continue;
+    }
+    const text = message.text.trim();
+    if (group.some((existing) => existing.text.trim() === text)) {
+      continue;
+    }
+    group.push(message);
+    deduped.push(message);
+  }
+  return deduped;
 }
 
 function timestampBucket(timestampMs: number): number {
@@ -151,11 +181,35 @@ function liveMessageIsInTranscript(
     ));
 }
 
+function earliestLiveTimestampMs(liveMessages: NormalizedMessage[]): number | undefined {
+  let earliest: number | undefined;
+  for (const message of liveMessages) {
+    const timestampMs = messageTimestampMs(message);
+    if (timestampMs === undefined) {
+      continue;
+    }
+    if (earliest === undefined || timestampMs < earliest) {
+      earliest = timestampMs;
+    }
+  }
+  return earliest;
+}
+
 function filterTranscriptBackedLiveMessages(
   liveMessages: NormalizedMessage[],
   transcriptMessages: NormalizedMessage[],
 ): NormalizedMessage[] {
-  const transcriptIndex = buildTranscriptMessageIndex(transcriptMessages);
+  // Live messages can only duplicate transcript content near their own time range,
+  // so restrict the (normalization-heavy) transcript index to that window instead of
+  // indexing the entire conversation on every request.
+  const earliestLiveMs = earliestLiveTimestampMs(liveMessages);
+  const relevantTranscriptMessages = earliestLiveMs === undefined
+    ? transcriptMessages
+    : transcriptMessages.filter((message) => {
+      const timestampMs = messageTimestampMs(message);
+      return timestampMs === undefined || timestampMs >= earliestLiveMs - LIVE_TRANSCRIPT_DUPLICATE_WINDOW_MS;
+    });
+  const transcriptIndex = buildTranscriptMessageIndex(relevantTranscriptMessages);
   return liveMessages.filter((liveMessage) => !liveMessageIsInTranscript(liveMessage, transcriptIndex));
 }
 
@@ -203,31 +257,25 @@ export function mergeTimelineMessages(input: {
   visibleMessages: NormalizedMessage[];
   liveMessages: NormalizedMessage[];
 }): {
-  mergedAllMessages: NormalizedMessage[];
   mergedMessages: NormalizedMessage[];
 } {
+  if (input.liveMessages.length === 0) {
+    // Provider transcripts arrive pre-sorted (buildParsedTranscript sorts both
+    // message lists), so with nothing to merge only the duplicate scrub applies.
+    return {
+      mergedMessages: dedupeTimelineMessages(input.visibleMessages),
+    };
+  }
+
   const providerHasTranscript = input.allMessages.some((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'tool');
-  const mergedAllMessages = uniqueBy(
-    [
-      ...input.allMessages,
-      ...(providerHasTranscript
-        ? input.liveMessages.filter((message) => message.role === 'status')
-        : input.liveMessages),
-    ],
-    (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
-  )
-    .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const liveMessagesNotInTranscript = filterTranscriptBackedLiveMessages(input.liveMessages, input.visibleMessages);
   const latestVisibleTranscriptMessage = latestMessageByTimestamp(input.visibleMessages);
-  const mergedMessages = uniqueBy(
-    [
-      ...input.visibleMessages,
-      ...(providerHasTranscript
-        ? filterPendingLiveUserMessagesAfterTranscript(liveMessagesNotInTranscript, latestVisibleTranscriptMessage)
-        : filterUserVisibleMessages(input.liveMessages)),
-    ],
-    (message) => `${message.source}:${message.timestamp}:${message.role}:${message.text.trim()}`,
-  ).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const mergedMessages = dedupeTimelineMessages([
+    ...input.visibleMessages,
+    ...(providerHasTranscript
+      ? filterPendingLiveUserMessagesAfterTranscript(liveMessagesNotInTranscript, latestVisibleTranscriptMessage)
+      : filterUserVisibleMessages(input.liveMessages)),
+  ]).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-  return { mergedAllMessages, mergedMessages };
+  return { mergedMessages };
 }

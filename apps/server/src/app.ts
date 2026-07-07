@@ -23,7 +23,6 @@ import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
-import { SessionSummaryService } from './summaries/session-summary-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
 
 export interface AppOptions {
@@ -40,7 +39,7 @@ export async function buildApp(options: AppOptions = {}) {
   });
   const eventBus = new RealtimeEventBus();
   const projectService = new ProjectService(configService);
-  const providerRegistry = new ProviderRegistry();
+  const providerRegistry = new ProviderRegistry(db.transcriptParseCache);
   const liveOutputReader = new LiveOutputReader();
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus);
   const search = new ConversationSearchService(db, projectService, liveOutputReader);
@@ -49,15 +48,6 @@ export async function buildApp(options: AppOptions = {}) {
     providerRegistry,
   }, app.log);
   const authService = new AuthService(config, db);
-  const sessionSummaries = new SessionSummaryService(
-    db,
-    projectService,
-    providerRegistry,
-    config.runtimeDir,
-    eventBus,
-    undefined,
-    liveOutputReader,
-  );
   const restartService = new RestartService(() => app.close());
 
   await app.register(fastifyCookie);
@@ -120,10 +110,9 @@ export async function buildApp(options: AppOptions = {}) {
   await indexing.loadProjectMetadata();
   await indexing.start();
   sessions.startSessionReconciliation();
-  sessionSummaries.start();
+  void sessions.cleanupEndedSessionRuntimeDirs();
 
   app.addHook('onClose', async () => {
-    await sessionSummaries.stop();
     await indexing.stop();
     await sessions.stop();
     liveOutputReader.clear();
