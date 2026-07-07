@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 35f7d35c9fcaadb279dba096c4132de19f01b630
-current_through_date: 2026-07-06T21:14:04-04:00
+current_through_commit: 5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e
+current_through_date: 2026-07-07T00:29:08-04:00
 ---
 
 # File Index
@@ -77,6 +77,10 @@ current_through_date: 2026-07-06T21:14:04-04:00
   recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
+- `apps/server/src/sessions/timeline-merge.ts` - server-owned merge and duplicate-suppression
+  rules between durable provider transcript messages and temporary live event-log messages.
+- `apps/server/src/sessions/transcript-watcher.ts` - transcript-file change detection that refreshes
+  selected timelines when provider history catches up.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and session metadata options.
@@ -152,13 +156,19 @@ Test and verification anchors:
   and `apps/server/test/session-keystrokes-submit.test.ts`
   together so prompt restarts and literal selection passthrough stay distinct.
 - Live output, history pagination, duplicate filtering, or text latency changes should review
-  `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/live-output/`,
+  `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/timeline-merge.ts`,
+  `apps/server/src/sessions/live-output/`, `apps/server/src/sessions/transcript-watcher.ts`,
   `apps/server/src/providers/transcripts/codex.ts`,
+  `apps/server/test/timeline-merge.test.ts`, `apps/server/test/transcript-watcher.test.ts`,
   `apps/server/test/live-output.test.ts`,
   `apps/server/test/conversation-routes.test.ts`,
   `apps/web/src/features/conversation/useConversationData.ts`,
   `apps/web/src/features/realtime/reducers.ts`, `apps/web/src/features/conversation/transcript-turns.tsx`,
   and `apps/web/src/components/ConversationPane.tsx`.
+- For repeated or duplicated transcript bubbles, inspect source ownership in this order:
+  provider transcript parser, live-output reader, server timeline merge, realtime cache reducer, then
+  web transcript rendering. Avoid starting in `ConversationPane.tsx` unless the server timeline
+  payload is already correct.
 - Raw terminal/screen rendering changes should review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-screen.ts`, `apps/server/src/sessions/live-output/reader.ts`,
   `apps/web/src/components/ConversationPane.tsx`,

@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 35f7d35c9fcaadb279dba096c4132de19f01b630
-current_through_date: 2026-07-06T21:14:04-04:00
+current_through_commit: 5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e
+current_through_date: 2026-07-07T00:29:08-04:00
 ---
 
 # Architecture
@@ -17,7 +17,7 @@ First-class runtime surfaces:
   `apps/server/src/indexing/indexing-service.ts`, and the SQLite `conversation_search_fts` table in
   `apps/server/src/db/database.ts`.
 - Fastify session input API: `apps/server/src/routes/sessions.ts`.
-- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-runtime.ts`, `session-screen.ts`, `live-output/reader.ts`, `screen-heuristics.ts`, `working-state.ts`, `tmux-health.ts`, and `tmux-client.ts`.
+- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-runtime.ts`, `timeline-merge.ts`, `session-screen.ts`, `live-output/reader.ts`, `screen-heuristics.ts`, `working-state.ts`, `transcript-watcher.ts`, `tmux-health.ts`, and `tmux-client.ts`.
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
 - React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`.
@@ -42,12 +42,16 @@ The server is authoritative for project configuration, conversation indexes, bou
 provider transcript loading, proxy access, and auth. The web app requests server APIs and renders
 the resulting conversation/session model; it should not become a raw terminal controller.
 
-Conversation timelines merge provider transcripts with live session event logs. The conversation
-route owns pagination through `limit` and `before`, supports metadata-only polling with `limit=0`,
-and keeps bound live-session metadata available without forcing the web app to carry the full
-history payload on every refresh. Provider-backed live messages are compared against transcript
-messages by role, timestamp buckets, exact short-window matches, and longer containment matches so
-duplicate event-log content does not reappear after the durable provider transcript catches up.
+Conversation timelines merge provider transcripts with live session event logs at the server
+boundary. `apps/server/src/routes/conversations.ts` owns pagination through `limit` and `before`,
+supports metadata-only polling with `limit=0`, and keeps bound live-session metadata available
+without forcing the web app to carry the full history payload on every refresh.
+`apps/server/src/sessions/timeline-merge.ts` owns the duplicate-suppression contract between
+durable transcript messages and event-log live messages: it compares role, timestamp buckets, exact
+short-window matches, and longer containment matches so the same assistant output does not reappear
+after the provider transcript catches up. `apps/server/src/sessions/transcript-watcher.ts` detects
+provider transcript file updates and should be considered part of the same timeline freshness
+contract.
 
 Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
 state, while user-visible incremental output comes through
@@ -67,6 +71,17 @@ event-log readers produce temporary live conversation messages, and provider tra
 produce durable conversation history. The web conversation pane may mirror local text-bypass typing
 optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
 pending user transcript row.
+
+When debugging duplicated bubbles, missing assistant text, terminal repaint noise, or stale live
+output, route the investigation by text source instead of by visual symptom. Durable history starts
+in the provider transcript parser (`apps/server/src/providers/transcripts/codex.ts` or the Claude
+adapter), live pending output starts in `apps/server/src/sessions/live-output/`, duplicate
+suppression belongs in `apps/server/src/sessions/timeline-merge.ts`, raw screen inspection belongs
+in `apps/server/src/sessions/session-screen.ts`, and presentation rules belong in
+`apps/web/src/features/conversation/transcript-turns.tsx` and
+`apps/web/src/components/ConversationPane.tsx`. Repeated bubble corruption is usually a boundary
+failure between these sources; do not fix it by teaching the renderer to guess which server text is
+real conversation content.
 
 Conversation search is a server-owned API at `/api/search/conversations`. The search service builds
 FTS rows from sanitized user/assistant prose, excludes hidden system-invocation conversations, and
@@ -128,7 +143,9 @@ stuck composer.
   recovery behavior.
 - Live-output latency and correctness belong in the server timeline boundary, not only the web
   renderer. Review `apps/server/src/routes/conversations.ts`,
-  `apps/server/src/sessions/live-output/`, `apps/server/test/conversation-routes.test.ts`,
+  `apps/server/src/sessions/timeline-merge.ts`, `apps/server/src/sessions/live-output/`,
+  `apps/server/src/sessions/transcript-watcher.ts`, `apps/server/test/conversation-routes.test.ts`,
+  `apps/server/test/timeline-merge.test.ts`, `apps/server/test/transcript-watcher.test.ts`,
   `apps/server/test/live-output.test.ts`, and
   `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
   and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
