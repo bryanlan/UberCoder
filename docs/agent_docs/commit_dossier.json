@@ -1,45 +1,54 @@
 {
   "changed_paths": [
     "AGENTS.md",
-    "apps/server/src/db/repos/bound-sessions.ts",
-    "apps/server/src/db/repos/conversation-index.ts",
+    "apps/server/src/app.ts",
+    "apps/server/src/db/database.ts",
+    "apps/server/src/db/repos/interaction-summaries.ts",
     "apps/server/src/db/repos/search-index.ts",
+    "apps/server/src/db/repos/transcript-parse-cache.ts",
+    "apps/server/src/db/schema.ts",
+    "apps/server/src/index.ts",
     "apps/server/src/indexing/indexing-service.ts",
+    "apps/server/src/lib/conversation-summary.ts",
+    "apps/server/src/lib/provider-conversation-cache.ts",
+    "apps/server/src/providers/claude-provider.ts",
     "apps/server/src/providers/codex-provider.ts",
     "apps/server/src/providers/file-utils.ts",
+    "apps/server/src/providers/registry.ts",
     "apps/server/src/providers/transcripts/base.ts",
+    "apps/server/src/providers/transcripts/codex.ts",
     "apps/server/src/providers/types.ts",
     "apps/server/src/routes/conversations.ts",
-    "apps/server/src/sessions/live-output/filters.ts",
-    "apps/server/src/sessions/pending-adoption.ts",
     "apps/server/src/sessions/session-manager.ts",
-    "apps/server/test/conversation-routes.test.ts",
-    "apps/server/test/database.test.ts",
-    "apps/server/test/indexing.test.ts",
-    "apps/server/test/live-output.test.ts",
-    "apps/server/test/session-recency.test.ts",
-    "apps/server/test/session-runtime.test.ts",
-    "apps/web/src/components/ConversationPane.test.tsx",
-    "apps/web/src/components/ConversationPane.tsx",
+    "apps/server/src/sessions/timeline-merge.ts",
+    "apps/server/src/sessions/tmux-client.ts",
+    "apps/server/src/summaries/session-summary-service.ts",
+    "apps/server/test/helpers/session-fixtures.ts",
+    "apps/server/test/indexing-service.test.ts",
+    "apps/server/test/providers.test.ts",
+    "apps/server/test/session-lifecycle.test.ts",
+    "apps/server/test/session-summary-service.test.ts",
+    "apps/server/test/tmux-health.test.ts",
+    "apps/web/src/components/Sidebar.tsx",
+    "apps/web/src/features/realtime/reducers.test.ts",
+    "apps/web/src/features/realtime/reducers.ts",
+    "docs/agent_docs/agents_md_status.json",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md"
+    "docs/fileindex.md",
+    "package.json",
+    "packages/shared/src/index.ts",
+    "scripts/backfill-work-mode-session-summaries.mjs"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "eee56ef1173c652fd9f2a521449b993016fd978e",
-      "date": "2026-07-05T04:37:04-04:00",
+      "commit": "7322e1196501f292f44102a24369c7e0b5f4139c",
+      "date": "2026-07-06T00:30:13-04:00",
       "files": [
-        {
-          "paths": [
-            "AGENTS.md"
-          ],
-          "status": "M"
-        },
         {
           "paths": [
             "docs/agent_docs/commit_dossier.json"
@@ -77,29 +86,184 @@
           "status": "M"
         }
       ],
-      "short_commit": "eee56ef",
-      "subject": "Improve agent documentation navigation"
+      "short_commit": "7322e11",
+      "subject": "Sync repo docs"
     },
     {
       "author": "bryanlan",
-      "commit": "802e111d96bcf852033aba0d43c49d80aab25a38",
-      "date": "2026-07-05T15:49:30-04:00",
+      "commit": "a5ef6150b91b52df23811facee7be269845d7b5e",
+      "date": "2026-07-06T02:13:13-04:00",
       "files": [
         {
           "paths": [
-            "apps/server/src/db/repos/bound-sessions.ts"
+            "AGENTS.md"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/src/db/repos/conversation-index.ts"
+            "docs/agent_docs/agents_md_status.json"
           ],
           "status": "M"
+        }
+      ],
+      "short_commit": "a5ef615",
+      "subject": "Refresh AGENTS.md"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "3487b837b023c6ea7cf63dc0927397677341fea5",
+      "date": "2026-07-06T04:17:40-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/features/realtime/reducers.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "3487b83",
+      "subject": "Add regression coverage for workflow hotspot"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "dd98f37f5e32e5d0d974e123ce66ae47637e0fac",
+      "date": "2026-07-06T04:25:07-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/web/src/features/realtime/reducers.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/web/src/features/realtime/reducers.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "dd98f37",
+      "subject": "Address Ralph review findings"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "4917397391d98c6eaa707b883a80a432c5dc906f",
+      "date": "2026-07-06T04:28:23-04:00",
+      "files": [],
+      "short_commit": "4917397",
+      "subject": "Merge pull request #3 from bryanlan/automation/regression-hotspot-sentinel-coding/agent-console/dd98f37f5e32"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "b4102a1a34a5a284bdca2b86734f09b3c28a5d8c",
+      "date": "2026-07-06T06:28:42-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/codex.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "b4102a1",
+      "subject": "Show all pending Codex progress messages"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "6e14465cf5698b543444bbe0766ea523f31754c6",
+      "date": "2026-07-06T06:48:05-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/index.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/tmux-client.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/helpers/session-fixtures.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-lifecycle.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/tmux-health.test.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "6e14465",
+      "subject": "Isolate tmux session lifecycle from server restarts"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "36a73366b4906ef346cbe3e79ea6ed1cc0a360fc",
+      "date": "2026-07-06T20:59:15-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/database.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/repos/interaction-summaries.ts"
+          ],
+          "status": "D"
         },
         {
           "paths": [
             "apps/server/src/db/repos/search-index.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/repos/transcript-parse-cache.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/server/src/db/schema.ts"
           ],
           "status": "M"
         },
@@ -111,73 +275,22 @@
         },
         {
           "paths": [
-            "apps/server/src/sessions/live-output/filters.ts"
+            "apps/server/src/lib/conversation-summary.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/test/database.test.ts"
+            "apps/server/src/lib/provider-conversation-cache.ts"
           ],
           "status": "M"
         },
         {
           "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "802e111",
-      "subject": "Fix duplicate sessions and repaint noise"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "ba1a44dc390966e53ea49760667bfe55dc4f5f19",
-      "date": "2026-07-05T16:30:29-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/sessions/live-output/filters.ts"
+            "apps/server/src/providers/claude-provider.ts"
           ],
           "status": "M"
         },
-        {
-          "paths": [
-            "apps/server/test/live-output.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "ba1a44d",
-      "subject": "Filter Codex repaint chatter from live output"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "c5bd13d37515c51f4de087c9cc8464355cbfacab",
-      "date": "2026-07-05T17:27:35-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.test.tsx"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/web/src/components/ConversationPane.tsx"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "c5bd13d",
-      "subject": "Show live provider progress in conversation pane"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "10d99778679c57a0c0d71ddd7f40a21ea5472959",
-      "date": "2026-07-05T17:41:49-04:00",
-      "files": [
         {
           "paths": [
             "apps/server/src/providers/codex-provider.ts"
@@ -192,7 +305,19 @@
         },
         {
           "paths": [
+            "apps/server/src/providers/registry.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
             "apps/server/src/providers/transcripts/base.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/providers/transcripts/codex.ts"
           ],
           "status": "M"
         },
@@ -210,7 +335,82 @@
         },
         {
           "paths": [
-            "apps/server/src/sessions/pending-adoption.ts"
+            "apps/server/src/sessions/session-manager.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/sessions/timeline-merge.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/summaries/session-summary-service.ts"
+          ],
+          "status": "D"
+        },
+        {
+          "paths": [
+            "apps/server/test/indexing-service.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/providers.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-lifecycle.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/session-summary-service.test.ts"
+          ],
+          "status": "D"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/Sidebar.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "package.json"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "scripts/backfill-work-mode-session-summaries.mjs"
+          ],
+          "status": "D"
+        }
+      ],
+      "short_commit": "36a7336",
+      "subject": "Fix O(n\u00b2) transcript parse hotspot and shed dead-weight features"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "35f7d35c9fcaadb279dba096c4132de19f01b630",
+      "date": "2026-07-06T21:14:04-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/app.ts"
           ],
           "status": "M"
         },
@@ -222,77 +422,29 @@
         },
         {
           "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/indexing.test.ts"
+            "apps/server/test/session-lifecycle.test.ts"
           ],
           "status": "M"
         }
       ],
-      "short_commit": "10d9977",
-      "subject": "Fix pending transcript adoption for long Codex chats"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "7cc30cba326f4133c4e7747fbc06189064c1361e",
-      "date": "2026-07-05T18:09:09-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/test/session-recency.test.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/session-runtime.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "7cc30cb",
-      "subject": "Harden session timing tests"
-    },
-    {
-      "author": "bryanlan",
-      "commit": "6c0c76e8fb45eb59070431cd89e6ea8b78f02082",
-      "date": "2026-07-05T18:31:15-04:00",
-      "files": [
-        {
-          "paths": [
-            "apps/server/src/routes/conversations.ts"
-          ],
-          "status": "M"
-        },
-        {
-          "paths": [
-            "apps/server/test/conversation-routes.test.ts"
-          ],
-          "status": "M"
-        }
-      ],
-      "short_commit": "6c0c76e",
-      "subject": "Allow binding provider-readable unindexed conversations"
+      "short_commit": "35f7d35",
+      "subject": "Address Codex review findings on perf overhaul"
     }
   ],
   "docs_current_through": {
-    "commit": "4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1",
-    "date": "2026-07-05T00:30:34-04:00"
-  },
-  "from_commit": "4ea81ed1b37d50a8d0f1d83c5f81b4db2b91dff1",
-  "generated_at": "2026-07-06T04:24:02+00:00",
-  "head": {
     "commit": "6c0c76e8fb45eb59070431cd89e6ea8b78f02082",
-    "date": "2026-07-05T18:31:15-04:00",
-    "short_commit": "6c0c76e"
+    "date": "2026-07-05T18:31:15-04:00"
+  },
+  "from_commit": "6c0c76e8fb45eb59070431cd89e6ea8b78f02082",
+  "generated_at": "2026-07-07T04:26:23+00:00",
+  "head": {
+    "commit": "35f7d35c9fcaadb279dba096c4132de19f01b630",
+    "date": "2026-07-06T21:14:04-04:00",
+    "short_commit": "35f7d35"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "6c0c76e8fb45eb59070431cd89e6ea8b78f02082",
+  "to_commit": "35f7d35c9fcaadb279dba096c4132de19f01b630",
   "worktree_dirty": true
 }
