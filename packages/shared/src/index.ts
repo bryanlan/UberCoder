@@ -84,12 +84,20 @@ export interface ConversationMessagePage {
   total: number;
 }
 
+/**
+ * Transcripts at or above this size serve a stale parse while a bound session is
+ * working (re-parsing per poll would be too slow), so mid-turn updates lag until
+ * the turn completes. The UI warns at this size so the user can start a new chat.
+ */
+export const LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
 export interface ConversationTimeline {
   conversation: ConversationSummary;
   messages: NormalizedMessage[];
   boundSession?: BoundSession;
   liveScreen?: SessionScreen;
   messagePage?: ConversationMessagePage;
+  transcriptSizeBytes?: number;
 }
 
 export interface ConversationSearchResult {

@@ -1,5 +1,5 @@
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
-import type { ConversationTimeline, NormalizedMessage, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationTimeline, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -1246,6 +1246,25 @@ export function ConversationPane({
   const liveScreen = timeline?.liveScreen;
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = mobileChromeHidden;
+  const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
+  const [largeTranscriptWarningDismissed, setLargeTranscriptWarningDismissed] = useState(false);
+  useEffect(() => {
+    setLargeTranscriptWarningDismissed(
+      Boolean(largeTranscriptDismissKey && window.localStorage.getItem(largeTranscriptDismissKey)),
+    );
+  }, [largeTranscriptDismissKey]);
+  const largeTranscriptWarningVisible = Boolean(
+    timeline
+    && typeof timeline.transcriptSizeBytes === 'number'
+    && timeline.transcriptSizeBytes >= LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES
+    && !largeTranscriptWarningDismissed,
+  );
+  function dismissLargeTranscriptWarning(): void {
+    setLargeTranscriptWarningDismissed(true);
+    if (largeTranscriptDismissKey) {
+      window.localStorage.setItem(largeTranscriptDismissKey, new Date().toISOString());
+    }
+  }
   useEffect(() => {
     setLocalLiveDraft(undefined);
   }, [boundSession?.id, conversationKey]);
@@ -1508,6 +1527,23 @@ export function ConversationPane({
             )}
           </div>
         )
+      )}
+
+      {largeTranscriptWarningVisible && (
+        <div className="flex items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+          <span>
+            This chat&apos;s transcript is {Math.round((timeline.transcriptSizeBytes ?? 0) / (1024 * 1024))}MB.
+            Beyond {Math.round(LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES / (1024 * 1024))}MB, completed messages only
+            appear after each turn finishes — consider starting a new chat for snappier updates.
+          </span>
+          <button
+            type="button"
+            onClick={dismissLargeTranscriptWarning}
+            className="ml-auto shrink-0 rounded-lg border border-amber-400/30 px-2 py-1 text-amber-200 transition hover:bg-amber-500/20"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
       <div

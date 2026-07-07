@@ -1,5 +1,5 @@
 import fs from 'node:fs/promises';
-import type { ConversationSummary } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationSummary } from '@agent-console/shared';
 import { parseClaudeConversationFile } from '../providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../providers/transcripts/codex.js';
 import type { ProviderConversation } from '../providers/types.js';
@@ -15,6 +15,12 @@ interface CachedProviderConversation {
 // (LRU), always keeping the most recently used entry so the active conversation
 // stays warm even when it alone exceeds the cap.
 const MAX_CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
+
+// Serving a stale parse while the transcript is being appended to is only worth
+// it when re-parsing is genuinely expensive. Below this size the fresh parse is
+// fast enough for poll cadence, and staleness would hide completed messages that
+// the provider already wrote mid-turn.
+const STALE_WHILE_CHANGING_MIN_BYTES = LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES;
 
 const transcriptConversationCache = new Map<string, CachedProviderConversation>();
 
@@ -74,10 +80,12 @@ export async function loadProviderConversationFromSummary(
   try {
     const stat = await fs.stat(summary.transcriptPath);
     const cached = transcriptConversationCache.get(key);
+    const allowStale = options.allowStaleWhileChanging === true
+      && stat.size >= STALE_WHILE_CHANGING_MIN_BYTES;
     if (
       cached
       && (
-        options.allowStaleWhileChanging === true
+        allowStale
         || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
       )
     ) {

@@ -12,6 +12,7 @@ import { AuthService } from '../security/auth-service.js';
 import { LiveOutputReader } from '../sessions/live-output/reader.js';
 import { SessionManager } from '../sessions/session-manager.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
+import { statFileSafe } from '../providers/file-utils.js';
 import { nowIso } from '../lib/time.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
 
@@ -128,6 +129,7 @@ interface TimelineResponse {
   boundSession: BoundSession | undefined;
   liveScreen: undefined;
   messagePage: MessagePageInfo;
+  transcriptSizeBytes: number | undefined;
 }
 
 function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationSummary, session: BoundSession): void {
@@ -271,6 +273,9 @@ export async function registerConversationRoutes(
         boundSession: resolvedBoundSession,
         liveScreen: undefined,
         messagePage: emptyPage.pageInfo,
+        transcriptSizeBytes: summary.transcriptPath
+          ? (await statFileSafe(summary.transcriptPath))?.size
+          : undefined,
       };
     }
 
@@ -329,6 +334,9 @@ export async function registerConversationRoutes(
       boundSession: resolvedBoundSession,
       liveScreen: undefined,
       messagePage: pagedMessages.pageInfo,
+      transcriptSizeBytes: summary.transcriptPath
+        ? (await statFileSafe(summary.transcriptPath))?.size
+        : undefined,
     };
   });
 

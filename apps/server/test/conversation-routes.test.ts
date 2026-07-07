@@ -1017,7 +1017,7 @@ describe('conversation routes', () => {
     }
   });
 
-  it('reuses the cached transcript parse while a bound session is working', async () => {
+  it('re-parses small transcripts while a bound session is working so mid-turn messages appear', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const transcriptPath = path.join(tempDir, 'working-history.jsonl');
     const writeTranscript = async (assistantText: string) => {
@@ -1127,16 +1127,18 @@ describe('conversation routes', () => {
       expect(firstResponse.statusCode).toBe(200);
       expect(firstResponse.json().messages.map((message: NormalizedMessage) => message.text)).toContain('Loaded once from the transcript file.');
 
-      await writeTranscript('This changed transcript text should wait until the run is no longer working.');
+      await writeTranscript('This changed transcript text should appear while the run is still working.');
       const secondResponse = await app.inject({
         method: 'GET',
         url: '/api/conversations/demo/codex/working-history/messages?limit=80',
       });
 
+      // Small transcripts re-parse cheaply, so completed messages the provider
+      // wrote mid-turn are visible immediately; only large transcripts
+      // (STALE_WHILE_CHANGING_MIN_BYTES+) serve the stale parse while working.
       expect(secondResponse.statusCode).toBe(200);
       const secondTexts = secondResponse.json().messages.map((message: NormalizedMessage) => message.text);
-      expect(secondTexts).toContain('Loaded once from the transcript file.');
-      expect(secondTexts).not.toContain('This changed transcript text should wait until the run is no longer working.');
+      expect(secondTexts).toContain('This changed transcript text should appear while the run is still working.');
       expect(getConversation).not.toHaveBeenCalled();
     } finally {
       await app.close();
