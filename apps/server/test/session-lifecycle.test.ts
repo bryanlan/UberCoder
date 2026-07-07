@@ -294,6 +294,44 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('re-checks idle state inside the queued suspend so fresh activity cancels a stale suspension', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history:idle-race',
+      title: 'Idle race',
+      kind: 'history',
+    });
+    const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: sixDaysAgo,
+      isWorking: false,
+    });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(sixDaysAgo, session.id);
+    const staleIdleRow = db.boundSessions.getById(session.id)!;
+
+    // User activity lands after the reconcile loop snapshotted the idle row but
+    // before the queued suspend executes.
+    db.boundSessions.upsert({
+      ...staleIdleRow,
+      lastActivityAt: new Date().toISOString(),
+    });
+
+    await (manager as unknown as {
+      suspendIdleSession(session: typeof staleIdleRow): Promise<void>;
+    }).suspendIdleSession(staleIdleRow);
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    db.close();
+  });
+
   it('never suspends idle pending sessions', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

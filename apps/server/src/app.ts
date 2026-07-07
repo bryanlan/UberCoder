@@ -111,6 +111,12 @@ export async function buildApp(options: AppOptions = {}) {
   await indexing.start();
   sessions.startSessionReconciliation();
   void sessions.cleanupEndedSessionRuntimeDirs();
+  // Rebuild search rows for any project/provider whose FTS index is empty (e.g.
+  // after the v3 migration reconciled a database predating search-state
+  // tracking). No-op when rows exist; runs off the startup path.
+  void indexing.loadProjectMetadata({ backfillSearchIndex: true }).catch(() => {
+    app.log.warn('Startup search-index backfill failed; use project refresh to rebuild.');
+  });
 
   app.addHook('onClose', async () => {
     await indexing.stop();

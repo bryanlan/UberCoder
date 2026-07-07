@@ -451,7 +451,15 @@ export class SessionManager {
     return idleSinceMs > 0 && Date.now() - idleSinceMs >= SESSION_IDLE_SUSPEND_MS;
   }
 
-  private async suspendIdleSession(session: BoundSession): Promise<void> {
+  private async suspendIdleSession(staleSession: BoundSession): Promise<void> {
+    // The idle decision was made before this callback reached the front of the
+    // session's operation queue; inputs, binds, or restores may have run since.
+    // Re-read the row and re-check so fresh activity or a new restore grace is
+    // never followed by a stale kill.
+    const session = this.db.boundSessions.getById(staleSession.id);
+    if (!session || !session.shouldRestore || !this.isIdleSuspendable(session)) {
+      return;
+    }
     if (this.suspendedSessionIds.has(session.id)) {
       return;
     }
