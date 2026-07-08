@@ -129,6 +129,52 @@ describe('timeline merge', () => {
     ]);
   });
 
+  it('drops live assistant chunks already contained in the durable transcript answer', () => {
+    const durableAnswer = [
+      'The deploy finished and the smoke test passed for the visible console.',
+      'I also removed the stale reconnect banner so restored sessions no longer show duplicate progress rows.',
+      'The only remaining note is that Playwright e2e still needs the opt-in headed browser run.',
+    ].join(' ');
+    const containedLiveChunk = [
+      'removed the stale reconnect banner so restored sessions no longer show',
+      'duplicate progress rows. The only remaining note is that Playwright e2e',
+      'still needs the opt-in headed browser run.',
+    ].join(' ');
+    const transcript = [
+      message({ id: 'provider-user-1', role: 'user', text: 'is the console fixed?', timestamp: '2026-07-03T18:00:00.000Z' }),
+      message({ id: 'provider-assistant-1', role: 'assistant', text: durableAnswer, timestamp: '2026-07-03T18:00:05.000Z' }),
+    ];
+
+    const merged = mergeTimelineMessages({
+      allMessages: transcript,
+      visibleMessages: transcript,
+      liveMessages: [
+        message({
+          id: 'live-contained-answer',
+          role: 'assistant',
+          text: containedLiveChunk,
+          timestamp: '2026-07-03T18:00:08.000Z',
+          source: 'live-output',
+          lifecycle: 'pending',
+        }),
+        message({
+          id: 'live-user-2',
+          role: 'user',
+          text: 'what should I run next?',
+          timestamp: '2026-07-03T18:00:09.000Z',
+          source: 'user-input',
+          lifecycle: 'pending',
+        }),
+      ],
+    });
+
+    expect(merged.mergedMessages.map((entry) => entry.id)).toEqual([
+      'provider-user-1',
+      'provider-assistant-1',
+      'live-user-2',
+    ]);
+  });
+
   it('keeps same-role messages together at page boundaries', () => {
     expect(messagesShareTimelinePageRun(
       message({ id: 'a1', role: 'assistant', text: 'one', timestamp: '2026-03-14T18:00:00.000Z' }),
