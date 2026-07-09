@@ -1,8 +1,8 @@
 ---
 doc_type: fileindex
 managed_by: sync-repo-docs
-current_through_commit: 5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e
-current_through_date: 2026-07-07T00:29:08-04:00
+current_through_commit: 593d9203951600d256aae819acb5e2b5c1b2dd60
+current_through_date: 2026-07-07T08:49:46-04:00
 ---
 
 # File Index
@@ -55,6 +55,9 @@ current_through_date: 2026-07-07T00:29:08-04:00
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor transcript discovery and launch command adapters.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
+- `apps/server/src/lib/provider-conversation-cache.ts` - transcript parse cache; small changing
+  transcripts re-parse during active turns, while transcripts above the shared large-transcript
+  threshold may serve a stale parse until the turn completes.
 - `apps/server/src/security/auth-service.ts` and `password.ts` - cookie auth, Tailscale identity bootstrap, and password verification.
 - `apps/server/src/routes/conversations.ts` - provider/live timeline merge, message pagination,
   metadata-only refreshes, transcript-backed live-message duplicate filtering, and live-screen
@@ -98,7 +101,11 @@ current_through_date: 2026-07-07T00:29:08-04:00
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
-  and display shell surfaces.
+  and display shell surfaces. `ConversationPane.tsx` also renders the dismissible warning when a
+  conversation transcript is large enough that active-turn updates may lag behind provider writes.
+- `packages/shared/src/index.ts` - shared API contracts, including
+  `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES`, which must stay aligned between the server cache,
+  conversation route response, and web warning.
 - `apps/web/src/pages/SettingsPage.tsx` - explicit project/config management UI.
 - `apps/web/src/lib/api.ts` - web API client boundary.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
@@ -158,10 +165,12 @@ Test and verification anchors:
 - Live output, history pagination, duplicate filtering, or text latency changes should review
   `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/timeline-merge.ts`,
   `apps/server/src/sessions/live-output/`, `apps/server/src/sessions/transcript-watcher.ts`,
+  `apps/server/src/lib/provider-conversation-cache.ts`, `packages/shared/src/index.ts`,
   `apps/server/src/providers/transcripts/codex.ts`,
   `apps/server/test/timeline-merge.test.ts`, `apps/server/test/transcript-watcher.test.ts`,
   `apps/server/test/live-output.test.ts`,
   `apps/server/test/conversation-routes.test.ts`,
+  `apps/server/test/provider-conversation-cache.test.ts`,
   `apps/web/src/features/conversation/useConversationData.ts`,
   `apps/web/src/features/realtime/reducers.ts`, `apps/web/src/features/conversation/transcript-turns.tsx`,
   and `apps/web/src/components/ConversationPane.tsx`.

@@ -1,8 +1,8 @@
 ---
 doc_type: architecture
 managed_by: sync-repo-docs
-current_through_commit: 5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e
-current_through_date: 2026-07-07T00:29:08-04:00
+current_through_commit: 593d9203951600d256aae819acb5e2b5c1b2dd60
+current_through_date: 2026-07-07T08:49:46-04:00
 ---
 
 # Architecture
@@ -46,6 +46,12 @@ Conversation timelines merge provider transcripts with live session event logs a
 boundary. `apps/server/src/routes/conversations.ts` owns pagination through `limit` and `before`,
 supports metadata-only polling with `limit=0`, and keeps bound live-session metadata available
 without forcing the web app to carry the full history payload on every refresh.
+`apps/server/src/lib/provider-conversation-cache.ts` re-parses small changing transcripts even while
+a bound session is working so provider-written mid-turn messages appear promptly. Transcripts at or
+above `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES` in `packages/shared/src/index.ts` may serve a stale
+parse during the active turn to avoid expensive poll-time reparsing; the conversation route returns
+`transcriptSizeBytes`, and `ConversationPane.tsx` shows a dismissible large-chat warning for that
+case.
 `apps/server/src/sessions/timeline-merge.ts` owns the duplicate-suppression contract between
 durable transcript messages and event-log live messages: it compares role, timestamp buckets, exact
 short-window matches, and longer containment matches so the same assistant output does not reappear

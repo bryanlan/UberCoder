@@ -1,8 +1,8 @@
 ---
 doc_type: running_tests
 managed_by: sync-repo-docs
-current_through_commit: 5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e
-current_through_date: 2026-07-07T00:29:08-04:00
+current_through_commit: 593d9203951600d256aae819acb5e2b5c1b2dd60
+current_through_date: 2026-07-07T08:49:46-04:00
 ---
 
 # Running Tests
@@ -17,7 +17,7 @@ current_through_date: 2026-07-07T00:29:08-04:00
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
-- Timeline merge, transcript catch-up, or duplicated bubble fixes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- timeline-merge transcript-watcher conversation-routes`.
+- Timeline merge, transcript catch-up, stale transcript cache, or duplicated bubble fixes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- timeline-merge transcript-watcher conversation-routes provider-conversation-cache`.
 - Raw screen, text-bypass, and conversation-pane transcript boundaries: `npm run test -w @agent-console/web -- ConversationPane`.
 - Live session recovery and route handling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-routes tmux-health`.
 - Pending Codex progress or stale bound timeline polling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- providers && npm run test -w @agent-console/web -- useConversationData transcript-turns`.

@@ -1,18 +1,31 @@
 {
   "changed_paths": [
+    "AGENTS.md",
+    "apps/server/src/lib/provider-conversation-cache.ts",
+    "apps/server/src/routes/conversations.ts",
+    "apps/server/test/conversation-routes.test.ts",
+    "apps/server/test/provider-conversation-cache.test.ts",
+    "apps/web/src/components/ConversationPane.tsx",
     "docs/agent_docs/commit_dossier.json",
     "docs/agent_docs/commit_dossier.md",
     "docs/agent_docs/doc_status.json",
     "docs/agent_docs/running_tests.md",
     "docs/architecture.md",
-    "docs/fileindex.md"
+    "docs/fileindex.md",
+    "packages/shared/src/index.ts"
   ],
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e",
-      "date": "2026-07-07T00:29:08-04:00",
+      "commit": "1c68f067098e99c4513751fc47a97c3a48ce86e3",
+      "date": "2026-07-07T02:09:46-04:00",
       "files": [
+        {
+          "paths": [
+            "AGENTS.md"
+          ],
+          "status": "M"
+        },
         {
           "paths": [
             "docs/agent_docs/commit_dossier.json"
@@ -50,24 +63,69 @@
           "status": "M"
         }
       ],
-      "short_commit": "5ac8c9f",
-      "subject": "Sync repo docs"
+      "short_commit": "1c68f06",
+      "subject": "Improve agent documentation navigation"
+    },
+    {
+      "author": "bryanlan",
+      "commit": "593d9203951600d256aae819acb5e2b5c1b2dd60",
+      "date": "2026-07-07T08:49:46-04:00",
+      "files": [
+        {
+          "paths": [
+            "apps/server/src/lib/provider-conversation-cache.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/src/routes/conversations.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/conversation-routes.test.ts"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "apps/server/test/provider-conversation-cache.test.ts"
+          ],
+          "status": "A"
+        },
+        {
+          "paths": [
+            "apps/web/src/components/ConversationPane.tsx"
+          ],
+          "status": "M"
+        },
+        {
+          "paths": [
+            "packages/shared/src/index.ts"
+          ],
+          "status": "M"
+        }
+      ],
+      "short_commit": "593d920",
+      "subject": "Show mid-turn transcript updates and warn on large chats"
     }
   ],
   "docs_current_through": {
-    "commit": "35f7d35c9fcaadb279dba096c4132de19f01b630",
-    "date": "2026-07-06T21:14:04-04:00"
-  },
-  "from_commit": "35f7d35c9fcaadb279dba096c4132de19f01b630",
-  "generated_at": "2026-07-07T06:08:17+00:00",
-  "head": {
     "commit": "5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e",
-    "date": "2026-07-07T00:29:08-04:00",
-    "short_commit": "5ac8c9f"
+    "date": "2026-07-07T00:29:08-04:00"
+  },
+  "from_commit": "5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e",
+  "generated_at": "2026-07-09T04:44:55+00:00",
+  "head": {
+    "commit": "593d9203951600d256aae819acb5e2b5c1b2dd60",
+    "date": "2026-07-07T08:49:46-04:00",
+    "short_commit": "593d920"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "5ac8c9f40fe4e05b72c21596afea8ee510ab9c5e",
+  "to_commit": "593d9203951600d256aae819acb5e2b5c1b2dd60",
   "worktree_dirty": true
 }
