@@ -10,8 +10,8 @@
   "commits": [
     {
       "author": "bryanlan",
-      "commit": "82eb6ff5233500cc6d5fbbe760e2849998ac3988",
-      "date": "2026-07-09T00:46:35-04:00",
+      "commit": "37bdd6179e69f6b9d139465623ef51bd55adf378",
+      "date": "2026-07-10T00:20:13-04:00",
       "files": [
         {
           "paths": [
@@ -50,24 +50,24 @@
           "status": "M"
         }
       ],
-      "short_commit": "82eb6ff",
+      "short_commit": "37bdd61",
       "subject": "Sync repo docs"
     }
   ],
   "docs_current_through": {
-    "commit": "593d9203951600d256aae819acb5e2b5c1b2dd60",
-    "date": "2026-07-07T08:49:46-04:00"
-  },
-  "from_commit": "593d9203951600d256aae819acb5e2b5c1b2dd60",
-  "generated_at": "2026-07-10T04:18:42+00:00",
-  "head": {
     "commit": "82eb6ff5233500cc6d5fbbe760e2849998ac3988",
-    "date": "2026-07-09T00:46:35-04:00",
-    "short_commit": "82eb6ff"
+    "date": "2026-07-09T00:46:35-04:00"
+  },
+  "from_commit": "82eb6ff5233500cc6d5fbbe760e2849998ac3988",
+  "generated_at": "2026-07-11T04:44:35+00:00",
+  "head": {
+    "commit": "37bdd6179e69f6b9d139465623ef51bd55adf378",
+    "date": "2026-07-10T00:20:13-04:00",
+    "short_commit": "37bdd61"
   },
   "mode": "delta",
   "recent_commits": [],
   "repo": "/home/bryan/code/UberCoder/agent-console-mvp/agent-console",
-  "to_commit": "82eb6ff5233500cc6d5fbbe760e2849998ac3988",
+  "to_commit": "37bdd6179e69f6b9d139465623ef51bd55adf378",
   "worktree_dirty": true
 }
