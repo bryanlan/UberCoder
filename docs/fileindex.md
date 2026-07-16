@@ -1,15 +1,8 @@
----
-doc_type: fileindex
-managed_by: sync-repo-docs
-current_through_commit: 37bdd6179e69f6b9d139465623ef51bd55adf378
-current_through_date: 2026-07-10T00:20:13-04:00
----
-
 # File Index
 ## Top-Level Layout
 - `apps/` - JavaScript/TypeScript source for the Fastify server and React PWA.
 - `config/` - configuration files.
-- `docs/` - repository documentation and managed doc-sync metadata.
+- `docs/` - repository navigation, architecture, and test guidance.
 - `packages/` - JavaScript/TypeScript source.
 - `scripts/` - operator or development scripts.
 - `test-results/` - ignored/generated Playwright evidence; rerun e2e before treating contents as
@@ -111,6 +104,8 @@ current_through_date: 2026-07-10T00:20:13-04:00
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
 - `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
+- `scripts/verify-live-console.mjs` - opt-in visible-browser check for live Agent Console UX
+  against a running backend and Chrome CDP endpoint.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/command-and-proxy.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/config.test.ts` - key tracked file or entrypoint for this repo.

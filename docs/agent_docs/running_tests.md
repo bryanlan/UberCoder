@@ -1,17 +1,13 @@
----
-doc_type: running_tests
-managed_by: sync-repo-docs
-current_through_commit: 37bdd6179e69f6b9d139465623ef51bd55adf378
-current_through_date: 2026-07-10T00:20:13-04:00
----
-
 # Running Tests
 ## Primary Commands
-- `npm test` - builds shared package and runs server Vitest suite; passed on 2026-07-03 with 33 files and 270 tests.
-- `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search` - focused conversation search, live-session search, result ranking, hidden-conversation filtering, and cached-index backfill coverage; passed on 2026-06-26 with 17 tests.
-- `npm run typecheck` - builds shared package and typechecks server and web; passed on 2026-07-03.
-- `npm run build` - builds shared, server, and web/PWA bundles; passed on 2026-07-03.
-- `npm run test:e2e` - Playwright settings suite; passed on 2026-07-03 with 4 tests on isolated backend/web servers.
+- `npm test` - builds the shared package and runs the server Vitest suite.
+- `npm run typecheck` - builds the shared package, then typechecks the server and web packages.
+- `npm run build` - builds the shared package, server package, and web/PWA bundle.
+- `npm run test:e2e` - builds the shared package and runs Playwright browser coverage on isolated
+  backend/web servers.
+- `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search` -
+  focused conversation search, live-session search, result ranking, hidden-conversation filtering,
+  and cached-index backfill coverage.
 
 ## Targeted Test Patterns
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
@@ -24,6 +20,7 @@ current_through_date: 2026-07-10T00:20:13-04:00
 - Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
 - Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`.
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.
+- Visible live-console UX check: `npm run verify:live-console -- --base-url http://127.0.0.1:4317 --cdp-url http://127.0.0.1:9222 --password '<login-password>' --claude-url <conversation-route> --codex-url <conversation-route>` only when a backend and visible Chrome CDP endpoint are already running and the Claude/Codex live sessions are deliberately chosen. The verifier attaches to visible Chrome, sends `/model` plus model-selection input, and submits `Reply exactly ...` marker prompts through Text Bypass, so it changes real model, session, and transcript state. Omitted route defaults are Bryan-specific hard-coded pending sessions and should not be used unless that is the intended target.
 
 ## Environment and Fixtures
 - Install with `npm install`.
