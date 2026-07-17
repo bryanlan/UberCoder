@@ -53,11 +53,12 @@ provider transcript file updates and should be considered part of the same timel
 contract.
 
 Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
-state, while user-visible incremental output comes through
-`apps/server/src/sessions/live-output/reader.ts` and the event log attached to the bound session. The
-conversation route trims the live screen against the durable transcript/event-log tail before
-returning it, so already-rendered scrollback stays in history bubbles and only the active live tail
-renders as terminal output. Codex transcript parsing prefers response-backed display messages over
+state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses from
+`apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,
+not raw screen content; `apps/web/src/features/conversation/useConversationData.ts` polls the
+screen route separately for the live terminal/status panel. User-visible incremental conversation
+output comes through `apps/server/src/sessions/live-output/reader.ts` and the event log attached to
+the bound session. Codex transcript parsing prefers response-backed display messages over
 near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
 from the visible transcript while keeping the full parsed message set available for indexing. Codex
 commentary-phase assistant records are treated as pending progress, and only the latest pending
@@ -147,7 +148,7 @@ stuck composer.
   `apps/server/test/live-output.test.ts`, and
   `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
   and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
-  merge, pagination, duplicate filtering, live-screen trimming, or refresh behavior.
+  merge, pagination, duplicate filtering, live-screen polling, or refresh behavior.
 - Raw screen rendering belongs to interactive/status display, not durable transcript construction.
   Review `apps/web/src/components/ConversationPane.tsx`,
   `apps/web/src/components/ConversationPane.test.tsx`,
@@ -169,9 +170,10 @@ stuck composer.
   `apps/server/src/routes/conversations.ts`, `apps/server/src/indexing/indexing-service.ts`,
   provider transcript adapters, `apps/server/src/sessions/pending-adoption.ts`, and
   conversation/indexing tests aligned.
-- The web app keeps paged history separately from metadata polling. `limit=0` refreshes live
-  metadata and screen state, while the infinite history query loads durable messages in pages and
-  retains prior pages during transient refreshes.
+- The web app keeps paged history separately from metadata and screen polling. `limit=0` refreshes
+  conversation and bound-session metadata only; live screen state is fetched separately through
+  `/api/sessions/:sessionId/screen`, while the infinite history query loads durable messages in
+  pages and retains prior pages during transient refreshes.
 - Playwright e2e uses isolated backend/web servers by default (`4517`/`5178`) and does not reuse existing
   local servers. This prevents settings tests from accidentally attaching to Bryan's real
   `~/.config/agent-console/config.json`.

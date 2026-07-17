@@ -53,8 +53,8 @@
   threshold may serve a stale parse until the turn completes.
 - `apps/server/src/security/auth-service.ts` and `password.ts` - cookie auth, Tailscale identity bootstrap, and password verification.
 - `apps/server/src/routes/conversations.ts` - provider/live timeline merge, message pagination,
-  metadata-only refreshes, transcript-backed live-message duplicate filtering, and live-screen
-  tail trimming.
+  metadata-only refreshes, transcript-backed live-message duplicate filtering, and bound-session
+  metadata for the separate live-screen fetch path.
 - `apps/server/src/routes/search.ts` - authenticated `/api/search/conversations` route and query
   validation.
 - `apps/server/src/search/conversation-search.ts` - FTS query construction, sanitized message
@@ -80,9 +80,9 @@
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and session metadata options.
-- `apps/web/src/features/conversation/useConversationData.ts` - two-query conversation metadata
-  and timeline-message fetch path with paged history, live refresh behavior, and completed-tail
-  polling while durable transcripts catch up after a bound session finishes.
+- `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,
+  paged timeline-message query, separate session-screen polling, live refresh behavior, and
+  completed-tail polling while durable transcripts catch up after a bound session finishes.
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
