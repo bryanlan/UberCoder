@@ -153,7 +153,7 @@ describe('project routes', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(observeSessions).toHaveBeenCalledOnce();
+      expect(observeSessions).not.toHaveBeenCalled();
       expect(refreshAll).toHaveBeenCalledOnce();
       expect(autoTrackConversations).toHaveBeenCalledOnce();
       expect(autoTrackConversations.mock.calls[0]?.[0]).toEqual([

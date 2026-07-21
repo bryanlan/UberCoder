@@ -90,7 +90,6 @@ export async function registerProjectRoutes(
       reply.code(400).send({ error: 'Invalid project refresh payload.', details: parsedBody.error.flatten() });
       return;
     }
-    await sessions.observeSessions();
     await indexing.refreshAll();
     if (parsedBody.data.autoTrackRecent === true) {
       const autoTrackedAt = nowIso();
