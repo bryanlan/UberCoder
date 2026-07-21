@@ -37,7 +37,8 @@
 - `playwright.config.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/auth.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
-- `apps/server/src/routes/projects.ts` - key tracked file or entrypoint for this repo.
+- `apps/server/src/routes/projects.ts` - project tree reads and explicit refresh orchestration,
+  including the opt-in eight-hour scan for recent unbound Codex/Claude conversations.
 - `apps/server/src/routes/sessions.ts` - session input/screen/raw-output routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
@@ -47,6 +48,8 @@
 - `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor transcript discovery and launch command adapters.
+- `apps/server/src/providers/transcripts/claude.ts` - Claude JSONL parsing and active-branch
+  selection for parent-linked sibling resume histories.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
 - `apps/server/src/lib/provider-conversation-cache.ts` - transcript parse cache; small changing
   transcripts re-parse during active turns, while transcripts above the shared large-transcript
@@ -69,8 +72,8 @@
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper records, and event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
-  working state, event-log observation, text entry, literal selection-keystroke detection, and
-  recency timestamps.
+  bounded recent-conversation auto-tracking, working state, event-log observation, text entry,
+  literal selection-keystroke detection, and recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
 - `apps/server/src/sessions/timeline-merge.ts` - server-owned merge and duplicate-suppression
@@ -90,7 +93,8 @@
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
-  404 selection, sidebar ordering, and work-mode derivation.
+  404 selection, sidebar ordering, work-mode derivation, and separation of auto-track indicator
+  freshness from genuine activity ordering.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
@@ -152,6 +156,10 @@ Test and verification anchors:
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-recency.test.ts`,
   `apps/server/test/session-lifecycle.test.ts`,
   `apps/web/src/components/Sidebar.tsx`, and any API response shape consumed by the sidebar.
+- Top-left refresh auto-tracking changes should review `apps/server/src/routes/projects.ts`,
+  `apps/server/src/sessions/session-manager.ts`, both provider transcript adapters,
+  `apps/web/src/App.tsx`, `apps/web/src/features/navigation/sidebar-projects.ts`, and their focused
+  route, lifecycle, provider, database, and sidebar tests together.
 - Pending Codex first-turn input or live keystroke changes should review
   `apps/server/src/routes/sessions.ts`, `apps/server/src/sessions/session-manager.ts`,
   `apps/server/test/session-routes.test.ts`, `apps/server/test/session-pending-first-turn.test.ts`,

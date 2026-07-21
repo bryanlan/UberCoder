@@ -7,6 +7,7 @@ import type {
   CreateProjectSettingsRequest,
   DirectoryBrowserResponse,
   EditableProjectSettings,
+  RefreshTreeRequest,
   RenameConversationRequest,
   SettingsSummary,
   SessionScreen,
@@ -71,7 +72,11 @@ export const api = {
       signal: options.signal,
     });
   },
-  refreshTree: (csrfToken?: string) => request<TreeResponse>('/api/projects/refresh', { method: 'POST', body: '{}' }, csrfToken),
+  refreshTree: (csrfToken?: string, body: RefreshTreeRequest = {}) => request<TreeResponse>(
+    '/api/projects/refresh',
+    { method: 'POST', body: JSON.stringify(body) },
+    csrfToken,
+  ),
   timeline: (
     projectSlug: string,
     provider: string,

@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 
-export const CURRENT_SCHEMA_VERSION = 4;
+export const CURRENT_SCHEMA_VERSION = 5;
 
 interface Migration {
   version: number;
@@ -71,6 +71,7 @@ const MIGRATIONS: Migration[] = [
           last_activity_at text,
           last_output_at text,
           last_completed_at text,
+          auto_tracked_at text,
           is_working integer not null default 0,
           pid integer,
           raw_log_path text,
@@ -179,9 +180,9 @@ const MIGRATIONS: Migration[] = [
     version: 3,
     name: 'parse-cache-parser-version-and-search-state-reconciliation',
     up(sqlite) {
-      // Default matches the current TRANSCRIPT_PARSER_VERSION so rows written by
-      // the same parser stay valid; future parser changes bump the constant and
-      // naturally miss these rows.
+      // Version 1 was the parser version when this migration was introduced.
+      // Current writes always supply their parser version explicitly, so future
+      // parser changes naturally miss older rows.
       addColumnIfMissing(sqlite, 'transcript_parse_cache', 'parser_version', 'parser_version integer not null default 1');
       // Incremental search indexing purges vanished conversations via
       // conversation_search_state; FTS rows indexed before that table existed
@@ -203,6 +204,13 @@ const MIGRATIONS: Migration[] = [
     name: 'drop-session-interaction-summaries',
     up(sqlite) {
       sqlite.exec(`drop table if exists session_interaction_summaries;`);
+    },
+  },
+  {
+    version: 5,
+    name: 'auto-tracked-session-provenance',
+    up(sqlite) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'auto_tracked_at', 'auto_tracked_at text');
     },
   },
 ];

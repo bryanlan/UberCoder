@@ -65,8 +65,38 @@ function extractClaudeMessage(record: Record<string, unknown>): { role: Normaliz
   return undefined;
 }
 
+function activeClaudeBranchRecordUuids(records: Array<{ record: Record<string, unknown> }>): Set<string> | undefined {
+  const recordsByUuid = new Map<string, Record<string, unknown>>();
+  let leafUuid: string | undefined;
+
+  for (const { record } of records) {
+    const uuid = typeof record.uuid === 'string' ? record.uuid : undefined;
+    if (!uuid) {
+      continue;
+    }
+    recordsByUuid.set(uuid, record);
+    if (extractClaudeMessage(record)) {
+      leafUuid = uuid;
+    }
+  }
+
+  if (!leafUuid) {
+    return undefined;
+  }
+
+  const activeUuids = new Set<string>();
+  let cursor: string | undefined = leafUuid;
+  while (cursor && !activeUuids.has(cursor)) {
+    activeUuids.add(cursor);
+    const record = recordsByUuid.get(cursor);
+    cursor = typeof record?.parentUuid === 'string' ? record.parentUuid : undefined;
+  }
+  return activeUuids;
+}
+
 export async function parseClaudeConversationFile(input: TranscriptParseInput): Promise<ParsedTranscript> {
   const { records, fallbackTime } = await loadJsonlRecords(input.filePath);
+  const activeBranchUuids = activeClaudeBranchRecordUuids(records);
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
@@ -90,6 +120,11 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
       if (msg && typeof msg.model === 'string') {
         model = msg.model;
       }
+    }
+
+    const recordUuid = typeof record.uuid === 'string' ? record.uuid : undefined;
+    if (activeBranchUuids && recordUuid && !activeBranchUuids.has(recordUuid)) {
+      continue;
     }
 
     const extracted = extractClaudeMessage(record);

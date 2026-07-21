@@ -23,6 +23,7 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
     lastActivityAt: input.lastActivityAt,
     lastOutputAt: input.lastOutputAt,
     lastCompletedAt: input.lastCompletedAt,
+    autoTrackedAt: input.autoTrackedAt,
     isWorking: input.isWorking ?? false,
     pid: input.pid,
     rawLogPath: input.rawLogPath,
@@ -83,12 +84,32 @@ describe('AppDatabase', () => {
       'should_restore',
       'last_output_at',
       'last_completed_at',
+      'auto_tracked_at',
       'is_working',
     ]));
     expect(session).toMatchObject({
       id: 'legacy-session',
       shouldRestore: true,
       resumeConversationRef: 'legacy-ref',
+    });
+    db.close();
+  });
+
+  it('round-trips auto-tracked session provenance separately from activity recency', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+
+    db.boundSessions.upsert(boundSession({
+      id: 'auto-tracked-session',
+      conversationRef: 'recent-external-conversation',
+      updatedAt: '2026-03-07T08:00:00.000Z',
+      autoTrackedAt: '2026-03-07T08:00:00.000Z',
+    }));
+
+    expect(db.boundSessions.getById('auto-tracked-session')).toMatchObject({
+      autoTrackedAt: '2026-03-07T08:00:00.000Z',
+      lastActivityAt: undefined,
+      lastCompletedAt: undefined,
     });
     db.close();
   });

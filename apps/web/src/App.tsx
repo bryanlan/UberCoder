@@ -417,7 +417,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   });
 
   const refreshMutation = useMutation({
-    mutationFn: () => api.refreshTree(authQuery.data?.csrfToken),
+    mutationFn: () => api.refreshTree(authQuery.data?.csrfToken, { autoTrackRecent: true }),
     onSuccess: (data) => {
       setActionError(undefined);
       queryClient.setQueryData(['tree'], data);

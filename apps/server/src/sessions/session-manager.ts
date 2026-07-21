@@ -56,6 +56,7 @@ const SESSION_MODEL_METADATA_KEY = 'lastLiveModel';
 const SESSION_MODEL_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
+const AUTO_TRACK_CONCURRENCY = 2;
 // Sessions idle this long stop being kept alive (and stop being auto-restored by
 // reconciliation). Their rows stay bound and tree-visible, so work-mode
 // conversations never disappear; selecting one restores its tmux session on demand.
@@ -222,6 +223,17 @@ interface SessionManagerLogger {
   warn(bindings: unknown, message?: string): void;
 }
 
+export interface AutoTrackConversationsResult {
+  attempted: number;
+  tracked: BoundSession[];
+  failed: Array<{
+    projectSlug: string;
+    provider: ProviderId;
+    conversationRef: string;
+    error: string;
+  }>;
+}
+
 export class SessionManager {
   private readonly outputWatchers = new OutputWatcherRegistry();
   private readonly transcriptWatchers = new TranscriptWatcherRegistry();
@@ -233,6 +245,9 @@ export class SessionManager {
   // reconciliation cycle does not re-check tmux liveness for every idle session.
   private readonly suspendedSessionIds = new Set<string>();
   private readonly suspensionGraceUntilMs = new Map<string, number>();
+  private readonly conversationBindRuns = new Map<string, Promise<BoundSession>>();
+  private readonly autoTrackLaunchQueue: Array<() => void> = [];
+  private autoTrackActiveLaunches = 0;
   private reconciliationRun?: Promise<void>;
   private stopped = false;
 
@@ -812,11 +827,138 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    autoTrackedAt?: string;
   }): Promise<BoundSession> {
-    const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
-    const sessionId = existing?.id ?? randomUUID();
-    const result = await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
-    return result.session;
+    const bindKey = `${input.project.slug}:${input.provider.id}:${input.conversationRef}`;
+    const activeRun = this.conversationBindRuns.get(bindKey);
+    if (activeRun) {
+      return this.applyAutoTrackProvenance(await activeRun, input.autoTrackedAt);
+    }
+
+    const run = (async () => {
+      const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
+      const sessionId = existing?.id ?? randomUUID();
+      const result = await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
+      return result.session;
+    })();
+    this.conversationBindRuns.set(bindKey, run);
+    try {
+      return this.applyAutoTrackProvenance(await run, input.autoTrackedAt);
+    } finally {
+      if (this.conversationBindRuns.get(bindKey) === run) {
+        this.conversationBindRuns.delete(bindKey);
+      }
+    }
+  }
+
+  private applyAutoTrackProvenance(session: BoundSession, autoTrackedAt?: string): BoundSession {
+    if (!autoTrackedAt || session.autoTrackedAt === autoTrackedAt) {
+      return session;
+    }
+    const current = this.db.boundSessions.getById(session.id) ?? session;
+    const autoTrackedSession = { ...current, autoTrackedAt };
+    this.db.boundSessions.upsert(autoTrackedSession);
+    this.eventBus.emit({ type: 'session.updated', session: autoTrackedSession });
+    return autoTrackedSession;
+  }
+
+  private acquireAutoTrackLaunchSlot(): Promise<void> {
+    if (this.autoTrackActiveLaunches < AUTO_TRACK_CONCURRENCY) {
+      this.autoTrackActiveLaunches += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.autoTrackLaunchQueue.push(() => {
+        this.autoTrackActiveLaunches += 1;
+        resolve();
+      });
+    });
+  }
+
+  private releaseAutoTrackLaunchSlot(): void {
+    this.autoTrackActiveLaunches = Math.max(0, this.autoTrackActiveLaunches - 1);
+    const next = this.autoTrackLaunchQueue.shift();
+    if (next) {
+      next();
+    }
+  }
+
+  private async runWithAutoTrackLaunchSlot<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquireAutoTrackLaunchSlot();
+    try {
+      return await fn();
+    } finally {
+      this.releaseAutoTrackLaunchSlot();
+    }
+  }
+
+  async autoTrackConversations(
+    conversations: ConversationSummary[],
+    autoTrackedAt = nowIso(),
+  ): Promise<AutoTrackConversationsResult> {
+    const uniqueConversations = [...new Map(
+      conversations
+        .filter((conversation) => conversation.kind === 'history')
+        .map((conversation) => [
+          `${conversation.projectSlug}:${conversation.provider}:${conversation.ref}`,
+          conversation,
+        ]),
+    ).values()];
+    const tracked: BoundSession[] = [];
+    const failed: AutoTrackConversationsResult['failed'] = [];
+    const dependencies = this.recoveryDependencies;
+    let nextIndex = 0;
+
+    const runWorker = async (): Promise<void> => {
+      while (nextIndex < uniqueConversations.length) {
+        const conversation = uniqueConversations[nextIndex++];
+        if (!conversation) {
+          continue;
+        }
+        try {
+          if (!dependencies) {
+            throw new Error('Session recovery dependencies are unavailable.');
+          }
+          const project = await dependencies.projectService.getProjectBySlug(conversation.projectSlug);
+          if (!project) {
+            throw new Error('Project not found.');
+          }
+          const provider = dependencies.providerRegistry.get(conversation.provider);
+          const providerSettings = dependencies.projectService.getMergedProviderSettings(project, conversation.provider);
+          if (!providerSettings.enabled) {
+            throw new Error('Provider is disabled.');
+          }
+          tracked.push(await this.runWithAutoTrackLaunchSlot(() => this.bindConversation({
+            project,
+            provider,
+            providerSettings,
+            conversationRef: conversation.ref,
+            title: conversation.title,
+            kind: 'history',
+            autoTrackedAt,
+          })));
+        } catch (error) {
+          const failure = {
+            projectSlug: conversation.projectSlug,
+            provider: conversation.provider,
+            conversationRef: conversation.ref,
+            error: error instanceof Error ? error.message : 'Unknown auto-track failure.',
+          };
+          failed.push(failure);
+          this.logger?.warn(failure, 'Failed to auto-track recent provider conversation.');
+        }
+      }
+    };
+
+    await Promise.all(Array.from(
+      { length: Math.min(AUTO_TRACK_CONCURRENCY, uniqueConversations.length) },
+      () => runWorker(),
+    ));
+    return {
+      attempted: uniqueConversations.length,
+      tracked,
+      failed,
+    };
   }
 
   private async bindConversationInternal(input: {
@@ -827,6 +969,7 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    autoTrackedAt?: string;
   }, sessionId: string): Promise<SessionCommandResult> {
     const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
@@ -868,6 +1011,7 @@ export class SessionManager {
       lastActivityAt: initialPrompt ? now : undefined,
       lastOutputAt: undefined,
       lastCompletedAt: undefined,
+      autoTrackedAt: input.autoTrackedAt,
       isWorking: false,
       rawLogPath,
       eventLogPath,

@@ -36,6 +36,119 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('auto-tracks unique indexed conversations with failure isolation and separate provenance', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const recentConversation = {
+      ref: 'recent-external-conversation',
+      kind: 'history' as const,
+      projectSlug: 'demo',
+      provider: 'codex' as const,
+      title: 'Recent external conversation',
+      updatedAt: '2026-03-07T07:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    };
+
+    const result = await manager.autoTrackConversations([
+      recentConversation,
+      recentConversation,
+      { ...recentConversation, ref: 'missing-project-conversation', projectSlug: 'missing' },
+    ], '2026-03-07T08:00:00.000Z');
+
+    expect(result.attempted).toBe(2);
+    expect(result.tracked).toHaveLength(1);
+    expect(result.failed).toEqual([expect.objectContaining({
+      projectSlug: 'missing',
+      conversationRef: 'missing-project-conversation',
+      error: 'Project not found.',
+    })]);
+    expect(tmux.created).toHaveLength(1);
+    expect(db.boundSessions.getById(result.tracked[0]!.id)).toMatchObject({
+      conversationRef: 'recent-external-conversation',
+      resumeConversationRef: 'recent-external-conversation',
+      autoTrackedAt: '2026-03-07T08:00:00.000Z',
+      lastActivityAt: undefined,
+      lastCompletedAt: undefined,
+    });
+    db.close();
+  });
+
+  it('keeps auto-track launch concurrency global across concurrent refresh calls', async () => {
+    class SlowLaunchTmux extends FakeTmux {
+      activeLaunches = 0;
+      maxActiveLaunches = 0;
+
+      override async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
+        this.activeLaunches += 1;
+        this.maxActiveLaunches = Math.max(this.maxActiveLaunches, this.activeLaunches);
+        try {
+          await new Promise<void>((resolve) => setTimeout(resolve, 25));
+          await super.newDetachedSession(sessionName, cwd, shellCommand);
+        } finally {
+          this.activeLaunches -= 1;
+        }
+      }
+
+      override async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
+        await super.pipePaneToFile(sessionName, filePath);
+        await fs.writeFile(filePath, 'ready');
+      }
+    }
+
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new SlowLaunchTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const conversation = (ref: string) => ({
+      ref,
+      kind: 'history' as const,
+      projectSlug: 'demo',
+      provider: 'codex' as const,
+      title: ref,
+      updatedAt: '2026-03-07T07:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    });
+
+    await Promise.all([
+      manager.autoTrackConversations([conversation('first'), conversation('second')], '2026-03-07T08:00:00.000Z'),
+      manager.autoTrackConversations([conversation('third'), conversation('fourth')], '2026-03-07T08:00:00.000Z'),
+    ]);
+
+    expect(tmux.created).toHaveLength(4);
+    expect(tmux.maxActiveLaunches).toBeLessThanOrEqual(2);
+    db.close();
+  });
+
+  it('coalesces concurrent binds for the same provider conversation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const input = {
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'concurrent-bind',
+      title: 'Concurrent bind',
+      kind: 'history' as const,
+    };
+
+    const [first, second] = await Promise.all([
+      manager.bindConversation(input),
+      manager.bindConversation({ ...input, autoTrackedAt: '2026-03-07T08:00:00.000Z' }),
+    ]);
+
+    expect(first.id).toBe(second.id);
+    expect(second.autoTrackedAt).toBe('2026-03-07T08:00:00.000Z');
+    expect(db.boundSessions.getById(first.id)?.autoTrackedAt).toBe('2026-03-07T08:00:00.000Z');
+    expect(tmux.created).toHaveLength(1);
+    db.close();
+  });
+
   it('marks failed bind attempts as error and cleans up tmux state', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

@@ -137,6 +137,7 @@ export interface BoundSession {
   lastActivityAt?: string;
   lastOutputAt?: string;
   lastCompletedAt?: string;
+  autoTrackedAt?: string;
   isWorking?: boolean;
   pid?: number | null;
   rawLogPath?: string;
@@ -145,6 +146,10 @@ export interface BoundSession {
 
 export interface SessionInputRequest {
   text: string;
+}
+
+export interface RefreshTreeRequest {
+  autoTrackRecent?: boolean;
 }
 
 export interface RecordedUserInput {

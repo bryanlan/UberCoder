@@ -6,7 +6,9 @@ type BoundSessionItem = TreeResponse['boundSessions'][number];
 export interface SidebarConversation {
   provider: ProviderId;
   conversation: ConversationItem;
-  freshnessTimestamp: string;
+  activityTimestamp: string;
+  indicatorTimestamp: string;
+  autoTrackedAt?: string;
 }
 
 export type SidebarProject = ProjectSummary & {
@@ -22,6 +24,10 @@ function getConversationRecencyTimestamp(
     return conversation.updatedAt;
   }
   return session.lastCompletedAt ?? conversation.updatedAt;
+}
+
+function newestTimestamp(first: string, second?: string): string {
+  return second && second > first ? second : first;
 }
 
 export function deriveSidebarProjects({
@@ -48,16 +54,18 @@ export function deriveSidebarProjects({
       const combinedConversations = (['codex', 'claude'] as const)
         .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
           const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
-          const freshnessTimestamp = getConversationRecencyTimestamp(conversation, session);
+          const activityTimestamp = getConversationRecencyTimestamp(conversation, session);
           return {
             provider,
             conversation,
-            freshnessTimestamp,
+            activityTimestamp,
+            indicatorTimestamp: newestTimestamp(activityTimestamp, session?.autoTrackedAt),
+            autoTrackedAt: session?.autoTrackedAt,
           };
         }))
         .filter(({ conversation }) => !workMode || conversation.isBound);
       const latestActivityAt = combinedConversations.reduce(
-        (latest, conversation) => conversation.freshnessTimestamp > latest ? conversation.freshnessTimestamp : latest,
+        (latest, conversation) => conversation.activityTimestamp > latest ? conversation.activityTimestamp : latest,
         '',
       );
       return {

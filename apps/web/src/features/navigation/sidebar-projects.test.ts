@@ -57,11 +57,13 @@ function boundSession({
   provider,
   conversationRef,
   lastCompletedAt,
+  autoTrackedAt,
 }: {
   projectSlug: string;
   provider: ProviderId;
   conversationRef: string;
   lastCompletedAt?: string;
+  autoTrackedAt?: string;
 }): BoundSession {
   return {
     id: `${projectSlug}:${provider}:${conversationRef}`,
@@ -73,6 +75,7 @@ function boundSession({
     startedAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',
     lastCompletedAt,
+    autoTrackedAt,
   };
 }
 
@@ -121,7 +124,56 @@ describe('deriveSidebarProjects', () => {
     });
 
     expect(visibleProjects.map((item) => item.slug)).toEqual(['alpha', 'beta']);
-    expect(visibleProjects[0]?.combinedConversations[0]?.freshnessTimestamp).toBe('2026-07-01T11:00:00.000Z');
+    expect(visibleProjects[0]?.combinedConversations[0]?.activityTimestamp).toBe('2026-07-01T11:00:00.000Z');
+  });
+
+  it('uses auto-tracked time for the indicator without moving genuine recent-activity order', () => {
+    const tree: TreeResponse = {
+      projects: [
+        project({
+          slug: 'auto-tracked',
+          displayName: 'Auto tracked',
+          codex: [conversation({
+            ref: 'older-source',
+            provider: 'codex',
+            projectSlug: 'auto-tracked',
+            updatedAt: '2026-07-01T09:00:00.000Z',
+            isBound: true,
+          })],
+        }),
+        project({
+          slug: 'genuinely-newer',
+          displayName: 'Genuinely newer',
+          claude: [conversation({
+            ref: 'newer-source',
+            provider: 'claude',
+            projectSlug: 'genuinely-newer',
+            updatedAt: '2026-07-01T10:00:00.000Z',
+            isBound: true,
+          })],
+        }),
+      ],
+      boundSessions: [boundSession({
+        projectSlug: 'auto-tracked',
+        provider: 'codex',
+        conversationRef: 'older-source',
+        autoTrackedAt: '2026-07-01T12:00:00.000Z',
+      })],
+    };
+
+    const visibleProjects = deriveSidebarProjects({
+      tree,
+      workMode: true,
+      recentActivitySortEnabled: true,
+      manualProjectOrder: [],
+    });
+
+    expect(visibleProjects.map((item) => item.slug)).toEqual(['genuinely-newer', 'auto-tracked']);
+    expect(visibleProjects[1]?.combinedConversations[0]).toMatchObject({
+      activityTimestamp: '2026-07-01T09:00:00.000Z',
+      indicatorTimestamp: '2026-07-01T12:00:00.000Z',
+      autoTrackedAt: '2026-07-01T12:00:00.000Z',
+    });
   });
 
   it('uses manual order and display-name fallback when recent sorting is disabled', () => {

@@ -96,6 +96,16 @@ provider conversations, while `backfillMissingSearchIndexRows()` fills missing F
 cached conversation index on startup or when cached projects become active without re-listing the
 provider tree. A failed individual transcript load should not break the conversation tree.
 
+The top-left refresh action explicitly requests recent-conversation auto-tracking. The server first
+re-indexes every configured active project, then finds unbound Codex and Claude history with real
+provider activity during the preceding eight hours and resumes each conversation into its own
+hidden tmux session. Auto-tracking is bounded to two concurrent launches and isolates individual
+launch failures so one bad conversation does not abort the refresh. Settings-driven tree refreshes
+do not request this side effect. `autoTrackedAt` is persisted as display provenance: it makes a
+newly discovered binding green without changing genuine conversation activity or project-recency
+ordering. The current provider launch path resumes the original conversation id; it does not fork
+a new provider id.
+
 The web conversation data hook keeps metadata and paged messages on separate query keys. Active
 bound sessions poll the message timeline; after a session completes, the message query keeps polling
 briefly when the latest durable message is still the user's prompt or when session output/completion
@@ -128,6 +138,12 @@ stuck composer.
 - Session recency is not a generic "screen changed" timestamp. Opening an old session, restoring a
   tmux binding, viewing an old transcript, raw restore output, or the screen merely leaving
   `Working` must not make a conversation look fresh.
+- Explicit recent-conversation auto-tracking uses `autoTrackedAt` only for the sidebar freshness
+  indicator. It must not write `lastActivityAt` or `lastCompletedAt`, reorder projects as if user or
+  agent work occurred, or run during Settings' ordinary project-tree refresh.
+- Claude transcripts can contain multiple parent-linked branches when the same provider session is
+  resumed concurrently. The transcript adapter follows the last message leaf back through
+  `parentUuid` and exposes that active branch instead of flattening sibling turns together.
 - First-turn pending Codex input must keep prompt submission separate from literal selection
   keystrokes. Review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and

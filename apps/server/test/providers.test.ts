@@ -74,6 +74,76 @@ describe('provider history discovery', () => {
     expect(conversations[0]?.title).toContain('Refactor the tmux manager');
   });
 
+  it('keeps only the latest Claude parent-linked branch in the visible transcript', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-branch-'));
+    const transcriptPath = path.join(tempDir, 'branched-claude-transcript.jsonl');
+    await fs.writeFile(transcriptPath, [
+      {
+        uuid: 'root-user',
+        parentUuid: null,
+        timestamp: '2026-03-07T00:00:00.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: { role: 'user', content: 'Shared root prompt' },
+      },
+      {
+        uuid: 'root-assistant',
+        parentUuid: 'root-user',
+        timestamp: '2026-03-07T00:00:01.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Shared root reply' },
+      },
+      {
+        uuid: 'branch-b-user',
+        parentUuid: 'root-assistant',
+        timestamp: '2026-03-07T00:00:02.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: { role: 'user', content: 'Sibling branch B prompt' },
+      },
+      {
+        uuid: 'branch-b-assistant',
+        parentUuid: 'branch-b-user',
+        timestamp: '2026-03-07T00:00:03.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Sibling branch B reply' },
+      },
+      {
+        uuid: 'branch-a-user',
+        parentUuid: 'root-assistant',
+        timestamp: '2026-03-07T00:00:04.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: { role: 'user', content: 'Latest branch A prompt' },
+      },
+      {
+        uuid: 'branch-a-assistant',
+        parentUuid: 'branch-a-user',
+        timestamp: '2026-03-07T00:00:05.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Latest branch A reply' },
+      },
+    ].map((record) => JSON.stringify(record)).join('\n'));
+
+    const parsed = await parseClaudeConversationFile({
+      filePath: transcriptPath,
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'branched-claude-transcript',
+    });
+
+    expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+      'Shared root prompt',
+      'Shared root reply',
+      'Latest branch A prompt',
+      'Latest branch A reply',
+    ]);
+    expect(parsed.summary.updatedAt).toBe('2026-03-07T00:00:05.000Z');
+  });
+
   it('parses complete large Claude transcripts instead of splicing head and tail windows', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-large-'));
     const transcriptPath = path.join(tempDir, 'large-claude-transcript.jsonl');

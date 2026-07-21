@@ -233,6 +233,8 @@ function ConversationLink({
   rebinding,
   renaming,
   lastInteractionAt,
+  indicatorTimestamp,
+  autoTrackedAt,
   sessionFreshnessThresholds,
 }: {
   project: ProjectSummary;
@@ -248,6 +250,8 @@ function ConversationLink({
   rebinding: boolean;
   renaming: boolean;
   lastInteractionAt?: string;
+  indicatorTimestamp?: string;
+  autoTrackedAt?: string;
   sessionFreshnessThresholds: SessionFreshnessThresholds;
 }) {
   const location = useLocation();
@@ -258,7 +262,7 @@ function ConversationLink({
   const rowRef = useRef<HTMLDivElement | null>(null);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
-  const indicatorClassName = getConversationFreshnessClass(isBound, lastInteractionAt, sessionFreshnessThresholds, nowMs);
+  const indicatorClassName = getConversationFreshnessClass(isBound, indicatorTimestamp, sessionFreshnessThresholds, nowMs);
 
   useEffect(() => {
     if (!editing) {
@@ -342,7 +346,10 @@ function ConversationLink({
       >
         <span
           className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
-          title={`Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`}
+          title={[
+            `Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`,
+            autoTrackedAt ? `Auto-tracked: ${formatRelativeAge(autoTrackedAt, nowMs)}` : undefined,
+          ].filter(Boolean).join(' · ')}
         />
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
@@ -670,7 +677,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, freshnessTimestamp }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, indicatorTimestamp, autoTrackedAt }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -685,7 +692,9 @@ function ProjectSection({
                 onRenameConversation={onRenameConversation}
                 rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
-                lastInteractionAt={freshnessTimestamp}
+                lastInteractionAt={activityTimestamp}
+                indicatorTimestamp={indicatorTimestamp}
+                autoTrackedAt={autoTrackedAt}
                 sessionFreshnessThresholds={sessionFreshnessThresholds}
               />
             ))}
