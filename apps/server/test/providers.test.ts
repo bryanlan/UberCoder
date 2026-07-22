@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
+import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
@@ -59,6 +60,60 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.title).toContain('Plan the auth flow');
+  });
+
+  it('finds pending Codex adoption candidates by parsed user hash when prompts contain escaped text', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-pending-hash-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '07');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const conversationRef = '11111111-2222-4333-8444-555555555555';
+    const transcriptPath = path.join(sessionsDir, `rollout-2026-03-07T10-00-00-${conversationRef}.jsonl`);
+    const prompt = 'Create the "must-hit" plan.\nKeep C:\\research\\inputs intact.';
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T15:00:00.000Z',
+        type: 'session_meta',
+        payload: { id: conversationRef, cwd: '/tmp/demo-project' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T15:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: prompt }],
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+    const pending = {
+      ref: 'pending:quoted-prompt',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-03-07T15:00:00.000Z',
+      updatedAt: '2026-03-07T15:00:01.000Z',
+      isBound: true,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: stableTextHash(normalizeComparableText(prompt)),
+        lastUserInputPreview: 'Create the "must-hit" plan. Keep C:\\research\\inputs intact.',
+        lastUserInputAt: '2026-03-07T15:00:01.000Z',
+      },
+    } as const;
+
+    const candidates = await provider.listPendingAdoptionCandidates(project, pending, settings);
+
+    expect(candidates.map((candidate) => candidate.ref)).toEqual([conversationRef]);
   });
 
   it('discovers Claude transcripts from encoded project storage', async () => {
@@ -375,6 +430,82 @@ describe('provider history discovery', () => {
       },
     ]);
     expect(parsed.messages).toHaveLength(2);
+  });
+
+  it('deduplicates Codex final-answer pairs after removing internal memory citations wherever they occur', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-'));
+    const transcriptPath = path.join(tempDir, 'rollout-memory-citation-duplicates.jsonl');
+    const citation = '<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1-2|note=[context]\n</citation_entries>\n<rollout_ids>\n</rollout_ids>\n</oai-mem-citation>';
+    const structuredAnswer = '{"reasoning":"Validated the repair.\\n","status":"changed"}';
+    const annotatedStructuredAnswer = structuredAnswer.replace('\\n"', `\\n${citation}"`);
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Finish the transcript fix.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'final_answer', message: 'Fixed and verified.' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:05.005Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: `Fixed and verified.\n\n${citation}` }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Return the structured result.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:05.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'final_answer', message: structuredAnswer },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:01:05.005Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: annotatedStructuredAnswer }],
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseCodexConversationFile({
+      filePath: transcriptPath,
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'memory-citation-duplicates',
+    });
+
+    expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+      'Finish the transcript fix.',
+      'Fixed and verified.',
+      'Return the structured result.',
+      structuredAnswer,
+    ]);
+    expect(parsed.displayMessages.some((message) => message.text.includes('<oai-mem-citation>'))).toBe(false);
+    expect(parsed.messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
+    expect(parsed.messages.filter((message) => message.role === 'assistant')
+      .every((message) => message.rawMetadata?.type === 'response_item')).toBe(true);
   });
 
   it('keeps Codex event and response messages separate outside the duplicate window and for same-kind repeats', async () => {

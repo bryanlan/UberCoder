@@ -3,7 +3,6 @@ import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
-import { normalizeWhitespace, stripAnsiAndControl } from '../lib/text.js';
 import { listFilesRecursive, pathExists, readTextHead, readTextTail, statFileSafe, type FileFingerprint } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
 import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
@@ -14,14 +13,14 @@ import {
   loadCachedTranscriptParse,
   type CachedTranscriptParse,
 } from './transcripts/base.js';
-import { parseCodexConversationFile } from './transcripts/codex.js';
+import { codexJsonlTextContainsUserHash, parseCodexConversationFile } from './transcripts/codex.js';
 
-const PENDING_PREVIEW_MEMO_MAX_ENTRIES = 4096;
+const PENDING_USER_HASH_MEMO_MAX_ENTRIES = 4096;
 
-interface PendingPreviewMatchMemoEntry {
+interface PendingUserHashMatchMemoEntry {
   size: number;
   mtimeMs: number;
-  needle: string;
+  userTextHash: string;
   matches: boolean;
 }
 
@@ -100,49 +99,34 @@ export class CodexProvider implements ProviderAdapter {
     return conversations.sort(compareConversationDiscoveryOrder);
   }
 
-  private pendingPreviewNeedle(pending: ConversationSummary): string | undefined {
-    const preview = pending.rawMetadata?.lastUserInputPreview;
-    if (typeof preview !== 'string') {
-      return undefined;
-    }
+  private readonly pendingUserHashMatchMemo = new Map<string, PendingUserHashMatchMemoEntry>();
 
-    const normalized = normalizeWhitespace(stripAnsiAndControl(preview.replace(/…$/u, ''))).toLowerCase();
-    return normalized.length >= 20 ? normalized : undefined;
-  }
-
-  private readonly pendingPreviewMatchMemo = new Map<string, PendingPreviewMatchMemoEntry>();
-
-  private async fileContainsPendingPreview(filePath: string, needle: string | undefined): Promise<boolean> {
-    if (!needle) {
-      return true;
-    }
-
+  private async fileContainsPendingUserHash(filePath: string, userTextHash: string): Promise<boolean> {
     const fingerprint = await statFileSafe(filePath);
-    const memoized = fingerprint ? this.pendingPreviewMatchMemo.get(filePath) : undefined;
+    const memoized = fingerprint ? this.pendingUserHashMatchMemo.get(filePath) : undefined;
     if (
       memoized
       && memoized.size === fingerprint!.size
       && memoized.mtimeMs === fingerprint!.mtimeMs
-      && memoized.needle === needle
+      && memoized.userTextHash === userTextHash
     ) {
       return memoized.matches;
     }
 
-    const haystack = normalizeWhitespace(stripAnsiAndControl([
+    const matches = codexJsonlTextContainsUserHash([
       await readTextHead(filePath),
       await readTextTail(filePath),
-    ].join('\n'))).toLowerCase();
-    const matches = haystack.includes(needle);
+    ].join('\n'), userTextHash);
     if (fingerprint) {
       // Keyed by path so a changed file replaces its own entry; evict the oldest
       // entries (insertion order) rather than clearing the whole memo.
-      this.pendingPreviewMatchMemo.delete(filePath);
-      this.pendingPreviewMatchMemo.set(filePath, { ...fingerprint, needle, matches });
-      for (const oldestPath of this.pendingPreviewMatchMemo.keys()) {
-        if (this.pendingPreviewMatchMemo.size <= PENDING_PREVIEW_MEMO_MAX_ENTRIES) {
+      this.pendingUserHashMatchMemo.delete(filePath);
+      this.pendingUserHashMatchMemo.set(filePath, { ...fingerprint, userTextHash, matches });
+      for (const oldestPath of this.pendingUserHashMatchMemo.keys()) {
+        if (this.pendingUserHashMatchMemo.size <= PENDING_USER_HASH_MEMO_MAX_ENTRIES) {
           break;
         }
-        this.pendingPreviewMatchMemo.delete(oldestPath);
+        this.pendingUserHashMatchMemo.delete(oldestPath);
       }
     }
     return matches;
@@ -242,6 +226,8 @@ export class CodexProvider implements ProviderAdapter {
   ): Promise<ConversationSummary[]> {
     const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
     if (!(await pathExists(sessionsRoot))) return [];
+    const pendingUserHash = pending.rawMetadata?.lastUserInputHash;
+    if (typeof pendingUserHash !== 'string') return [];
 
     const files = new Set<string>();
     for (const dayDir of this.candidateSessionDayDirs(sessionsRoot, pending)) {
@@ -252,9 +238,8 @@ export class CodexProvider implements ProviderAdapter {
     }
 
     const candidateFiles: string[] = [];
-    const needle = this.pendingPreviewNeedle(pending);
     for (const filePath of [...files].sort()) {
-      if (await this.fileContainsPendingPreview(filePath, needle)) {
+      if (await this.fileContainsPendingUserHash(filePath, pendingUserHash)) {
         candidateFiles.push(filePath);
       }
     }

@@ -47,7 +47,9 @@
 - `apps/server/src/db/database.ts` - SQLite persistence boundary.
 - `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
-- `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor transcript discovery and launch command adapters.
+- `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor
+  transcript discovery and launch command adapters; Codex pending adoption prefilters decoded JSONL
+  user messages by their recorded text hash.
 - `apps/server/src/providers/transcripts/claude.ts` - Claude JSONL parsing and active-branch
   selection for parent-linked sibling resume histories.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
@@ -70,7 +72,8 @@
 - `apps/server/src/db/database.ts` - SQLite schema and persistence methods for
   `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
-  filtering for instruction/environment wrapper records, and event/response duplicate preference.
+  filtering for instruction/environment wrapper and internal memory-citation records, and
+  event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
   bounded recent-conversation auto-tracking, working state, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.

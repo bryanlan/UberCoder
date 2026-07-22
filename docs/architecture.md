@@ -59,11 +59,11 @@ not raw screen content; `apps/web/src/features/conversation/useConversationData.
 screen route separately for the live terminal/status panel. User-visible incremental conversation
 output comes through `apps/server/src/sessions/live-output/reader.ts` and the event log attached to
 the bound session. Codex transcript parsing prefers response-backed display messages over
-near-duplicate event messages and hides environment, `AGENTS.md`, and instruction wrapper records
-from the visible transcript while keeping the full parsed message set available for indexing. Codex
-commentary-phase assistant records are treated as pending progress, and only the latest pending
-commentary tail is displayed so an in-flight answer can show progress without flooding the durable
-transcript.
+near-duplicate event messages, removes internal memory-citation blocks before display comparison,
+and hides environment, `AGENTS.md`, and instruction wrapper records from the visible transcript
+while keeping the full parsed message set available for indexing. Codex commentary-phase assistant
+records are treated as pending progress, and only the latest pending commentary tail is displayed
+so an in-flight answer can show progress without flooding the durable transcript.
 
 The console intentionally keeps four text channels separate. `/screen` exposes parsed tmux screen
 state for interactive pickers and status, `/raw-output` exposes debug tails for inspection only,
@@ -124,6 +124,10 @@ first-turn pending Codex session, `sessions.ts` asks `SessionManager.allowsLiter
 whether the current screen is an interactive selection UI. Selection tokens stay on the live tmux
 bridge, while non-selection prompt text restarts the pending Codex session instead of typing into a
 stuck composer.
+After Codex creates the durable provider transcript, pending adoption locates candidates by hashing
+decoded user-message text from JSONL records. Raw serialized prompt previews are not an identity
+boundary because JSON escaping can change quotes, newlines, and backslashes without changing the
+user's actual prompt.
 
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.

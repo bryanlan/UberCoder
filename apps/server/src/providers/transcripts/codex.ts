@@ -23,8 +23,11 @@ function isCodexDisplayChromeLine(line: string): boolean {
     || /^Expand to type directly into the live session\.$/i.test(trimmed);
 }
 
-function sanitizeCodexDisplayText(text: string): string {
-  return text
+function sanitizeCodexDisplayText(text: string, role: NormalizedMessage['role']): string {
+  const displayText = role === 'assistant'
+    ? text.replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/gi, '')
+    : text;
+  return displayText
     .replace(/^<codex_internal_context\b[\s\S]*?<\/codex_internal_context>\s*/gim, '')
     .replace(/^<turn_aborted>[\s\S]*?<\/turn_aborted>\s*/gim, '')
     .split('\n')
@@ -153,6 +156,19 @@ function extractCodexMessage(record: Record<string, unknown>): { role: Normalize
   return directText ? { role: directRole, text: directText } : undefined;
 }
 
+export function codexJsonlTextContainsUserHash(text: string, userTextHash: string): boolean {
+  return text.split(/\r?\n/).some((line) => {
+    if (!line.trim()) return false;
+    try {
+      const extracted = extractCodexMessage(JSON.parse(line) as Record<string, unknown>);
+      return extracted?.role === 'user'
+        && stableTextHash(normalizeComparableText(extracted.text)) === userTextHash;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function timestampMs(message: NormalizedMessage): number | undefined {
   const parsed = Date.parse(message.timestamp);
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -198,7 +214,7 @@ function dedupeCodexEventResponseMessages(messages: NormalizedMessage[]): Normal
   const slotIndexesByKey = new Map<string, number[]>();
 
   for (const message of messages) {
-    const comparable = normalizeComparableText(message.text);
+    const comparable = normalizeComparableText(sanitizeCodexDisplayText(message.text, message.role));
     const slot: DedupeSlot = {
       message,
       comparable,
@@ -276,7 +292,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   const displayMessages = toCodexDisplayMessages(dedupedMessages)
     .map((message) => ({
       ...message,
-      text: sanitizeCodexDisplayText(message.text),
+      text: sanitizeCodexDisplayText(message.text, message.role),
     }))
     .filter((message) => message.text.length > 0);
 
