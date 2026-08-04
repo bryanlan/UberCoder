@@ -5,7 +5,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ConversationSummary } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
-import { getProviderTranscriptWatchPaths, IndexingService } from '../src/indexing/indexing-service.js';
+import {
+  getProviderTranscriptRefreshDelay,
+  getProviderTranscriptWatchPaths,
+  IndexingService,
+} from '../src/indexing/indexing-service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
@@ -51,6 +55,13 @@ describe('IndexingService', () => {
     ]);
   });
 
+  it('refreshes changed Claude transcripts without broadening Codex discovery events', () => {
+    expect(getProviderTranscriptRefreshDelay('claude', 'change', '/state/claude/projects/demo/chat.jsonl')).toBe(750);
+    expect(getProviderTranscriptRefreshDelay('codex', 'change', '/state/codex/sessions/chat.jsonl')).toBeUndefined();
+    expect(getProviderTranscriptRefreshDelay('claude', 'add', '/state/claude/projects/demo/chat.jsonl')).toBe(750);
+    expect(getProviderTranscriptRefreshDelay('claude', 'change', '/state/claude/projects/demo/notes.txt')).toBeUndefined();
+  });
+
   it('starts from cached index data without scanning provider transcripts', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const projectPath = path.join(tempDir, 'project');
@@ -92,7 +103,7 @@ describe('IndexingService', () => {
     db.close();
   });
 
-  it('handles scheduled provider-file refreshes without scanning provider transcripts', async () => {
+  it('keeps generic provider-root events metadata-only', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-refresh-'));
     const projectPath = path.join(tempDir, 'project');
     const providerRoot = path.join(tempDir, 'provider-home');
@@ -120,6 +131,117 @@ describe('IndexingService', () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(listConversations).not.toHaveBeenCalled();
+
+    await indexing.stop();
+    db.close();
+  });
+
+  it('refreshes only the affected project provider when an external transcript is discovered', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-targeted-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const claudeConversations: ConversationSummary[] = [{
+      ref: 'external-claude-chat',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'claude',
+      title: 'Review Waltium business plan',
+      updatedAt: '2026-08-03T22:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    }];
+    const listConversations = vi.fn(async (activeProject: ActiveProject) => (
+      activeProject.slug === 'demo' ? claudeConversations : []
+    ));
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [project, secondProject],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          ...providerSettings,
+          id: providerId,
+          enabled: providerId === 'claude',
+          discoveryRoot: path.join(tempDir, providerId),
+        }),
+      } as never,
+      {
+        get: () => ({
+          listConversations,
+          getConversation: async () => null,
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.refreshProjectProvider('demo', 'claude');
+
+    expect(listConversations).toHaveBeenCalledTimes(1);
+    expect(indexing.getTree().projects.find((candidate) => candidate.slug === 'demo')?.providers.claude.conversations)
+      .toMatchObject([{ ref: 'external-claude-chat', title: 'Review Waltium business plan', isBound: false }]);
+    expect(indexing.getTree().projects.find((candidate) => candidate.slug === 'demo-two')?.providers.claude.conversations)
+      .toEqual([]);
+
+    await indexing.stop();
+    db.close();
+  });
+
+  it('serializes distinct project-provider refreshes without dropping later scopes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-serialized-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    let releaseFirstRefresh!: () => void;
+    const firstRefreshBlocked = new Promise<void>((resolve) => {
+      releaseFirstRefresh = resolve;
+    });
+    let markFirstRefreshStarted!: () => void;
+    const firstRefreshStarted = new Promise<void>((resolve) => {
+      markFirstRefreshStarted = resolve;
+    });
+    const listConversations = vi.fn(async (activeProject: ActiveProject) => {
+      if (activeProject.slug === 'demo') {
+        markFirstRefreshStarted();
+        await firstRefreshBlocked;
+      }
+      return [{
+        ref: `${activeProject.slug}-claude-chat`,
+        kind: 'history' as const,
+        projectSlug: activeProject.slug,
+        provider: 'claude' as const,
+        title: `${activeProject.displayName} Claude chat`,
+        updatedAt: '2026-08-03T22:00:00.000Z',
+        isBound: false,
+        degraded: false,
+      }];
+    });
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [project, secondProject],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          ...providerSettings,
+          id: providerId,
+          enabled: providerId === 'claude',
+          discoveryRoot: path.join(tempDir, providerId),
+        }),
+      } as never,
+      {
+        get: () => ({
+          listConversations,
+          getConversation: async () => null,
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    const firstRefresh = indexing.refreshProjectProvider('demo', 'claude');
+    await firstRefreshStarted;
+    const secondRefresh = indexing.refreshProjectProvider('demo-two', 'claude');
+    releaseFirstRefresh();
+    await Promise.all([firstRefresh, secondRefresh]);
+
+    expect(listConversations.mock.calls.map(([activeProject]) => activeProject.slug)).toEqual(['demo', 'demo-two']);
+    expect(indexing.getTree().projects.find((candidate) => candidate.slug === 'demo-two')?.providers.claude.conversations)
+      .toMatchObject([{ ref: 'demo-two-claude-chat' }]);
 
     await indexing.stop();
     db.close();

@@ -686,7 +686,7 @@ function ProjectSection({
                 title={conversation.title}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
-                canRebind={conversation.kind === 'history'}
+                canRebind={conversation.kind === 'history' && provider !== 'claude'}
                 onClose={onClose}
                 onRebindConversation={onRebindConversation}
                 onRenameConversation={onRenameConversation}

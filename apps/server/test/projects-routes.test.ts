@@ -77,7 +77,7 @@ describe('project routes', () => {
     }
   });
 
-  it('auto-tracks only unbound provider conversations with activity in the last eight hours', async () => {
+  it('auto-tracks only recent unbound Codex conversations', async () => {
     const nowMs = Date.now();
     const iso = (offsetMs: number) => new Date(nowMs + offsetMs).toISOString();
     const refreshAll = vi.fn(async () => undefined);
@@ -158,7 +158,6 @@ describe('project routes', () => {
       expect(autoTrackConversations).toHaveBeenCalledOnce();
       expect(autoTrackConversations.mock.calls[0]?.[0]).toEqual([
         expect.objectContaining({ ref: 'recent-codex', provider: 'codex' }),
-        expect.objectContaining({ ref: 'within-eight-hours', provider: 'claude' }),
       ]);
       expect(Date.parse(autoTrackConversations.mock.calls[0]?.[1] ?? '')).toBeGreaterThanOrEqual(nowMs);
     } finally {
@@ -185,6 +184,37 @@ describe('project routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(autoTrackConversations).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('refreshes one provider without triggering a global scan', async () => {
+    const refreshAll = vi.fn(async () => undefined);
+    const refreshProjectProvider = vi.fn(async () => undefined);
+    const app = fastify();
+    await registerProjectRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      {
+        getTree: () => ({ projects: [], boundSessions: [], lastIndexedAt: new Date().toISOString() }),
+        refreshAll,
+        refreshProjectProvider,
+      } as never,
+      { observeSessions: async () => undefined, autoTrackConversations: vi.fn() } as never,
+    );
+    await app.ready();
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/projects/refresh',
+        payload: { projectSlug: 'waltium', providerId: 'claude' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(refreshProjectProvider).toHaveBeenCalledWith('waltium', 'claude');
+      expect(refreshAll).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }

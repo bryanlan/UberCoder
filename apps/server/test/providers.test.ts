@@ -129,6 +129,38 @@ describe('provider history discovery', () => {
     expect(conversations[0]?.title).toContain('Refactor the tmux manager');
   });
 
+  it('uses Claude aiTitle metadata instead of a continuation wrapper as the conversation title', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-title-'));
+    const transcriptPath = path.join(tempDir, 'review-business-plan.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        type: 'ai-title',
+        aiTitle: 'Review Waltium business plan',
+        sessionId: 'review-business-plan',
+      }),
+      JSON.stringify({
+        uuid: 'user-1',
+        parentUuid: null,
+        timestamp: '2026-08-03T20:00:00.000Z',
+        cwd: '/tmp/demo-project',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'This session is being continued from a previous conversation.',
+        },
+      }),
+    ].join('\n'));
+
+    const parsed = await parseClaudeConversationFile({
+      filePath: transcriptPath,
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: 'review-business-plan',
+    });
+
+    expect(parsed.summary.title).toBe('Review Waltium business plan');
+  });
+
   it('keeps only the latest Claude parent-linked branch in the visible transcript', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-branch-'));
     const transcriptPath = path.join(tempDir, 'branched-claude-transcript.jsonl');

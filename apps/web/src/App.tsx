@@ -425,7 +425,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   });
 
   const bindExistingMutation = useMutation({
-    mutationFn: () => api.bindConversation(selectedProjectSlug!, selectedProvider!, selectedConversationRef!, authQuery.data?.csrfToken),
+    mutationFn: ({ confirmExternalHandoff }: { confirmExternalHandoff?: boolean } = {}) => api.bindConversation(
+      selectedProjectSlug!,
+      selectedProvider!,
+      selectedConversationRef!,
+      authQuery.data?.csrfToken,
+      { confirmExternalHandoff },
+    ),
     onSuccess: () => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
@@ -581,10 +587,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  async function handleBindExisting(): Promise<void> {
+  async function handleBindExisting(options: { confirmExternalHandoff?: boolean } = {}): Promise<void> {
     setActionError(undefined);
     try {
-      await bindExistingMutation.mutateAsync();
+      await bindExistingMutation.mutateAsync(options);
     } catch (error) {
       setActionError(describeError(error, 'Unable to bind this conversation.'));
     }

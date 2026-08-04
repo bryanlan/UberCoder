@@ -98,7 +98,7 @@ export const api = {
     provider: string,
     conversationRef: string,
     csrfToken?: string,
-    options: { force?: boolean; initialPrompt?: string } = {},
+    options: { force?: boolean; initialPrompt?: string; confirmExternalHandoff?: boolean } = {},
   ) => request<{ session: BoundSession }>(
     `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`,
     {
@@ -106,6 +106,7 @@ export const api = {
       body: JSON.stringify({
         force: options.force === true,
         initialPrompt: options.initialPrompt,
+        confirmExternalHandoff: options.confirmExternalHandoff === true,
       }),
     },
     csrfToken,

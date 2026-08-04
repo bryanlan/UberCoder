@@ -112,8 +112,12 @@ function latestMessageByTimestamp(pages: ConversationTimeline[]): NormalizedMess
 export function timelineMessagesRefetchInterval(input: {
   boundSession?: Pick<BoundSession, 'isWorking' | 'lastCompletedAt' | 'lastOutputAt'>;
   pages?: ConversationTimeline[];
+  externalClaudeConversation?: boolean;
 }): number | false {
   const { boundSession } = input;
+  if (input.externalClaudeConversation) {
+    return ACTIVE_TIMELINE_REFETCH_MS;
+  }
   if (!boundSession) {
     return false;
   }
@@ -164,6 +168,10 @@ export function useConversationData({
     enabled,
     placeholderData: keepPreviousData,
     refetchInterval: (query) => {
+      const timeline = query.state.data;
+      if (timeline?.conversation.provider === 'claude' && !timeline.boundSession) {
+        return ACTIVE_TIMELINE_REFETCH_MS;
+      }
       if (!realtimeDegraded) {
         return false;
       }
@@ -217,6 +225,7 @@ export function useConversationData({
     refetchInterval: (query) => timelineMessagesRefetchInterval({
       boundSession: selectedBoundSession,
       pages: query.state.data?.pages,
+      externalClaudeConversation: selectedMetaTimeline?.conversation.provider === 'claude' && !selectedBoundSession,
     }),
   });
 

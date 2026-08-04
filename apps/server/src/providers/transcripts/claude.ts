@@ -102,8 +102,12 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
   const authoritativeProjectPaths = new Set<string>();
   const shouldCollectPathMetadata = input.collectPathMetadata !== false;
   let model: string | undefined;
+  let title: string | undefined;
 
   for (const { index, record } of records) {
+    if (typeof record.aiTitle === 'string' && record.aiTitle.trim()) {
+      title = record.aiTitle.trim();
+    }
     if (shouldCollectPathMetadata) {
       collectProjectPaths(record, projectPaths);
       collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);
@@ -153,5 +157,6 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     projectPaths,
     authoritativeProjectPaths,
     model,
+    metadata: { title },
   });
 }

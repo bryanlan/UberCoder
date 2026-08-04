@@ -11,6 +11,7 @@ import { nowIso } from '../lib/time.js';
 import { ProjectService, type ActiveProject } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { CodexProvider } from '../providers/codex-provider.js';
+import { getClaudeProjectTranscriptRoots } from '../providers/claude-provider.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -42,8 +43,15 @@ function compareConversationTreeOrder(a: ConversationSummary, b: ConversationSum
   return placedAtComparison || a.ref.localeCompare(b.ref);
 }
 
-function getProviderRootRefreshDelay(eventName: string, changedPath: string): number | undefined {
-  if ((eventName === 'add' || eventName === 'unlink') && changedPath.endsWith('.jsonl')) {
+export function getProviderTranscriptRefreshDelay(
+  providerId: ProviderId,
+  eventName: string,
+  changedPath: string,
+): number | undefined {
+  const shouldRefresh = eventName === 'add'
+    || eventName === 'unlink'
+    || (providerId === 'claude' && eventName === 'change');
+  if (shouldRefresh && changedPath.endsWith('.jsonl')) {
     return PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS;
   }
 
@@ -54,10 +62,11 @@ export class IndexingService {
   private watchers: FSWatcher[] = [];
   private refreshTimer?: NodeJS.Timeout;
   private refreshDueAt?: number;
+  private readonly scopedRefreshTimers = new Map<string, NodeJS.Timeout>();
   private projectCache: Awaited<ReturnType<ProjectService['listActiveProjects']>> = [];
   private watchConfigSignature?: string;
   private refreshPromise?: Promise<void>;
-  private refreshQueued = false;
+  private fullRefreshPromise?: Promise<void>;
   private refreshGeneration = 0;
 
   constructor(
@@ -76,6 +85,10 @@ export class IndexingService {
     clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
     this.refreshDueAt = undefined;
+    for (const timer of this.scopedRefreshTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.scopedRefreshTimers.clear();
     await Promise.all(this.watchers.map((watcher) => watcher.close()));
     this.watchers = [];
   }
@@ -92,36 +105,63 @@ export class IndexingService {
       this.refreshTimer = undefined;
       this.refreshDueAt = undefined;
       void this.loadProjectMetadata().catch(() => {
-        // Provider file notifications are advisory; explicit refresh remains available if metadata refresh fails.
+        // Provider file notifications are advisory; the next metadata refresh can retry.
       });
     }, Math.max(0, dueAt - Date.now()));
   }
 
-  async refreshAll(): Promise<void> {
-    await this.requestRefresh(false);
+  scheduleProjectProviderRefresh(projectSlug: string, providerId: ProviderId, delayMs = 750): void {
+    const key = `${projectSlug}:${providerId}`;
+    const existing = this.scopedRefreshTimers.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.scopedRefreshTimers.delete(key);
+      void this.refreshProjectProvider(projectSlug, providerId).catch(() => {
+        // Provider file notifications are advisory; the next event can retry discovery.
+      });
+    }, Math.max(0, delayMs));
+    this.scopedRefreshTimers.set(key, timer);
   }
 
-  private async requestRefresh(queueIfRunning: boolean): Promise<void> {
-    if (this.refreshPromise) {
-      if (queueIfRunning) {
-        this.refreshQueued = true;
-      }
-      await this.refreshPromise;
+  async refreshAll(): Promise<void> {
+    if (this.fullRefreshPromise) {
+      await this.fullRefreshPromise;
       return;
     }
 
-    this.refreshPromise = this.runRefreshLoop()
-      .finally(() => {
-        this.refreshPromise = undefined;
-      });
-    await this.refreshPromise;
+    const fullRefresh = this.enqueueRefresh(() => this.performRefreshAll());
+    const tracked = fullRefresh.finally(() => {
+      if (this.fullRefreshPromise === tracked) {
+        this.fullRefreshPromise = undefined;
+      }
+    });
+    this.fullRefreshPromise = tracked;
+    await tracked;
   }
 
-  private async runRefreshLoop(): Promise<void> {
-    do {
-      this.refreshQueued = false;
-      await this.performRefreshAll();
-    } while (this.refreshQueued);
+  async refreshProjectProvider(projectSlug: string, providerId: ProviderId): Promise<void> {
+    await this.enqueueRefresh(() => this.performProjectProviderRefresh(projectSlug, providerId));
+  }
+
+  private async enqueueRefresh(operation: () => Promise<void>): Promise<void> {
+    const predecessor = this.refreshPromise ?? Promise.resolve();
+    const queued = predecessor.then(operation);
+    const tracked = queued.then(
+      () => {
+        if (this.refreshPromise === tracked) {
+          this.refreshPromise = undefined;
+        }
+      },
+      () => {
+        if (this.refreshPromise === tracked) {
+          this.refreshPromise = undefined;
+        }
+      },
+    );
+    this.refreshPromise = tracked;
+    await queued;
   }
 
   private async performRefreshAll(): Promise<void> {
@@ -155,6 +195,39 @@ export class IndexingService {
         await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
       }
     }
+    const timestamp = nowIso();
+    this.db.meta.set('lastIndexedAt', timestamp);
+    this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
+    await this.syncWatchers();
+  }
+
+  private async performProjectProviderRefresh(projectSlug: string, providerId: ProviderId): Promise<void> {
+    this.refreshGeneration += 1;
+    const projects = await this.projectService.listActiveProjects();
+    this.projectCache = projects;
+    this.persistProjectMetadata(projects);
+    const project = projects.find((candidate) => candidate.slug === projectSlug);
+    if (!project) {
+      return;
+    }
+
+    const settings = this.projectService.getMergedProviderSettings(project, providerId);
+    if (!settings.enabled) {
+      this.db.conversationIndex.replace(project.slug, providerId, []);
+      this.db.searchIndex.replace(project.slug, providerId, []);
+    } else {
+      const pendingConversations = this.db.pendingConversations.list();
+      const provider = this.providerRegistry.get(providerId);
+      if (providerId === 'codex' && provider instanceof CodexProvider) {
+        await this.refreshCodexProjects([project], pendingConversations, provider);
+      } else {
+        const conversations = await provider.listConversations(project, settings);
+        this.reconcilePendingConversations(project.slug, providerId, conversations, pendingConversations);
+        this.db.conversationIndex.replace(project.slug, providerId, conversations);
+        await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
+      }
+    }
+
     const timestamp = nowIso();
     this.db.meta.set('lastIndexedAt', timestamp);
     this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
@@ -297,9 +370,18 @@ export class IndexingService {
     ];
 
     this.watchers[0]?.on('all', (eventName, changedPath) => {
-      const delayMs = getProviderRootRefreshDelay(eventName, changedPath);
-      if (delayMs !== undefined) {
-        this.scheduleRefresh(delayMs);
+      const claudeRefreshDelayMs = getProviderTranscriptRefreshDelay('claude', eventName, changedPath);
+      if (claudeRefreshDelayMs !== undefined) {
+        const claudeProject = this.findClaudeProjectForTranscript(changedPath);
+        if (claudeProject) {
+          this.scheduleProjectProviderRefresh(claudeProject.slug, 'claude', claudeRefreshDelayMs);
+          return;
+        }
+      }
+
+      const providerRootRefreshDelayMs = getProviderTranscriptRefreshDelay('codex', eventName, changedPath);
+      if (providerRootRefreshDelayMs !== undefined) {
+        this.scheduleRefresh(providerRootRefreshDelayMs);
       }
     });
 
@@ -308,6 +390,22 @@ export class IndexingService {
         // Keep the app running even if the host is near its watch limit.
       });
     }
+  }
+
+  private findClaudeProjectForTranscript(changedPath: string): ActiveProject | undefined {
+    for (const project of this.projectCache) {
+      const settings = this.projectService.getMergedProviderSettings(project, 'claude');
+      if (!settings.enabled) {
+        continue;
+      }
+      for (const transcriptRoot of getClaudeProjectTranscriptRoots(project, settings.discoveryRoot)) {
+        const relativePath = path.relative(transcriptRoot, changedPath);
+        if (relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+          return project;
+        }
+      }
+    }
+    return undefined;
   }
 
   private reconcilePendingConversations(

@@ -51,11 +51,20 @@ const serverConfigSchema = z.object({
   webDistPath: '../web/dist',
 });
 
+const sessionsConfigSchema = z.object({
+  eagerRestoreHours: z.number().positive().default(48),
+  restoreGraceHours: z.number().positive().default(24),
+}).default({
+  eagerRestoreHours: 48,
+  restoreGraceHours: 24,
+});
+
 export const appConfigSchema = z.object({
   server: serverConfigSchema,
   projectsRoot: z.string(),
   runtimeDir: z.string().default('~/.local/share/agent-console/runtime'),
   databasePath: z.string().default('~/.local/share/agent-console/agent-console.sqlite'),
+  sessions: sessionsConfigSchema,
   security: z.object({
     passwordHash: z.string().min(1),
     sessionSecret: z.string().min(32),

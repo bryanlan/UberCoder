@@ -10,7 +10,12 @@ export const RECENT_AUTO_TRACK_WINDOW_MS = 8 * 60 * 60 * 1000;
 
 const refreshProjectsBodySchema = z.object({
   autoTrackRecent: z.boolean().optional(),
-});
+  projectSlug: z.string().min(1).optional(),
+  providerId: z.enum(['codex', 'claude']).optional(),
+}).refine(
+  ({ projectSlug, providerId }) => Boolean(projectSlug) === Boolean(providerId),
+  { message: 'projectSlug and providerId must be provided together.' },
+);
 
 export function findRecentUnboundConversations(
   tree: TreeResponse,
@@ -18,7 +23,7 @@ export function findRecentUnboundConversations(
 ): ConversationSummary[] {
   const cutoffMs = nowMs - RECENT_AUTO_TRACK_WINDOW_MS;
   return tree.projects.flatMap((project) => (
-    (['codex', 'claude'] as const).flatMap((provider) => (
+    (['codex'] as const).flatMap((provider) => (
       project.providers[provider].conversations.filter((conversation) => {
         if (conversation.kind !== 'history' || conversation.isBound || conversation.degraded) {
           return false;
@@ -90,7 +95,11 @@ export async function registerProjectRoutes(
       reply.code(400).send({ error: 'Invalid project refresh payload.', details: parsedBody.error.flatten() });
       return;
     }
-    await indexing.refreshAll();
+    if (parsedBody.data.projectSlug && parsedBody.data.providerId) {
+      await indexing.refreshProjectProvider(parsedBody.data.projectSlug, parsedBody.data.providerId);
+    } else {
+      await indexing.refreshAll();
+    }
     if (parsedBody.data.autoTrackRecent === true) {
       const autoTrackedAt = nowIso();
       const autoTrackResult = await sessions.autoTrackConversations(

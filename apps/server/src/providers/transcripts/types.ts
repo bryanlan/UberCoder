@@ -17,6 +17,7 @@ export interface ParsedTranscript {
 }
 
 export interface TranscriptMetadata {
+  title?: string;
   originator?: string;
   source?: string;
   threadSource?: string;

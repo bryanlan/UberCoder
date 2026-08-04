@@ -114,6 +114,83 @@ describe('conversation routes', () => {
     }
   });
 
+  it('requires explicit confirmation before moving an unbound Claude history into Agent Console', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const summary: ConversationSummary = {
+      ref: 'external-claude-history',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'claude',
+      title: 'Review Waltium business plan',
+      updatedAt: '2026-08-03T20:00:00.000Z',
+      isBound: false,
+      degraded: false,
+    };
+    db.conversationIndex.replace('demo', 'claude', [summary]);
+    const movedSession: BoundSession = {
+      id: 'moved-session',
+      provider: 'claude',
+      projectSlug: 'demo',
+      conversationRef: summary.ref,
+      tmuxSessionName: 'ac-claude-demo-moved',
+      status: 'bound',
+      title: summary.title,
+      startedAt: summary.updatedAt,
+      updatedAt: summary.updatedAt,
+    };
+    const bindConversation = vi.fn(async () => movedSession);
+    const app = fastify();
+    await registerConversationRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      db,
+      {
+        getProjectBySlug: async () => ({ slug: 'demo', displayName: 'Demo' }),
+        getMergedProviderSettings: () => ({
+          id: 'claude',
+          enabled: true,
+          discoveryRoot: tempDir,
+          commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
+        }),
+      } as never,
+      { get: () => ({ getConversation: async () => null }) } as never,
+      {
+        bindConversation,
+        getSessionByConversation: () => undefined,
+      } as never,
+      new RealtimeEventBus(),
+    );
+    await app.ready();
+
+    try {
+      const blocked = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/claude/external-claude-history/bind',
+        payload: {},
+      });
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json()).toMatchObject({
+        error: 'Confirm that the Claude chat is stopped outside Agent Console before moving it here.',
+      });
+      expect(bindConversation).not.toHaveBeenCalled();
+
+      const moved = await app.inject({
+        method: 'POST',
+        url: '/api/conversations/demo/claude/external-claude-history/bind',
+        payload: { confirmExternalHandoff: true },
+      });
+      expect(moved.statusCode).toBe(200);
+      expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
+        conversationRef: 'external-claude-history',
+        title: 'Review Waltium business plan',
+      }));
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it('binds an adopted pending alias through its indexed history conversation', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

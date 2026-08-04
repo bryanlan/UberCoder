@@ -289,3 +289,77 @@ describe('ConversationPane live input bridge', () => {
     expect(screen.getAllByText('/model').length).toBeGreaterThan(0);
   });
 });
+
+describe('ConversationPane external Claude handoff', () => {
+  it('keeps an external Claude transcript read-only until the user confirms handoff', async () => {
+    const onBind = vi.fn().mockResolvedValue(undefined);
+    const externalTimeline: ConversationTimeline = {
+      conversation: {
+        ref: 'external-claude-chat',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'claude',
+        title: 'Review Waltium business plan',
+        updatedAt: baseTime,
+        isBound: false,
+        degraded: false,
+      },
+      messages: [],
+      boundSession: undefined,
+      liveScreen: undefined,
+      messagePage: { hasOlder: false, total: 0 },
+    };
+    function HandoffPane({ conversationKey }: { conversationKey: string }) {
+      return (
+        <MemoryRouter>
+          <ConversationPane
+            projects={[project()]}
+            project={project()}
+            selectedProvider="claude"
+            timeline={externalTimeline}
+            liveMode={false}
+            loading={false}
+            workMode={false}
+            mobileChromeHidden={false}
+            onToggleMobileChrome={vi.fn()}
+            mobileControlsHidden={false}
+            onToggleMobileControls={vi.fn()}
+            onBind={onBind}
+            onRelease={vi.fn()}
+            onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+            onLocalSubmittedText={vi.fn()}
+            onDiscardLocalSubmittedText={vi.fn()}
+            binding={false}
+            releasing={false}
+            debugOpen={false}
+            onToggleDebug={vi.fn()}
+            rawLoading={false}
+            hasOlderMessages={false}
+            loadingOlderMessages={false}
+            onLoadOlderMessages={vi.fn()}
+            conversationKey={conversationKey}
+            historyPrependVersion={0}
+          />
+        </MemoryRouter>
+      );
+    }
+    const view = render(<HandoffPane conversationKey="demo:claude:external-claude-chat" />);
+
+    expect(screen.getByText(/This Claude chat is outside Agent Console/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+    expect(screen.getByRole('dialog')).toHaveTextContent('stop that terminal session first');
+    expect(screen.getByRole('button', { name: 'Start in Agent Console' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: 'Start in Agent Console' }));
+    await waitFor(() => expect(onBind).toHaveBeenCalledWith({ confirmExternalHandoff: true }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+    fireEvent.click(screen.getByRole('checkbox'));
+    view.rerender(<HandoffPane conversationKey="demo:claude:another-chat" />);
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(onBind).toHaveBeenCalledTimes(1);
+  });
+});

@@ -16,6 +16,10 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
     projectsRoot: '/tmp/projects',
     runtimeDir: '/tmp/runtime',
     databasePath: '/tmp/agent-console.sqlite',
+    sessions: {
+      eagerRestoreHours: 48,
+      restoreGraceHours: 24,
+    },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',

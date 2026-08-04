@@ -28,6 +28,11 @@ function encodeClaudeCandidates(projectPaths: string[]): string[] {
   })));
 }
 
+export function getClaudeProjectTranscriptRoots(project: ActiveProject, claudeHome: string): string[] {
+  const projectsRoot = path.join(claudeHome, 'projects');
+  return encodeClaudeCandidates(project.matchPaths).map((candidate) => path.join(projectsRoot, candidate));
+}
+
 async function readClaudeHistory(projectPaths: string[], claudeHome: string): Promise<string[]> {
   const historyPath = path.join(claudeHome, 'history.jsonl');
   if (!(await pathExists(historyPath))) return [];
@@ -61,7 +66,7 @@ export class ClaudeProvider implements ProviderAdapter {
   async discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>> {
     const claudeHome = settings.discoveryRoot;
     const projectsRoot = path.join(claudeHome, 'projects');
-    const candidates = encodeClaudeCandidates(project.matchPaths).map((candidate) => path.join(projectsRoot, candidate));
+    const candidates = getClaudeProjectTranscriptRoots(project, claudeHome);
     return {
       claudeHome,
       projectsRoot,
@@ -72,13 +77,10 @@ export class ClaudeProvider implements ProviderAdapter {
 
   private async resolveTranscriptFiles(project: ActiveProject, settings: MergedProviderSettings): Promise<string[]> {
     const claudeHome = settings.discoveryRoot;
-    const projectsRoot = path.join(claudeHome, 'projects');
-    const candidates = encodeClaudeCandidates(project.matchPaths);
     const files = new Set<string>();
-    for (const candidate of candidates) {
-      const candidatePath = path.join(projectsRoot, candidate);
-      if (await pathExists(candidatePath)) {
-        for (const filePath of await listFilesRecursive(candidatePath, isTopLevelClaudeTranscript)) {
+    for (const transcriptRoot of getClaudeProjectTranscriptRoots(project, claudeHome)) {
+      if (await pathExists(transcriptRoot)) {
+        for (const filePath of await listFilesRecursive(transcriptRoot, isTopLevelClaudeTranscript)) {
           files.add(filePath);
         }
       }

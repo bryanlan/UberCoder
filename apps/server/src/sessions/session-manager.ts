@@ -57,18 +57,23 @@ const SESSION_MODEL_LOG_TAIL_BYTES = 2 * 1024 * 1024;
 const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
 const AUTO_TRACK_CONCURRENCY = 2;
-// Sessions idle this long stop being kept alive (and stop being auto-restored by
-// reconciliation). Their rows stay bound and tree-visible, so work-mode
+// Sessions idle this long stop being kept alive and stop being auto-restored by
+// reconciliation. Their rows stay bound and tree-visible, so work-mode
 // conversations never disappear; selecting one restores its tmux session on demand.
-const SESSION_IDLE_SUSPEND_MS = 5 * 24 * 60 * 60 * 1000;
+const DEFAULT_SESSION_EAGER_RESTORE_MS = 48 * 60 * 60 * 1000;
 // Restoring a session does not move recency, so a freshly restored idle session
 // gets this long before the reaper may suspend it again.
-const SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
+}
+
+interface SessionManagerOptions {
+  eagerRestoreWindowMs?: number;
+  restoreGraceMs?: number;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -247,6 +252,8 @@ export class SessionManager {
   private readonly suspensionGraceUntilMs = new Map<string, number>();
   private readonly conversationBindRuns = new Map<string, Promise<BoundSession>>();
   private readonly autoTrackLaunchQueue: Array<() => void> = [];
+  private readonly eagerRestoreWindowMs: number;
+  private readonly restoreGraceMs: number;
   private autoTrackActiveLaunches = 0;
   private reconciliationRun?: Promise<void>;
   private stopped = false;
@@ -258,7 +265,10 @@ export class SessionManager {
     private readonly eventBus: RealtimeEventBus,
     private readonly recoveryDependencies?: SessionRecoveryDependencies,
     private readonly logger?: SessionManagerLogger,
+    options: SessionManagerOptions = {},
   ) {
+    this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
+    this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     fs.mkdirSync(this.runtimeDir, { recursive: true });
     this.runtimes = new SessionRuntimeRegistry({
       onSlowCommand: ({ sessionId, label, elapsedMs }) => {
@@ -463,7 +473,7 @@ export class SessionManager {
       return false;
     }
     const idleSinceMs = this.sessionIdleTimestampMs(session);
-    return idleSinceMs > 0 && Date.now() - idleSinceMs >= SESSION_IDLE_SUSPEND_MS;
+    return idleSinceMs > 0 && Date.now() - idleSinceMs >= this.eagerRestoreWindowMs;
   }
 
   private async suspendIdleSession(staleSession: BoundSession): Promise<void> {
@@ -720,7 +730,7 @@ export class SessionManager {
     // Restores do not move recency, so grant an explicit grace window before the
     // idle reaper may suspend this session again.
     this.suspendedSessionIds.delete(session.id);
-    this.suspensionGraceUntilMs.set(session.id, Date.now() + SESSION_IDLE_RESTORE_GRACE_MS);
+    this.suspensionGraceUntilMs.set(session.id, Date.now() + this.restoreGraceMs);
 
     const dependencies = this.recoveryDependencies;
     if (!dependencies) {

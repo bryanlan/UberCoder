@@ -46,7 +46,10 @@ export async function buildApp(options: AppOptions = {}) {
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
-  }, app.log);
+  }, app.log, {
+    eagerRestoreWindowMs: config.sessions.eagerRestoreHours * 60 * 60 * 1000,
+    restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
+  });
   const authService = new AuthService(config, db);
   const restartService = new RestartService(() => app.close());
 

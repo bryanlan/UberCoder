@@ -8,6 +8,10 @@
   "projectsRoot": "/srv/projects",
   "runtimeDir": "~/.local/share/agent-console/runtime",
   "databasePath": "~/.local/share/agent-console/agent-console.sqlite",
+  "sessions": {
+    "eagerRestoreHours": 48,
+    "restoreGraceHours": 24
+  },
   "security": {
     "passwordHash": "REPLACE_WITH_OUTPUT_FROM_NPM_RUN_AUTH_HASH",
     "sessionSecret": "REPLACE_WITH_64_PLUS_CHAR_RANDOM_HEX_SECRET",

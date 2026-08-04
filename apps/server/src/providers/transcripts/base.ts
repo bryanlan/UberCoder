@@ -360,7 +360,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
       || message.role === 'user'
       || message.role === 'status'
   ));
-  const title = truncate(firstVisibleUser?.text ?? firstUser?.text ?? path.basename(input.filePath, path.extname(input.filePath)), 72);
+  const title = truncate(input.metadata?.title ?? firstVisibleUser?.text ?? firstUser?.text ?? path.basename(input.filePath, path.extname(input.filePath)), 72);
   const updatedAt = lastVisible?.timestamp ?? lastMeaningful?.timestamp ?? input.fallbackTime;
   const createdAt = sortedMessages[0]?.timestamp ?? input.fallbackTime;
 

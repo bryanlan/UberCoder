@@ -96,15 +96,16 @@ provider conversations, while `backfillMissingSearchIndexRows()` fills missing F
 cached conversation index on startup or when cached projects become active without re-listing the
 provider tree. A failed individual transcript load should not break the conversation tree.
 
-The top-left refresh action explicitly requests recent-conversation auto-tracking. The server first
-re-indexes every configured active project, then finds unbound Codex and Claude history with real
-provider activity during the preceding eight hours and resumes each conversation into its own
-hidden tmux session. Auto-tracking is bounded to two concurrent launches and isolates individual
-launch failures so one bad conversation does not abort the refresh. Settings-driven tree refreshes
-do not request this side effect. `autoTrackedAt` is persisted as display provenance: it makes a
-newly discovered binding green without changing genuine conversation activity or project-recency
-ordering. The current provider launch path resumes the original conversation id; it does not fork
-a new provider id.
+The top-left refresh action explicitly requests recent Codex auto-tracking. The server first
+re-indexes every configured active project, then may resume unbound Codex history with real
+provider activity during the preceding eight hours into hidden tmux sessions. Claude discovery is
+intentionally different: an unbound Claude transcript remains outside Agent Console until the user
+explicitly confirms that its original terminal session has stopped. This prevents refresh from
+starting a second Claude process for the same provider conversation. Settings-driven tree refreshes
+do not request auto-tracking. `autoTrackedAt` is persisted as display provenance: it makes a newly
+discovered Codex binding green without changing genuine conversation activity or project-recency
+ordering. The provider launch path resumes the original conversation id; it does not fork a new
+provider id.
 
 The web conversation data hook keeps metadata and paged messages on separate query keys. Active
 bound sessions poll the message timeline; after a session completes, the message query keeps polling
@@ -148,6 +149,11 @@ user's actual prompt.
 - Claude transcripts can contain multiple parent-linked branches when the same provider session is
   resumed concurrently. The transcript adapter follows the last message leaf back through
   `parentUuid` and exposes that active branch instead of flattening sibling turns together.
+- Claude's provider-supplied `aiTitle` is durable transcript metadata and is preferred for the
+  conversation title over an initial continuation wrapper. Newly created provider transcript files
+  trigger a debounced refresh of that Claude project only, so externally started chats appear in
+  their configured project without a global transcript scan. The targeted refresh API likewise
+  accepts a project/provider pair for recovery of a pre-existing external transcript.
 - First-turn pending Codex input must keep prompt submission separate from literal selection
   keystrokes. Review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and

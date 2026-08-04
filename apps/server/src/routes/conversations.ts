@@ -27,6 +27,7 @@ const conversationParamsSchema = projectProviderParamsSchema.extend({
 const bindConversationBodySchema = z.object({
   force: z.boolean().optional(),
   initialPrompt: z.string().trim().min(1).optional(),
+  confirmExternalHandoff: z.literal(true).optional(),
 });
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -447,13 +448,13 @@ export async function registerConversationRoutes(
       ? null
       : await provider.getConversation(project, resolvedConversationRef, providerSettings);
     const bindableSummary = cached ?? providerConversation?.summary;
+    const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef)
+      ?? (
+        pendingSummary?.boundSessionId
+          ? sessions.getSessionById(pendingSummary.boundSessionId)
+          : undefined
+      );
     if (!parsedBody.data.force) {
-      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef)
-        ?? (
-          pendingSummary?.boundSessionId
-            ? sessions.getSessionById(pendingSummary.boundSessionId)
-            : undefined
-        );
       if (existingSession?.shouldRestore) {
         const liveSession = await sessions.ensureSession(existingSession.id);
         if (liveSession) {
@@ -474,8 +475,18 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Conversation not indexed.' });
       return;
     }
+    if (
+      providerId === 'claude'
+      && bindableSummary.kind === 'history'
+      && !existingSession?.shouldRestore
+      && parsedBody.data.confirmExternalHandoff !== true
+    ) {
+      reply.code(409).send({
+        error: 'Confirm that the Claude chat is stopped outside Agent Console before moving it here.',
+      });
+      return;
+    }
     if (parsedBody.data.force) {
-      const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef);
       if (existingSession) {
         await sessions.releaseSession(existingSession.id);
       }
