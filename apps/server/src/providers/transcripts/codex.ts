@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import readline from 'node:readline';
 import type { NormalizedMessage } from '@agent-console/shared';
 import { normalizeComparableText, stableTextHash } from '../../lib/text.js';
 import {
@@ -156,17 +158,31 @@ function extractCodexMessage(record: Record<string, unknown>): { role: Normalize
   return directText ? { role: directRole, text: directText } : undefined;
 }
 
-export function codexJsonlTextContainsUserHash(text: string, userTextHash: string): boolean {
-  return text.split(/\r?\n/).some((line) => {
-    if (!line.trim()) return false;
-    try {
-      const extracted = extractCodexMessage(JSON.parse(line) as Record<string, unknown>);
-      return extracted?.role === 'user'
-        && stableTextHash(normalizeComparableText(extracted.text)) === userTextHash;
-    } catch {
-      return false;
+function codexJsonlLineContainsUserHash(line: string, userTextHash: string): boolean {
+  if (!line.trim()) return false;
+  try {
+    const extracted = extractCodexMessage(JSON.parse(line) as Record<string, unknown>);
+    return extracted?.role === 'user'
+      && stableTextHash(normalizeComparableText(extracted.text)) === userTextHash;
+  } catch {
+    return false;
+  }
+}
+
+export async function codexJsonlFileContainsUserHash(filePath: string, userTextHash: string): Promise<boolean> {
+  const input = fs.createReadStream(filePath, { encoding: 'utf8' });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (codexJsonlLineContainsUserHash(line, userTextHash)) {
+        return true;
+      }
     }
-  });
+    return false;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
 }
 
 function timestampMs(message: NormalizedMessage): number | undefined {

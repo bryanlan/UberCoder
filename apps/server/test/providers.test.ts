@@ -116,6 +116,77 @@ describe('provider history discovery', () => {
     expect(candidates.map((candidate) => candidate.ref)).toEqual([conversationRef]);
   });
 
+  it('finds a pending Codex prompt between large instruction and output records', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-pending-middle-'));
+    const sessionsDir = path.join(tempDir, 'sessions', '2026', '08', '14');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const conversationRef = '22222222-3333-4444-8555-666666666666';
+    const transcriptPath = path.join(sessionsDir, `rollout-2026-08-14T10-40-41-${conversationRef}.jsonl`);
+    const prompt = 'how was last nights run';
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-08-14T14:40:43.000Z',
+        type: 'session_meta',
+        payload: { id: conversationRef, cwd: '/tmp/demo-project' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-08-14T14:40:44.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: 'x'.repeat(80_000) }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-08-14T14:40:46.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: prompt }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-08-14T14:44:27.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'custom_tool_call_output',
+          output: 'y'.repeat(1_100_000),
+        },
+      }),
+    ].join('\n'));
+
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex',
+      enabled: true,
+      discoveryRoot: tempDir,
+      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
+    } satisfies MergedProviderSettings;
+    const pending = {
+      ref: 'pending:prompt-in-middle',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-08-14T14:40:41.000Z',
+      updatedAt: '2026-08-14T14:40:41.000Z',
+      isBound: true,
+      degraded: false,
+      rawMetadata: {
+        pending: true,
+        lastUserInputHash: stableTextHash(normalizeComparableText(prompt)),
+        lastUserInputPreview: prompt,
+        lastUserInputAt: '2026-08-14T14:40:41.000Z',
+      },
+    } as const;
+
+    const candidates = await provider.listPendingAdoptionCandidates(project, pending, settings);
+
+    expect(candidates.map((candidate) => candidate.ref)).toEqual([conversationRef]);
+  });
+
   it('discovers Claude transcripts from encoded project storage', async () => {
     const provider = new ClaudeProvider();
     const settings = {

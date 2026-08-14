@@ -3,7 +3,7 @@ import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
-import { listFilesRecursive, pathExists, readTextHead, readTextTail, statFileSafe, type FileFingerprint } from './file-utils.js';
+import { listFilesRecursive, pathExists, readTextHead, statFileSafe, type FileFingerprint } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
 import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
 import {
@@ -13,7 +13,7 @@ import {
   loadCachedTranscriptParse,
   type CachedTranscriptParse,
 } from './transcripts/base.js';
-import { codexJsonlTextContainsUserHash, parseCodexConversationFile } from './transcripts/codex.js';
+import { codexJsonlFileContainsUserHash, parseCodexConversationFile } from './transcripts/codex.js';
 
 const PENDING_USER_HASH_MEMO_MAX_ENTRIES = 4096;
 
@@ -113,10 +113,7 @@ export class CodexProvider implements ProviderAdapter {
       return memoized.matches;
     }
 
-    const matches = codexJsonlTextContainsUserHash([
-      await readTextHead(filePath),
-      await readTextTail(filePath),
-    ].join('\n'), userTextHash);
+    const matches = await codexJsonlFileContainsUserHash(filePath, userTextHash);
     if (fingerprint) {
       // Keyed by path so a changed file replaces its own entry; evict the oldest
       // entries (insertion order) rather than clearing the whole memo.
