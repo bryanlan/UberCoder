@@ -18,6 +18,7 @@ import type {
 import { api, ApiError } from './lib/api';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
+import { CoordinationPanel } from './components/CoordinationPanel';
 import {
   conversationMetaQueryKey,
   invalidateConversationData,
@@ -993,6 +994,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
           </div>
         )}
 
+        {project && !routeSelection.inSettings && <CoordinationPanel checkout={project.path} />}
         <main className="min-h-0 flex-1 overflow-hidden">
           {routeSelection.inSettings ? (
             <SettingsPage

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
+import { createCoordinationSchema } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 interface Migration {
   version: number;
@@ -213,6 +214,7 @@ const MIGRATIONS: Migration[] = [
       addColumnIfMissing(sqlite, 'bound_sessions', 'auto_tracked_at', 'auto_tracked_at text');
     },
   },
+  { version: 6, name: 'assignment-coordination', up: createCoordinationSchema },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

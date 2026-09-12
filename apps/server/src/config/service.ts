@@ -46,6 +46,7 @@ export class ConfigService {
       projectsRoot: normalizeFsPath(config.projectsRoot),
       runtimeDir: normalizeFsPath(config.runtimeDir),
       databasePath: normalizeFsPath(config.databasePath),
+      coordination: { ...config.coordination, pilotPaths: config.coordination.pilotPaths.map(normalizeFsPath) },
       projects: Object.fromEntries(Object.entries(config.projects).map(([key, project]) => [
         key,
         {

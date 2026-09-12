@@ -8,6 +8,7 @@ import { AuthService } from '../src/security/auth-service.js';
 
 function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig {
   return {
+    coordination: { enabled: false, pilotPaths: [] },
     server: {
       host: '127.0.0.1',
       port: 4317,

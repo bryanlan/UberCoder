@@ -8,6 +8,10 @@
   "projectsRoot": "/srv/projects",
   "runtimeDir": "~/.local/share/agent-console/runtime",
   "databasePath": "~/.local/share/agent-console/agent-console.sqlite",
+  "coordination": {
+    "enabled": false,
+    "pilotPaths": []
+  },
   "sessions": {
     "eagerRestoreHours": 48,
     "restoreGraceHours": 24

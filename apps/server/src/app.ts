@@ -24,6 +24,8 @@ import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
+import { CoordinationService } from './coordination/service.js';
+import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -51,6 +53,7 @@ export async function buildApp(options: AppOptions = {}) {
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
   });
   const authService = new AuthService(config, db);
+  const coordination = new CoordinationService(db, config.coordination);
   const restartService = new RestartService(() => app.close());
 
   await app.register(fastifyCookie);
@@ -83,6 +86,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
+  await registerCoordinationRoutes(app, authService, coordination);
   new LocalhostProxyService(projectService, authService).register(app);
 
   if (fs.existsSync(config.server.webDistPath)) {
@@ -110,6 +114,9 @@ export async function buildApp(options: AppOptions = {}) {
     });
   }
 
+  const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir) : undefined;
+  const coordinationTimer = config.coordination.enabled ? setInterval(() => coordination.reconcileProcesses(), 15_000) : undefined;
+  coordinationTimer?.unref();
   await indexing.loadProjectMetadata();
   await indexing.start();
   sessions.startSessionReconciliation();
@@ -122,6 +129,8 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   app.addHook('onClose', async () => {
+    if (coordinationTimer) clearInterval(coordinationTimer);
+    await coordinationSocket?.close();
     await indexing.stop();
     await sessions.stop();
     liveOutputReader.clear();

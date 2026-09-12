@@ -8,4 +8,5 @@ coverage/
 .DS_Store
 sqlite-data/
 runtime/
+!apps/server/src/runtime/
 test-results/

@@ -37,3 +37,7 @@
 
 ## Known Gaps
 - Host-level Codex and Claude live smokes still require real tmux/provider CLIs and remain opt-in.
+
+## Assignment coordination
+
+Run `NODE_ENV=test npm run test -w @agent-console/server -- coordination`, `NODE_ENV=test npm run test -w @agent-console/web -- CoordinationPanel`, and `npm run typecheck`. React tests require `NODE_ENV=test` when invoked from the production Console environment. Coordination tests use temporary Git repositories and private sockets. The live cross-provider delivery proof is opt-in and must use disposable sessions, never existing user conversations. See `docs/agent-coordination.md`.
