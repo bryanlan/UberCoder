@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
-import { createCoordinationSchema } from '../coordination/schema.js';
+import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 interface Migration {
   version: number;
@@ -215,6 +215,7 @@ const MIGRATIONS: Migration[] = [
     },
   },
   { version: 6, name: 'assignment-coordination', up: createCoordinationSchema },
+  { version: 7, name: 'advisory-coordination', up: retireCoordinationEnforcement },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

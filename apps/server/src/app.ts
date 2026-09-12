@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
@@ -38,6 +39,8 @@ export async function buildApp(options: AppOptions = {}) {
   const app = fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
+    // Browser event streams must not keep shutdown and socket release waiting.
+    forceCloseConnections: true,
   });
   const eventBus = new RealtimeEventBus();
   const projectService = new ProjectService(configService);
@@ -77,7 +80,13 @@ export async function buildApp(options: AppOptions = {}) {
     return payload;
   });
 
-  app.get('/api/health', async () => ({ ok: true }));
+  const instanceId = randomUUID();
+  app.get('/api/health', async (_request, reply) => {
+    // Public readiness only: a settings change may move the server to a new
+    // origin. No credentials or application data are exposed by this route.
+    reply.header('Access-Control-Allow-Origin', '*').header('Cache-Control', 'no-store');
+    return { ok: true, instanceId };
+  });
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
   await registerProjectRoutes(app, authService, indexing, sessions);
@@ -120,11 +129,13 @@ export async function buildApp(options: AppOptions = {}) {
   await indexing.loadProjectMetadata();
   await indexing.start();
   sessions.startSessionReconciliation();
-  void sessions.cleanupEndedSessionRuntimeDirs();
+  const runtimeCleanup = sessions.cleanupEndedSessionRuntimeDirs().catch((error) => {
+    app.log.warn({ err: error }, 'Startup session-runtime cleanup failed.');
+  });
   // Rebuild search rows for any project/provider whose FTS index is empty (e.g.
   // after the v3 migration reconciled a database predating search-state
   // tracking). No-op when rows exist; runs off the startup path.
-  void indexing.loadProjectMetadata({ backfillSearchIndex: true }).catch(() => {
+  const searchBackfill = indexing.loadProjectMetadata({ backfillSearchIndex: true }).catch(() => {
     app.log.warn('Startup search-index backfill failed; use project refresh to rebuild.');
   });
 
@@ -132,6 +143,7 @@ export async function buildApp(options: AppOptions = {}) {
     if (coordinationTimer) clearInterval(coordinationTimer);
     await coordinationSocket?.close();
     await indexing.stop();
+    await Promise.all([runtimeCleanup, searchBackfill]);
     await sessions.stop();
     liveOutputReader.clear();
     db.close();

@@ -11,6 +11,7 @@ import type {
 import { Link } from 'react-router-dom';
 import { ApiError, api } from '../lib/api';
 import { DirectoryPickerModal } from '../components/DirectoryPickerModal';
+import { readServerInstance, waitForServerRestart } from './settings-restart';
 
 interface GlobalDraft {
   projectsRoot: string;
@@ -213,13 +214,13 @@ export function SettingsPage({
 
       try {
         setGlobalMessage('Restarting server...');
+        const previousInstance = await readServerInstance(window.location.href);
         await restartMutation.mutateAsync();
         const reloadUrl = getRestartUrl(settings ?? nextSettings, variables);
-        window.setTimeout(() => {
-          window.location.href = reloadUrl;
-        }, 1200);
+        await waitForServerRestart(reloadUrl, previousInstance);
+        window.location.href = reloadUrl;
       } catch (error) {
-        setGlobalMessage(error instanceof ApiError ? error.message : 'Restart request failed. Restart the server manually to apply the saved settings.');
+        setGlobalMessage(error instanceof Error ? error.message : 'Restart request failed. Restart the server manually to apply the saved settings.');
       }
     },
   });

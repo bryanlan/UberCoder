@@ -35,7 +35,7 @@ const codexText = before.get(codexConfig)?.toString() ?? '';
 if (codexText.includes(`[mcp_servers.${serverName}`)) throw new Error('Coordination is already installed in Codex. Review existing configuration instead of overwriting it.');
 const claudeData = JSON.parse(before.get(claudeConfig)?.toString() ?? '{}');
 if (claudeData.mcpServers?.[serverName]) throw new Error('Coordination is already installed in Claude. Review existing configuration instead of overwriting it.');
-console.log(JSON.stringify({ apply, pilotPaths: pilots, files: targets, hookEvents: ['SessionStart', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'], mcpServer: serverName, runtimeDir, activation: 'Requires the updated Console backend; existing provider processes are not restarted.' }, null, 2));
+console.log(JSON.stringify({ apply, pilotPaths: pilots, files: targets, hookEvents: ['SessionStart', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'], mcpServer: serverName, runtimeDir, activation: 'Requires the updated Console backend; existing provider processes are not restarted.' }, null, 2));
 if (!apply) process.exit(0);
 
 const backup = path.join(os.homedir(), '.local/share/agent-console/coordination-install-backups', new Date().toISOString().replace(/[:.]/g, '-'));
@@ -56,7 +56,7 @@ function replaceJson(file, update) {
 function addHooks(file, provider) {
   replaceJson(file, (data) => {
     data.hooks ??= {};
-    const events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'];
+    const events = ['SessionStart', 'PostToolUse', 'UserPromptSubmit', 'Stop', 'SessionEnd'];
     if (provider === 'claude') events.push('PostToolUseFailure');
     for (const event of events) {
       data.hooks[event] ??= [];

@@ -13,7 +13,7 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - When transcript bubbles duplicate, repeat, disappear, or show terminal repaint text, start with the server timeline/transcript routing in `docs/architecture.md` and `docs/fileindex.md` before changing the web renderer.
 - Keep conversation search server-owned: index sanitized provider transcript content and approved live pending-session text, not raw screen/debug surfaces.
 - Never commit real secrets or local runtime config; use `config/agent-console.example.json` as the template.
-- Assignment coordination is backend-owned: see `docs/agent-coordination.md`. Keep peer inbox delivery separate from user input, and preserve claims from disconnected sessions until explicit reconciliation.
+- Assignment coordination is backend-owned: see `docs/agent-coordination.md`. Keep peer inbox delivery separate from user input, use ordinary editing/Git tools and preserve unfinished work. Coordination supplies activity and messages only; it never blocks edits or owns Git operations.
 
 ## Build / Test / Verify
 - Install: `npm install`

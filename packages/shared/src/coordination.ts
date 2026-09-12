@@ -17,13 +17,6 @@ export interface CoordinationScope {
   summary: string;
 }
 
-export interface CoordinationClaim {
-  assignmentId: string;
-  checkout: string;
-  path: string;
-  acquiredAt: string;
-}
-
 export interface CoordinationEvent {
   seq: number;
   assignmentId: string;
@@ -47,7 +40,7 @@ export interface CoordinationSnapshot {
   enabled: boolean;
   assignments: CoordinationAssignment[];
   scopes: CoordinationScope[];
-  claims: CoordinationClaim[];
   events: CoordinationEvent[];
   messages: CoordinationMessage[];
+  pendingMessageCount: number;
 }

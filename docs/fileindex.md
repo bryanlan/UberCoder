@@ -210,3 +210,12 @@ Test and verification anchors:
 ## Deferred or Unclear Areas
 - Playwright e2e artifacts under `test-results/` are generated evidence, not source architecture.
 - Host-level Codex smoke validation requires a running backend plus real Codex/tmux access and is intentionally opt-in.
+
+## Assignment coordination
+
+- `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
+- `packages/shared/src/coordination.ts` — browser/server coordination contracts.
+- `scripts/agent-coord.mjs` — provider lifecycle hooks, host MCP server and local operator client.
+- `scripts/install-coordination.mjs` — reviewed pilot installation with private configuration backups.
+- `apps/web/src/components/CoordinationPanel.tsx` — peer work and delivery status outside the user conversation.
+- `docs/agent-coordination.md` — operating and deployment contract.

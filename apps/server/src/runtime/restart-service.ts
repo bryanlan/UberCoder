@@ -18,22 +18,25 @@ export class RestartService {
 
   private async restart(): Promise<void> {
     try {
-      const child = spawn(process.execPath, process.argv.slice(1), {
-        cwd: process.cwd(),
-        env: process.env,
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-    } catch {
-      this.pending = false;
-      return;
-    }
-
-    try {
       await this.closeApp();
-    } finally {
+      // The installed unit uses Restart=always. Only its main process delegates
+      // replacement to systemd; a child inheriting the environment does not.
+      if (process.env.SYSTEMD_EXEC_PID !== String(process.pid)) {
+        await new Promise<void>((resolve, reject) => {
+          const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+            cwd: process.cwd(),
+            env: process.env,
+            detached: true,
+            stdio: 'ignore',
+          });
+          child.once('error', reject);
+          child.once('spawn', () => { child.unref(); resolve(); });
+        });
+      }
       process.exit(0);
+    } catch (error) {
+      console.error('Agent Console restart failed:', error);
+      process.exit(1);
     }
   }
 }

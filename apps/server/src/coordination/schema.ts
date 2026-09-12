@@ -1,5 +1,27 @@
 import type Database from 'better-sqlite3';
 
+// Keep version 6 intact as migration history. Version 7 preserves the ownership
+// evidence as activity, then removes the tables and their locking semantics.
+export function retireCoordinationEnforcement(db: Database.Database): void {
+  db.exec(`
+    insert into coordination_events(assignment_id, checkout, kind, text, timestamp)
+      select assignment_id, checkout, 'claim-retired',
+        json_object('path', path, 'acquiredAt', acquired_at,
+          'note', 'Historical claim only. Enforcement retired; unfinished files were not changed.'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      from coordination_claims;
+    insert into coordination_events(assignment_id, checkout, kind, text, timestamp)
+      select assignment_id, checkout, 'git-operation-retired',
+        json_object('repository', repository, 'startedAt', started_at,
+          'pid', server_pid, 'processStart', process_start,
+          'note', 'Historical operation only. Inspect Git state before continuing; no Git state was changed.'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      from coordination_git_operations;
+    drop table coordination_git_operations;
+    drop table coordination_claims;
+  `);
+}
+
 export function createCoordinationSchema(db: Database.Database): void {
   db.exec(`
     create table coordination_assignments (

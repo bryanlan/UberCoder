@@ -5,8 +5,8 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
   const query = useQuery({
     queryKey: ['coordination', checkout],
     queryFn: async () => {
-      const response = await fetch(`/api/coordination?${new URLSearchParams({ checkout })}`, { credentials: 'include' });
-      if (!response.ok) throw new Error('Coordination is unavailable. Editing claims and message delivery cannot be verified.');
+      const response = await fetch(`/api/assignment-activity?${new URLSearchParams({ checkout })}`, { credentials: 'include' });
+      if (!response.ok) throw new Error('Coordination is unavailable. Activity and message delivery cannot be verified. Work is not blocked.');
       return await response.json() as CoordinationSnapshot;
     },
     refetchInterval: 5000,
@@ -15,23 +15,22 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
   if (query.error) return <div role="status" className="mx-4 my-1 text-xs text-amber-200">{query.error.message}</div>;
   const data = query.data;
   if (!data?.enabled) return null;
-  const activeAssignments = data.assignments.filter((assignment) => assignment.status === 'active' || assignment.status === 'waiting' || data.claims.some((claim) => claim.assignmentId === assignment.id));
-  const pendingMessages = data.messages.filter((message) => !message.acknowledgedAt && activeAssignments.some((assignment) => assignment.id === message.recipientId));
+  const activeAssignments = data.assignments.filter((assignment) => assignment.status === 'active' || assignment.status === 'waiting');
   const label = (id: string) => {
     const assignment = data.assignments.find((item) => item.id === id);
     return assignment ? `${assignment.provider}: ${assignment.description}` : id.slice(0, 8);
   };
   return (
     <details className="mx-4 my-2 rounded-xl border border-slate-700 bg-slate-900 text-sm text-slate-200 lg:mx-6">
-      <summary className="cursor-pointer px-3 py-2">Work in this repository · {activeAssignments.length} assignments · {pendingMessages.length} messages awaiting acknowledgement</summary>
+      <summary className="cursor-pointer px-3 py-2">Work in this repository · {activeAssignments.length} assignments · {data.pendingMessageCount} messages awaiting acknowledgement</summary>
       <div className="max-h-72 space-y-4 overflow-auto border-t border-slate-700 p-3">
+        <p className="text-xs text-slate-400">Activity and messages only. Agents coordinate overlaps directly; files and Git operations are not locked.</p>
         {activeAssignments.length === 0 && <p>No registered assignments currently affect this repository.</p>}
         <ul className="space-y-2" aria-label="Active assignments">
           {activeAssignments.map((assignment) => (
             <li key={assignment.id}>
               <div><strong>{assignment.description}</strong> <span className="text-slate-400">· {assignment.provider} · {assignment.status}</span></div>
               {data.scopes.filter((scope) => scope.assignmentId === assignment.id).map((scope) => <div key={scope.checkout} className="break-all text-xs text-slate-400">{scope.checkout}: {scope.summary}</div>)}
-              {data.claims.filter((claim) => claim.assignmentId === assignment.id).map((claim) => <div key={`${claim.checkout}:${claim.path}`} className="break-all text-xs text-amber-200">Editing: {claim.path}{assignment.status === 'disconnected' || assignment.status === 'finished' ? ' · unfinished changes need reconciliation' : ''}</div>)}
             </li>
           ))}
         </ul>
