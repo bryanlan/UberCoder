@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { NormalizedMessage } from '@agent-console/shared';
-import { groupTranscriptTurns } from './transcript-turns';
+import { groupTranscriptTurns, shouldShowInMainTranscript } from './transcript-turns';
 
 function message(overrides: Partial<NormalizedMessage>): NormalizedMessage {
   return {
@@ -40,4 +40,11 @@ describe('groupTranscriptTurns', () => {
       ['Done.'],
     ]);
   });
+});
+
+it('shows normalized provider failures while keeping raw status output hidden', () => {
+  const failure = message({ role: 'status', statusKind: 'run-failure' });
+  expect(shouldShowInMainTranscript(failure)).toBe(true);
+  expect(shouldShowInMainTranscript({ ...failure, statusKind: undefined })).toBe(false);
+  expect(shouldShowInMainTranscript({ ...failure, source: 'live-output' })).toBe(false);
 });

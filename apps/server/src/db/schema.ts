@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 interface Migration {
   version: number;
@@ -216,6 +216,9 @@ const MIGRATIONS: Migration[] = [
   },
   { version: 6, name: 'assignment-coordination', up: createCoordinationSchema },
   { version: 7, name: 'advisory-coordination', up: retireCoordinationEnforcement },
+  { version: 8, name: 'persistent-run-failure-recovery', up(sqlite) {
+    addColumnIfMissing(sqlite, 'bound_sessions', 'run_failure_json', 'run_failure_json text');
+  } },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

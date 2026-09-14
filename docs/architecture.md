@@ -210,3 +210,40 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 ## Assignment coordination
 
 `apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver context without entering the tmux user-input path. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
+
+## Provider run failures and bounded recovery
+
+Codex `task_complete.error` records are authoritative failed-turn outcomes. The
+provider adapter preserves their messages as durable status rows, and its
+incremental lifecycle monitor observes append-only transcript updates independently
+of the large-conversation display cache. SessionManager attaches this monitor to
+managed transcript bindings even when no conversation page is open.
+
+The backend persists failure and retry state in `bound_sessions.run_failure_json`
+(schema version 8). Ordinary screen/status writes cannot overwrite that state.
+The conversation notice and sidebar badge distinguish stopped, retry scheduled and
+retrying. Failed turns do not remain working because of terminal-output cooldown.
+
+Only the typed Codex `server_overloaded` error automatically continues the same
+conversation: at most three attempts, delayed 15, 45 and 120 seconds. Permission,
+policy, authentication, quota and unknown failures stay stopped. Each attempt
+rechecks the latest provider turn, canonical binding, live tmux ownership, enabled
+project/provider and idle composer. It never launches a second writer. The
+continuation tells the agent to reconcile existing work and external effects before
+continuing under the original authorization. It does not resend the original user
+command or grant additional authority.
+
+User input, keystrokes and release cancel pending recovery. The budget survives
+server restart; historical failures without an existing recovery record remain
+visible but are not automatically resumed. A scheduled attempt older than ten
+minutes stops, with age checked again after asynchronous readiness checks before
+starting submission. The attempt is persisted before submission: uncertain transport or
+restart outcomes are stopped for manual inspection, and lack of provider
+acknowledgment within 30 seconds also stops recovery. Successful completion clears
+the active notice while preserving the failure in transcript history.
+
+Known cancellation limitations: Stop received during automatic text entry can still
+be followed by Enter before Escape is delivered. Cancellation of a running turn
+can also be forgotten across a server restart because its turn identity is not
+persisted. These two cases remain unresolved; the retry-expiry guard does not
+change their behavior.

@@ -9,6 +9,7 @@ export interface SidebarConversation {
   activityTimestamp: string;
   indicatorTimestamp: string;
   autoTrackedAt?: string;
+  runFailure?: BoundSessionItem['runFailure'];
 }
 
 export type SidebarProject = ProjectSummary & {
@@ -61,6 +62,7 @@ export function deriveSidebarProjects({
             activityTimestamp,
             indicatorTimestamp: newestTimestamp(activityTimestamp, session?.autoTrackedAt),
             autoTrackedAt: session?.autoTrackedAt,
+            runFailure: session?.runFailure,
           };
         }))
         .filter(({ conversation }) => !workMode || conversation.isBound);

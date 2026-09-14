@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { CodexRunMonitor } from './transcripts/codex-run-state.js';
 import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
@@ -26,6 +27,8 @@ interface PendingUserHashMatchMemoEntry {
 
 export class CodexProvider implements ProviderAdapter {
   readonly id = 'codex' as const;
+
+  createRunMonitor(): CodexRunMonitor { return new CodexRunMonitor(); }
 
   constructor(private readonly parseCache?: TranscriptParseCache) {}
 

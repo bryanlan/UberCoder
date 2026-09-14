@@ -1,3 +1,4 @@
+import { RunFailureNotice } from './RunFailureNotice';
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
 import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationTimeline, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
@@ -1488,6 +1489,8 @@ export function ConversationPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {boundSession?.runFailure && <RunFailureNotice failure={boundSession.runFailure}
+        onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
       {!hideTopPanel && (
         isMobile ? (
           <div className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">

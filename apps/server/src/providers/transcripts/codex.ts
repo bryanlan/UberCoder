@@ -1,3 +1,4 @@
+import { codexRunState } from './codex-run-state.js';
 import fs from 'node:fs';
 import readline from 'node:readline';
 import type { NormalizedMessage } from '@agent-console/shared';
@@ -39,6 +40,7 @@ function sanitizeCodexDisplayText(text: string, role: NormalizedMessage['role'])
 }
 
 function shouldHideCodexDisplayMessage(message: NormalizedMessage): boolean {
+  if (message.role === 'status' && codexRunState(message.rawMetadata ?? {})?.status === 'failed') return false;
   if (message.role !== 'user' && message.role !== 'assistant') {
     return true;
   }
@@ -107,6 +109,8 @@ function toCodexDisplayMessages(messages: NormalizedMessage[]): NormalizedMessag
 
 function extractCodexMessage(record: Record<string, unknown>): { role: NormalizedMessage['role']; text: string } | undefined {
   const payload = asObject(record.payload);
+  const run = codexRunState(record);
+  if (run?.status === 'failed') return { role: 'status', text: `Run stopped: ${run.error!.message}` };
 
   if (record.type === 'response_item' && payload?.type === 'message') {
     const role = coerceMessageRole(payload.role);
@@ -295,6 +299,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
       role: extracted.role,
+      statusKind: codexRunState(record)?.status === 'failed' ? 'run-failure' : undefined,
       lifecycle: codexMessageLifecycle(record, extracted.role),
       text: extracted.text,
       timestamp,

@@ -20,7 +20,7 @@ export interface ProviderConversation {
  * message filtering that affects titles/excerpts) so stale cached artifacts
  * from older parser code are re-derived instead of served forever.
  */
-export const TRANSCRIPT_PARSER_VERSION = 4;
+export const TRANSCRIPT_PARSER_VERSION = 6;
 
 /**
  * Persisted per-file parse artifacts keyed by (path, size, mtimeMs, parser
@@ -45,7 +45,20 @@ export interface TranscriptParseCache {
   retainUnderPrefix?(directoryPrefix: string, keepPaths: Iterable<string>): void;
 }
 
+export interface ProviderRunState {
+  turnId: string;
+  timestamp: string;
+  startedAt?: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  error?: { code: string; message: string };
+}
+
+export interface ProviderRunMonitor {
+  read(transcriptPath: string): Promise<ProviderRunState | undefined>;
+}
+
 export interface ProviderAdapter {
+  createRunMonitor?(): ProviderRunMonitor;
   readonly id: ProviderId;
   discoverLocalState(project: ActiveProject, settings: MergedProviderSettings): Promise<Record<string, unknown>>;
   listConversations(project: ActiveProject, settings: MergedProviderSettings): Promise<ConversationSummary[]>;

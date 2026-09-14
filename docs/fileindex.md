@@ -219,3 +219,16 @@ Test and verification anchors:
 - `scripts/install-coordination.mjs` — reviewed pilot installation with private configuration backups.
 - `apps/web/src/components/CoordinationPanel.tsx` — peer work and delivery status outside the user conversation.
 - `docs/agent-coordination.md` — operating and deployment contract.
+
+Run recovery ownership:
+- `apps/server/src/providers/transcripts/codex-run-state.ts` — typed Codex lifecycle
+  decoding and incremental bounded-memory observation.
+- `apps/server/src/sessions/run-recovery.ts` — persisted retry budget, delays,
+  cancellation, reconciliation and uncertain-delivery stop rules.
+- `apps/server/src/db/repos/bound-sessions.ts` and `db/schema.ts` — separately owned
+  recovery state and schema version 8.
+- `apps/web/src/components/RunFailureNotice.tsx`, `Sidebar.tsx` — visible stopped and
+  recovery states, with an explicit Stop action.
+- `apps/server/test/codex-run-state.test.ts`, `run-recovery.test.ts`, and
+  `apps/web/e2e/run-recovery.spec.ts` — provider/transport/controller and desktop/mobile
+  consumer regressions; browser fixtures never submit to a real provider.

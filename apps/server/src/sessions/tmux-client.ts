@@ -116,6 +116,7 @@ export interface TmuxClient {
   killSession(sessionName: string): Promise<void>;
   hasSession(sessionName: string): Promise<boolean>;
   getPanePid(sessionName: string): Promise<number | undefined>;
+  getOption(sessionName: string, name: string): Promise<string | undefined>;
   setOption(sessionName: string, name: string, value: string): Promise<void>;
 }
 
@@ -212,6 +213,11 @@ export class ShellTmuxClient implements TmuxClient {
     } catch {
       return undefined;
     }
+  }
+
+  async getOption(sessionName: string, name: string): Promise<string | undefined> {
+    const output = await runTmux(['show-options', '-qv', '-t', sessionName, name]);
+    return output || undefined;
   }
 
   async setOption(sessionName: string, name: string, value: string): Promise<void> {

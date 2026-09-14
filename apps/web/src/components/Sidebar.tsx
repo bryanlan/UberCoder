@@ -1,6 +1,6 @@
 import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Plus, RefreshCcw, Search, Sparkles, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import type { ConversationSearchResult, ProjectSummary, ProviderId, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
+import type { ConversationSearchResult, ProjectSummary, ProviderId, RunFailure, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
@@ -234,6 +234,7 @@ function ConversationLink({
   renaming,
   lastInteractionAt,
   indicatorTimestamp,
+  runFailure,
   autoTrackedAt,
   sessionFreshnessThresholds,
 }: {
@@ -251,6 +252,7 @@ function ConversationLink({
   renaming: boolean;
   lastInteractionAt?: string;
   indicatorTimestamp?: string;
+  runFailure?: RunFailure;
   autoTrackedAt?: string;
   sessionFreshnessThresholds: SessionFreshnessThresholds;
 }) {
@@ -355,6 +357,9 @@ function ConversationLink({
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
         <span className="line-clamp-1 min-w-0">{title}</span>
+        {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
+          {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
+        </span>}
       </Link>
       <div className="relative">
         <button
@@ -677,7 +682,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, activityTimestamp, indicatorTimestamp, autoTrackedAt }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, indicatorTimestamp, autoTrackedAt, runFailure }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -694,6 +699,7 @@ function ProjectSection({
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 lastInteractionAt={activityTimestamp}
                 indicatorTimestamp={indicatorTimestamp}
+                runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
                 sessionFreshnessThresholds={sessionFreshnessThresholds}
               />

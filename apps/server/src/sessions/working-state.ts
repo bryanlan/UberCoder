@@ -50,8 +50,9 @@ export function nextScreenWorkingState(
     input.screenShowsWorking ? session.lastActivityAt : undefined,
   );
   const outputIsCoolingDown = isRecentTimestamp(session.lastOutputAt, input.capturedAt, input.idleMs);
-  const nextIsWorking = outputIsCoolingDown
-    || (input.screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, input.capturedAt, input.idleMs));
+  const failureStopped = session.runFailure && session.runFailure.status !== 'retrying';
+  const nextIsWorking = !failureStopped && (outputIsCoolingDown
+    || (input.screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, input.capturedAt, input.idleMs)));
   const nextLastCompletedAt = session.lastCompletedAt;
   const expiryHeartbeatAt = nextIsWorking
     ? session.lastOutputAt ?? workingHeartbeatAt
@@ -88,7 +89,7 @@ export function nextIdleExpiryDecision(
     idleMs: number;
   },
 ): IdleExpiryDecision {
-  if (!session.isWorking) {
+  if (!session.isWorking || (session.runFailure && session.runFailure.status !== 'retrying')) {
     return { action: 'clear' };
   }
 

@@ -199,6 +199,7 @@ export function groupTranscriptTurns(messages: NormalizedMessage[]): TranscriptT
 }
 
 export function shouldShowInMainTranscript(message: NormalizedMessage): boolean {
+  if (message.role === 'status' && message.statusKind === 'run-failure' && message.lifecycle === 'durable' && message.source === 'history-file') return true;
   if (message.role !== 'user' && message.role !== 'assistant') {
     return false;
   }

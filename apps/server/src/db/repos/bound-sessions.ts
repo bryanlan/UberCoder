@@ -83,6 +83,12 @@ export class BoundSessionsRepo {
     tx();
   }
 
+  // Independently owned state: ordinary screen/status upserts must not overwrite it.
+  setRunFailure(id: string, failure: BoundSession['runFailure']): void {
+    this.sqlite.prepare('update bound_sessions set run_failure_json = ? where id = ?')
+      .run(failure ? JSON.stringify(failure) : null, id);
+  }
+
   list(): BoundSession[] {
     const rows = this.sqlite.prepare(`select * from bound_sessions order by updated_at desc`).all() as SqliteRow[];
     return rows.map(mapBoundSessionRow);
@@ -132,6 +138,7 @@ export class BoundSessionsRepo {
 
 export function mapBoundSessionRow(row: SqliteRow): BoundSession {
   return {
+    runFailure: row.run_failure_json ? JSON.parse(String(row.run_failure_json)) as BoundSession['runFailure'] : undefined,
     id: String(row.id),
     provider: String(row.provider) as BoundSession['provider'],
     projectSlug: String(row.project_slug),

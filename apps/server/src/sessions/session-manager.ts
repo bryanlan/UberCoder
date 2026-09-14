@@ -32,6 +32,7 @@ import {
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
   screenShowsQueuedMessageHint,
+  screenShowsInteractiveSelectionHint,
   sessionScreenShowsWorking,
   shouldUseBracketedPasteTransport,
   submittedTextShouldCreateUserTurn,
@@ -39,6 +40,7 @@ import {
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
+import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
@@ -242,6 +244,7 @@ export interface AutoTrackConversationsResult {
 export class SessionManager {
   private readonly outputWatchers = new OutputWatcherRegistry();
   private readonly transcriptWatchers = new TranscriptWatcherRegistry();
+  private readonly runRecovery: RunRecovery;
   private readonly unsubscribeRealtimeEvents: () => void;
   private readonly runtimes: SessionRuntimeRegistry;
   private reconciliationTimer?: ReturnType<typeof setInterval>;
@@ -278,6 +281,30 @@ export class SessionManager {
         );
       },
     });
+    this.runRecovery = new RunRecovery({
+      db: this.db,
+      runExclusive: (id, fn) => this.runtimes.run(id, 'runRecovery', fn),
+      canRetry: async (session) => {
+        if (this.stopped || this.getCurrentRestorableSession(session)?.id !== session.id || session.status !== 'bound') return 'This session no longer owns the conversation.';
+        const project = await this.recoveryDependencies?.projectService.getProjectBySlug(session.projectSlug);
+        if (!project || !this.recoveryDependencies?.projectService.getMergedProviderSettings(project, session.provider).enabled) return 'This provider or project is no longer enabled.';
+        if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive') return 'The provider session is unavailable. Resume it manually.';
+        if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) return 'Session ownership could not be verified.';
+        const screen = await this.captureSessionScreen(session);
+        if (screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen) || screen.contextPercent === undefined) return 'The provider is busy, has an unsent draft, or needs your input.';
+        return undefined;
+      },
+      submit: async (session, text) => {
+        if (this.getCurrentRestorableSession(session)?.id !== session.id) throw new Error('Conversation ownership changed before recovery submission.');
+        await this.runInputTmuxAction(session, () => this.submitTextToSession(session.tmuxSessionName, text));
+        const timestamp = nowIso();
+        const updated = this.updateBoundSessionFields(session.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
+        this.appendEvent(updated, { type: 'status', text: 'Submitted automatic recovery for the interrupted turn.', timestamp });
+        this.eventBus.emit({ type: 'session.updated', session: updated });
+      },
+      publish: (session) => this.eventBus.emit({ type: 'session.updated', session }),
+      onError: (error) => this.logger?.warn({ err: error }, 'Run recovery failed.'),
+    });
     this.unsubscribeRealtimeEvents = this.eventBus.subscribe((event) => this.handleRealtimeLifecycleEvent(event));
   }
 
@@ -296,6 +323,7 @@ export class SessionManager {
     const sessionsToDetach = this.listRestorableSessions()
       .filter((session) => session.rawLogPath && (session.status === 'starting' || session.status === 'bound'));
     this.stopped = true;
+    this.runRecovery.stop();
     if (this.reconciliationStartupTimer) {
       clearTimeout(this.reconciliationStartupTimer);
       this.reconciliationStartupTimer = undefined;
@@ -575,6 +603,19 @@ export class SessionManager {
     this.appendEvent(failed, { type: 'status', text, timestamp: failedAt });
     this.eventBus.emit({ type: 'session.updated', session: failed });
     return failed;
+  }
+
+  private getCurrentRestorableSession(session: BoundSession): BoundSession | undefined {
+    const current = this.db.boundSessions.getById(session.id);
+    if (!current || !current.shouldRestore || current.status === 'releasing') {
+      return undefined;
+    }
+    const owner = this.db.boundSessions.getRestorableByConversation(
+      current.projectSlug,
+      current.provider,
+      current.conversationRef,
+    );
+    return owner?.id === current.id ? current : undefined;
   }
 
   private markSessionMissingDuringInput(session: BoundSession): void {
@@ -1094,6 +1135,7 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
+    this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
   }
 
@@ -1136,6 +1178,7 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+    if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
 
@@ -1364,6 +1407,7 @@ export class SessionManager {
   }
 
   async releaseSession(sessionId: string): Promise<void> {
+    this.runRecovery.cancel(sessionId);
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
 
@@ -1681,6 +1725,9 @@ export class SessionManager {
       return;
     }
 
+    const provider = this.recoveryDependencies?.providerRegistry.get(session.provider);
+    if (provider?.createRunMonitor) this.runRecovery.watch(session.id, transcriptPath, () => provider.createRunMonitor!());
+
     this.transcriptWatchers.watch({
       sessionId: session.id,
       transcriptPath,
@@ -1689,6 +1736,7 @@ export class SessionManager {
   }
 
   private emitTranscriptUpdated(sessionId: string): void {
+    this.runRecovery.changed(sessionId);
     const session = this.db.boundSessions.getById(sessionId);
     if (!session || session.status === 'ended') {
       this.transcriptWatchers.stop(sessionId);
@@ -1705,6 +1753,7 @@ export class SessionManager {
   }
 
   private stopWatching(sessionId: string): void {
+    this.runRecovery.stopWatching(sessionId);
     this.outputWatchers.stop(sessionId, { flush: true }, (chunk) => this.flushPendingChunk(sessionId, chunk));
     this.transcriptWatchers.stop(sessionId);
     this.clearWorkingExpiry(sessionId);

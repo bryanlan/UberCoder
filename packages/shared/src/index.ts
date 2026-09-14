@@ -53,6 +53,7 @@ export interface ConversationSummary {
   boundSessionId?: string;
   degraded: boolean;
   model?: string;
+  statusKind?: 'run-failure';
   rawMetadata?: Record<string, unknown>;
 }
 
@@ -65,6 +66,7 @@ export interface NormalizedMessage {
   timestamp: string;
   conversationRef: string;
   source: 'history-file' | 'live-output' | 'synthetic-status' | 'user-input';
+  statusKind?: 'run-failure';
   rawMetadata?: Record<string, unknown>;
 }
 
@@ -123,7 +125,21 @@ export interface ConversationSearchResponse {
   results: ConversationSearchResult[];
 }
 
+export interface RunFailure {
+  turnId: string;
+  failedAt: string;
+  code: string;
+  message: string;
+  attempts: number;
+  maxAttempts: number;
+  status: 'scheduled' | 'retrying' | 'stopped';
+  nextRetryAt?: string;
+  retrySubmittedAt?: string;
+  stoppedReason?: string;
+}
+
 export interface BoundSession {
+  runFailure?: RunFailure;
   id: string;
   provider: ProviderId;
   projectSlug: string;

@@ -75,6 +75,15 @@ export class FakeTmux implements TmuxClient {
     return this.alive.has(sessionName);
   }
   async getPanePid(): Promise<number | undefined> { return 4242; }
+  async getOption(sessionName: string, name: string): Promise<string | undefined> {
+    for (let index = this.options.length - 1; index >= 0; index -= 1) {
+      const option = this.options[index];
+      if (option?.sessionName === sessionName && option.name === name) {
+        return option.value;
+      }
+    }
+    return undefined;
+  }
   async setOption(sessionName: string, name: string, value: string): Promise<void> {
     this.options.push({ sessionName, name, value });
   }
