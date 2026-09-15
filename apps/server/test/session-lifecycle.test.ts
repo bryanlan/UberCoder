@@ -50,6 +50,38 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('keeps the original Codex session bound when a profile-switch kill fails', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history-profile-kill-failure',
+      title: 'Profile test',
+      kind: 'history',
+    });
+
+    tmux.failKill = true;
+    await expect(manager.switchCodexModelProfile({
+      sessionId: session.id,
+      project,
+      provider,
+      providerSettings,
+      profile: 'high',
+    })).rejects.toThrow('kill failed');
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(tmux.created).toHaveLength(1);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({
+      status: 'bound',
+      codexProfile: undefined,
+    });
+    db.close();
+  });
+
   it('tracks bind → input → release transitions through the database', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

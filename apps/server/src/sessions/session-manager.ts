@@ -1468,16 +1468,18 @@ export class SessionManager {
         text: `Switching this Codex session to ${input.profile} (${profile.model}, ${profile.reasoningEffort}).`,
         timestamp: starting.updatedAt,
       });
-      await this.tmuxClient.closePanePipe(starting.tmuxSessionName).catch(() => undefined);
-      await this.tmuxClient.killSession(starting.tmuxSessionName);
-      const launch = input.provider.getLaunchCommand(
-        input.project,
-        starting.resumeConversationRef ?? starting.conversationRef,
-        input.providerSettings,
-        { codexProfile: input.profile },
-      );
       let tmuxCreated = false;
+      let originalStopped = false;
       try {
+        await this.tmuxClient.closePanePipe(starting.tmuxSessionName).catch(() => undefined);
+        await this.tmuxClient.killSession(starting.tmuxSessionName);
+        originalStopped = true;
+        const launch = input.provider.getLaunchCommand(
+          input.project,
+          starting.resumeConversationRef ?? starting.conversationRef,
+          input.providerSettings,
+          { codexProfile: input.profile },
+        );
         await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
         tmuxCreated = true;
         await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
@@ -1520,45 +1522,51 @@ export class SessionManager {
             void cleanupError;
           }
         }
-        const rollbackLaunch = input.provider.getLaunchCommand(
-          input.project,
-          starting.resumeConversationRef ?? starting.conversationRef,
-          input.providerSettings,
-          { codexProfile: previousProfile },
-        );
-        try {
-          await this.tmuxClient.newDetachedSession(
-            starting.tmuxSessionName,
-            rollbackLaunch.cwd,
-            commandToShell(rollbackLaunch.argv, rollbackLaunch.env),
+        const originalStillAlive = !originalStopped
+          && await this.tmuxClient.hasSession(starting.tmuxSessionName).catch(() => false);
+        if (originalStillAlive) {
+          await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!).catch(() => undefined);
+        } else {
+          const rollbackLaunch = input.provider.getLaunchCommand(
+            input.project,
+            starting.resumeConversationRef ?? starting.conversationRef,
+            input.providerSettings,
+            { codexProfile: previousProfile },
           );
-          await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
-          await this.configureTmuxSessionOptions(starting.tmuxSessionName, {
-            sessionId: starting.id,
-            conversationRef: starting.conversationRef,
-            provider: starting.provider,
-          });
-          const rollbackPid = await this.tmuxClient.getPanePid(starting.tmuxSessionName);
-          await this.waitForStartupOutput({ ...starting, pid: rollbackPid });
-          const rollbackLiveness = await checkTmuxLiveness(this.tmuxClient, starting.tmuxSessionName);
-          if (rollbackLiveness !== 'alive') {
-            throw new Error(rollbackLiveness === 'dead'
-              ? 'Provider session exited while restoring the previous model profile.'
-              : 'Could not verify the restored model-profile session.');
+          try {
+            await this.tmuxClient.newDetachedSession(
+              starting.tmuxSessionName,
+              rollbackLaunch.cwd,
+              commandToShell(rollbackLaunch.argv, rollbackLaunch.env),
+            );
+            await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
+            await this.configureTmuxSessionOptions(starting.tmuxSessionName, {
+              sessionId: starting.id,
+              conversationRef: starting.conversationRef,
+              provider: starting.provider,
+            });
+            const rollbackPid = await this.tmuxClient.getPanePid(starting.tmuxSessionName);
+            await this.waitForStartupOutput({ ...starting, pid: rollbackPid });
+            const rollbackLiveness = await checkTmuxLiveness(this.tmuxClient, starting.tmuxSessionName);
+            if (rollbackLiveness !== 'alive') {
+              throw new Error(rollbackLiveness === 'dead'
+                ? 'Provider session exited while restoring the previous model profile.'
+                : 'Could not verify the restored model-profile session.');
+            }
+            const restored = this.updateBoundSessionFields(starting.id, {
+              status: 'bound',
+              codexProfile: previousProfile,
+              updatedAt: nowIso(),
+              pid: rollbackPid,
+            });
+            this.watchSessionOutput(restored);
+            this.eventBus.emit({ type: 'session.updated', session: restored });
+          } catch (rollbackError) {
+            this.logger?.warn(
+              { err: rollbackError, sessionId: starting.id },
+              'Failed to restore the previous Codex session after a model-profile switch error.',
+            );
           }
-          const restored = this.updateBoundSessionFields(starting.id, {
-            status: 'bound',
-            codexProfile: previousProfile,
-            updatedAt: nowIso(),
-            pid: rollbackPid,
-          });
-          this.watchSessionOutput(restored);
-          this.eventBus.emit({ type: 'session.updated', session: restored });
-        } catch (rollbackError) {
-          this.logger?.warn(
-            { err: rollbackError, sessionId: starting.id },
-            'Failed to restore the previous Codex session after a model-profile switch error.',
-          );
         }
         const failed = this.updateBoundSessionFields(starting.id, {
           status: (await this.tmuxClient.hasSession(starting.tmuxSessionName).catch(() => false)) ? 'bound' : 'error',
@@ -1573,6 +1581,10 @@ export class SessionManager {
           timestamp: failed.updatedAt,
         });
         this.eventBus.emit({ type: 'session.updated', session: failed });
+        if (originalStillAlive) {
+          this.watchSessionOutput(failed);
+          await this.emitScreenUpdate(failed);
+        }
         throw error;
       }
     });

@@ -56,8 +56,9 @@ function timeline(input: {
   screenContentAnsi?: string;
   screenStatus?: string;
   screenStatusAnsi?: string;
+  sessionOverrides?: Partial<BoundSession>;
 } = {}): ConversationTimeline {
-  const session = boundSession();
+  const session = boundSession(input.sessionOverrides);
   return {
     conversation: {
       ref: 'conversation-1',
@@ -93,6 +94,7 @@ function renderPane(input: {
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onSetCodexProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
+  sessionOverrides?: Partial<BoundSession>;
 } = {}) {
   const onSendKeystrokes = input.onSendKeystrokes ?? vi.fn().mockResolvedValue(true);
   const onSetCodexProfile = input.onSetCodexProfile ?? vi.fn().mockResolvedValue(true);
@@ -109,6 +111,7 @@ function renderPane(input: {
           screenContentAnsi: input.screenContentAnsi,
           screenStatus: input.screenStatus,
           screenStatusAnsi: input.screenStatusAnsi,
+          sessionOverrides: input.sessionOverrides,
         })}
         liveMode
         loading={false}
@@ -149,6 +152,54 @@ it('Alt H selects the high Codex profile without changing the draft', async () =
 
   await waitFor(() => expect(onSetCodexProfile).toHaveBeenCalledWith('session-1', 'high'));
   expect(textbox).toHaveValue('keep this draft');
+});
+
+it('does not apply a queued profile to a different conversation', async () => {
+  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
+  const view = renderPane({
+    onSetCodexProfile,
+    sessionOverrides: { id: 'session-1', isWorking: true },
+  });
+
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'h', altKey: true });
+  expect(screen.getByText(/High queued/)).toBeInTheDocument();
+
+  view.rerender(
+    <MemoryRouter>
+      <ConversationPane
+        projects={[project()]}
+        project={project()}
+        selectedProvider="codex"
+        timeline={timeline({ sessionOverrides: { id: 'session-2', isWorking: false } })}
+        liveMode
+        loading={false}
+        workMode={false}
+        mobileChromeHidden={false}
+        onToggleMobileChrome={vi.fn()}
+        mobileControlsHidden={false}
+        onToggleMobileControls={vi.fn()}
+        onBind={vi.fn()}
+        onRelease={vi.fn()}
+        onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+        onSetCodexProfile={onSetCodexProfile}
+        onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
+        onDiscardLocalSubmittedText={vi.fn()}
+        binding={false}
+        releasing={false}
+        debugOpen={false}
+        onToggleDebug={vi.fn()}
+        rawLoading={false}
+        hasOlderMessages={false}
+        loadingOlderMessages={false}
+        onLoadOlderMessages={vi.fn()}
+        conversationKey="demo:codex:conversation-2"
+        historyPrependVersion={0}
+      />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(screen.queryByText(/High queued/)).not.toBeInTheDocument());
+  expect(onSetCodexProfile).not.toHaveBeenCalled();
 });
 
 describe('ConversationPane live input bridge', () => {

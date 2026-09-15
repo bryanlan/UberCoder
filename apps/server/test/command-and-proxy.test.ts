@@ -69,6 +69,45 @@ describe('command construction and proxy allowlisting', () => {
     ]);
   });
 
+  it('preserves an explicit project model profile for a new session', () => {
+    const configuredSettings: MergedProviderSettings = {
+      ...settings,
+      commands: {
+        ...settings.commands,
+        newCommand: ['codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"'],
+      },
+    };
+
+    const command = new CodexProvider().getLaunchCommand(project, null, configuredSettings);
+
+    expect(command.argv).toEqual([
+      'codex', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-6-astra',
+      '-c', 'model_reasoning_effort="xhigh"',
+    ]);
+  });
+
+  it('replaces all supported model-profile flag forms when a profile is selected', () => {
+    const configuredSettings: MergedProviderSettings = {
+      ...settings,
+      commands: {
+        ...settings.commands,
+        resumeCommand: [
+          'codex', '-m=gpt-5.6-luna', '--config=model_reasoning_effort="low"',
+          'resume', '{{conversationId}}',
+        ],
+      },
+    };
+
+    const command = new CodexProvider().getLaunchCommand(project, 'session-123', configuredSettings, {
+      codexProfile: 'high',
+    });
+
+    expect(command.argv).toEqual([
+      'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
+      '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+    ]);
+  });
+
   it('forces Claude launch commands to skip permissions prompts', () => {
     const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings);
     expect(command.argv).toEqual(['claude', '--dangerously-skip-permissions', '--resume', 'session-123']);

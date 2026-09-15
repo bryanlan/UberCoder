@@ -299,14 +299,18 @@ function LiveSessionInputBridge({
   const bridgeBusyRef = useRef(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
-  const [queuedProfile, setQueuedProfile] = useState<CodexCostProfileKey>();
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
+  const [queuedProfile, setQueuedProfile] = useState<{ sessionId: string; profile: CodexCostProfileKey }>();
   const [profileStatus, setProfileStatus] = useState<string>();
 
   async function applyCodexProfile(profile: CodexCostProfileKey): Promise<void> {
+    const targetSessionId = sessionId;
     setProfileBusy(true);
     const selection = CODEX_COST_PROFILES[profile];
-    const changed = await onSetCodexProfile(sessionId, profile);
+    const changed = await onSetCodexProfile(targetSessionId, profile);
     setProfileBusy(false);
+    if (activeSessionIdRef.current !== targetSessionId) return;
     if (changed) {
       setQueuedProfile(undefined);
       setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} selected · ${selection.model} · ${selection.reasoningEffort}`);
@@ -319,7 +323,7 @@ function LiveSessionInputBridge({
   function requestCodexProfile(profile: CodexCostProfileKey): void {
     if (provider !== 'codex') return;
     if (isWorking) {
-      setQueuedProfile(profile);
+      setQueuedProfile({ sessionId, profile });
       setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} queued until this turn finishes.`);
       return;
     }
@@ -327,9 +331,14 @@ function LiveSessionInputBridge({
   }
 
   useEffect(() => {
-    if (!queuedProfile || isWorking || profileBusy) return;
-    void applyCodexProfile(queuedProfile);
-  }, [isWorking, profileBusy, queuedProfile]);
+    if (!queuedProfile || queuedProfile.sessionId !== sessionId || isWorking || profileBusy) return;
+    void applyCodexProfile(queuedProfile.profile);
+  }, [isWorking, profileBusy, queuedProfile, sessionId]);
+
+  useEffect(() => {
+    setQueuedProfile(undefined);
+    setProfileStatus(undefined);
+  }, [sessionId]);
 
   useEffect(() => {
     if (provider !== 'codex') return;
@@ -964,12 +973,12 @@ function LiveSessionInputBridge({
                     type="button"
                     disabled={profileBusy}
                     aria-label={`Use ${profile} Codex profile`}
-                    aria-pressed={(queuedProfile ?? activeCodexProfile) === profile}
+                    aria-pressed={(queuedProfile?.profile ?? activeCodexProfile) === profile}
                     title={`${profile}: ${CODEX_COST_PROFILES[profile].model} / ${CODEX_COST_PROFILES[profile].reasoningEffort} (Alt ${CODEX_COST_PROFILES[profile].shortcut})`}
                     onClick={() => requestCodexProfile(profile)}
                     className={clsx(
                       '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',
-                      (queuedProfile ?? activeCodexProfile) === profile ? 'bg-sky-500/20 text-sky-100' : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
+                      (queuedProfile?.profile ?? activeCodexProfile) === profile ? 'bg-sky-500/20 text-sky-100' : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
                     )}
                   >
                     {CODEX_COST_PROFILES[profile].shortcut}

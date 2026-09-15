@@ -18,6 +18,47 @@ import { codexJsonlFileContainsUserHash, parseCodexConversationFile } from './tr
 
 const PENDING_USER_HASH_MEMO_MAX_ENTRIES = 4096;
 
+function isReasoningConfig(value: string | undefined): boolean {
+  return /^model_reasoning_effort\s*=/.test(value ?? '');
+}
+
+function hasConfiguredModelProfile(argv: string[]): boolean {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--model' || arg === '-m' || arg.startsWith('--model=') || arg.startsWith('-m=')) {
+      return true;
+    }
+    if ((arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
+      return true;
+    }
+    if ((arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function withoutConfiguredModelProfile(argv: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--model' || arg === '-m') {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--model=') || arg.startsWith('-m=')) continue;
+    if ((arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
+      index += 1;
+      continue;
+    }
+    if ((arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
+}
+
 interface PendingUserHashMatchMemoEntry {
   size: number;
   mtimeMs: number;
@@ -282,21 +323,11 @@ export class CodexProvider implements ProviderAdapter {
       }),
       '--dangerously-bypass-approvals-and-sandbox',
     );
-    const profileKey = options?.codexProfile ?? (conversationRef ? undefined : 'medium');
+    const profileKey = options?.codexProfile
+      ?? (!conversationRef && !hasConfiguredModelProfile(baseArgv) ? 'medium' : undefined);
     if (profileKey) {
       const profile = CODEX_COST_PROFILES[profileKey];
-      const withoutProfileArgs: string[] = [];
-      for (let index = 0; index < baseArgv.length; index += 1) {
-        if (baseArgv[index] === '--model') {
-          index += 1;
-          continue;
-        }
-        if (baseArgv[index] === '-c' && /^model_reasoning_effort=/.test(baseArgv[index + 1] ?? '')) {
-          index += 1;
-          continue;
-        }
-        withoutProfileArgs.push(baseArgv[index]!);
-      }
+      const withoutProfileArgs = withoutConfiguredModelProfile(baseArgv);
       const executable = withoutProfileArgs[0];
       if (!executable) {
         throw new Error('Codex launch command is empty.');
