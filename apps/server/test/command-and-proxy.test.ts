@@ -53,7 +53,20 @@ describe('command construction and proxy allowlisting', () => {
     const command = new CodexProvider().getLaunchCommand(project, null, settings, {
       initialPrompt: 'Reply with exactly: smoke-token',
     });
-    expect(command.argv).toEqual(['codex', '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token']);
+    expect(command.argv).toEqual([
+      'codex', '--model', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="medium"',
+      '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token',
+    ]);
+  });
+
+  it('applies the canonical high profile to a resumed Codex session', () => {
+    const command = new CodexProvider().getLaunchCommand(project, 'session-123', settings, {
+      codexProfile: 'high',
+    });
+    expect(command.argv).toEqual([
+      'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
+      '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+    ]);
   });
 
   it('forces Claude launch commands to skip permissions prompts', () => {

@@ -32,6 +32,9 @@ const keystrokeBodySchema = z.object({
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
 });
+const modelProfileBodySchema = z.object({
+  profile: z.enum(['high', 'medium', 'low']),
+});
 
 type PendingCodexFirstTurnRestartResult =
   | { kind: 'not-applicable' }
@@ -119,6 +122,48 @@ export async function registerSessionRoutes(
   providerRegistry: ProviderRegistry,
   sessions: SessionManager,
 ): Promise<void> {
+  app.post('/api/sessions/:sessionId/model-profile', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) return;
+    const parsed = modelProfileBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      reply.code(400).send({ error: 'Invalid model profile.', details: parsed.error.flatten() });
+      return;
+    }
+    const session = sessions.getSessionById(sessionId);
+    if (!session) {
+      reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    const project = await projectService.getProjectBySlug(session.projectSlug);
+    if (!project) {
+      reply.code(404).send({ error: 'Project not found.' });
+      return;
+    }
+    const provider = providerRegistry.get(session.provider);
+    const providerSettings = projectService.getMergedProviderSettings(project, session.provider);
+    try {
+      return await sessions.switchCodexModelProfile({
+        sessionId,
+        project,
+        provider,
+        providerSettings,
+        profile: parsed.data.profile,
+      });
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
   app.post('/api/sessions/:sessionId/input', { bodyLimit: LIVE_INPUT_BODY_LIMIT_BYTES }, async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);

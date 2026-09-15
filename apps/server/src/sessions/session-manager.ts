@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { BoundSession, ConversationSummary, ProviderId, RecordedUserInput, SessionEvent, SessionInputResponse, SessionScreen } from '@agent-console/shared';
+import { CODEX_COST_PROFILES, type BoundSession, type CodexCostProfileKey, type ConversationSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -694,7 +694,9 @@ export class SessionManager {
     const resumeConversationRef = session.resumeConversationRef
       ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
     if (resumeConversationRef) {
-      return provider.getLaunchCommand(project, resumeConversationRef, providerSettings);
+      return provider.getLaunchCommand(project, resumeConversationRef, providerSettings, {
+        codexProfile: session.provider === 'codex' ? session.codexProfile : undefined,
+      });
     }
     return undefined;
   }
@@ -878,6 +880,7 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    codexProfile?: CodexCostProfileKey;
     autoTrackedAt?: string;
   }): Promise<BoundSession> {
     const bindKey = `${input.project.slug}:${input.provider.id}:${input.conversationRef}`;
@@ -1020,6 +1023,7 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    codexProfile?: CodexCostProfileKey;
     autoTrackedAt?: string;
   }, sessionId: string): Promise<SessionCommandResult> {
     const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
@@ -1043,13 +1047,16 @@ export class SessionManager {
       input.project,
       input.kind === 'pending' ? null : input.conversationRef,
       input.providerSettings,
-      { initialPrompt: input.initialPrompt },
+      { initialPrompt: input.initialPrompt, codexProfile: input.codexProfile },
     );
     const now = nowIso();
     const initialPrompt = input.initialPrompt?.trim();
     const session: BoundSession = {
       id: sessionId,
       provider: input.provider.id,
+      codexProfile: input.provider.id === 'codex'
+        ? input.codexProfile ?? (input.kind === 'pending' ? 'medium' : undefined)
+        : undefined,
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,
       resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
@@ -1403,7 +1410,172 @@ export class SessionManager {
       title: session.title ?? 'New conversation',
       kind: 'pending',
       initialPrompt: input.initialPrompt,
+      codexProfile: session.codexProfile,
     }, randomUUID());
+  }
+
+  async switchCodexModelProfile(input: {
+    sessionId: string;
+    project: ActiveProject;
+    provider: ProviderAdapter;
+    providerSettings: MergedProviderSettings;
+    profile: CodexCostProfileKey;
+  }): Promise<SessionModelProfileResponse> {
+    return await this.runtimes.run(input.sessionId, 'switchCodexModelProfile', async () => {
+      let session = this.mustGetSession(input.sessionId);
+      if (session.provider !== 'codex' || input.provider.id !== 'codex') {
+        throw new SessionInputRejectedError('Model profiles are available only for Codex sessions.');
+      }
+      session = await this.tryResolvePendingResumeSession(
+        session,
+        input.project,
+        input.provider,
+        input.providerSettings,
+      );
+      const liveSession = await this.refreshSessionState(session);
+      if (!liveSession) {
+        throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
+      }
+      if (liveSession.isWorking) {
+        throw new SessionInputRejectedError('The session is working. The browser will apply the queued profile when the turn finishes.');
+      }
+      const profile = CODEX_COST_PROFILES[input.profile];
+      const previousProfile = liveSession.codexProfile;
+      if (liveSession.conversationRef.startsWith('pending:')) {
+        if (this.hasRecordedPendingUserInput(liveSession)) {
+          throw new SessionInputRejectedError('The first turn is not resumable yet. Wait for it to appear in Codex history.');
+        }
+        const updated = this.updateBoundSessionFields(liveSession.id, { codexProfile: input.profile, updatedAt: nowIso() });
+        this.runtimeState(updated.id).codexProfile = input.profile;
+        this.appendEvent(updated, {
+          type: 'status',
+          text: `Selected ${input.profile} profile for the first Codex turn (${profile.model}, ${profile.reasoningEffort}).`,
+          timestamp: updated.updatedAt,
+        });
+        this.eventBus.emit({ type: 'session.updated', session: updated });
+        return { session: updated, profile: input.profile, model: profile.model, reasoningEffort: profile.reasoningEffort };
+      }
+
+      const starting = this.updateBoundSessionFields(liveSession.id, {
+        status: 'starting',
+        codexProfile: input.profile,
+        updatedAt: nowIso(),
+        isWorking: false,
+      });
+      this.eventBus.emit({ type: 'session.updated', session: starting });
+      this.appendEvent(starting, {
+        type: 'status',
+        text: `Switching this Codex session to ${input.profile} (${profile.model}, ${profile.reasoningEffort}).`,
+        timestamp: starting.updatedAt,
+      });
+      await this.tmuxClient.closePanePipe(starting.tmuxSessionName).catch(() => undefined);
+      await this.tmuxClient.killSession(starting.tmuxSessionName);
+      const launch = input.provider.getLaunchCommand(
+        input.project,
+        starting.resumeConversationRef ?? starting.conversationRef,
+        input.providerSettings,
+        { codexProfile: input.profile },
+      );
+      let tmuxCreated = false;
+      try {
+        await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
+        tmuxCreated = true;
+        await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
+        await this.configureTmuxSessionOptions(starting.tmuxSessionName, {
+          sessionId: starting.id,
+          conversationRef: starting.conversationRef,
+          provider: starting.provider,
+        });
+        await this.tmuxClient.setOption(starting.tmuxSessionName, '@agent_console_codex_profile', input.profile);
+        const pid = await this.tmuxClient.getPanePid(starting.tmuxSessionName);
+        await this.waitForStartupOutput({ ...starting, pid });
+        const switchedLiveness = await checkTmuxLiveness(this.tmuxClient, starting.tmuxSessionName);
+        if (switchedLiveness !== 'alive') {
+          throw new Error(switchedLiveness === 'dead'
+            ? 'Provider session exited during model-profile startup.'
+            : 'Could not verify model-profile startup.');
+        }
+        const rebound = this.updateBoundSessionFields(starting.id, {
+          status: 'bound',
+          codexProfile: input.profile,
+          updatedAt: nowIso(),
+          pid,
+        });
+        this.runtimeState(rebound.id).liveSessionModel = profile.model;
+        this.runtimeState(rebound.id).codexProfile = input.profile;
+        this.appendEvent(rebound, {
+          type: 'status',
+          text: `Codex session now uses ${input.profile} (${profile.model}, ${profile.reasoningEffort}).`,
+          timestamp: rebound.updatedAt,
+        });
+        this.eventBus.emit({ type: 'session.updated', session: rebound });
+        this.watchSessionOutput(rebound);
+        await this.emitScreenUpdate(rebound);
+        return { session: rebound, profile: input.profile, model: profile.model, reasoningEffort: profile.reasoningEffort };
+      } catch (error) {
+        if (tmuxCreated) {
+          try {
+            await this.tmuxClient.killSession(starting.tmuxSessionName);
+          } catch (cleanupError) {
+            void cleanupError;
+          }
+        }
+        const rollbackLaunch = input.provider.getLaunchCommand(
+          input.project,
+          starting.resumeConversationRef ?? starting.conversationRef,
+          input.providerSettings,
+          { codexProfile: previousProfile },
+        );
+        try {
+          await this.tmuxClient.newDetachedSession(
+            starting.tmuxSessionName,
+            rollbackLaunch.cwd,
+            commandToShell(rollbackLaunch.argv, rollbackLaunch.env),
+          );
+          await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
+          await this.configureTmuxSessionOptions(starting.tmuxSessionName, {
+            sessionId: starting.id,
+            conversationRef: starting.conversationRef,
+            provider: starting.provider,
+          });
+          const rollbackPid = await this.tmuxClient.getPanePid(starting.tmuxSessionName);
+          await this.waitForStartupOutput({ ...starting, pid: rollbackPid });
+          const rollbackLiveness = await checkTmuxLiveness(this.tmuxClient, starting.tmuxSessionName);
+          if (rollbackLiveness !== 'alive') {
+            throw new Error(rollbackLiveness === 'dead'
+              ? 'Provider session exited while restoring the previous model profile.'
+              : 'Could not verify the restored model-profile session.');
+          }
+          const restored = this.updateBoundSessionFields(starting.id, {
+            status: 'bound',
+            codexProfile: previousProfile,
+            updatedAt: nowIso(),
+            pid: rollbackPid,
+          });
+          this.watchSessionOutput(restored);
+          this.eventBus.emit({ type: 'session.updated', session: restored });
+        } catch (rollbackError) {
+          this.logger?.warn(
+            { err: rollbackError, sessionId: starting.id },
+            'Failed to restore the previous Codex session after a model-profile switch error.',
+          );
+        }
+        const failed = this.updateBoundSessionFields(starting.id, {
+          status: (await this.tmuxClient.hasSession(starting.tmuxSessionName).catch(() => false)) ? 'bound' : 'error',
+          shouldRestore: true,
+          updatedAt: nowIso(),
+          isWorking: false,
+          codexProfile: previousProfile,
+        });
+        this.appendEvent(failed, {
+          type: 'status',
+          text: `Failed to switch Codex profile: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+          timestamp: failed.updatedAt,
+        });
+        this.eventBus.emit({ type: 'session.updated', session: failed });
+        throw error;
+      }
+    });
   }
 
   async releaseSession(sessionId: string): Promise<void> {

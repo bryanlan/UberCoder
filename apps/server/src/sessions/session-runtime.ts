@@ -10,6 +10,7 @@ export interface SessionRuntimeState {
   workingIdleTimer?: NodeJS.Timeout;
   rawOutputScreenUpdateTimer?: NodeJS.Timeout;
   liveSessionModel?: string;
+  codexProfile?: import('@agent-console/shared').CodexCostProfileKey;
 }
 
 interface SessionRuntime {
@@ -85,6 +86,7 @@ export class SessionRuntimeRegistry {
     state.deferredTextReadyUntil = undefined;
     state.deferredSelectionInput = undefined;
     state.liveSessionModel = undefined;
+    state.codexProfile = undefined;
   }
 
   delete(sessionId: string): void {

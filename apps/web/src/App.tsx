@@ -4,6 +4,7 @@ import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X }
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   BoundSession,
+  CodexCostProfileKey,
   ConversationTimeline,
   NormalizedMessage,
   ProjectSummary,
@@ -770,6 +771,19 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
+  async function handleSetCodexProfile(sessionId: string, profile: CodexCostProfileKey): Promise<boolean> {
+    setActionError(undefined);
+    try {
+      const response = await api.setSessionModelProfile(sessionId, profile, authQuery.data?.csrfToken);
+      applyUpdatedSessionToSelection(sessionId, response.session);
+      void queryClient.invalidateQueries({ queryKey: ['tree'] });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Could not change the Codex model profile.'));
+      return false;
+    }
+  }
+
   async function handleRenameConversation(projectSlug: string, provider: ProviderId, conversationRef: string, title: string): Promise<boolean> {
     setActionError(undefined);
     setRenamingConversationKey(`${projectSlug}:${provider}:${conversationRef}`);
@@ -1023,6 +1037,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSendKeystrokes={handleSendKeystrokes}
+              onSetCodexProfile={handleSetCodexProfile}
               onLocalSubmittedText={appendLocalSubmittedText}
               onDiscardLocalSubmittedText={discardSelectedSubmittedMessage}
               binding={bindExistingMutation.isPending}

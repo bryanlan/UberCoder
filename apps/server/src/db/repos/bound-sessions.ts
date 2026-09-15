@@ -14,14 +14,15 @@ export class BoundSessionsRepo {
     const tx = this.sqlite.transaction(() => {
       this.sqlite.prepare(`
         insert into bound_sessions (
-          id, provider, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
+          id, provider, codex_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
           started_at, updated_at, last_activity_at, last_output_at, last_completed_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
-          @id, @provider, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
+          @id, @provider, @codex_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
           @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @auto_tracked_at, @is_working, @pid, @raw_log_path, @event_log_path
         )
         on conflict(id) do update set
           conversation_ref = excluded.conversation_ref,
+          codex_profile = excluded.codex_profile,
           resume_conversation_ref = excluded.resume_conversation_ref,
           tmux_session_name = excluded.tmux_session_name,
           status = excluded.status,
@@ -39,6 +40,7 @@ export class BoundSessionsRepo {
       `).run({
         id: session.id,
         provider: session.provider,
+        codex_profile: session.codexProfile ?? null,
         project_slug: session.projectSlug,
         conversation_ref: session.conversationRef,
         resume_conversation_ref: resumeConversationRef ?? null,
@@ -141,6 +143,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     runFailure: row.run_failure_json ? JSON.parse(String(row.run_failure_json)) as BoundSession['runFailure'] : undefined,
     id: String(row.id),
     provider: String(row.provider) as BoundSession['provider'],
+    codexProfile: optionalString(row.codex_profile) as BoundSession['codexProfile'],
     projectSlug: String(row.project_slug),
     conversationRef: String(row.conversation_ref),
     resumeConversationRef: optionalString(row.resume_conversation_ref),

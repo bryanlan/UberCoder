@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { CodexRunMonitor } from './transcripts/codex-run-state.js';
-import type { ConversationSummary } from '@agent-console/shared';
+import { CODEX_COST_PROFILES, type CodexCostProfileKey, type ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
@@ -270,11 +270,11 @@ export class CodexProvider implements ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string },
+    options?: { initialPrompt?: string; codexProfile?: CodexCostProfileKey },
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
     const initialPrompt = options?.initialPrompt?.trim();
-    const baseArgv = ensureProviderFlag(
+    let baseArgv = ensureProviderFlag(
       renderTemplateTokens(template, {
         conversationId: conversationRef ?? '',
         projectPath: project.path,
@@ -282,6 +282,34 @@ export class CodexProvider implements ProviderAdapter {
       }),
       '--dangerously-bypass-approvals-and-sandbox',
     );
+    const profileKey = options?.codexProfile ?? (conversationRef ? undefined : 'medium');
+    if (profileKey) {
+      const profile = CODEX_COST_PROFILES[profileKey];
+      const withoutProfileArgs: string[] = [];
+      for (let index = 0; index < baseArgv.length; index += 1) {
+        if (baseArgv[index] === '--model') {
+          index += 1;
+          continue;
+        }
+        if (baseArgv[index] === '-c' && /^model_reasoning_effort=/.test(baseArgv[index + 1] ?? '')) {
+          index += 1;
+          continue;
+        }
+        withoutProfileArgs.push(baseArgv[index]!);
+      }
+      const executable = withoutProfileArgs[0];
+      if (!executable) {
+        throw new Error('Codex launch command is empty.');
+      }
+      baseArgv = [
+        executable,
+        '--model',
+        profile.model,
+        '-c',
+        `model_reasoning_effort="${profile.reasoningEffort}"`,
+        ...withoutProfileArgs.slice(1),
+      ];
+    }
     return {
       cwd: project.path,
       argv: [

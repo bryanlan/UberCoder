@@ -91,9 +91,11 @@ function renderPane(input: {
   screenStatus?: string;
   screenStatusAnsi?: string;
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSetCodexProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
 } = {}) {
   const onSendKeystrokes = input.onSendKeystrokes ?? vi.fn().mockResolvedValue(true);
+  const onSetCodexProfile = input.onSetCodexProfile ?? vi.fn().mockResolvedValue(true);
   const onLocalSubmittedText = input.onLocalSubmittedText ?? vi.fn(() => ({ id: 'optimistic-1' }));
   const view = render(
     <MemoryRouter>
@@ -118,6 +120,7 @@ function renderPane(input: {
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSendKeystrokes={onSendKeystrokes}
+        onSetCodexProfile={onSetCodexProfile}
         onLocalSubmittedText={onLocalSubmittedText}
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
@@ -133,8 +136,20 @@ function renderPane(input: {
       />
     </MemoryRouter>,
   );
-  return { ...view, onSendKeystrokes, onLocalSubmittedText };
+  return { ...view, onSendKeystrokes, onSetCodexProfile, onLocalSubmittedText };
 }
+
+it('Alt H selects the high Codex profile without changing the draft', async () => {
+  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
+  renderPane({ onSetCodexProfile });
+  const textbox = screen.getByRole('textbox');
+  fireEvent.change(textbox, { target: { value: 'keep this draft' } });
+
+  fireEvent.keyDown(textbox, { key: 'h', altKey: true });
+
+  await waitFor(() => expect(onSetCodexProfile).toHaveBeenCalledWith('session-1', 'high'));
+  expect(textbox).toHaveValue('keep this draft');
+});
 
 describe('ConversationPane live input bridge', () => {
   it('clears the normal draft immediately after Enter while the keystroke request is pending', () => {
@@ -194,6 +209,7 @@ describe('ConversationPane live input bridge', () => {
           onBind={vi.fn()}
           onRelease={vi.fn()}
           onSendKeystrokes={vi.fn(() => send.promise)}
+          onSetCodexProfile={vi.fn().mockResolvedValue(true)}
           onLocalSubmittedText={onLocalSubmittedText}
           onDiscardLocalSubmittedText={vi.fn()}
           binding={false}
@@ -327,6 +343,7 @@ describe('ConversationPane external Claude handoff', () => {
             onBind={onBind}
             onRelease={vi.fn()}
             onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+            onSetCodexProfile={vi.fn().mockResolvedValue(true)}
             onLocalSubmittedText={vi.fn()}
             onDiscardLocalSubmittedText={vi.fn()}
             binding={false}

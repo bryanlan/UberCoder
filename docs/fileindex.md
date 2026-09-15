@@ -39,7 +39,7 @@
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - project tree reads and explicit refresh orchestration,
   including the opt-in eight-hour scan for recent unbound Codex/Claude conversations.
-- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output routes, including
+- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and Codex model-profile routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
@@ -85,14 +85,14 @@
   selected timelines when provider history catches up.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
-  default pane capture, interrupts, session kill, and session metadata options.
+  default pane capture, interrupts, session kill, and readable/writable session ownership options.
 - `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,
   paged timeline-message query, separate session-screen polling, live refresh behavior, and
   completed-tail polling while durable transcripts catch up after a bound session finishes.
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
-- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` -
+- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+H/Alt+M/Alt+L Codex profile controls, and
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,

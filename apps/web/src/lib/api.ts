@@ -1,6 +1,7 @@
 import type {
   AuthState,
   BoundSession,
+  CodexCostProfileKey,
   ConversationSearchResponse,
   ConversationTimeline,
   CreateDirectoryRequest,
@@ -12,6 +13,7 @@ import type {
   SettingsSummary,
   SessionScreen,
   SessionInputResponse,
+  SessionModelProfileResponse,
   UiPreferences,
   SessionKeystrokeRequest,
   TreeResponse,
@@ -120,6 +122,12 @@ export const api = {
     ),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+  setSessionModelProfile: (sessionId: string, profile: CodexCostProfileKey, csrfToken?: string) =>
+    request<SessionModelProfileResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/model-profile`,
+      { method: 'POST', body: JSON.stringify({ profile }) },
+      csrfToken,
+    ),
   sessionScreen: (sessionId: string) =>
     request<{ session: BoundSession; screen: SessionScreen }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen?lines=120`),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),

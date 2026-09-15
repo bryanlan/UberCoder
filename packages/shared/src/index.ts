@@ -2,6 +2,20 @@ export * from './coordination.js';
 export const PROVIDERS = ['codex', 'claude'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
+export const CODEX_COST_PROFILES = {
+  high: { model: 'gpt-6-astra', reasoningEffort: 'xhigh', shortcut: 'H' },
+  medium: { model: 'gpt-5.6-sol', reasoningEffort: 'medium', shortcut: 'M' },
+  low: { model: 'gpt-5.6-terra', reasoningEffort: 'high', shortcut: 'L' },
+} as const;
+export type CodexCostProfileKey = keyof typeof CODEX_COST_PROFILES;
+
+export interface SessionModelProfileResponse {
+  session: BoundSession;
+  profile: CodexCostProfileKey;
+  model: string;
+  reasoningEffort: string;
+}
+
 export const MESSAGE_ROLES = ['user', 'assistant', 'system', 'tool', 'status'] as const;
 export type MessageRole = (typeof MESSAGE_ROLES)[number];
 export type MessageLifecycle = 'durable' | 'pending' | 'status';
@@ -142,6 +156,7 @@ export interface BoundSession {
   runFailure?: RunFailure;
   id: string;
   provider: ProviderId;
+  codexProfile?: CodexCostProfileKey;
   projectSlug: string;
   conversationRef: string;
   resumeConversationRef?: string;

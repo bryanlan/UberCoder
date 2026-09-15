@@ -1,6 +1,6 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
-import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationTimeline, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
+import { CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type CodexCostProfileKey, type ConversationTimeline, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -239,6 +239,7 @@ function LiveSessionInputBridge({
   conversationRef,
   provider,
   onSendKeystrokes,
+  onSetCodexProfile,
   onLocalSubmittedText,
   onLocalDraftText,
   onDiscardLocalSubmittedText,
@@ -251,6 +252,8 @@ function LiveSessionInputBridge({
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
+  isWorking,
+  activeCodexProfile,
 }: {
   sessionId: string;
   projectSlug: string;
@@ -258,6 +261,7 @@ function LiveSessionInputBridge({
   conversationRef: string;
   provider: ConversationTimeline['conversation']['provider'];
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSetCodexProfile: (sessionId: string, profile: CodexCostProfileKey) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
   onLocalDraftText: (sessionId: string, text: string) => void;
   onDiscardLocalSubmittedText: (messageId: string) => void;
@@ -270,6 +274,8 @@ function LiveSessionInputBridge({
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
+  isWorking: boolean;
+  activeCodexProfile?: CodexCostProfileKey;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -292,6 +298,52 @@ function LiveSessionInputBridge({
   const committedInputRef = useRef('');
   const bridgeBusyRef = useRef(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [queuedProfile, setQueuedProfile] = useState<CodexCostProfileKey>();
+  const [profileStatus, setProfileStatus] = useState<string>();
+
+  async function applyCodexProfile(profile: CodexCostProfileKey): Promise<void> {
+    setProfileBusy(true);
+    const selection = CODEX_COST_PROFILES[profile];
+    const changed = await onSetCodexProfile(sessionId, profile);
+    setProfileBusy(false);
+    if (changed) {
+      setQueuedProfile(undefined);
+      setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} selected · ${selection.model} · ${selection.reasoningEffort}`);
+    } else {
+      setQueuedProfile(undefined);
+      setProfileStatus('Profile switch failed.');
+    }
+  }
+
+  function requestCodexProfile(profile: CodexCostProfileKey): void {
+    if (provider !== 'codex') return;
+    if (isWorking) {
+      setQueuedProfile(profile);
+      setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} queued until this turn finishes.`);
+      return;
+    }
+    void applyCodexProfile(profile);
+  }
+
+  useEffect(() => {
+    if (!queuedProfile || isWorking || profileBusy) return;
+    void applyCodexProfile(queuedProfile);
+  }, [isWorking, profileBusy, queuedProfile]);
+
+  useEffect(() => {
+    if (provider !== 'codex') return;
+    const onProfileShortcut = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
+      const profile = ({ h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'h' | 'm' | 'l'];
+      if (!profile) return;
+      event.preventDefault();
+      event.stopPropagation();
+      requestCodexProfile(profile);
+    };
+    window.addEventListener('keydown', onProfileShortcut, true);
+    return () => window.removeEventListener('keydown', onProfileShortcut, true);
+  }, [isWorking, profileBusy, provider, sessionId]);
 
   useEffect(() => {
     captureRef.current?.focus();
@@ -899,6 +951,33 @@ function LiveSessionInputBridge({
           >
             <span className="h-1.5 w-16 rounded-full bg-slate-700/90" />
           </button>
+          {provider === 'codex' ? (
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Session model</div>
+                <div className="text-xs text-slate-300">{profileStatus ?? (activeCodexProfile ? `${activeCodexProfile.charAt(0).toUpperCase() + activeCodexProfile.slice(1)} profile` : 'Existing session · choose H, M, or L')}</div>
+              </div>
+              <div className="flex" aria-label="Codex cost profile">
+                {(['high', 'medium', 'low'] as CodexCostProfileKey[]).map((profile) => (
+                  <button
+                    key={profile}
+                    type="button"
+                    disabled={profileBusy}
+                    aria-label={`Use ${profile} Codex profile`}
+                    aria-pressed={(queuedProfile ?? activeCodexProfile) === profile}
+                    title={`${profile}: ${CODEX_COST_PROFILES[profile].model} / ${CODEX_COST_PROFILES[profile].reasoningEffort} (Alt ${CODEX_COST_PROFILES[profile].shortcut})`}
+                    onClick={() => requestCodexProfile(profile)}
+                    className={clsx(
+                      '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',
+                      (queuedProfile ?? activeCodexProfile) === profile ? 'bg-sky-500/20 text-sky-100' : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
+                    )}
+                  >
+                    {CODEX_COST_PROFILES[profile].shortcut}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <textarea
             ref={captureRef}
             readOnly={bridgeBusy}
@@ -1105,6 +1184,7 @@ interface ConversationPaneProps {
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSetCodexProfile: (sessionId: string, profile: CodexCostProfileKey) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
   onDiscardLocalSubmittedText: (messageId: string) => void;
   binding: boolean;
@@ -1225,6 +1305,7 @@ export function ConversationPane({
   onBind,
   onRelease,
   onSendKeystrokes,
+  onSetCodexProfile,
   onLocalSubmittedText,
   onDiscardLocalSubmittedText,
   binding,
@@ -1675,6 +1756,7 @@ export function ConversationPane({
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
           onSendKeystrokes={onSendKeystrokes}
+          onSetCodexProfile={onSetCodexProfile}
           onLocalSubmittedText={onLocalSubmittedText}
           onLocalDraftText={updateLocalLiveDraft}
           onDiscardLocalSubmittedText={onDiscardLocalSubmittedText}
@@ -1687,6 +1769,8 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
+          isWorking={Boolean(boundSession.isWorking)}
+          activeCodexProfile={boundSession.codexProfile}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">

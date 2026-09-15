@@ -10,6 +10,46 @@ import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 describe('SessionManager lifecycle', () => {
+  it('restarts an idle Codex session with the selected cost profile', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const profileProvider: ProviderAdapter = {
+      ...provider,
+      getLaunchCommand(_project, conversationRef, _settings, options) {
+        return {
+          cwd: '/srv/demo',
+          argv: ['codex', options?.codexProfile ?? 'unprofiled', 'resume', conversationRef ?? ''],
+          env: {},
+        };
+      },
+    };
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), profileProvider);
+    const session = await manager.bindConversation({
+      project,
+      provider: profileProvider,
+      providerSettings,
+      conversationRef: 'history-profile-test',
+      title: 'Profile test',
+      kind: 'history',
+    });
+
+    const switched = await manager.switchCodexModelProfile({
+      sessionId: session.id,
+      project,
+      provider: profileProvider,
+      providerSettings,
+      profile: 'high',
+    });
+
+    expect(switched).toMatchObject({ profile: 'high', model: 'gpt-6-astra', reasoningEffort: 'xhigh' });
+    expect(switched.session.codexProfile).toBe('high');
+    expect(db.boundSessions.getById(session.id)?.codexProfile).toBe('high');
+    expect(tmux.created).toHaveLength(2);
+    expect(tmux.createdCommands.at(-1)).toContain('high');
+    db.close();
+  });
+
   it('tracks bind → input → release transitions through the database', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

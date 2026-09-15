@@ -30,6 +30,6 @@ it('retires version 6 locks once, preserving assignments, inboxes and ownership 
     expect(events.map((event) => event.kind)).toEqual(['claim-retired', 'git-operation-retired']);
     expect(JSON.parse(events[0]!.text)).toMatchObject({ path: '.', acquiredAt: 'acquired' });
     expect(JSON.parse(events[1]!.text)).toMatchObject({ repository: '/repo/.git', startedAt: 'started', pid: 1, processStart: 'start' });
-    expect(db.prepare('select max(version) version from schema_version').get()).toEqual({ version: 7 });
+    expect(db.prepare('select max(version) version from schema_version').get()).toEqual({ version: 9 });
   } finally { db.close(); }
 });

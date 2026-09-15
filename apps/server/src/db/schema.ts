@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 
 interface Migration {
   version: number;
@@ -12,6 +12,10 @@ interface Migration {
 function tableColumns(sqlite: Database.Database, tableName: string): Set<string> {
   const rows = sqlite.prepare(`pragma table_info(${tableName})`).all() as Array<{ name: string }>;
   return new Set(rows.map((row) => row.name));
+}
+
+function tableExists(sqlite: Database.Database, tableName: string): boolean {
+  return Boolean(sqlite.prepare("select 1 from sqlite_master where type = 'table' and name = ?").get(tableName));
 }
 
 function addColumnIfMissing(sqlite: Database.Database, tableName: string, columnName: string, ddl: string): void {
@@ -60,6 +64,7 @@ const MIGRATIONS: Migration[] = [
         create table if not exists bound_sessions (
           id text primary key,
           provider text not null,
+          codex_profile text,
           project_slug text not null,
           conversation_ref text not null,
           resume_conversation_ref text,
@@ -217,7 +222,14 @@ const MIGRATIONS: Migration[] = [
   { version: 6, name: 'assignment-coordination', up: createCoordinationSchema },
   { version: 7, name: 'advisory-coordination', up: retireCoordinationEnforcement },
   { version: 8, name: 'persistent-run-failure-recovery', up(sqlite) {
-    addColumnIfMissing(sqlite, 'bound_sessions', 'run_failure_json', 'run_failure_json text');
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'run_failure_json', 'run_failure_json text');
+    }
+  } },
+  { version: 9, name: 'codex-cost-profile', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'codex_profile', 'codex_profile text');
+    }
   } },
 ];
 
