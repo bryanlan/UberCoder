@@ -35,6 +35,7 @@ describe('conversation routes', () => {
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:01:00.000Z',
       lastActivityAt: '2026-03-14T18:01:00.000Z',
+      codexProfile: 'high',
     };
     const replacementSession: BoundSession = {
       ...existingSession,
@@ -102,6 +103,7 @@ describe('conversation routes', () => {
       expect(bindConversation).toHaveBeenCalledOnce();
       expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
         initialPrompt: 'follow up from recovery',
+        codexProfile: 'high',
       }));
       expect(response.json()).toMatchObject({
         session: {

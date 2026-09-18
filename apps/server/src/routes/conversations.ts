@@ -499,6 +499,7 @@ export async function registerConversationRoutes(
       title: bindableSummary.title,
       kind: 'history',
       initialPrompt: parsedBody.data.initialPrompt,
+      codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
     });
     return { session };
   });
