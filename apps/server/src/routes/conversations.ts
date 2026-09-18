@@ -284,7 +284,9 @@ export async function registerConversationRoutes(
     let allMessages: NormalizedMessage[] = [];
 
     if (!pendingSummary || adoptedConversationRef) {
-      const cachedConversation = summary
+      // An older adoption may have saved only the pending alias's path. Resolve
+      // the native identity through the provider instead of parsing as that alias.
+      const cachedConversation = summary?.ref === resolvedConversationRef
         ? await loadProviderConversationFromSummary(summary, {
             allowStaleWhileChanging: resolvedBoundSession?.isWorking === true,
           })
@@ -292,6 +294,13 @@ export async function registerConversationRoutes(
       const conversation = cachedConversation
         ?? await provider.getConversation(project, resolvedConversationRef, providerSettings);
       if (conversation) {
+        if (!cachedSummary?.transcriptPath && conversation.summary.transcriptPath) {
+          db.conversationIndex.upsert(conversation.summary);
+          eventBus.emit({
+            type: 'conversation.index-updated', projectSlug, provider: providerId,
+            conversationRef: resolvedConversationRef, timestamp: nowIso(),
+          });
+        }
         summary = {
           ...conversation.summary,
           title: cachedSummary?.title ?? pendingSummary?.title ?? conversation.summary.title,
@@ -444,10 +453,17 @@ export async function registerConversationRoutes(
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
     const cached = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
-    const providerConversation = cached
+    const providerConversation = cached?.transcriptPath
       ? null
       : await provider.getConversation(project, resolvedConversationRef, providerSettings);
     const bindableSummary = cached ?? providerConversation?.summary;
+    if (providerConversation) {
+      db.conversationIndex.upsert(providerConversation.summary);
+      eventBus.emit({
+        type: 'conversation.index-updated', projectSlug, provider: providerId,
+        conversationRef: resolvedConversationRef, timestamp: nowIso(),
+      });
+    }
     const existingSession = sessions.getSessionByConversation(projectSlug, providerId, resolvedConversationRef)
       ?? (
         pendingSummary?.boundSessionId

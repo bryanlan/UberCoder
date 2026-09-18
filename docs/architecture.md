@@ -133,6 +133,8 @@ user's actual prompt.
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.
 - Codex sessions expose three explicit cost profiles: High (Astra/xhigh), Medium (Sol/medium), and Low (Terra/high). New Codex sessions start on Medium. The authenticated model-profile route restarts only an idle tmux session against the same provider conversation; the browser queues a requested shortcut while a turn is active and preserves the unsent draft.
+- Codex working state follows provider `task_started`, `task_complete`, and `turn_aborted` events, not the output-recency cooldown. Completion/interruption releases queued model changes immediately; completion recency still waits for the output idle window. Model switching rereads provider lifecycle under the session command lock and checks the live screen before restarting. A previous completion cannot acknowledge newly submitted input, and older screen polls cannot override newer session updates in the browser.
+- Opening or binding an unindexed provider conversation registers its native transcript path and notifies session watchers. Pending adoption registers the same path atomically with the native binding; turn monitoring must not depend on a later project-wide discovery refresh.
 - tmux is the session execution boundary; the backend captures pane state and logs normalized events.
 - SQLite via `better-sqlite3` stores config-derived indexes, bound session state, auth/session state, pending conversations, and UI preferences.
 - Tailscale identity headers can bootstrap a cookie session when explicitly trusted and allowlisted.

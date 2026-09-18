@@ -130,6 +130,10 @@ export function adoptPendingConversation(input: {
       return { adopted: false };
     }
 
+    // Persist the native ref and transcript path in the same transaction as the
+    // binding. Polling, transcript watchers and alias reads use this index.
+    input.db.conversationIndex.upsert(input.matchedConversation);
+
     const adoptedAt = input.adoptedAt ?? nowIso();
     const titleOverride = input.db.titleOverrides.get(input.projectSlug, input.providerId, pending.ref);
     if (titleOverride) {

@@ -1,6 +1,6 @@
 import type { BoundSession, RunFailure } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
-import type { ProviderRunMonitor } from '../providers/types.js';
+import type { ProviderRunMonitor, ProviderRunState } from '../providers/types.js';
 
 export const RUN_RETRY_DELAYS_MS = [15_000, 45_000, 120_000] as const;
 const RECOVERY_MAX_AGE_MS = 10 * 60_000;
@@ -13,6 +13,7 @@ interface RecoveryOptions {
   submit: (session: BoundSession, text: string) => Promise<void>;
   publish: (session: BoundSession) => void;
   onError: (error: unknown) => void;
+  onRunState?: (sessionId: string) => void;
   delaysMs?: readonly number[];
   now?: () => number;
 }
@@ -26,6 +27,7 @@ interface Observation {
   cancelledAt?: number;
   lastTurnId?: string;
   lastStatus?: string;
+  run?: ProviderRunState;
 }
 
 /** Owns only recovery state; lifecycle/transport ownership remains with SessionManager. */
@@ -48,6 +50,10 @@ export class RunRecovery {
   changed(sessionId: string): void {
     if (!this.observations.has(sessionId)) return;
     void this.options.runExclusive(sessionId, () => this.refresh(sessionId)).catch(this.options.onError);
+  }
+
+  getRunState(sessionId: string): ProviderRunState | undefined {
+    return this.observations.get(sessionId)?.run;
   }
 
   cancel(sessionId: string): void {
@@ -87,7 +93,8 @@ export class RunRecovery {
     this.options.publish(current);
   }
 
-  private async refresh(id: string): Promise<void> {
+  /** Caller must hold the session runtime lock, as changed() and retry() do. */
+  async refresh(id: string): Promise<void> {
     const observation = this.observations.get(id);
     if (!observation) return;
     const generation = observation.generation;
@@ -99,6 +106,8 @@ export class RunRecovery {
     observation.seen = key;
     observation.lastTurnId = run.turnId;
     observation.lastStatus = run.status;
+    observation.run = run;
+    this.options.onRunState?.(id);
     const session = this.options.db.boundSessions.getById(id);
     if (!session || !session.shouldRestore || session.status !== 'bound') return;
     const prior = session.runFailure;

@@ -35,6 +35,8 @@ export function nextScreenWorkingState(
   session: BoundSession,
   input: {
     screenShowsWorking: boolean;
+    /** Authoritative provider lifecycle, when available; independent of recency. */
+    turnIsWorking?: boolean;
     capturedAt: string;
     idleMs: number;
   },
@@ -51,10 +53,12 @@ export function nextScreenWorkingState(
   );
   const outputIsCoolingDown = isRecentTimestamp(session.lastOutputAt, input.capturedAt, input.idleMs);
   const failureStopped = session.runFailure && session.runFailure.status !== 'retrying';
-  const nextIsWorking = !failureStopped && (outputIsCoolingDown
-    || (input.screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, input.capturedAt, input.idleMs)));
+  const nextIsWorking = !failureStopped && (input.turnIsWorking ?? (outputIsCoolingDown
+    || (input.screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, input.capturedAt, input.idleMs))));
   const nextLastCompletedAt = session.lastCompletedAt;
-  const expiryHeartbeatAt = nextIsWorking
+  const pendingCompletion = input.turnIsWorking === false && session.lastOutputAt
+    && session.lastOutputAt !== session.lastCompletedAt;
+  const expiryHeartbeatAt = nextIsWorking || pendingCompletion
     ? session.lastOutputAt ?? workingHeartbeatAt
     : undefined;
 
@@ -71,7 +75,7 @@ export function nextScreenWorkingState(
     nextIsWorking,
     nextLastCompletedAt,
     expiryHeartbeatAt,
-    clearExpiry: !nextIsWorking,
+    clearExpiry: !expiryHeartbeatAt,
     updatedSession,
   };
 }
@@ -87,9 +91,13 @@ export function nextIdleExpiryDecision(
     expectedHeartbeatAt: string;
     now: string;
     idleMs: number;
+    turnIsWorking?: boolean;
   },
 ): IdleExpiryDecision {
-  if (!session.isWorking || (session.runFailure && session.runFailure.status !== 'retrying')) {
+  if (input.turnIsWorking === true || (session.runFailure && session.runFailure.status !== 'retrying')) {
+    return { action: 'clear' };
+  }
+  if (!session.isWorking && (input.turnIsWorking !== false || !session.lastOutputAt || session.lastOutputAt === session.lastCompletedAt)) {
     return { action: 'clear' };
   }
 

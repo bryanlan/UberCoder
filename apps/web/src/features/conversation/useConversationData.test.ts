@@ -114,6 +114,12 @@ describe('timelineMessagesRefetchInterval', () => {
 });
 
 describe('selectRefreshedBoundSession', () => {
+  it('does not let an older screen poll overwrite a completed turn or newly selected profile', () => {
+    const current = session({ isWorking: false, codexProfile: 'high', updatedAt: '2026-07-03T15:01:00.000Z' });
+    const stalePoll = session({ isWorking: true, codexProfile: 'medium', updatedAt: '2026-07-03T15:00:59.000Z' });
+    expect(selectRefreshedBoundSession(current, stalePoll)).toEqual(current);
+  });
+
   it('uses the polled server session state for the currently bound session', () => {
     const stale = session({ isWorking: true, codexProfile: 'medium' });
     const refreshed = session({ isWorking: false, codexProfile: 'medium', lastCompletedAt: '2026-07-03T15:51:44.000Z' });

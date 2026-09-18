@@ -197,6 +197,11 @@ describe('pending conversation adoption', () => {
 
       expect(first.adopted).toBe(true);
       expect(first.reboundSession?.conversationRef).toBe('real-adopted');
+      expect(db.conversationIndex.get('demo', 'codex', 'real-adopted')).toMatchObject({
+        transcriptPath: adoptedConversation.transcriptPath,
+        boundSessionId: 'session-adopt-me',
+      });
+      expect(db.conversationIndex.get('demo', 'codex', 'real-raced')).toBeUndefined();
       expect(second).toEqual({ adopted: false });
       expect(getAdoptionState(db)).toEqual({
         pendingIsBound: false,

@@ -296,6 +296,7 @@ export class SessionManager {
       },
       submit: async (session, text) => {
         if (this.getCurrentRestorableSession(session)?.id !== session.id) throw new Error('Conversation ownership changed before recovery submission.');
+        this.runtimeState(session.id).submittedTurnAt = nowIso();
         await this.runInputTmuxAction(session, () => this.submitTextToSession(session.tmuxSessionName, text));
         const timestamp = nowIso();
         const updated = this.updateBoundSessionFields(session.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
@@ -303,6 +304,12 @@ export class SessionManager {
         this.eventBus.emit({ type: 'session.updated', session: updated });
       },
       publish: (session) => this.eventBus.emit({ type: 'session.updated', session }),
+      onRunState: (id) => {
+        const session = this.db.boundSessions.getById(id);
+        if (session?.shouldRestore && session.status === 'bound') {
+          this.syncSessionWorkingState(session, { screenShowsWorking: false, capturedAt: nowIso() });
+        }
+      },
       onError: (error) => this.logger?.warn({ err: error }, 'Run recovery failed.'),
     });
     this.unsubscribeRealtimeEvents = this.eventBus.subscribe((event) => this.handleRealtimeLifecycleEvent(event));
@@ -386,6 +393,16 @@ export class SessionManager {
 
   private runtimeState(sessionId: string): SessionRuntimeState {
     return this.runtimes.state(sessionId);
+  }
+
+  private providerTurnIsWorking(sessionId: string): boolean | undefined {
+    const run = this.runRecovery.getRunState(sessionId);
+    const state = this.runtimeState(sessionId);
+    if (!run) return undefined;
+    // A previous completion cannot acknowledge a newly submitted turn.
+    if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
+    state.submittedTurnAt = undefined;
+    return run.status === 'running';
   }
 
   private shouldWatchSession(session: BoundSession): boolean {
@@ -1152,6 +1169,7 @@ export class SessionManager {
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
+    this.runtimeState(liveSession.id).submittedTurnAt = nowIso();
     await this.runInputTmuxAction(liveSession, () => this.submitTextToSession(liveSession.tmuxSessionName, text));
     const activityAt = nowIso();
     const updated = this.updateBoundSessionFields(liveSession.id, {
@@ -1195,6 +1213,7 @@ export class SessionManager {
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
+    if (payload.keys?.includes('Escape')) this.runtimeState(liveSession.id).submittedTurnAt = undefined;
 
     let plan = planKeystrokeSend(undefined, payload, liveSession.provider, {
       deferredTextReady: payload.deferScreenUpdate === true
@@ -1330,6 +1349,10 @@ export class SessionManager {
       }
     }
     if (plan.hasSpecialKeys) {
+      if (payload.keys?.includes('Enter') && !submittedDeferredSelection
+        && submittedTextShouldCreateUserTurn(beforeScreen, submittedText ?? (shouldRecordTextAsUserInput ? payload.text : undefined))) {
+        this.runtimeState(liveSession.id).submittedTurnAt = nowIso();
+      }
       await this.runInputTmuxAction(
         liveSession,
         () => this.tmuxClient.sendKeys(liveSession.tmuxSessionName, payload.keys ?? []),
@@ -1432,11 +1455,17 @@ export class SessionManager {
         input.provider,
         input.providerSettings,
       );
-      const liveSession = await this.refreshSessionState(session);
+      let liveSession = await this.refreshSessionState(session);
       if (!liveSession) {
         throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
       }
-      if (liveSession.isWorking) {
+      const screen = await this.captureSessionScreen(liveSession);
+      await this.runRecovery.refresh(liveSession.id);
+      this.syncSessionWorkingState(this.mustGetSession(liveSession.id), {
+        screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
+      });
+      liveSession = this.mustGetSession(liveSession.id);
+      if (liveSession.isWorking || (this.providerTurnIsWorking(liveSession.id) === undefined && sessionScreenShowsWorking(screen))) {
         throw new SessionInputRejectedError('The session is working. The browser will apply the queued profile when the turn finishes.');
       }
       const profile = CODEX_COST_PROFILES[input.profile];
@@ -1714,7 +1743,9 @@ export class SessionManager {
     }
     const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName, options.startLine).catch(() => '');
     const screen = this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso()));
-    this.syncSessionScreenState(this.mustGetSession(liveSession.id), screen);
+    this.syncSessionWorkingState(this.mustGetSession(liveSession.id), {
+      screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
+    });
     return {
       session: this.mustGetSession(liveSession.id),
       screen,
@@ -2010,6 +2041,7 @@ export class SessionManager {
         expectedHeartbeatAt,
         now: nowIso(),
         idleMs: SESSION_COMPLETION_IDLE_MS,
+        turnIsWorking: this.providerTurnIsWorking(sessionId),
       });
       if (decision.action === 'reschedule') {
         this.scheduleWorkingExpiry(sessionId, decision.heartbeatAt);
@@ -2039,7 +2071,7 @@ export class SessionManager {
             updatedAt: now,
             lastActivityAt: now,
             lastOutputAt: now,
-            isWorking: true,
+            isWorking: this.providerTurnIsWorking(sessionId) ?? true,
           }
         : session;
       if (shouldTrackOutput) {
@@ -2082,7 +2114,9 @@ export class SessionManager {
     }
 
     state.lastScreenHash = nextHash;
-    this.syncSessionScreenState(this.mustGetSession(session.id), screen);
+    this.syncSessionWorkingState(this.mustGetSession(session.id), {
+      screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
+    });
     const currentSession = this.mustGetSession(session.id);
     this.eventBus.emit({
       type: 'session.screen-updated',
@@ -2255,14 +2289,15 @@ export class SessionManager {
     }
   }
 
-  private syncSessionScreenState(
+  private syncSessionWorkingState(
     session: BoundSession,
-    screen: SessionScreen,
+    screen: { screenShowsWorking: boolean; capturedAt: string },
   ): void {
     const next = nextScreenWorkingState(session, {
-      screenShowsWorking: sessionScreenShowsWorking(screen),
+      screenShowsWorking: screen.screenShowsWorking,
       capturedAt: screen.capturedAt,
       idleMs: SESSION_COMPLETION_IDLE_MS,
+      turnIsWorking: this.providerTurnIsWorking(session.id),
     });
 
     if (next.expiryHeartbeatAt) {

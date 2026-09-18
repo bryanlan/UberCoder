@@ -19,6 +19,34 @@ function session(input: Partial<BoundSession> = {}): BoundSession {
 }
 
 describe('working-state reducer', () => {
+  it('releases a completed provider turn immediately but retains the recency idle timer', () => {
+    const current = session({ isWorking: true, lastOutputAt: '2026-03-01T00:00:10.000Z' });
+    const next = nextScreenWorkingState(current, {
+      screenShowsWorking: false, turnIsWorking: false,
+      capturedAt: '2026-03-01T00:00:11.000Z', idleMs: 60_000,
+    });
+    expect(next.updatedSession).toMatchObject({ isWorking: false, lastCompletedAt: undefined });
+    expect(next.expiryHeartbeatAt).toBe(current.lastOutputAt);
+    expect(next.clearExpiry).toBe(false);
+    const expiry = nextIdleExpiryDecision(next.updatedSession!, {
+      expectedHeartbeatAt: current.lastOutputAt!, now: '2026-03-01T00:01:11.000Z', idleMs: 60_000,
+      turnIsWorking: false,
+    });
+    expect(expiry).toMatchObject({ action: 'update', updatedSession: { isWorking: false, lastCompletedAt: current.lastOutputAt } });
+  });
+
+  it('does not mistake a quiet but running provider turn for completion', () => {
+    const current = session({ isWorking: true, lastOutputAt: '2026-03-01T00:00:10.000Z' });
+    expect(nextScreenWorkingState(current, {
+      screenShowsWorking: false, turnIsWorking: true,
+      capturedAt: '2026-03-01T00:02:00.000Z', idleMs: 60_000,
+    }).nextIsWorking).toBe(true);
+    expect(nextIdleExpiryDecision(current, {
+      expectedHeartbeatAt: current.lastOutputAt!, now: '2026-03-01T00:02:00.000Z', idleMs: 60_000,
+      turnIsWorking: true,
+    })).toEqual({ action: 'clear' });
+  });
+
   it('keeps recent output working on repaint without moving recency fields', () => {
     const current = session({
       updatedAt: '2026-03-01T00:00:05.000Z',

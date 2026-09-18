@@ -25,18 +25,44 @@ export function pickPreferredConversation(existing: ConversationSummary | undefi
 }
 
 export class ConversationIndexRepo {
+  private upsertStatement?: Database.Statement;
   constructor(private readonly sqlite: Database.Database) {}
 
-  replace(projectSlug: string, provider: string, items: ConversationSummary[]): void {
-    const insert = this.sqlite.prepare(`
+  upsert(item: ConversationSummary): void {
+    if (!isConversationVisibleInDiscovery(item)) return;
+    const statement = this.upsertStatement ??= this.sqlite.prepare(`
       insert into conversation_index (
         project_slug, provider, ref, kind, title, excerpt, created_at, updated_at,
         transcript_path, provider_conversation_id, branch, degraded, raw_metadata_json
       ) values (
         @project_slug, @provider, @ref, @kind, @title, @excerpt, @created_at, @updated_at,
         @transcript_path, @provider_conversation_id, @branch, @degraded, @raw_metadata_json
-      )
+      ) on conflict(project_slug, provider, ref) do update set
+        kind = excluded.kind, title = excluded.title, excerpt = excluded.excerpt,
+        created_at = excluded.created_at, updated_at = excluded.updated_at,
+        transcript_path = excluded.transcript_path,
+        provider_conversation_id = excluded.provider_conversation_id,
+        branch = excluded.branch, degraded = excluded.degraded,
+        raw_metadata_json = excluded.raw_metadata_json
     `);
+    statement.run({
+      project_slug: item.projectSlug,
+      provider: item.provider,
+      ref: item.ref,
+      kind: item.kind,
+      title: item.title,
+      excerpt: item.excerpt ?? null,
+      created_at: item.createdAt ?? null,
+      updated_at: item.updatedAt,
+      transcript_path: item.transcriptPath ?? null,
+      provider_conversation_id: item.providerConversationId ?? null,
+      branch: item.branch ?? null,
+      degraded: boolAsInt(item.degraded),
+      raw_metadata_json: item.rawMetadata ? JSON.stringify(item.rawMetadata) : null,
+    });
+  }
+
+  replace(projectSlug: string, provider: string, items: ConversationSummary[]): void {
     const clear = this.sqlite.prepare(`delete from conversation_index where project_slug = ? and provider = ?`);
     const deduped = new Map<string, ConversationSummary>();
     for (const item of items.filter(isConversationVisibleInDiscovery)) {
@@ -45,21 +71,7 @@ export class ConversationIndexRepo {
     const tx = this.sqlite.transaction(() => {
       clear.run(projectSlug, provider);
       for (const item of deduped.values()) {
-        insert.run({
-          project_slug: item.projectSlug,
-          provider: item.provider,
-          ref: item.ref,
-          kind: item.kind,
-          title: item.title,
-          excerpt: item.excerpt ?? null,
-          created_at: item.createdAt ?? null,
-          updated_at: item.updatedAt,
-          transcript_path: item.transcriptPath ?? null,
-          provider_conversation_id: item.providerConversationId ?? null,
-          branch: item.branch ?? null,
-          degraded: boolAsInt(item.degraded),
-          raw_metadata_json: item.rawMetadata ? JSON.stringify(item.rawMetadata) : null,
-        });
+        this.upsert(item);
       }
     });
     tx();

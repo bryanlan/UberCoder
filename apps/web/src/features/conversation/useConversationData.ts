@@ -36,7 +36,8 @@ export function selectRefreshedBoundSession(
   boundSession: BoundSession | undefined,
   polledSession: BoundSession | undefined,
 ): BoundSession | undefined {
-  return polledSession?.id === boundSession?.id ? polledSession : boundSession;
+  if (!boundSession || polledSession?.id !== boundSession.id) return boundSession;
+  return Date.parse(polledSession.updatedAt) >= Date.parse(boundSession.updatedAt) ? polledSession : boundSession;
 }
 
 export function invalidateConversationData(
