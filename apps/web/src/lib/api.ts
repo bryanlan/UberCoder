@@ -108,7 +108,7 @@ export const api = {
       body: JSON.stringify({
         force: options.force === true,
         initialPrompt: options.initialPrompt,
-        confirmExternalHandoff: options.confirmExternalHandoff === true,
+        ...(options.confirmExternalHandoff === true ? { confirmExternalHandoff: true } : {}),
       }),
     },
     csrfToken,
