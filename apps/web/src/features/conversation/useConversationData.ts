@@ -32,6 +32,13 @@ export function sessionScreenQueryKey(sessionId: string | undefined) {
   return ['session-screen', sessionId] as const;
 }
 
+export function selectRefreshedBoundSession(
+  boundSession: BoundSession | undefined,
+  polledSession: BoundSession | undefined,
+): BoundSession | undefined {
+  return polledSession?.id === boundSession?.id ? polledSession : boundSession;
+}
+
 export function invalidateConversationData(
   queryClient: QueryClient,
   projectSlug: string | undefined,
@@ -264,8 +271,10 @@ export function useConversationData({
     const refreshedLiveScreen = liveScreenData && liveScreenData.session.id === selectedBoundSession?.id
       ? liveScreenData.screen
       : undefined;
+    const refreshedBoundSession = selectRefreshedBoundSession(selectedBoundSession, liveScreenData?.session);
     return {
       ...meta,
+      boundSession: refreshedBoundSession,
       messages: pagedTimelineMessages,
       liveScreen: refreshedLiveScreen ?? meta.liveScreen,
       messagePage: messagePages.at(-1)?.messagePage ?? meta.messagePage,

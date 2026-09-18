@@ -202,6 +202,54 @@ it('does not apply a queued profile to a different conversation', async () => {
   expect(onSetCodexProfile).not.toHaveBeenCalled();
 });
 
+it('applies a queued profile when the current turn becomes idle', async () => {
+  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
+  const view = renderPane({
+    onSetCodexProfile,
+    sessionOverrides: { id: 'session-1', isWorking: true },
+  });
+
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'h', altKey: true });
+  expect(screen.getByText(/High queued/)).toBeInTheDocument();
+
+  view.rerender(
+    <MemoryRouter>
+      <ConversationPane
+        projects={[project()]}
+        project={project()}
+        selectedProvider="codex"
+        timeline={timeline({ sessionOverrides: { id: 'session-1', isWorking: false } })}
+        liveMode
+        loading={false}
+        workMode={false}
+        mobileChromeHidden={false}
+        onToggleMobileChrome={vi.fn()}
+        mobileControlsHidden={false}
+        onToggleMobileControls={vi.fn()}
+        onBind={vi.fn()}
+        onRelease={vi.fn()}
+        onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+        onSetCodexProfile={onSetCodexProfile}
+        onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
+        onDiscardLocalSubmittedText={vi.fn()}
+        binding={false}
+        releasing={false}
+        debugOpen={false}
+        onToggleDebug={vi.fn()}
+        rawLoading={false}
+        hasOlderMessages={false}
+        loadingOlderMessages={false}
+        onLoadOlderMessages={vi.fn()}
+        conversationKey="demo:codex:conversation-1"
+        historyPrependVersion={0}
+      />
+    </MemoryRouter>,
+  );
+
+  await waitFor(() => expect(onSetCodexProfile).toHaveBeenCalledWith('session-1', 'high'));
+  expect(screen.getByText(/High selected/)).toBeInTheDocument();
+});
+
 describe('ConversationPane live input bridge', () => {
   it('clears the normal draft immediately after Enter while the keystroke request is pending', () => {
     const send = deferred<boolean>();

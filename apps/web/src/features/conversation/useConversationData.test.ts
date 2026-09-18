@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BoundSession, ConversationTimeline, NormalizedMessage } from '@agent-console/shared';
-import { timelineMessagesRefetchInterval } from './useConversationData';
+import { selectRefreshedBoundSession, timelineMessagesRefetchInterval } from './useConversationData';
 
 function session(overrides: Partial<BoundSession> = {}): BoundSession {
   return {
@@ -110,5 +110,21 @@ describe('timelineMessagesRefetchInterval', () => {
         message({ id: 'new-answer', timestamp: '2026-07-03T15:51:42.000Z' }),
       ])],
     })).toBe(false);
+  });
+});
+
+describe('selectRefreshedBoundSession', () => {
+  it('uses the polled server session state for the currently bound session', () => {
+    const stale = session({ isWorking: true, codexProfile: 'medium' });
+    const refreshed = session({ isWorking: false, codexProfile: 'medium', lastCompletedAt: '2026-07-03T15:51:44.000Z' });
+
+    expect(selectRefreshedBoundSession(stale, refreshed)).toEqual(refreshed);
+  });
+
+  it('does not apply a late poll response from a replaced session', () => {
+    const current = session({ id: 'session-2', isWorking: true });
+    const stalePoll = session({ id: 'session-1', isWorking: false });
+
+    expect(selectRefreshedBoundSession(current, stalePoll)).toEqual(current);
   });
 });
