@@ -14,6 +14,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› \ngpt-5.6-sol medium · 98% left · ~/demo';
     const profileProvider: ProviderAdapter = {
       ...provider,
       getLaunchCommand(_project, conversationRef, _settings, options) {
@@ -34,17 +35,11 @@ describe('SessionManager lifecycle', () => {
       kind: 'history',
     });
 
-    const switched = await manager.switchCodexModelProfile({
-      sessionId: session.id,
-      project,
-      provider: profileProvider,
-      providerSettings,
-      profile: 'high',
-    });
+    const accepted = await manager.requestModelProfile(session.id, 'high');
 
-    expect(switched).toMatchObject({ profile: 'high', model: 'gpt-6-astra', reasoningEffort: 'xhigh' });
-    expect(switched.session.codexProfile).toBe('high');
-    expect(db.boundSessions.getById(session.id)?.codexProfile).toBe('high');
+    expect(accepted.session.modelProfileRequest).toMatchObject({ profile: 'high', state: 'queued' });
+    await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
+    expect(db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
     expect(tmux.created).toHaveLength(2);
     expect(tmux.createdCommands.at(-1)).toContain('high');
     db.close();
@@ -54,6 +49,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› \ngpt-5.6-sol medium · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
     const session = await manager.bindConversation({
       project,
@@ -65,20 +61,103 @@ describe('SessionManager lifecycle', () => {
     });
 
     tmux.failKill = true;
-    await expect(manager.switchCodexModelProfile({
-      sessionId: session.id,
-      project,
-      provider,
-      providerSettings,
-      profile: 'high',
-    })).rejects.toThrow('kill failed');
+    await manager.requestModelProfile(session.id, 'high');
+
+    await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest?.state).toBe('failed');
 
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
     expect(tmux.created).toHaveLength(1);
     expect(db.boundSessions.getById(session.id)).toMatchObject({
       status: 'bound',
       codexProfile: undefined,
+      modelProfileRequest: expect.objectContaining({ state: 'failed', profile: 'high' }),
     });
+    db.close();
+  });
+
+  it('does not launch or kill another process when liveness is unknown after a failed profile-switch kill', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› \ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history-profile-unknown-after-kill',
+      title: 'Profile test',
+      kind: 'history',
+    });
+
+    tmux.failKill = true;
+    tmux.hasSessionResults.push(true, new Error('tmux unavailable'));
+    await manager.requestModelProfile(session.id, 'high');
+    await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest?.state).toBe('failed');
+
+    expect(tmux.created).toHaveLength(1);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({
+      status: 'error',
+      codexProfile: undefined,
+      modelProfileRequest: expect.objectContaining({ state: 'failed', profile: 'high' }),
+    });
+    await manager.stop();
+    db.close();
+  });
+
+  it('reports an error and removes a partial process when both a profile switch and rollback fail', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› \ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'history-profile-rollback-failure',
+      title: 'Profile test',
+      kind: 'history',
+    });
+
+    tmux.failPipePane = true;
+    await manager.requestModelProfile(session.id, 'high');
+    await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest?.state).toBe('failed');
+
+    expect(tmux.created).toHaveLength(3);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({
+      status: 'error',
+      codexProfile: undefined,
+      modelProfileRequest: expect.objectContaining({ state: 'failed', profile: 'high' }),
+    });
+    await manager.stop();
+    db.close();
+  });
+
+  it('selects a Codex profile for the existing first-turn prompt restart', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-6-sol xhigh · /tmp';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'pending:first-profile',
+      title: 'New conversation',
+      kind: 'pending',
+    });
+
+    await manager.requestModelProfile(session.id, 'high');
+
+    await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
+    expect(db.boundSessions.getById(session.id)?.codexProfile).toBe('high');
+    expect(db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
+    expect(tmux.created).toHaveLength(1);
+    await manager.stop();
     db.close();
   });
 
@@ -243,6 +322,35 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it('does not report a bind as successful when the provider exits during startup', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    class ExitingTmux extends FakeTmux {
+      override async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
+        await super.newDetachedSession(sessionName, cwd, shellCommand);
+        this.alive.delete(sessionName);
+      }
+    }
+    const tmux = new ExitingTmux();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+
+    await expect(manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-exits-during-bind',
+      title: 'Exited bind',
+      kind: 'history',
+    })).rejects.toThrow('Provider session exited during startup.');
+
+    const failed = db.boundSessions.list()[0];
+    expect(failed?.status).toBe('error');
+    expect(failed?.shouldRestore).toBe(false);
+    const eventLog = await fs.readFile(failed?.eventLogPath ?? '', 'utf8');
+    expect(eventLog).not.toContain('Bound codex session');
+    db.close();
+  });
+
   it('restores the same bound session when the tmux session is gone', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -264,6 +372,44 @@ describe('SessionManager lifecycle', () => {
     expect(second?.id).toBe(first.id);
     expect(second?.status).toBe('bound');
     expect(tmux.created).toHaveLength(2);
+    db.close();
+  });
+
+  it('records one restore failure when the provider exits during startup', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    class ExitingRestoreTmux extends FakeTmux {
+      private launchCount = 0;
+
+      override async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
+        await super.newDetachedSession(sessionName, cwd, shellCommand);
+        this.launchCount += 1;
+        if (this.launchCount > 1) {
+          this.alive.delete(sessionName);
+        }
+      }
+    }
+    const tmux = new ExitingRestoreTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+
+    const session = await manager.bindConversation({
+      project,
+      provider,
+      providerSettings,
+      conversationRef: 'session-exits-during-restore',
+      title: 'Exited restore',
+      kind: 'history',
+    });
+    tmux.alive.clear();
+
+    await expect(manager.getSessionScreen(session.id)).resolves.toBeUndefined();
+    await expect(manager.getSessionScreen(session.id)).resolves.toBeUndefined();
+
+    expect(tmux.created).toHaveLength(2);
+    expect(db.boundSessions.getById(session.id)?.status).toBe('error');
+    const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
+    expect(eventLog).not.toContain('Restored bound session.');
+    expect(eventLog.match(/Provider session exited during startup\./g)).toHaveLength(1);
     db.close();
   });
 

@@ -4,7 +4,7 @@ import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, Settings, X }
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   BoundSession,
-  CodexCostProfileKey,
+  ModelProfileKey,
   ConversationTimeline,
   NormalizedMessage,
   ProjectSummary,
@@ -24,6 +24,7 @@ import {
   conversationMetaQueryKey,
   invalidateConversationData,
   invalidateTimelineMessages,
+  selectRefreshedBoundSession,
   timelineMessagesQueryKey,
   useConversationData,
 } from './features/conversation/useConversationData';
@@ -633,10 +634,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         (current) => current?.boundSession?.id === sessionId
           ? {
               ...current,
-              boundSession: {
-                ...current.boundSession,
-                ...updatedSession,
-              },
+              boundSession: selectRefreshedBoundSession(current.boundSession, updatedSession),
             }
           : current,
       );
@@ -771,7 +769,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  async function handleSetCodexProfile(sessionId: string, profile: CodexCostProfileKey): Promise<boolean> {
+  async function handleSetModelProfile(sessionId: string, profile: ModelProfileKey): Promise<boolean> {
     setActionError(undefined);
     try {
       const response = await api.setSessionModelProfile(sessionId, profile, authQuery.data?.csrfToken);
@@ -779,7 +777,20 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       void queryClient.invalidateQueries({ queryKey: ['tree'] });
       return true;
     } catch (error) {
-      setActionError(describeError(error, 'Could not change the Codex model profile.'));
+      setActionError(describeError(error, 'Could not change the session model profile.'));
+      return false;
+    }
+  }
+
+  async function handleCancelModelProfileRequest(sessionId: string, requestId: string): Promise<boolean> {
+    setActionError(undefined);
+    try {
+      const response = await api.cancelSessionModelProfileRequest(sessionId, requestId, authQuery.data?.csrfToken);
+      applyUpdatedSessionToSelection(sessionId, response.session);
+      void queryClient.invalidateQueries({ queryKey: ['tree'] });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Could not cancel the queued model profile.'));
       return false;
     }
   }
@@ -1037,7 +1048,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSendKeystrokes={handleSendKeystrokes}
-              onSetCodexProfile={handleSetCodexProfile}
+              onSetModelProfile={handleSetModelProfile}
+              onCancelModelProfileRequest={handleCancelModelProfileRequest}
               onLocalSubmittedText={appendLocalSubmittedText}
               onDiscardLocalSubmittedText={discardSelectedSubmittedMessage}
               binding={bindExistingMutation.isPending}

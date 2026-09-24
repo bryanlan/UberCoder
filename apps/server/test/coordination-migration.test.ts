@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { expect, it } from 'vitest';
 import { createCoordinationSchema } from '../src/coordination/schema.js';
-import { migrateDatabase } from '../src/db/schema.js';
+import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../src/db/schema.js';
 
 it('retires version 6 locks once, preserving assignments, inboxes and ownership evidence', () => {
   const db = new Database(':memory:');
@@ -30,6 +30,6 @@ it('retires version 6 locks once, preserving assignments, inboxes and ownership 
     expect(events.map((event) => event.kind)).toEqual(['claim-retired', 'git-operation-retired']);
     expect(JSON.parse(events[0]!.text)).toMatchObject({ path: '.', acquiredAt: 'acquired' });
     expect(JSON.parse(events[1]!.text)).toMatchObject({ repository: '/repo/.git', startedAt: 'started', pid: 1, processStart: 'start' });
-    expect(db.prepare('select max(version) version from schema_version').get()).toEqual({ version: 9 });
+    expect(db.prepare('select max(version) version from schema_version').get()).toEqual({ version: CURRENT_SCHEMA_VERSION });
   } finally { db.close(); }
 });

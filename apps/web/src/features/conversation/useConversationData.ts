@@ -37,7 +37,7 @@ export function selectRefreshedBoundSession(
   polledSession: BoundSession | undefined,
 ): BoundSession | undefined {
   if (!boundSession || polledSession?.id !== boundSession.id) return boundSession;
-  return Date.parse(polledSession.updatedAt) >= Date.parse(boundSession.updatedAt) ? polledSession : boundSession;
+  return Date.parse(polledSession.updatedAt) > Date.parse(boundSession.updatedAt) ? polledSession : boundSession;
 }
 
 export function invalidateConversationData(
@@ -134,7 +134,7 @@ export function timelineMessagesRefetchInterval(input: {
   }
 
   const latestMessage = latestMessageByTimestamp(input.pages ?? []);
-  if (latestMessage?.role === 'user') {
+  if (latestMessage?.role === 'user' || latestMessage?.lifecycle === 'pending') {
     return ACTIVE_TIMELINE_REFETCH_MS;
   }
 

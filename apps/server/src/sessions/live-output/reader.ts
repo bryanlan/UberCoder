@@ -55,7 +55,7 @@ function userInputLooksLikeProviderCommandControl(text: string, events: SessionE
   }
 
   const context = nearbyRawEventContext(events, index);
-  return /(?:Select model|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter to set as default|s to use this session only|Set\s*model\s*to|Set\s*mode\s*to|saved as your default for new sessions|Select Model and Effort|Effort not supported|Faster Smarter|lowmediumhighxhighmax|Enter to confirm\s*·\s*Esc to exit|Press enter to confirm or esc to go back)/i.test(context);
+  return /(?:Select model|Select Reasoning Level for|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter to set as default|s to use this session only|Set\s*model\s*to|Set\s*mode\s*to|saved as your default for new sessions|Select Model and Effort|Effort not supported|Faster Smarter|lowmediumhighxhighmax|Enter (?:select|default)\s*·\s*(?:s session\s*·\s*)?Esc back|Enter to confirm\s*·\s*Esc to exit|Press enter to confirm or esc to go back)/i.test(context);
 }
 
 export class LiveOutputReader {
@@ -69,7 +69,7 @@ export class LiveOutputReader {
     if (!session.eventLogPath) return [];
     try {
       const plan = await getEventLogReadPlan(session.eventLogPath, options);
-      const { cacheKey } = plan;
+      const cacheKey = `${session.provider}:${session.id}:${session.conversationRef}:${plan.cacheKey}`;
       const cached = this.liveMessageCache.get(cacheKey);
       if (cached) {
         return cloneMessages(cached.messages);
@@ -112,7 +112,9 @@ export class LiveOutputReader {
         continue;
       }
 
-      if (event.type === 'raw-output' && !hasTrackedUserTurn) {
+      // Codex conversation text comes exclusively from its structured transcript.
+      // Terminal output remains available through the screen and debug routes.
+      if (event.type === 'raw-output' && (session.provider === 'codex' || !hasTrackedUserTurn)) {
         continue;
       }
 

@@ -86,6 +86,8 @@ describe('AppDatabase', () => {
       'last_completed_at',
       'auto_tracked_at',
       'is_working',
+      'model_profile_request_json',
+      'claude_profile',
     ]));
     expect(session).toMatchObject({
       id: 'legacy-session',
@@ -111,6 +113,119 @@ describe('AppDatabase', () => {
       lastActivityAt: undefined,
       lastCompletedAt: undefined,
     });
+    db.close();
+  });
+
+  it('persists model-profile requests independently from ordinary session upserts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const db = new AppDatabase(databasePath);
+    const session = boundSession({
+      id: 'profile-request-session',
+      conversationRef: 'profile-request-conversation',
+      updatedAt: '2026-09-18T10:00:00.000Z',
+    });
+    db.boundSessions.upsert(session);
+    const request = {
+      requestId: 'request-1',
+      profile: 'high' as const,
+      requestedAt: '2026-09-18T10:01:00.000Z',
+      state: 'queued' as const,
+      deferredReason: 'turn_running' as const,
+    };
+
+    db.boundSessions.replaceModelProfileRequest(session.id, request, request.requestedAt);
+    db.boundSessions.upsert({ ...session, updatedAt: '2026-09-18T10:02:00.000Z', isWorking: true });
+
+    expect(db.boundSessions.getById(session.id)?.modelProfileRequest).toEqual(request);
+    db.close();
+
+    const reopened = new AppDatabase(databasePath);
+    expect(reopened.boundSessions.getById(session.id)?.modelProfileRequest).toEqual(request);
+    reopened.close();
+  });
+
+  it('uses request identity when transitioning and atomically completing a model-profile request', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const session = boundSession({
+      id: 'profile-cas-session',
+      conversationRef: 'profile-cas-conversation',
+      updatedAt: '2026-09-18T11:00:00.000Z',
+    });
+    db.boundSessions.upsert(session);
+    const queued = {
+      requestId: 'request-new',
+      profile: 'high' as const,
+      requestedAt: '2026-09-18T11:01:00.000Z',
+      state: 'queued' as const,
+    };
+    db.boundSessions.replaceModelProfileRequest(session.id, queued, queued.requestedAt);
+
+    expect(db.boundSessions.compareAndSetModelProfileRequest({
+      id: session.id,
+      requestId: 'request-stale',
+      expectedState: 'queued',
+      next: undefined,
+      updatedAt: '2026-09-18T11:02:00.000Z',
+    })).toBeUndefined();
+
+    const applying = {
+      ...queued,
+      state: 'applying' as const,
+      startedAt: '2026-09-18T11:03:00.000Z',
+      resumeConversationRef: session.conversationRef,
+    };
+    expect(db.boundSessions.compareAndSetModelProfileRequest({
+      id: session.id,
+      requestId: queued.requestId,
+      expectedState: 'queued',
+      next: applying,
+      updatedAt: applying.startedAt,
+    })?.modelProfileRequest).toEqual(applying);
+    expect(db.boundSessions.completeModelProfileRequest({
+      id: session.id,
+      requestId: 'request-stale',
+      profile: 'high',
+      updatedAt: '2026-09-18T11:04:00.000Z',
+    })).toBeUndefined();
+
+    expect(db.boundSessions.completeModelProfileRequest({
+      id: session.id,
+      requestId: queued.requestId,
+      profile: 'high',
+      updatedAt: '2026-09-18T11:05:00.000Z',
+    })).toMatchObject({ codexProfile: 'high', modelProfileRequest: undefined });
+
+    db.boundSessions.upsert({ ...session, updatedAt: '2026-09-18T11:04:30.000Z', isWorking: true });
+    expect(db.boundSessions.getById(session.id)).toMatchObject({
+      codexProfile: 'high',
+      modelProfileRequest: undefined,
+      isWorking: true,
+    });
+    db.close();
+  });
+
+  it('commits a Claude profile to the Claude column and preserves it against stale upserts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const session = boundSession({
+      id: 'claude-profile-session', provider: 'claude', conversationRef: 'claude-conversation',
+      updatedAt: '2026-09-24T11:00:00.000Z',
+    });
+    db.boundSessions.upsert(session);
+    const applying = {
+      requestId: 'claude-request', profile: 'high' as const, state: 'applying' as const,
+      requestedAt: '2026-09-24T11:01:00.000Z', startedAt: '2026-09-24T11:02:00.000Z',
+      resumeConversationRef: session.conversationRef,
+    };
+    db.boundSessions.replaceModelProfileRequest(session.id, applying, applying.startedAt);
+    const completed = db.boundSessions.completeModelProfileRequest({
+      id: session.id, requestId: applying.requestId, profile: 'high', updatedAt: '2026-09-24T11:03:00.000Z',
+    });
+    expect(completed).toMatchObject({ claudeProfile: 'high', codexProfile: undefined, modelProfileRequest: undefined });
+    db.boundSessions.upsert({ ...session, updatedAt: '2026-09-24T11:02:30.000Z' });
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ claudeProfile: 'high', codexProfile: undefined });
     db.close();
   });
 

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 11;
 
 interface Migration {
   version: number;
@@ -229,6 +229,16 @@ const MIGRATIONS: Migration[] = [
   { version: 9, name: 'codex-cost-profile', up(sqlite) {
     if (tableExists(sqlite, 'bound_sessions')) {
       addColumnIfMissing(sqlite, 'bound_sessions', 'codex_profile', 'codex_profile text');
+    }
+  } },
+  { version: 10, name: 'durable-model-profile-request', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'model_profile_request_json', 'model_profile_request_json text');
+    }
+  } },
+  { version: 11, name: 'claude-cost-profile', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'claude_profile', 'claude_profile text');
     }
   } },
 ];

@@ -63,12 +63,25 @@ near-duplicate event messages, removes internal memory-citation blocks before di
 and hides environment, `AGENTS.md`, and instruction wrapper records from the visible transcript
 while keeping the full parsed message set available for indexing. Codex commentary-phase assistant
 records are treated as pending progress, and only the latest pending commentary tail is displayed
-so an in-flight answer can show progress without flooding the durable transcript.
+so an in-flight answer can show progress without flooding the durable transcript. Codex pending
+conversations attempt transcript linking during the active first turn. Linking atomically writes
+the native conversation summary and transcript path to the index alongside the binding and pending
+reference, so subsequent reads and transcript watchers share the same identity without waiting for
+full discovery. Until a matching transcript exists, the chat shows submitted input and session
+status. Polling continues while the latest message is pending, even if terminal activity reports
+completion within the usual timestamp grace window.
+
+Pending adoption matches the first/last user prompt hashes and timestamps from the
+provider-filtered visible messages. Injected instructions, midnight environment updates, and
+other hidden records remain available in the full parse but cannot displace the submitted
+prompts in matching metadata. Parser version changes invalidate persisted summaries so an
+existing pending URL can recover its completed transcript without relaunching the agent.
 
 The console intentionally keeps four text channels separate. `/screen` exposes parsed tmux screen
 state for interactive pickers and status, `/raw-output` exposes debug tails for inspection only,
-event-log readers produce temporary live conversation messages, and provider transcript adapters
-produce durable conversation history. The web conversation pane may mirror local text-bypass typing
+event-log readers preserve submitted user input and session status, and provider transcript adapters
+produce conversation history. Codex raw-output events never become assistant messages, including
+before its first transcript is linked; the remaining terminal-prose normalizer serves Claude. The web conversation pane may mirror local text-bypass typing
 optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
 pending user transcript row.
 
@@ -88,7 +101,8 @@ FTS rows from sanitized user/assistant prose, excludes hidden system-invocation 
 deduplicates chunks down to one best result per conversation after applying recency-bucket and score
 ordering. Persisted search rows live in SQLite `conversation_search_fts`; live pending sessions are
 searched from the recent event-log tail so new conversations can appear before a provider transcript
-exists. Transcript-backed live sessions intentionally ignore assistant `live-output` fragments for
+exists. For Codex that tail contributes submitted user input only, never terminal-derived assistant
+text. Transcript-backed live sessions intentionally ignore assistant `live-output` fragments for
 search, because the durable transcript is the source for those conversations.
 
 `IndexingService` owns search-index refresh and repair. Normal indexing replaces FTS rows from
@@ -132,8 +146,8 @@ user's actual prompt.
 
 ## External Integrations
 - Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.
-- Codex sessions expose three explicit cost profiles: High (Astra/xhigh), Medium (Sol/medium), and Low (Terra/high). New Codex sessions start on Medium. The authenticated model-profile route restarts only an idle tmux session against the same provider conversation; the browser queues a requested shortcut while a turn is active and preserves the unsent draft.
-- Codex working state follows provider `task_started`, `task_complete`, and `turn_aborted` events, not the output-recency cooldown. Completion/interruption releases queued model changes immediately; completion recency still waits for the output idle window. Model switching rereads provider lifecycle under the session command lock and checks the live screen before restarting. A previous completion cannot acknowledge newly submitted input, and older screen polls cannot override newer session updates in the browser.
+- Codex sessions expose High (GPT-6 Astra/xhigh), Medium (GPT-6 Sol/xhigh), and Low (GPT-6 Luna/xhigh). Claude sessions expose High (Fable 5.1/xhigh), Medium (Opus 5.5/xhigh), and Low (Sonnet 5/high). New sessions use Medium unless a project supplies explicit model flags. Model-profile selections are durable server-owned requests on the bound session: the authenticated route persists the latest target immediately, and the backend applies it after verifying the provider is idle and the terminal has no draft or interactive selection. A Codex profile chosen before the first turn is used by the established first-prompt restart; a Claude profile chosen before the first turn restarts the empty provider process immediately. Navigation, browser shutdown, and ordinary backend restart do not discard a queued selection. Explicit cancellation is request-ID guarded, and release/supersession clears obsolete requests.
+- Codex working state follows provider `task_started`, `task_complete`, and `turn_aborted` events, not the output-recency cooldown. Completion/interruption schedules the server-owned model queue immediately; completion recency still waits for the output idle window. Model switching rereads provider lifecycle under the session command lock, verifies tmux ownership, and defers on drafts, provider-queued messages, or interactive terminal state. Claude uses its parsed terminal readiness and working status for the same queue. The confirmed active profile is updated only after verified startup. A durable applying marker prevents a backend restart from blindly repeating an ambiguous process restart. A previous completion cannot acknowledge newly submitted input, and older screen polls cannot override newer session updates in the browser.
 - Opening or binding an unindexed provider conversation registers its native transcript path and notifies session watchers. Pending adoption registers the same path atomically with the native binding; turn monitoring must not depend on a later project-wide discovery refresh.
 - tmux is the session execution boundary; the backend captures pane state and logs normalized events.
 - SQLite via `better-sqlite3` stores config-derived indexes, bound session state, auth/session state, pending conversations, and UI preferences.
@@ -143,6 +157,11 @@ user's actual prompt.
 ## Key Decisions
 - Prefer current ownership modules over stale facade or compatibility paths when changing behavior.
 - Do not add compatibility layers, fallback mappings, or legacy response fields unless the caller contract explicitly requires them.
+- A provider conversation has one restorable database owner and one hidden tmux writer. Live screen
+  reads stay outside the mutating session queue, but a missing-session restore is serialized with
+  input and release operations, re-reads the current conversation owner before launch and commit,
+  and reports success only after the provider process survives startup. Tmux owner metadata guards
+  failed-launch cleanup from terminating a replacement writer.
 - Session recency is not a generic "screen changed" timestamp. Opening an old session, restoring a
   tmux binding, viewing an old transcript, raw restore output, or the screen merely leaving
   `Working` must not make a conversation look fresh.
@@ -213,6 +232,7 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 ## Assignment coordination
 
 `apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver context without entering the tmux user-input path. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
+
 
 ## Provider run failures and bounded recovery
 

@@ -11,6 +11,7 @@ export interface SessionRuntimeState {
   rawOutputScreenUpdateTimer?: NodeJS.Timeout;
   liveSessionModel?: string;
   codexProfile?: import('@agent-console/shared').CodexCostProfileKey;
+  claudeProfile?: import('@agent-console/shared').ClaudeCostProfileKey;
   submittedTurnAt?: string;
 }
 
@@ -88,6 +89,7 @@ export class SessionRuntimeRegistry {
     state.deferredSelectionInput = undefined;
     state.liveSessionModel = undefined;
     state.codexProfile = undefined;
+    state.claudeProfile = undefined;
     state.submittedTurnAt = undefined;
   }
 

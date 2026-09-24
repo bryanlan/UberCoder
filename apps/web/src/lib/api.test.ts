@@ -48,3 +48,26 @@ describe('api.bindConversation', () => {
     });
   });
 });
+
+describe('model-profile requests', () => {
+  it('submits selections immediately to the server-owned queue', async () => {
+    const fetchMock = installSuccessfulFetch();
+
+    await api.setSessionModelProfile('session-1', 'high', 'csrf-token');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session-1/model-profile', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ profile: 'high' }),
+    }));
+  });
+
+  it('cancels a specific queued request with DELETE', async () => {
+    const fetchMock = installSuccessfulFetch();
+
+    await api.cancelSessionModelProfileRequest('session-1', 'request-1', 'csrf-token');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session-1/model-profile/requests/request-1', expect.objectContaining({
+      method: 'DELETE',
+    }));
+  });
+});

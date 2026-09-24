@@ -4,16 +4,70 @@ export type ProviderId = (typeof PROVIDERS)[number];
 
 export const CODEX_COST_PROFILES = {
   high: { model: 'gpt-6-astra', reasoningEffort: 'xhigh', shortcut: 'H' },
-  medium: { model: 'gpt-5.6-sol', reasoningEffort: 'medium', shortcut: 'M' },
-  low: { model: 'gpt-5.6-terra', reasoningEffort: 'high', shortcut: 'L' },
+  medium: { model: 'gpt-6-sol', reasoningEffort: 'xhigh', shortcut: 'M' },
+  low: { model: 'gpt-6-luna', reasoningEffort: 'xhigh', shortcut: 'L' },
 } as const;
 export type CodexCostProfileKey = keyof typeof CODEX_COST_PROFILES;
 
+export const CLAUDE_COST_PROFILES = {
+  high: { model: 'claude-fable-5-1', reasoningEffort: 'xhigh', shortcut: 'H' },
+  medium: { model: 'claude-opus-5-5', reasoningEffort: 'xhigh', shortcut: 'M' },
+  low: { model: 'claude-sonnet-5', reasoningEffort: 'high', shortcut: 'L' },
+} as const;
+export type ClaudeCostProfileKey = keyof typeof CLAUDE_COST_PROFILES;
+export type ModelProfileKey = CodexCostProfileKey | ClaudeCostProfileKey;
+
+export function visibleModelMatchesProfile(provider: ProviderId, profile: ModelProfileKey, visibleModel: string | undefined): boolean | undefined {
+  if (!visibleModel) return undefined;
+  const selected = provider === 'codex' ? CODEX_COST_PROFILES[profile] : CLAUDE_COST_PROFILES[profile];
+  if (provider === 'codex') {
+    const observed = visibleModel.trim().match(/^(gpt-[\w.-]+)(?:\s+(default|low|medium|high|xhigh|max|ultra))?$/i);
+    if (!observed) return undefined;
+    return observed[1]!.toLowerCase() === selected.model
+      && (!observed[2] || observed[2].toLowerCase() === selected.reasoningEffort);
+  }
+  const expected = selected.model.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
+  const observed = visibleModel.trim().match(/^([a-z]+)\s+(\d+)(?:\.(\d+))?$/i);
+  if (!expected || !observed) return undefined;
+  return observed[1]!.toLowerCase() === expected[1]
+    && observed[2] === expected[2]
+    && observed[3] === expected[3];
+}
+
+export type ModelProfileDeferredReason =
+  | 'turn_running'
+  | 'unsent_input'
+  | 'interactive_input'
+  | 'provider_message_queued'
+  | 'starting'
+  | 'awaiting_native_conversation'
+  | 'cannot_verify_idle';
+
+interface ModelProfileRequestBase {
+  requestId: string;
+  profile: ModelProfileKey;
+  requestedAt: string;
+}
+
+export type ModelProfileRequest =
+  | (ModelProfileRequestBase & {
+      state: 'queued';
+      deferredReason?: ModelProfileDeferredReason;
+    })
+  | (ModelProfileRequestBase & {
+      state: 'applying';
+      startedAt: string;
+      previousProfile?: ModelProfileKey;
+      resumeConversationRef: string;
+    })
+  | (ModelProfileRequestBase & {
+      state: 'failed';
+      failedAt: string;
+      message: string;
+    });
+
 export interface SessionModelProfileResponse {
   session: BoundSession;
-  profile: CodexCostProfileKey;
-  model: string;
-  reasoningEffort: string;
 }
 
 export const MESSAGE_ROLES = ['user', 'assistant', 'system', 'tool', 'status'] as const;
@@ -157,6 +211,8 @@ export interface BoundSession {
   id: string;
   provider: ProviderId;
   codexProfile?: CodexCostProfileKey;
+  claudeProfile?: ClaudeCostProfileKey;
+  modelProfileRequest?: ModelProfileRequest;
   projectSlug: string;
   conversationRef: string;
   resumeConversationRef?: string;

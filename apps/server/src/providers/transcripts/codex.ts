@@ -12,7 +12,7 @@ import {
   extractTextBlocks,
   extractTextFromFields,
   extractTimestamp,
-  loadJsonlRecords,
+  iterateJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
 
@@ -272,7 +272,7 @@ function dedupeCodexEventResponseMessages(messages: NormalizedMessage[]): Normal
 }
 
 export async function parseCodexConversationFile(input: TranscriptParseInput): Promise<ParsedTranscript> {
-  const { records, fallbackTime } = await loadJsonlRecords(input.filePath);
+  const fallbackTime = (await fs.promises.stat(input.filePath)).mtime.toISOString();
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
@@ -281,7 +281,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   let source: string | undefined;
   let threadSource: string | undefined;
 
-  for (const { index, record } of records) {
+  for await (const { index, record } of iterateJsonlRecords(input.filePath)) {
     if (shouldCollectPathMetadata) {
       collectProjectPaths(record, projectPaths);
       collectAuthoritativeProjectPaths(record, authoritativeProjectPaths);

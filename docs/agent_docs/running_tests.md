@@ -25,7 +25,7 @@
 ## Environment and Fixtures
 - Install with `npm install`.
 - Host runtime needs Node 22+, npm 10+, tmux 3.4+, Codex CLI, Claude Code, git, build-essential, and python3.
-- `CLAUDE.md` is a symlink to `AGENTS.md`; do not replace it during docs or guidance edits.
+- Codex and Claude Code read the shared `AGENTS.md` directly.
 - `node_modules/@agent-console/*` workspace links point back to local `apps/*` and `packages/*`; do not replace them with copied package directories.
 - `playwright.config.ts` starts isolated local backend/web servers and does not reuse existing servers.
 

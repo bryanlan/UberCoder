@@ -1,7 +1,7 @@
 import type {
   AuthState,
   BoundSession,
-  CodexCostProfileKey,
+  ModelProfileKey,
   ConversationSearchResponse,
   ConversationTimeline,
   CreateDirectoryRequest,
@@ -122,10 +122,16 @@ export const api = {
     ),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
-  setSessionModelProfile: (sessionId: string, profile: CodexCostProfileKey, csrfToken?: string) =>
+  setSessionModelProfile: (sessionId: string, profile: ModelProfileKey, csrfToken?: string) =>
     request<SessionModelProfileResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/model-profile`,
       { method: 'POST', body: JSON.stringify({ profile }) },
+      csrfToken,
+    ),
+  cancelSessionModelProfileRequest: (sessionId: string, requestId: string, csrfToken?: string) =>
+    request<SessionModelProfileResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/model-profile/requests/${encodeURIComponent(requestId)}`,
+      { method: 'DELETE' },
       csrfToken,
     ),
   sessionScreen: (sessionId: string) =>

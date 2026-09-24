@@ -2838,7 +2838,7 @@ describe('conversation routes', () => {
     }
   });
 
-  it('trims live screen scrollback against event-log-only pending history', async () => {
+  it('keeps Codex terminal output out of pending history before linking', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const eventOnlyAnswer = 'Event-only assistant answer has enough unique content to identify duplicated pending terminal output.';
@@ -2937,7 +2937,7 @@ describe('conversation routes', () => {
       expect(response.statusCode).toBe(200);
       const texts = response.json().messages.map((message: NormalizedMessage) => message.text);
       expect(texts).toContain('Draft an event-only implementation plan.');
-      expect(texts).toContain(eventOnlyAnswer);
+      expect(texts).not.toContain(eventOnlyAnswer);
       expect(response.json().liveScreen).toBeUndefined();
       expect(getSessionScreen).not.toHaveBeenCalled();
       expect(getConversation).not.toHaveBeenCalled();

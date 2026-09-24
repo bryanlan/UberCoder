@@ -54,7 +54,7 @@ describe('command construction and proxy allowlisting', () => {
       initialPrompt: 'Reply with exactly: smoke-token',
     });
     expect(command.argv).toEqual([
-      'codex', '--model', 'gpt-5.6-sol', '-c', 'model_reasoning_effort="medium"',
+      'codex', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort="xhigh"',
       '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token',
     ]);
   });
@@ -112,6 +112,42 @@ describe('command construction and proxy allowlisting', () => {
     const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings);
     expect(command.argv).toEqual(['claude', '--dangerously-skip-permissions', '--resume', 'session-123']);
     expect(command.env).toEqual({ CLAUDE_CONFIG_DIR: '/home/user/.claude' });
+  });
+
+  it('uses Opus 5.5 xhigh for a new Claude session without project model flags', () => {
+    const command = new ClaudeProvider().getLaunchCommand(project, null, claudeSettings);
+    expect(command.argv).toEqual([
+      'claude', '--model', 'claude-opus-5-5', '--effort', 'xhigh', '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it.each([
+    ['high', 'claude-fable-5-1', 'xhigh'],
+    ['medium', 'claude-opus-5-5', 'xhigh'],
+    ['low', 'claude-sonnet-5', 'high'],
+  ] as const)('launches a resumed Claude session with %s profile', (profile, model, effort) => {
+    const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings, { claudeProfile: profile });
+    expect(command.argv).toEqual([
+      'claude', '--model', model, '--effort', effort,
+      '--dangerously-skip-permissions', '--resume', 'session-123',
+    ]);
+  });
+
+  it('preserves project model flags until a Claude profile is selected', () => {
+    const configured: MergedProviderSettings = {
+      ...claudeSettings,
+      commands: {
+        ...claudeSettings.commands,
+        newCommand: ['claude', '--model=claude-sonnet-5', '--effort', 'high'],
+        resumeCommand: ['claude', '--model=claude-sonnet-5', '--effort', 'high', '--resume', '{{conversationId}}'],
+      },
+    };
+    expect(new ClaudeProvider().getLaunchCommand(project, null, configured).argv).toEqual([
+      'claude', '--dangerously-skip-permissions', '--model=claude-sonnet-5', '--effort', 'high',
+    ]);
+    expect(new ClaudeProvider().getLaunchCommand(project, 'session-123', configured, { claudeProfile: 'high' }).argv).toEqual([
+      'claude', '--model', 'claude-fable-5-1', '--effort', 'xhigh', '--dangerously-skip-permissions', '--resume', 'session-123',
+    ]);
   });
 
   it('parses proxy URLs and enforces project port allowlists', () => {

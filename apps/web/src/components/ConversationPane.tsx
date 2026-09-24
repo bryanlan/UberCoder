@@ -1,6 +1,6 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
-import { CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type CodexCostProfileKey, type ConversationTimeline, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -232,6 +232,23 @@ function upsertLiveBridgeDraft(
   liveBridgeDraftStore.set(conversationKey, next);
 }
 
+function modelProfileLabel(profile: ModelProfileKey): string {
+  return profile.charAt(0).toUpperCase() + profile.slice(1);
+}
+
+function modelProfileRequestStatus(request: ModelProfileRequest): string {
+  const label = modelProfileLabel(request.profile);
+  if (request.state === 'applying') return `Switching to ${label}…`;
+  if (request.state === 'failed') return `Could not switch to ${label}: ${request.message}`;
+  if (request.deferredReason === 'unsent_input') return `${label} queued. Send or clear the terminal draft first.`;
+  if (request.deferredReason === 'interactive_input') return `${label} queued. Finish the terminal selection first.`;
+  if (request.deferredReason === 'provider_message_queued') return `${label} queued. Resolve the provider's queued message first.`;
+  if (request.deferredReason === 'awaiting_native_conversation') return `${label} queued until the first turn can be resumed safely.`;
+  if (request.deferredReason === 'starting') return `${label} queued until the session finishes starting.`;
+  if (request.deferredReason === 'cannot_verify_idle') return `${label} queued until the server can verify the session is idle.`;
+  return `${label} queued until this turn finishes.`;
+}
+
 function LiveSessionInputBridge({
   sessionId,
   projectSlug,
@@ -239,7 +256,8 @@ function LiveSessionInputBridge({
   conversationRef,
   provider,
   onSendKeystrokes,
-  onSetCodexProfile,
+  onSetModelProfile,
+  onCancelModelProfileRequest,
   onLocalSubmittedText,
   onLocalDraftText,
   onDiscardLocalSubmittedText,
@@ -252,8 +270,9 @@ function LiveSessionInputBridge({
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
-  isWorking,
-  activeCodexProfile,
+  activeModelProfile,
+  visibleModel,
+  modelProfileRequest,
 }: {
   sessionId: string;
   projectSlug: string;
@@ -261,7 +280,8 @@ function LiveSessionInputBridge({
   conversationRef: string;
   provider: ConversationTimeline['conversation']['provider'];
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
-  onSetCodexProfile: (sessionId: string, profile: CodexCostProfileKey) => Promise<boolean>;
+  onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
+  onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
   onLocalDraftText: (sessionId: string, text: string) => void;
   onDiscardLocalSubmittedText: (messageId: string) => void;
@@ -274,8 +294,9 @@ function LiveSessionInputBridge({
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
-  isWorking: boolean;
-  activeCodexProfile?: CodexCostProfileKey;
+  activeModelProfile?: ModelProfileKey;
+  visibleModel?: string;
+  modelProfileRequest?: ModelProfileRequest;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState('');
@@ -301,58 +322,49 @@ function LiveSessionInputBridge({
   const [profileBusy, setProfileBusy] = useState(false);
   const activeSessionIdRef = useRef(sessionId);
   activeSessionIdRef.current = sessionId;
-  const [queuedProfile, setQueuedProfile] = useState<{ sessionId: string; profile: CodexCostProfileKey }>();
-  const [profileStatus, setProfileStatus] = useState<string>();
+  const [profileError, setProfileError] = useState<string>();
+  const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
+  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
 
-  async function applyCodexProfile(profile: CodexCostProfileKey): Promise<void> {
+  async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
     const targetSessionId = sessionId;
     setProfileBusy(true);
-    const selection = CODEX_COST_PROFILES[profile];
-    const changed = await onSetCodexProfile(targetSessionId, profile);
+    const changed = await onSetModelProfile(targetSessionId, profile);
     setProfileBusy(false);
     if (activeSessionIdRef.current !== targetSessionId) return;
-    if (changed) {
-      setQueuedProfile(undefined);
-      setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} selected · ${selection.model} · ${selection.reasoningEffort}`);
-    } else {
-      setQueuedProfile(undefined);
-      setProfileStatus('Profile switch failed.');
-    }
+    setProfileError(changed ? undefined : 'Profile request failed.');
   }
 
-  function requestCodexProfile(profile: CodexCostProfileKey): void {
-    if (provider !== 'codex') return;
-    if (isWorking) {
-      setQueuedProfile({ sessionId, profile });
-      setProfileStatus(`${profile.charAt(0).toUpperCase() + profile.slice(1)} queued until this turn finishes.`);
-      return;
-    }
-    void applyCodexProfile(profile);
+  function requestModelProfile(profile: ModelProfileKey): void {
+    void applyModelProfile(profile);
+  }
+
+  async function cancelModelProfileRequest(): Promise<void> {
+    if (!modelProfileRequest || modelProfileRequest.state === 'applying') return;
+    const targetSessionId = sessionId;
+    setProfileBusy(true);
+    const cancelled = await onCancelModelProfileRequest(targetSessionId, modelProfileRequest.requestId);
+    setProfileBusy(false);
+    if (activeSessionIdRef.current !== targetSessionId) return;
+    setProfileError(cancelled ? undefined : 'Could not cancel the profile request.');
   }
 
   useEffect(() => {
-    if (!queuedProfile || queuedProfile.sessionId !== sessionId || isWorking || profileBusy) return;
-    void applyCodexProfile(queuedProfile.profile);
-  }, [isWorking, profileBusy, queuedProfile, sessionId]);
-
-  useEffect(() => {
-    setQueuedProfile(undefined);
-    setProfileStatus(undefined);
+    setProfileError(undefined);
   }, [sessionId]);
 
   useEffect(() => {
-    if (provider !== 'codex') return;
     const onProfileShortcut = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
       const profile = ({ h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'h' | 'm' | 'l'];
       if (!profile) return;
       event.preventDefault();
       event.stopPropagation();
-      requestCodexProfile(profile);
+      requestModelProfile(profile);
     };
     window.addEventListener('keydown', onProfileShortcut, true);
     return () => window.removeEventListener('keydown', onProfileShortcut, true);
-  }, [isWorking, profileBusy, provider, sessionId]);
+  }, [profileBusy, provider, sessionId]);
 
   useEffect(() => {
     captureRef.current?.focus();
@@ -697,7 +709,7 @@ function LiveSessionInputBridge({
       const submittedText = (bypassPreviewTextRef.current ?? '').trim();
       keepBypassSelectionPinnedRef.current = true;
       const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
-      const optimisticMessage = submittedText ? onLocalSubmittedText(sessionId, submittedText) : undefined;
+      const optimisticMessage = submittedText && !submittedText.startsWith('/') ? onLocalSubmittedText(sessionId, submittedText) : undefined;
       const restore = () => {
         restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
         if (optimisticMessage) {
@@ -941,6 +953,18 @@ function LiveSessionInputBridge({
   }
 
   const bridgeBodyClassName = mobileCollapsible ? 'px-4 pb-4' : 'px-4 py-4';
+  const currentProfileMatchesVisibleModel = activeModelProfile
+    ? visibleModelMatchesProfile(provider, activeModelProfile, visibleModel) !== false
+    : false;
+  const displayedProfileStatus = profileError
+    ?? (modelProfileRequest
+      ? modelProfileRequestStatus(modelProfileRequest)
+      : activeModelProfile && !currentProfileMatchesVisibleModel
+        ? `Running: ${visibleModel} · select H, M, or L`
+        : activeModelProfile
+        ? `Current: ${modelProfileLabel(activeModelProfile)}`
+        : 'Existing session · choose H, M, or L');
+  const profileApplying = modelProfileRequest?.state === 'applying';
 
   return (
     <div className="border-t border-slate-800 bg-slate-950/90">
@@ -960,33 +984,47 @@ function LiveSessionInputBridge({
           >
             <span className="h-1.5 w-16 rounded-full bg-slate-700/90" />
           </button>
-          {provider === 'codex' ? (
+          {(
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Session model</div>
-                <div className="text-xs text-slate-300">{profileStatus ?? (activeCodexProfile ? `${activeCodexProfile.charAt(0).toUpperCase() + activeCodexProfile.slice(1)} profile` : 'Existing session · choose H, M, or L')}</div>
+                <div className="text-xs text-slate-300">{displayedProfileStatus}</div>
+                {modelProfileRequest && modelProfileRequest.state !== 'applying' ? (
+                  <button
+                    type="button"
+                    className="mt-1 text-[11px] text-slate-400 underline decoration-slate-600 underline-offset-2 hover:text-slate-200 disabled:opacity-50"
+                    disabled={profileBusy}
+                    onClick={() => { void cancelModelProfileRequest(); }}
+                  >
+                    Cancel queued profile
+                  </button>
+                ) : null}
               </div>
-              <div className="flex" aria-label="Codex cost profile">
-                {(['high', 'medium', 'low'] as CodexCostProfileKey[]).map((profile) => (
+              <div className="flex" aria-label={`${providerLabel} model profile`}>
+                {(['high', 'medium', 'low'] as ModelProfileKey[]).map((profile) => (
                   <button
                     key={profile}
                     type="button"
-                    disabled={profileBusy}
-                    aria-label={`Use ${profile} Codex profile`}
-                    aria-pressed={(queuedProfile?.profile ?? activeCodexProfile) === profile}
-                    title={`${profile}: ${CODEX_COST_PROFILES[profile].model} / ${CODEX_COST_PROFILES[profile].reasoningEffort} (Alt ${CODEX_COST_PROFILES[profile].shortcut})`}
-                    onClick={() => requestCodexProfile(profile)}
+                    disabled={profileBusy || profileApplying}
+                    aria-label={`Use ${profile} ${providerLabel} profile`}
+                    aria-pressed={activeModelProfile === profile && currentProfileMatchesVisibleModel}
+                    title={`${profile}: ${profileCatalog[profile].model} / ${profileCatalog[profile].reasoningEffort} (Alt ${profileCatalog[profile].shortcut})`}
+                    onClick={() => requestModelProfile(profile)}
                     className={clsx(
                       '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',
-                      (queuedProfile?.profile ?? activeCodexProfile) === profile ? 'bg-sky-500/20 text-sky-100' : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
+                      activeModelProfile === profile && currentProfileMatchesVisibleModel
+                        ? 'bg-sky-500/20 text-sky-100'
+                        : modelProfileRequest?.profile === profile
+                          ? 'bg-amber-500/15 text-amber-100'
+                          : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
                     )}
                   >
-                    {CODEX_COST_PROFILES[profile].shortcut}
+                    {profileCatalog[profile].shortcut}
                   </button>
                 ))}
               </div>
             </div>
-          ) : null}
+          )}
           <textarea
             ref={captureRef}
             readOnly={bridgeBusy}
@@ -1193,7 +1231,8 @@ interface ConversationPaneProps {
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
-  onSetCodexProfile: (sessionId: string, profile: CodexCostProfileKey) => Promise<boolean>;
+  onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
+  onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
   onDiscardLocalSubmittedText: (messageId: string) => void;
   binding: boolean;
@@ -1232,7 +1271,7 @@ function buildLiveDraftMessage(input: {
   timestamp: string;
 }): NormalizedMessage | undefined {
   const text = input.text.trim();
-  if (!text) {
+  if (!text || text.startsWith('/')) {
     return undefined;
   }
   return {
@@ -1256,7 +1295,8 @@ function screenHasInteractiveControlText(text: string): boolean {
     .map((line) => line.trim().replace(/\s+/g, ' '))
     .filter(Boolean)
     .join('\n');
-  return /Enter to confirm · Esc to exit/i.test(normalized)
+  return /Enter (?:select|default) · (?:s session · )?Esc back/i.test(normalized)
+    || /Enter to confirm · Esc to exit/i.test(normalized)
     || /Press enter to confirm or esc to go back/i.test(normalized)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
@@ -1314,7 +1354,8 @@ export function ConversationPane({
   onBind,
   onRelease,
   onSendKeystrokes,
-  onSetCodexProfile,
+  onSetModelProfile,
+  onCancelModelProfileRequest,
   onLocalSubmittedText,
   onDiscardLocalSubmittedText,
   binding,
@@ -1765,7 +1806,8 @@ export function ConversationPane({
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
           onSendKeystrokes={onSendKeystrokes}
-          onSetCodexProfile={onSetCodexProfile}
+          onSetModelProfile={onSetModelProfile}
+          onCancelModelProfileRequest={onCancelModelProfileRequest}
           onLocalSubmittedText={onLocalSubmittedText}
           onLocalDraftText={updateLocalLiveDraft}
           onDiscardLocalSubmittedText={onDiscardLocalSubmittedText}
@@ -1778,8 +1820,9 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
-          isWorking={Boolean(boundSession.isWorking)}
-          activeCodexProfile={boundSession.codexProfile}
+          activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
+          visibleModel={liveScreen?.model}
+          modelProfileRequest={boundSession.modelProfileRequest}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">

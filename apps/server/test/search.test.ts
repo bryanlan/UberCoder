@@ -331,7 +331,8 @@ describe('conversation search', () => {
       conversationRef: 'pending:search',
       isBound: true,
     });
-    expect(['user', 'assistant']).toContain(liveResult?.role);
+    expect(liveResult?.role).toBe('user');
+    expect(await search.search('Sidebar search covers', 10)).toEqual([]);
     expect(liveResult?.snippet).toContain('pending activity');
     db.close();
   });
@@ -346,12 +347,12 @@ describe('conversation search', () => {
       JSON.stringify({ type: 'raw-output', text: 'scale needle scale needle scale needle scale needle', timestamp: updatedAt }),
     ].join('\n'), 'utf8');
 
-    db.searchIndex.replace('demo', 'codex', [{
+    db.searchIndex.replace('demo', 'claude', [{
       projectSlug: 'demo',
       projectDisplayName: 'Demo Project',
       projectPath: '/tmp/demo',
       projectTags: [],
-      provider: 'codex',
+      provider: 'claude',
       conversationRef: 'persisted-weaker-score',
       conversationKind: 'history',
       conversationTitle: 'Persisted weaker score',
@@ -366,7 +367,7 @@ describe('conversation search', () => {
       ref: 'pending:live-stronger-score',
       kind: 'pending',
       projectSlug: 'demo',
-      provider: 'codex',
+      provider: 'claude',
       title: 'Live stronger score',
       createdAt: updatedAt,
       updatedAt,
@@ -376,10 +377,10 @@ describe('conversation search', () => {
     });
     db.boundSessions.upsert({
       id: 'session-live-stronger-score',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:live-stronger-score',
-      tmuxSessionName: 'ac-codex-demo-live-stronger-score',
+      tmuxSessionName: 'ac-claude-demo-live-stronger-score',
       status: 'bound',
       shouldRestore: true,
       title: 'Live stronger score',
@@ -561,7 +562,7 @@ describe('conversation search', () => {
       ref: 'pending:tail',
       kind: 'pending',
       projectSlug: 'demo',
-      provider: 'codex',
+      provider: 'claude',
       title: 'Tail bounded pending',
       createdAt: '2026-06-18T12:00:00.000Z',
       updatedAt: '2026-06-18T12:01:00.000Z',
@@ -571,10 +572,10 @@ describe('conversation search', () => {
     });
     db.boundSessions.upsert({
       id: 'session-tail',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:tail',
-      tmuxSessionName: 'ac-codex-demo-tail',
+      tmuxSessionName: 'ac-claude-demo-tail',
       status: 'bound',
       shouldRestore: true,
       title: 'Tail bounded pending',

@@ -50,7 +50,8 @@ export function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, 
     .filter(Boolean);
   const trailingLines = normalizedLines.slice(-8);
 
-  if (trailingLines.some((line) => /Enter to confirm · Esc to exit/i.test(line)
+  if (trailingLines.some((line) => /Enter (?:select|default) · (?:s session · )?Esc back/i.test(line)
+    || /Enter to confirm · Esc to exit/i.test(line)
     || /Press enter to confirm or esc to go back/i.test(line)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line))) {
     return true;
@@ -101,7 +102,8 @@ export function screenShowsInteractiveSelectionHint(screen: SessionScreen): bool
     .map((line) => normalizeWhitespace(line))
     .filter(Boolean)
     .slice(-8)
-    .some((line) => /Enter to confirm · Esc to exit/i.test(line)
+    .some((line) => /Enter (?:select|default) · (?:s session · )?Esc back/i.test(line)
+      || /Enter to confirm · Esc to exit/i.test(line)
       || /Press enter to confirm or esc to go back/i.test(line)
       || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
       || /Esc to cancel · Tab to amend/i.test(line)

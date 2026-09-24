@@ -56,6 +56,7 @@ function timeline(input: {
   screenContentAnsi?: string;
   screenStatus?: string;
   screenStatusAnsi?: string;
+  screenModel?: string;
   sessionOverrides?: Partial<BoundSession>;
 } = {}): ConversationTimeline {
   const session = boundSession(input.sessionOverrides);
@@ -64,7 +65,7 @@ function timeline(input: {
       ref: 'conversation-1',
       kind: 'history',
       projectSlug: 'demo',
-      provider: 'codex',
+      provider: session.provider,
       title: 'Demo conversation',
       updatedAt: baseTime,
       isBound: true,
@@ -80,6 +81,7 @@ function timeline(input: {
       status: input.screenStatus ?? 'Session active',
       statusAnsi: input.screenStatusAnsi,
       capturedAt: baseTime,
+      model: input.screenModel,
     },
     messagePage: { hasOlder: false, total: 0 },
   };
@@ -91,26 +93,30 @@ function renderPane(input: {
   screenContentAnsi?: string;
   screenStatus?: string;
   screenStatusAnsi?: string;
+  screenModel?: string;
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
-  onSetCodexProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
+  onSetModelProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
+  onCancelModelProfileRequest?: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
   sessionOverrides?: Partial<BoundSession>;
 } = {}) {
   const onSendKeystrokes = input.onSendKeystrokes ?? vi.fn().mockResolvedValue(true);
-  const onSetCodexProfile = input.onSetCodexProfile ?? vi.fn().mockResolvedValue(true);
+  const onSetModelProfile = input.onSetModelProfile ?? vi.fn().mockResolvedValue(true);
+  const onCancelModelProfileRequest = input.onCancelModelProfileRequest ?? vi.fn().mockResolvedValue(true);
   const onLocalSubmittedText = input.onLocalSubmittedText ?? vi.fn(() => ({ id: 'optimistic-1' }));
   const view = render(
     <MemoryRouter>
       <ConversationPane
         projects={[project()]}
         project={project()}
-        selectedProvider="codex"
+        selectedProvider={input.sessionOverrides?.provider ?? 'codex'}
         timeline={timeline({
           inputText: input.inputText,
           screenContent: input.screenContent,
           screenContentAnsi: input.screenContentAnsi,
           screenStatus: input.screenStatus,
           screenStatusAnsi: input.screenStatusAnsi,
+          screenModel: input.screenModel,
           sessionOverrides: input.sessionOverrides,
         })}
         liveMode
@@ -123,7 +129,8 @@ function renderPane(input: {
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSendKeystrokes={onSendKeystrokes}
-        onSetCodexProfile={onSetCodexProfile}
+        onSetModelProfile={onSetModelProfile}
+        onCancelModelProfileRequest={onCancelModelProfileRequest}
         onLocalSubmittedText={onLocalSubmittedText}
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
@@ -134,34 +141,58 @@ function renderPane(input: {
         hasOlderMessages={false}
         loadingOlderMessages={false}
         onLoadOlderMessages={vi.fn()}
-        conversationKey="demo:codex:conversation-1"
+        conversationKey={`demo:${input.sessionOverrides?.provider ?? 'codex'}:conversation-1`}
         historyPrependVersion={0}
       />
     </MemoryRouter>,
   );
-  return { ...view, onSendKeystrokes, onSetCodexProfile, onLocalSubmittedText };
+  return { ...view, onSendKeystrokes, onSetModelProfile, onCancelModelProfileRequest, onLocalSubmittedText };
 }
 
 it('Alt H selects the high Codex profile without changing the draft', async () => {
-  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
-  renderPane({ onSetCodexProfile });
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
+  renderPane({ onSetModelProfile });
   const textbox = screen.getByRole('textbox');
   fireEvent.change(textbox, { target: { value: 'keep this draft' } });
 
   fireEvent.keyDown(textbox, { key: 'h', altKey: true });
 
-  await waitFor(() => expect(onSetCodexProfile).toHaveBeenCalledWith('session-1', 'high'));
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'high'));
   expect(textbox).toHaveValue('keep this draft');
 });
 
-it('does not apply a queued profile to a different conversation', async () => {
-  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
+it('offers Claude H/M/L models and selects high without changing the draft', async () => {
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
+  renderPane({ onSetModelProfile, sessionOverrides: { provider: 'claude', claudeProfile: 'medium' } });
+  expect(screen.getByRole('button', { name: 'Use high Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-fable-5-1 / xhigh'));
+  expect(screen.getByRole('button', { name: 'Use medium Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-opus-5-5 / xhigh'));
+  expect(screen.getByRole('button', { name: 'Use low Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-sonnet-5 / high'));
+  const textbox = screen.getByRole('textbox');
+  fireEvent.change(textbox, { target: { value: 'keep this Claude draft' } });
+  fireEvent.keyDown(textbox, { key: 'h', altKey: true });
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'high'));
+  expect(textbox).toHaveValue('keep this Claude draft');
+});
+
+it('does not present a saved profile as current when the live model is older', () => {
+  renderPane({ sessionOverrides: { codexProfile: 'medium' }, screenModel: 'gpt-5.6-sol xhigh' });
+  expect(screen.getByText('Running: gpt-5.6-sol xhigh · select H, M, or L')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Use medium Codex profile' })).toHaveAttribute('aria-pressed', 'false');
+});
+
+it('submits a busy-session profile immediately and does not carry its server queue to another conversation', async () => {
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
   const view = renderPane({
-    onSetCodexProfile,
-    sessionOverrides: { id: 'session-1', isWorking: true },
+    onSetModelProfile,
+    sessionOverrides: {
+      id: 'session-1',
+      isWorking: true,
+      modelProfileRequest: { requestId: 'request-1', profile: 'high', requestedAt: baseTime, state: 'queued', deferredReason: 'turn_running' },
+    },
   });
 
   fireEvent.keyDown(screen.getByRole('textbox'), { key: 'h', altKey: true });
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'high'));
   expect(screen.getByText(/High queued/)).toBeInTheDocument();
 
   view.rerender(
@@ -181,7 +212,8 @@ it('does not apply a queued profile to a different conversation', async () => {
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue(true)}
-        onSetCodexProfile={onSetCodexProfile}
+        onSetModelProfile={onSetModelProfile}
+        onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
@@ -199,17 +231,20 @@ it('does not apply a queued profile to a different conversation', async () => {
   );
 
   await waitFor(() => expect(screen.queryByText(/High queued/)).not.toBeInTheDocument());
-  expect(onSetCodexProfile).not.toHaveBeenCalled();
+  expect(onSetModelProfile).toHaveBeenCalledTimes(1);
 });
 
-it('applies a queued profile when the current turn becomes idle', async () => {
-  const onSetCodexProfile = vi.fn().mockResolvedValue(true);
+it('does not use browser idleness to apply a server-owned queued profile', async () => {
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
   const view = renderPane({
-    onSetCodexProfile,
-    sessionOverrides: { id: 'session-1', isWorking: true },
+    onSetModelProfile,
+    sessionOverrides: {
+      id: 'session-1',
+      isWorking: true,
+      modelProfileRequest: { requestId: 'request-1', profile: 'high', requestedAt: baseTime, state: 'queued', deferredReason: 'turn_running' },
+    },
   });
 
-  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'h', altKey: true });
   expect(screen.getByText(/High queued/)).toBeInTheDocument();
 
   view.rerender(
@@ -218,7 +253,11 @@ it('applies a queued profile when the current turn becomes idle', async () => {
         projects={[project()]}
         project={project()}
         selectedProvider="codex"
-        timeline={timeline({ sessionOverrides: { id: 'session-1', isWorking: false } })}
+        timeline={timeline({ sessionOverrides: {
+          id: 'session-1',
+          isWorking: false,
+          modelProfileRequest: { requestId: 'request-1', profile: 'high', requestedAt: baseTime, state: 'queued', deferredReason: 'turn_running' },
+        } })}
         liveMode
         loading={false}
         workMode={false}
@@ -229,7 +268,8 @@ it('applies a queued profile when the current turn becomes idle', async () => {
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue(true)}
-        onSetCodexProfile={onSetCodexProfile}
+        onSetModelProfile={onSetModelProfile}
+        onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
@@ -246,8 +286,29 @@ it('applies a queued profile when the current turn becomes idle', async () => {
     </MemoryRouter>,
   );
 
-  await waitFor(() => expect(onSetCodexProfile).toHaveBeenCalledWith('session-1', 'high'));
-  expect(screen.getByText(/High selected/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText(/High queued/)).toBeInTheDocument());
+  expect(onSetModelProfile).not.toHaveBeenCalled();
+});
+
+it('cancels the exact server-owned queued profile request', async () => {
+  const onCancelModelProfileRequest = vi.fn().mockResolvedValue(true);
+  renderPane({
+    onCancelModelProfileRequest,
+    sessionOverrides: {
+      modelProfileRequest: {
+        requestId: 'request-1',
+        profile: 'high',
+        requestedAt: baseTime,
+        state: 'queued',
+        deferredReason: 'unsent_input',
+      },
+    },
+  });
+
+  expect(screen.getByText(/Send or clear the terminal draft/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel queued profile' }));
+
+  await waitFor(() => expect(onCancelModelProfileRequest).toHaveBeenCalledWith('session-1', 'request-1'));
 });
 
 describe('ConversationPane live input bridge', () => {
@@ -308,7 +369,8 @@ describe('ConversationPane live input bridge', () => {
           onBind={vi.fn()}
           onRelease={vi.fn()}
           onSendKeystrokes={vi.fn(() => send.promise)}
-          onSetCodexProfile={vi.fn().mockResolvedValue(true)}
+          onSetModelProfile={vi.fn().mockResolvedValue(true)}
+          onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
           onLocalSubmittedText={onLocalSubmittedText}
           onDiscardLocalSubmittedText={vi.fn()}
           binding={false}
@@ -334,6 +396,35 @@ describe('ConversationPane live input bridge', () => {
 
     expect(screen.getByText('Waiting for session output…')).toBeInTheDocument();
     expect(screen.queryByText('/model')).not.toBeInTheDocument();
+  });
+
+  it('submits /model from ordinary entry as a terminal command', async () => {
+    const onSendKeystrokes = vi.fn().mockResolvedValue(true);
+    const { onLocalSubmittedText } = renderPane({ onSendKeystrokes });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: '/model' } });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+
+    await waitFor(() => expect(onSendKeystrokes).toHaveBeenCalledWith('session-1', {
+      text: '/model', keys: ['Enter'], submittedText: '/model',
+    }));
+    expect(onLocalSubmittedText).not.toHaveBeenCalled();
+  });
+
+  it('submits /model from Text Bypass without creating a conversation turn', async () => {
+    const onSendKeystrokes = vi.fn().mockResolvedValue(true);
+    const { onLocalSubmittedText } = renderPane({ onSendKeystrokes });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+    for (const key of '/model') fireEvent.keyDown(textbox, { key });
+    expect(screen.getByText('Waiting for session output…')).toBeInTheDocument();
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+
+    await waitFor(() => expect(onSendKeystrokes).toHaveBeenCalledWith('session-1', {
+      keys: ['Enter'], submittedText: '/model',
+    }));
+    expect(onLocalSubmittedText).not.toHaveBeenCalled();
   });
 
   it('does not show ordinary terminal scrollback as a live screen panel', () => {
@@ -362,6 +453,15 @@ describe('ConversationPane live input bridge', () => {
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('choose what model and reasoning effort to use');
+  });
+
+  it.each([
+    ['Select Model and Effort', 'enter select · esc back'],
+    ['Select Reasoning Level for GPT-6-Sol', 'enter default · s session · esc back'],
+  ])('shows the current Codex %s picker', (heading, footer) => {
+    renderPane({ screenContent: `${heading}\n› 2. GPT-6-Sol (current)\n${footer}` });
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(heading);
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(footer);
   });
 
   it('shows provider progress while Claude is still thinking', () => {
@@ -393,15 +493,10 @@ describe('ConversationPane live input bridge', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
 
-    fireEvent.keyDown(textbox, { key: '/' });
-    fireEvent.keyDown(textbox, { key: 'm' });
-    fireEvent.keyDown(textbox, { key: 'o' });
-    fireEvent.keyDown(textbox, { key: 'd' });
-    fireEvent.keyDown(textbox, { key: 'e' });
-    fireEvent.keyDown(textbox, { key: 'l' });
+    for (const key of 'hello') fireEvent.keyDown(textbox, { key });
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
-    expect(screen.getAllByText('/model').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('hello').length).toBeGreaterThan(1);
   });
 });
 
@@ -442,7 +537,8 @@ describe('ConversationPane external Claude handoff', () => {
             onBind={onBind}
             onRelease={vi.fn()}
             onSendKeystrokes={vi.fn().mockResolvedValue(true)}
-            onSetCodexProfile={vi.fn().mockResolvedValue(true)}
+            onSetModelProfile={vi.fn().mockResolvedValue(true)}
+            onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
             onLocalSubmittedText={vi.fn()}
             onDiscardLocalSubmittedText={vi.fn()}
             binding={false}

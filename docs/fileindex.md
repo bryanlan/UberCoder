@@ -39,7 +39,7 @@
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - project tree reads and explicit refresh orchestration,
   including the opt-in eight-hour scan for recent unbound Codex/Claude conversations.
-- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and Codex model-profile routes, including
+- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and durable Codex/Claude model-profile request/cancel routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
@@ -69,12 +69,17 @@
   search-index row backfill from cached conversation summaries on startup or metadata priming.
 - `apps/server/src/sessions/pending-adoption.ts` - pending session adoption helper that can bind a
   live session to provider-readable conversations even before search indexing has caught up.
+- `apps/server/src/providers/transcripts/base.ts` - shared transcript summaries; pending-match
+  hashes and timestamps use provider-filtered visible user prompts, excluding injected context.
+- `apps/server/test/pending-codex-context.test.ts` - original-URL recovery of completed Codex
+  transcripts after midnight context injection, including invalidation of older cached summaries.
 - `apps/server/src/db/database.ts` - SQLite schema and persistence methods for
   `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper and internal memory-citation records, and
   event/response duplicate preference.
-- `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, restore, recovery,
+- `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution,
+  canonical conversation ownership, startup verification, recovery,
   bounded recent-conversation auto-tracking, working state, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
@@ -92,7 +97,7 @@
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
-- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+H/Alt+M/Alt+L Codex profile controls, and
+- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+H/Alt+M/Alt+L Codex/Claude profile controls, and
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
@@ -219,6 +224,7 @@ Test and verification anchors:
 - `scripts/install-coordination.mjs` — reviewed pilot installation with private configuration backups.
 - `apps/web/src/components/CoordinationPanel.tsx` — peer work and delivery status outside the user conversation.
 - `docs/agent-coordination.md` — operating and deployment contract.
+
 
 Run recovery ownership:
 - `apps/server/src/providers/transcripts/codex-run-state.ts` — typed Codex lifecycle

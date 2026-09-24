@@ -174,7 +174,9 @@ async function resolvePendingAdoptionForRead(input: {
   const boundSession = pending.boundSessionId
     ? db.boundSessions.getById(pending.boundSessionId)
     : db.boundSessions.getRestorableByConversation(projectSlug, providerId, pending.ref);
-  if (boundSession?.isWorking === true) {
+  // Codex writes structured messages during the first turn. Waiting for terminal
+  // idle here leaves that entire turn on the pending event-log path.
+  if (boundSession?.isWorking === true && providerId !== 'codex') {
     return pending;
   }
 

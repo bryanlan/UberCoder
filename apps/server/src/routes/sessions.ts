@@ -19,6 +19,9 @@ const inputBodySchema = z.object({
 const sessionParamsSchema = z.object({
   sessionId: z.string().min(1),
 });
+const modelProfileRequestParamsSchema = sessionParamsSchema.extend({
+  requestId: z.string().uuid(),
+});
 const screenQuerySchema = z.object({
   lines: z.coerce.number().int().min(50).max(20000).optional(),
 });
@@ -145,16 +148,39 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Project not found.' });
       return;
     }
-    const provider = providerRegistry.get(session.provider);
     const providerSettings = projectService.getMergedProviderSettings(project, session.provider);
+    if (!providerSettings.enabled) {
+      reply.code(409).send({ error: `${session.provider} is disabled for this project.` });
+      return;
+    }
     try {
-      return await sessions.switchCodexModelProfile({
-        sessionId,
-        project,
-        provider,
-        providerSettings,
-        profile: parsed.data.profile,
-      });
+      return await sessions.requestModelProfile(sessionId, parsed.data.profile);
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.delete('/api/sessions/:sessionId/model-profile/requests/:requestId', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const parsed = modelProfileRequestParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      reply.code(400).send({ error: 'Invalid model-profile request route.', details: parsed.error.flatten() });
+      return;
+    }
+    if (!sessions.getSessionById(parsed.data.sessionId)) {
+      reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    try {
+      return await sessions.cancelModelProfileRequest(parsed.data.sessionId, parsed.data.requestId);
     } catch (error) {
       if (error instanceof SessionInputRejectedError) {
         reply.code(error.statusCode).send({ error: error.message });

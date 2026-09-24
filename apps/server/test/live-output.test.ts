@@ -9,23 +9,69 @@ const liveOutputReader = new LiveOutputReader();
 const readLiveMessages = liveOutputReader.readLiveMessages.bind(liveOutputReader);
 
 describe('readLiveMessages', () => {
+  it('keeps updated Codex model pickers out of conversation messages', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-09-24T00:00:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Select Model and Effort\n› 2. GPT-6-Sol (current)\nenter select · esc back', timestamp: '2026-09-24T00:00:01.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Select Reasoning Level for GPT-6-Sol\n› 4. Extra high (current)\nenter default · s session · esc back', timestamp: '2026-09-24T00:00:02.000Z' }),
+    ].join('\n'));
+    const session: BoundSession = {
+      id: 'session-model-picker', provider: 'codex', projectSlug: 'demo',
+      conversationRef: 'pending:model-picker', tmuxSessionName: 'ac-codex-model-picker',
+      status: 'bound', startedAt: '2026-09-24T00:00:00.000Z',
+      updatedAt: '2026-09-24T00:00:02.000Z', eventLogPath,
+    };
+    const messages = await readLiveMessages(session);
+    expect(messages.filter((message) => message.role === 'assistant')).toEqual([]);
+  });
+  it('never promotes Codex terminal output and refreshes cached identities after linking', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-codex-output-'));
+    try {
+      const eventLogPath = path.join(tempDir, 'events.jsonl');
+      await fs.writeFile(eventLogPath, [
+        { type: 'status', text: 'Session started.', timestamp: '2026-09-10T14:15:29.000Z' },
+        { type: 'user-input', text: 'Prepare the packet.', timestamp: '2026-09-10T14:15:30.000Z' },
+        { type: 'raw-output', text: 'The packet is ready.\n45 minutes › Ask Codex to do anything\nCalling tool({})\nusage: python3\nW Wo', timestamp: '2026-09-10T14:15:31.000Z' },
+      ].map((event) => JSON.stringify(event)).join('\n'));
+      const session: BoundSession = {
+        id: 'codex-first-turn', provider: 'codex', projectSlug: 'demo',
+        conversationRef: 'pending:first-turn', tmuxSessionName: 'existing-writer',
+        status: 'bound', isWorking: true, eventLogPath,
+        startedAt: '2026-09-10T14:15:29.000Z', updatedAt: '2026-09-10T14:15:31.000Z',
+      };
+      const reader = new LiveOutputReader();
+      const pending = await reader.readLiveMessages(session);
+      expect(pending.map(({ role, text }) => ({ role, text }))).toEqual([
+        { role: 'status', text: 'Session started.' },
+        { role: 'user', text: 'Prepare the packet.' },
+      ]);
+      const linked = await reader.readLiveMessages({ ...session, conversationRef: 'native-first-turn' });
+      expect(linked.map((message) => message.id)).toEqual(pending.map((message) => message.id));
+      expect(linked.every((message) => message.conversationRef === 'native-first-turn')).toBe(true);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps live message ids stable when the event-log tail window shifts', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     const rows = [
       JSON.stringify({ type: 'user-input', text: 'summarize the result', timestamp: '2026-07-01T02:00:00.000Z' }),
       JSON.stringify({ type: 'raw-output', text: 'The result is stable.', timestamp: '2026-07-01T02:00:01.000Z' }),
-      JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-07-01T02:00:02.000Z' }),
+      JSON.stringify({ type: 'status', text: 'Bound claude session in Demo.', timestamp: '2026-07-01T02:00:02.000Z' }),
     ];
     await fs.writeFile(eventLogPath, `${rows.join('\n')}\n`);
     const targetOffset = Buffer.byteLength(`${rows[0]}\n`, 'utf8');
 
     const session: BoundSession = {
       id: 'session-stable-offset',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:stable-offset',
-      tmuxSessionName: 'ac-codex-demo-stable-offset',
+      tmuxSessionName: 'ac-claude-demo-stable-offset',
       status: 'bound',
       startedAt: '2026-07-01T02:00:00.000Z',
       updatedAt: '2026-07-01T02:00:02.000Z',
@@ -47,18 +93,18 @@ describe('readLiveMessages', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
-      JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-03-07T00:00:00.000Z' }),
+      JSON.stringify({ type: 'status', text: 'Bound claude session in Demo.', timestamp: '2026-03-07T00:00:00.000Z' }),
       JSON.stringify({ type: 'user-input', text: 'Reply with exactly PONG and nothing else.', timestamp: '2026-03-07T00:00:01.000Z' }),
-      JSON.stringify({ type: 'raw-output', text: '\u001b[?2026h\u001b[1;1H\u001b[J\u001b[3;1H› Reply with exactly PONG and nothing else.\u001b[6;1Hgpt-5.4 xhigh · 100% left · ~/code/demo\u001b[?2026l', timestamp: '2026-03-07T00:00:02.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: '\u001b[?2026h\u001b[1;1H\u001b[J\u001b[3;1H› Reply with exactly PONG and nothing else.\u001b[6;1HClaude Code · ~/code/demo\u001b[?2026l', timestamp: '2026-03-07T00:00:02.000Z' }),
       JSON.stringify({ type: 'raw-output', text: '\u001b[32mPONG\u001b[39m', timestamp: '2026-03-07T00:00:03.000Z' }),
     ].join('\n'));
 
     const session: BoundSession = {
       id: 'session-1',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:test',
-      tmuxSessionName: 'ac-codex-demo',
+      tmuxSessionName: 'ac-claude-demo',
       status: 'bound',
       startedAt: '2026-03-07T00:00:00.000Z',
       updatedAt: '2026-03-07T00:00:03.000Z',
@@ -69,35 +115,6 @@ describe('readLiveMessages', () => {
     expect(messages.map((message) => message.role)).toEqual(['status', 'user', 'assistant']);
     expect(messages[2]?.text).toBe('PONG');
     expect(messages.some((message) => message.text.includes('\u001b'))).toBe(false);
-  });
-
-  it('keeps startup chrome in status and drops repaint fragments', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
-    const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, [
-      JSON.stringify({ type: 'status', text: 'Bound codex session in Demo.', timestamp: '2026-03-07T00:00:00.000Z' }),
-      JSON.stringify({ type: 'user-input', text: 'Run the startup smoke check.', timestamp: '2026-03-07T00:00:00.500Z' }),
-      JSON.stringify({ type: 'raw-output', text: '\u001b[2mTip:\u001b[22m When the composer is empty, press Esc to step back and edit your last', timestamp: '2026-03-07T00:00:01.000Z' }),
-      JSON.stringify({ type: 'raw-output', text: 'message; Enter confirms. Starting MCP servers (0/3): chrome-devtools, codex_apps, playwright (0s esc to interrupt)', timestamp: '2026-03-07T00:00:02.000Z' }),
-      JSON.stringify({ type: 'raw-output', text: 'St\nta\nart\nti\nSin\nng\nMCP\nsers', timestamp: '2026-03-07T00:00:03.000Z' }),
-      JSON.stringify({ type: 'raw-output', text: '\u001b[32msmoke-ok\u001b[39m', timestamp: '2026-03-07T00:00:04.000Z' }),
-    ].join('\n'));
-
-    const session: BoundSession = {
-      id: 'session-2',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:test-2',
-      tmuxSessionName: 'ac-codex-demo-2',
-      status: 'bound',
-      startedAt: '2026-03-07T00:00:00.000Z',
-      updatedAt: '2026-03-07T00:00:04.000Z',
-      eventLogPath,
-    };
-
-    const messages = await readLiveMessages(session);
-    expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual(['smoke-ok']);
-    expect(messages.some((message) => /Tip:|Starting MCP servers/.test(message.text) && message.role !== 'status')).toBe(false);
   });
 
   it('drops Claude compaction progress repaints after a submitted prompt', async () => {
@@ -468,10 +485,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-token-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:token-prose',
-      tmuxSessionName: 'ac-codex-demo-token-prose',
+      tmuxSessionName: 'ac-claude-demo-token-prose',
       status: 'bound',
       startedAt: '2026-07-01T03:20:00.000Z',
       updatedAt: '2026-07-01T03:20:00.000Z',
@@ -502,10 +519,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-numeric-reply',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:numeric-reply',
-      tmuxSessionName: 'ac-codex-demo-numeric-reply',
+      tmuxSessionName: 'ac-claude-demo-numeric-reply',
       status: 'bound',
       startedAt: '2026-07-01T03:21:00.000Z',
       updatedAt: '2026-07-01T03:21:00.000Z',
@@ -539,10 +556,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-repeated-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:repeated-prose',
-      tmuxSessionName: 'ac-codex-demo-repeated-prose',
+      tmuxSessionName: 'ac-claude-demo-repeated-prose',
       status: 'bound',
       startedAt: '2026-07-01T03:25:00.000Z',
       updatedAt: '2026-07-01T03:25:01.000Z',
@@ -583,10 +600,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-repeated-answer',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:repeated-answer',
-      tmuxSessionName: 'ac-codex-demo-repeated-answer',
+      tmuxSessionName: 'ac-claude-demo-repeated-answer',
       status: 'bound',
       startedAt: '2026-07-01T03:25:00.000Z',
       updatedAt: '2026-07-01T03:25:11.000Z',
@@ -620,10 +637,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-status-like-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:status-like-prose',
-      tmuxSessionName: 'ac-codex-demo-status-like-prose',
+      tmuxSessionName: 'ac-claude-demo-status-like-prose',
       status: 'bound',
       startedAt: '2026-07-01T03:25:00.000Z',
       updatedAt: '2026-07-01T03:25:01.000Z',
@@ -665,10 +682,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-future-user-echo',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:future-user-echo',
-      tmuxSessionName: 'ac-codex-demo-future-user-echo',
+      tmuxSessionName: 'ac-claude-demo-future-user-echo',
       status: 'bound',
       startedAt: '2026-07-01T03:26:00.000Z',
       updatedAt: '2026-07-01T03:26:11.000Z',
@@ -826,10 +843,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-portfolio-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:portfolio-prose',
-      tmuxSessionName: 'ac-codex-demo-portfolio-prose',
+      tmuxSessionName: 'ac-claude-demo-portfolio-prose',
       status: 'bound',
       startedAt: '2026-07-01T02:17:00.000Z',
       updatedAt: '2026-07-01T02:17:00.000Z',
@@ -864,10 +881,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-starter-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:starter-prose',
-      tmuxSessionName: 'ac-codex-demo-starter-prose',
+      tmuxSessionName: 'ac-claude-demo-starter-prose',
       status: 'bound',
       startedAt: '2026-07-01T02:17:30.000Z',
       updatedAt: '2026-07-01T02:17:30.000Z',
@@ -906,10 +923,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-non-exact-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:non-exact-prose',
-      tmuxSessionName: 'ac-codex-demo-non-exact-prose',
+      tmuxSessionName: 'ac-claude-demo-non-exact-prose',
       status: 'bound',
       startedAt: '2026-07-01T02:18:00.000Z',
       updatedAt: '2026-07-01T02:18:02.000Z',
@@ -920,169 +937,6 @@ describe('readLiveMessages', () => {
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
       { role: 'user', source: 'user-input', text: 'Reply exactly OK' },
       { role: 'assistant', source: 'live-output', text: 'The answer is OK, plus context.' },
-    ]);
-  });
-
-  it('strips Codex startup repaint text glued to a live answer marker', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
-    const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, [
-      JSON.stringify({
-        type: 'user-input',
-        text: 'Reply exactly CODEX_CLEAN_OK',
-        timestamp: '2026-07-01T02:27:25.000Z',
-      }),
-      JSON.stringify({
-        type: 'raw-output',
-          text: [
-          'Youhave3usagelimitresetsavailable.Run/usagetouseone.CODEX_CLEAN_OK›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
-          'You have 3 usage limit resets available. Run /usage to use one.›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
-          'Starting MCP servers (0/4): chrome-devtools, codex_apps, openaiDeveloperDocs,…›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
-          'SttarrtiSinStang art MCart MC1playwright (0s ecar MrtiMCPinP ng seng se2playwright',
-          'Working (1s sc tointerrupt)ngg 2 WWoorrkkiinWng 3Wogorrkkiinngg 4 WWoorrk kiinWng5Wog',
-          'CODEX_CLEAN_OK›Write tests for @filenamegpt-5.4-mini medium · ~/code/UberCoder/agent-console-mvp/agent-console',
-        ].join('\n'),
-        timestamp: '2026-07-01T02:27:30.000Z',
-      }),
-    ].join('\n'));
-
-    const session: BoundSession = {
-      id: 'session-codex-startup-repaint',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:codex-startup-repaint',
-      tmuxSessionName: 'ac-codex-demo-startup-repaint',
-      status: 'bound',
-      startedAt: '2026-07-01T02:27:00.000Z',
-      updatedAt: '2026-07-01T02:27:30.000Z',
-      eventLogPath,
-    };
-
-    const messages = await readLiveMessages(session);
-    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
-      { role: 'user', source: 'user-input', text: 'Reply exactly CODEX_CLEAN_OK' },
-      { role: 'assistant', source: 'live-output', text: 'CODEX_CLEAN_OK' },
-    ]);
-  });
-
-  it('drops interleaved Codex MCP startup repaint text before live assistant updates', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
-    const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, [
-      JSON.stringify({
-        type: 'user-input',
-        text: 'research held away asset billing',
-        timestamp: '2026-07-05T15:21:20.259Z',
-      }),
-      JSON.stringify({
-        type: 'raw-output',
-        text: [
-          'Tip: Use /compact when the conversation gets long to summarize history and',
-          'free up context.',
-          'research held away asset billing',
-          'Starting MCP servers (0/4): chrome-devtools, codex_apps, openaiDeveloperDocs,...1playwright (0s * ecSStaarrtiti2playwright (0s * esc o interrup',
-          'StinStngtag ar MrtiMCPinP ng sg se MCervCPveP er sers er (rv(2ve2/er/4rs 4):rvers (3/4): (0s * esc o interrupt)rv(3ver3/4rs4)1s ): (: (3 c3/ch',
-          'rkkiin◦ngg•6',
-          '• I will use the advisor-web-research skill because this is current RIA/practice research.',
-          'Explored',
-          'Ran pwd && rg --files',
-          'Searched the web for RIA held away billing',
-          'W◦WoorrkkiinWng7Wogor•rkkiin',
-          'ngg',
-          '• The local wrapper delegates to the global web-research skill and requires source links plus an audit handle.',
-        ].join('\n'),
-        timestamp: '2026-07-05T15:21:31.566Z',
-      }),
-    ].join('\n'));
-
-    const session: BoundSession = {
-      id: 'session-codex-interleaved-mcp-repaint',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:codex-interleaved-mcp-repaint',
-      tmuxSessionName: 'ac-codex-demo-interleaved-mcp-repaint',
-      status: 'bound',
-      startedAt: '2026-07-05T15:21:20.000Z',
-      updatedAt: '2026-07-05T15:21:31.000Z',
-      eventLogPath,
-    };
-
-    const messages = (await readLiveMessages(session))
-      .filter((message) => message.role === 'user' || message.role === 'assistant');
-    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
-      { role: 'user', source: 'user-input', text: 'research held away asset billing' },
-      {
-        role: 'assistant',
-        source: 'live-output',
-        text: 'I will use the advisor-web-research skill because this is current RIA/practice research.',
-      },
-      {
-        role: 'assistant',
-        source: 'live-output',
-        text: 'The local wrapper delegates to the global web-research skill and requires source links plus an audit handle.',
-      },
-    ]);
-  });
-
-  it('keeps Codex cursor repaint and tool chatter out of pending assistant prose', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
-    const eventLogPath = path.join(tempDir, 'events.jsonl');
-    await fs.writeFile(eventLogPath, [
-      JSON.stringify({
-        type: 'user-input',
-        text: 'scan the fee model change end to end',
-        timestamp: '2026-07-05T19:50:36.635Z',
-      }),
-      JSON.stringify({
-        type: 'raw-output',
-        text: [
-          'g50 WWo or1rkki',
-          'g4 WWo',
-          'Search AGENTS.md in waltium-ops',
-          'Search billing|fee|invoice|ibkr|custody in waltium-ops',
-          'import json',
-          "p='/tmp/claude_fee_model_scan.json'",
-          'with open(p) as f:',
-          'data=json.load(f)',
-          'PY',
-          'python3 /home/bryan/code/ai-skills/codex/claude-opus-second-opinion/scripts/run_claude_second_opinion.py --spec-file /tmp/claude_fee_model_scan.json',
-          'quarterly_fee_deduction.py',
-          '4 WWoor5rkkiin',
-          'I’m reading that upstream contract now, then I’ll run a read-only research pass and distill the billing patterns. WWo',
-          'The existing code is already using client_portfolio_snapshot weekly',
-          'observations for both IBKR and held-away draft estimates.',
-          'inng g',
-          '20',
-        ].join('\n'),
-        timestamp: '2026-07-05T19:53:01.811Z',
-      }),
-    ].join('\n'));
-
-    const session: BoundSession = {
-      id: 'session-codex-tool-chatter-repaint',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:codex-tool-chatter-repaint',
-      tmuxSessionName: 'ac-codex-demo-tool-chatter-repaint',
-      status: 'bound',
-      startedAt: '2026-07-05T19:50:36.000Z',
-      updatedAt: '2026-07-05T19:53:01.000Z',
-      eventLogPath,
-    };
-
-    const messages = (await readLiveMessages(session))
-      .filter((message) => message.role === 'user' || message.role === 'assistant');
-    expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
-      { role: 'user', source: 'user-input', text: 'scan the fee model change end to end' },
-      {
-        role: 'assistant',
-        source: 'live-output',
-        text: [
-          'I’m reading that upstream contract now, then I’ll run a read-only research pass and distill the billing patterns.',
-          'The existing code is already using client_portfolio_snapshot weekly',
-          'observations for both IBKR and held-away draft estimates.',
-        ].join('\n'),
-      },
     ]);
   });
 
@@ -1245,9 +1099,7 @@ describe('readLiveMessages', () => {
     const messages = await readLiveMessages(session);
     expect(messages.map((message) => ({ role: message.role, source: message.source, text: message.text }))).toEqual([
       { role: 'user', source: 'user-input', text: 'Give me numbered options.' },
-      { role: 'assistant', source: 'live-output', text: 'Choose the next step:\n1. Run the targeted tests\n2. Inspect the debug logs' },
       { role: 'user', source: 'user-input', text: '2' },
-      { role: 'assistant', source: 'live-output', text: 'I will inspect the debug logs.' },
     ]);
   });
 
@@ -1487,10 +1339,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-short-prompt-legitimate-prose',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:short-prompt-legitimate-prose',
-      tmuxSessionName: 'ac-codex-demo-short-prompt-legitimate-prose',
+      tmuxSessionName: 'ac-claude-demo-short-prompt-legitimate-prose',
       status: 'bound',
       startedAt: '2026-07-01T03:30:00.000Z',
       updatedAt: '2026-07-01T03:30:02.000Z',
@@ -1527,10 +1379,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-3',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:test-3',
-      tmuxSessionName: 'ac-codex-demo-3',
+      tmuxSessionName: 'ac-claude-demo-3',
       status: 'bound',
       startedAt: '2026-03-07T00:00:00.000Z',
       updatedAt: '2026-03-07T00:01:01.000Z',
@@ -1560,7 +1412,7 @@ describe('readLiveMessages', () => {
         type: 'raw-output',
         text: [
           `› ${prompt}`,
-          `gpt-5.4 xhigh · 100% left · ~/code/demo ${'payloadword '.repeat(120)}`,
+          `Claude Code · ~/code/demo ${'payloadword '.repeat(120)}`,
           answer,
         ].join('\n'),
         timestamp: '2026-03-07T00:02:01.000Z',
@@ -1569,10 +1421,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-context-tail',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:context-tail',
-      tmuxSessionName: 'ac-codex-demo-context-tail',
+      tmuxSessionName: 'ac-claude-demo-context-tail',
       status: 'bound',
       startedAt: '2026-03-07T00:02:00.000Z',
       updatedAt: '2026-03-07T00:02:01.000Z',
@@ -1605,10 +1457,10 @@ describe('readLiveMessages', () => {
 
     const session: BoundSession = {
       id: 'session-4',
-      provider: 'codex',
+      provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:test-4',
-      tmuxSessionName: 'ac-codex-demo-4',
+      tmuxSessionName: 'ac-claude-demo-4',
       status: 'bound',
       startedAt: '2026-03-07T00:00:00.000Z',
       updatedAt: '2026-03-07T00:02:00.000Z',

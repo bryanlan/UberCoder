@@ -1,4 +1,4 @@
-import type { CodexCostProfileKey, ConversationSummary, NormalizedMessage, ProviderId } from '@agent-console/shared';
+import type { ClaudeCostProfileKey, CodexCostProfileKey, ConversationSummary, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 
@@ -72,6 +72,6 @@ export interface ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string; codexProfile?: CodexCostProfileKey },
+    options?: { initialPrompt?: string; codexProfile?: CodexCostProfileKey; claudeProfile?: ClaudeCostProfileKey },
   ): LaunchCommand;
 }

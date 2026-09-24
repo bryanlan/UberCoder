@@ -111,6 +111,13 @@ describe('timelineMessagesRefetchInterval', () => {
       ])],
     })).toBe(false);
   });
+
+  it.each(['history-file', 'live-output'] as const)('keeps polling a pending %s reply even within the completion grace window', (source) => {
+    expect(timelineMessagesRefetchInterval({
+      boundSession: session({ isWorking: false, lastCompletedAt: '2026-07-03T15:51:44.000Z' }),
+      pages: [page([message({ lifecycle: 'pending', source, timestamp: '2026-07-03T15:51:43.000Z' })])],
+    })).toBe(1200);
+  });
 });
 
 describe('selectRefreshedBoundSession', () => {
@@ -122,7 +129,7 @@ describe('selectRefreshedBoundSession', () => {
 
   it('uses the polled server session state for the currently bound session', () => {
     const stale = session({ isWorking: true, codexProfile: 'medium' });
-    const refreshed = session({ isWorking: false, codexProfile: 'medium', lastCompletedAt: '2026-07-03T15:51:44.000Z' });
+    const refreshed = session({ isWorking: false, codexProfile: 'medium', lastCompletedAt: '2026-07-03T15:51:44.000Z', updatedAt: '2026-07-03T15:00:01.000Z' });
 
     expect(selectRefreshedBoundSession(stale, refreshed)).toEqual(refreshed);
   });
@@ -132,5 +139,19 @@ describe('selectRefreshedBoundSession', () => {
     const stalePoll = session({ id: 'session-1', isWorking: false });
 
     expect(selectRefreshedBoundSession(current, stalePoll)).toEqual(current);
+  });
+
+  it('keeps the current session when an equal-timestamp response arrives late', () => {
+    const current = session({ codexProfile: 'high' });
+    const lateQueuedResponse = session({
+      modelProfileRequest: {
+        requestId: 'request-1',
+        profile: 'high',
+        requestedAt: current.updatedAt,
+        state: 'queued',
+      },
+    });
+
+    expect(selectRefreshedBoundSession(current, lateQueuedResponse)).toEqual(current);
   });
 });

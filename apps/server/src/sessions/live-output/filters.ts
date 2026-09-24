@@ -5,7 +5,7 @@ export function classifyChunk(text: string): MessageRole {
   const trimmed = text.trim();
   if (!trimmed) return 'status';
   if (
-    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|openai codex|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed|explored(?:\s|$)|search(?:ed|ing)?(?:\s|$)|searched the web(?:\s|$)|searching the web(?:\s|$)|waiting for background terminal)/i.test(trimmed)
+    /^(thinking|running|tool|read|write|edit|apply|status|error|warning|diff|command|tip:|message; enter confirms|claude code|model:|directory:|permissions:|approval:|sandbox:|context window:|use medium effort|with medium effort|1 mcp server failed|explored(?:\s|$)|search(?:ed|ing)?(?:\s|$)|searched the web(?:\s|$)|searching the web(?:\s|$)|waiting for background terminal)/i.test(trimmed)
     || /^ran\s+(?:[\w./-]+|mkdir|pwd|codex|npm|npx|git|python3?|node|rg|sed|cat|ls|find|curl)(?:\s|$)/i.test(trimmed)
     || /^(?:mkdir|pwd|codex|npm|npx|git|python3?|node|rg|sed|cat|ls|find|curl|repo-check|check)(?:\s|$)/i.test(trimmed)
     || /^(?:ran \d+ shell commands?|background command\b)/i.test(trimmed)
@@ -253,9 +253,9 @@ export function linesAreOnlyProviderProgressRepaint(lines: string[]): boolean {
 }
 
 function looksLikeTerminalChrome(line: string): boolean {
-  return /(?:^|\s)(?:OpenAI Codex|Claude Code|model:|directory:|permissions:|approval:|sandbox:|context window:|Use medium effort|with medium effort|Use \/skills to list available|loading \/model to change)/i.test(line)
+  return /(?:^|\s)(?:Claude Code|model:|directory:|permissions:|approval:|sandbox:|context window:|Use medium effort|with medium effort|Use \/skills to list available|loading \/model to change)/i.test(line)
     || /^(?:We recommend .+ effort|Effort determines|recommend .+ effort for most tasks|and maximize rate limits|Use ultrathink)/i.test(line)
-    || /^(?:\d+\.\s+Use .+ effort|gpt-[\w.]+ .+ left .+|(?:Opus|Sonnet|Haiku|Fable) .+ Claude Max)$/i.test(line);
+    || /^(?:\d+\.\s+Use .+ effort|(?:Opus|Sonnet|Haiku|Fable) .+ Claude Max)$/i.test(line);
 }
 
 function looksLikeIdleHousekeeping(line: string): boolean {
@@ -265,7 +265,7 @@ function looksLikeIdleHousekeeping(line: string): boolean {
   return /^(?:Checking for updates|How is Claude doing this session\? \(optional\)|Set model to .+)$/i.test(line)
     || /^free up context\.?$/i.test(line)
     || /^(?:\d+\s*:\s*Bad\s+\d+\s*:\s*Fine\s+\d+\s*:\s*Good\s+\d+\s*:\s*Dismiss)$/i.test(line)
-    || /^(?:Select model|Switch between Claude models\.?|Your pick becomes the default|For other\/previous model names|Enter to confirm(?:\s*·\s*Esc to exit)?|Press enter to confirm or esc to go back|Enter to set as default.*Esc to cancel|Esc to exit|Cancelled)$/i.test(line)
+    || /^(?:Select model|Select Reasoning Level for .+|Switch between Claude models\.?|Your pick becomes the default|For other\/previous model names|Enter (?:select|default) · (?:s session · )?Esc back|Enter to confirm(?:\s*·\s*Esc to exit)?|Press enter to confirm or esc to go back|Enter to set as default.*Esc to cancel|Esc to exit|Cancelled)$/i.test(line)
     || /(?:Switch between Claude models|Your pick becomes the default|For other\/previous model names|Fable.+unavailable|Sonnet 5|Efficient for routine tasks)/i.test(line)
     || /^(?:Effort|Faster Smarter|lowmediumhighxhighmax|.*to adjust.*Enter.*Esc to cancel|.*Effort not supported.*)$/i.test(line)
     || /^(?:\d+\.\s+(?:Default|Opus|Sonnet|Haiku|Fable)|Default \(recommended\)|Sonnet|Opus|Haiku|Fable \(disabled\)|complex tasks)$/i.test(line)
@@ -278,7 +278,7 @@ function looksLikeIdleHousekeeping(line: string): boolean {
 }
 
 function looksLikeProviderMenuLine(line: string): boolean {
-  return /(?:Select model|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter to set as default|Effort not supported|Use\s*\/fast\s*to turn on Fast mode)/i.test(line)
+  return /(?:Select model|Select Reasoning Level for|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter (?:select|default) · (?:s session · )?Esc back|Enter to set as default|Effort not supported|Use\s*\/fast\s*to turn on Fast mode)/i.test(line)
     || /(?:Default\s*\(?recommended\)?.*Opus|Opus\s*Opus|Haiku\s*✔?\s*Haiku|Fable.*disabled|thos-access)/i.test(line)
     || /^\d+\.\s*(?:Default|Opus|Sonnet|Haiku|Fable)/i.test(line);
 }
@@ -289,13 +289,7 @@ function looksLikeBareNumericLine(line: string): boolean {
 
 function looksLikePickerChunk(lines: string[]): boolean {
   return lines.some((line) => looksLikeProviderMenuLine(line)
-    || /(?:Select model|Enter to confirm|Enter to set as default|Press enter to confirm|Esc to exit|Esc to cancel|Switch between Claude models)/i.test(line));
-}
-
-function removeKnownPromptPlaceholders(line: string): string {
-  return line
-    .replace(/\s*(?:❯|›|>_?)\s*(?:Implement \{feature\}|Write tests for @filename|Improve documentation in @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits|Run \/review on my current changes).*$/i, '')
-    .trim();
+    || /(?:Select model|Select Reasoning Level for|Enter (?:select|default) · (?:s session · )?Esc back|Enter to confirm|Enter to set as default|Press enter to confirm|Esc to exit|Esc to cancel|Switch between Claude models)/i.test(line));
 }
 
 function removeKnownStatusAffixes(line: string): string {
@@ -306,15 +300,12 @@ function removeKnownStatusAffixes(line: string): string {
 }
 
 function normalizeTerminalLine(text: string): string {
-  return removeKnownStatusAffixes(normalizeWhitespace(
-    removeKnownPromptPlaceholders(
-      text
-        .trimStart()
-        .replace(/[│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+/gu, ' ')
-        .replace(/[•▪◦]+/gu, ' ')
-        .replace(/\s+/g, ' '),
-    ).replace(/^(?:❯|›|>_?|▋|▌|▐|●|✻|✽|✢|✶|⎿)\s*/u, ''),
-  ));
+  return removeKnownStatusAffixes(normalizeWhitespace(text
+    .trimStart()
+    .replace(/[│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+/gu, ' ')
+    .replace(/[•▪◦]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^(?:❯|›|>_?|▋|▌|▐|●|✻|✽|✢|✶|⎿)\s*/u, '')));
 }
 
 function extractExactReplyRequest(text: string | undefined): string | undefined {

@@ -2,6 +2,37 @@ import { describe, expect, it } from 'vitest';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 
 describe('parseSessionScreenSnapshot', () => {
+  it('keeps current Codex model and effort menus out of the input buffer', () => {
+    for (const [heading, footer] of [
+      ['Select Model and Effort', 'enter select · esc back'],
+      ['Select Reasoning Level for GPT-6-Sol', 'enter default · s session · esc back'],
+    ]) {
+      const screen = parseSessionScreenSnapshot([
+        'OpenAI Codex', heading, '1. GPT-6-Astra', '› 2. GPT-6-Sol (current)', footer,
+      ].join('\n'));
+      expect(screen.inputText).toBe('');
+      expect(screen.content).toContain(heading);
+      expect(screen.content).toContain(footer);
+    }
+  });
+
+  it('reads the current Codex model footer even when the CLI omits context percentage', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex', '› Ask Codex to do anything', 'GPT-6-Sol xhigh · /tmp',
+    ].join('\n'));
+    expect(screen.model).toBe('GPT-6-Sol xhigh');
+    expect(screen.contextPercent).toBeUndefined();
+  });
+  it('does not treat the Codex empty-composer placeholder as an unsent draft', () => {
+    const screen = parseSessionScreenSnapshot([
+      'OpenAI Codex',
+      '› Ask Codex to do anything',
+      'gpt-5.6-sol medium · 98% left · ~/demo',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('');
+    expect(screen.contextPercent).toBe(98);
+  });
   it('trims boxed Codex startup chrome before the first real live content line', () => {
     const screen = parseSessionScreenSnapshot([
       '╭──────────────────────────────────────────────────────╮',

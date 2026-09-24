@@ -5,6 +5,7 @@ import {
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
+  screenShowsInteractiveSelectionHint,
   screenShowsQueuedMessageHint,
   shouldUseBracketedPasteTransport,
   submittedTextShouldCreateUserTurn,
@@ -21,6 +22,15 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
 }
 
 describe('screen heuristics', () => {
+  it.each([
+    'enter select · esc back',
+    'enter default · s session · esc back',
+  ])('recognizes the current Codex model picker control: %s', (footer) => {
+    const picker = screen({ content: `Select Model and Effort\n› 2. GPT-6-Sol (current)\n${footer}` });
+    expect(screenShowsInteractiveSelectionHint(picker)).toBe(true);
+    expect(screenAllowsLiteralSelectionTokenWithoutInput(picker, '2')).toBe(true);
+    expect(submittedTextShouldCreateUserTurn(picker, '2')).toBe(false);
+  });
   it('detects Codex queue-message mode without treating queued text as ready input', () => {
     const queued = screen({
       content: [

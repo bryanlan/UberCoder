@@ -615,4 +615,72 @@ describe('session routes', () => {
       db.close();
     }
   });
+
+  it('accepts and explicitly cancels durable model-profile requests', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const requestId = '1e84ca5a-e606-4bc8-b648-93b5c686d101';
+    const session: BoundSession = {
+      id: 'session-profile',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'history-profile',
+      tmuxSessionName: 'ac-codex-demo-profile',
+      status: 'bound',
+      shouldRestore: true,
+      startedAt: '2026-09-18T18:00:00.000Z',
+      updatedAt: '2026-09-18T18:00:00.000Z',
+    };
+    const queued: BoundSession = {
+      ...session,
+      modelProfileRequest: {
+        requestId,
+        profile: 'high',
+        requestedAt: '2026-09-18T18:01:00.000Z',
+        state: 'queued',
+        deferredReason: 'turn_running',
+      },
+    };
+    const requestModelProfile = vi.fn(async () => ({ session: queued }));
+    const cancelModelProfileRequest = vi.fn(async () => ({ session }));
+    const app = fastify();
+    await registerSessionRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      db,
+      {
+        getProjectBySlug: vi.fn(async () => ({ slug: 'demo' })),
+        getMergedProviderSettings: vi.fn(() => ({ enabled: true })),
+      } as never,
+      {} as never,
+      {
+        getSessionById: vi.fn(() => session),
+        requestModelProfile,
+        cancelModelProfileRequest,
+      } as never,
+    );
+    await app.ready();
+
+    try {
+      const accepted = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/session-profile/model-profile',
+        payload: { profile: 'high' },
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json()).toEqual({ session: queued });
+      expect(requestModelProfile).toHaveBeenCalledWith('session-profile', 'high');
+
+      const cancelled = await app.inject({
+        method: 'DELETE',
+        url: `/api/sessions/session-profile/model-profile/requests/${requestId}`,
+      });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json()).toEqual({ session });
+      expect(cancelModelProfileRequest).toHaveBeenCalledWith('session-profile', requestId);
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
 });

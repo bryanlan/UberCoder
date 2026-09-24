@@ -10,9 +10,9 @@ interface CachedProviderConversation {
   size: number;
 }
 
-// Parsed conversations retain every raw transcript record, so in-memory cost is a
-// multiple (roughly 3-5x) of the file size. Cap the cache by total transcript bytes
-// (LRU), always keeping the most recently used entry so the active conversation
+// Parsed messages retain provider metadata and normalized text, so source bytes are
+// a conservative proxy for their in-memory cost. Cap the cache by total transcript
+// bytes (LRU), always keeping the most recently used entry so the active conversation
 // stays warm even when it alone exceeds the cap.
 const MAX_CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 

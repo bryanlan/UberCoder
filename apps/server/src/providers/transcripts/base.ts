@@ -1,5 +1,7 @@
+import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import readline from 'node:readline';
 import type { ConversationSummary, MessageRole, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import { samePath } from '../../lib/path-utils.js';
 import { coerceText, normalizeComparableText, stableTextHash, truncate } from '../../lib/text.js';
@@ -312,22 +314,40 @@ export function filterUserVisibleMessages(messages: NormalizedMessage[]): Normal
   return messages.filter((message) => message.role === 'user' || message.role === 'assistant');
 }
 
+export async function* iterateJsonlRecords(filePath: string): AsyncGenerator<{
+  index: number;
+  record: JsonRecord;
+}> {
+  const input = createReadStream(filePath, { encoding: 'utf8' });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  let index = 0;
+
+  try {
+    for await (const line of lines) {
+      if (line.length === 0) continue;
+      const recordIndex = index;
+      index += 1;
+      try {
+        yield { index: recordIndex, record: JSON.parse(line) as JsonRecord };
+      } catch {
+        continue;
+      }
+    }
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+
 export async function loadJsonlRecords(filePath: string): Promise<{
   records: Array<{ index: number; record: JsonRecord }>;
   fallbackTime: string;
 }> {
-  const text = await fs.readFile(filePath, 'utf8');
   const stat = await fs.stat(filePath);
-  const records = text
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .flatMap((line, index) => {
-      try {
-        return [{ index, record: JSON.parse(line) as JsonRecord }];
-      } catch {
-        return [];
-      }
-    });
+  const records: Array<{ index: number; record: JsonRecord }> = [];
+  for await (const entry of iterateJsonlRecords(filePath)) {
+    records.push(entry);
+  }
   return {
     records,
     fallbackTime: stat.mtime.toISOString(),
@@ -346,21 +366,23 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
   const sortedMessages = [...input.messages].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const displayMessages = [...(input.displayMessages ?? filterUserVisibleMessages(sortedMessages))]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-  const firstVisibleUser = displayMessages.find((message) => message.role === 'user');
   const lastVisible = [...displayMessages].reverse().find((message) => message.role === 'assistant' || message.role === 'user');
   const lastDurableVisible = [...displayMessages].reverse().find((message) => (
     message.lifecycle === 'durable'
     && (message.role === 'assistant' || message.role === 'user')
   ));
-  const allUserMessages = sortedMessages.filter((message) => message.role === 'user');
-  const firstUser = allUserMessages[0];
-  const lastUser = allUserMessages.at(-1);
+  // Provider adapters exclude injected instructions, date updates, and other
+  // non-conversation records from displayMessages. They must not displace the
+  // submitted prompts used to match pending sessions to their transcripts.
+  const visibleUserMessages = displayMessages.filter((message) => message.role === 'user');
+  const firstUser = visibleUserMessages[0];
+  const lastUser = visibleUserMessages.at(-1);
   const lastMeaningful = [...sortedMessages].reverse().find((message) => (
     message.role === 'assistant'
       || message.role === 'user'
       || message.role === 'status'
   ));
-  const title = truncate(input.metadata?.title ?? firstVisibleUser?.text ?? firstUser?.text ?? path.basename(input.filePath, path.extname(input.filePath)), 72);
+  const title = truncate(input.metadata?.title ?? firstUser?.text ?? path.basename(input.filePath, path.extname(input.filePath)), 72);
   const updatedAt = lastVisible?.timestamp ?? lastMeaningful?.timestamp ?? input.fallbackTime;
   const createdAt = sortedMessages[0]?.timestamp ?? input.fallbackTime;
 

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ConversationSummary } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, type ClaudeCostProfileKey, type ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
@@ -13,6 +13,25 @@ import { parseClaudeConversationFile } from './transcripts/claude.js';
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
+}
+
+function hasConfiguredClaudeProfile(argv: string[]): boolean {
+  return argv.some((arg) => arg === '--model' || arg.startsWith('--model=')
+    || arg === '--effort' || arg.startsWith('--effort='));
+}
+
+function withoutConfiguredClaudeProfile(argv: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--model' || arg === '--effort') {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--model=') || arg.startsWith('--effort=')) continue;
+    result.push(arg);
+  }
+  return result;
 }
 
 function encodeClaudeCandidates(projectPaths: string[]): string[] {
@@ -144,11 +163,11 @@ export class ClaudeProvider implements ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string },
+    options?: { initialPrompt?: string; claudeProfile?: ClaudeCostProfileKey },
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
     const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
-    const baseArgv = ensureProviderFlag(
+    let baseArgv = ensureProviderFlag(
       renderTemplateTokens(template, {
         conversationId: conversationRef ?? '',
         projectPath: project.path,
@@ -156,6 +175,18 @@ export class ClaudeProvider implements ProviderAdapter {
       }),
       '--dangerously-skip-permissions',
     );
+    const profileKey = options?.claudeProfile
+      ?? (!conversationRef && !hasConfiguredClaudeProfile(baseArgv) ? 'medium' : undefined);
+    if (profileKey) {
+      const profile = CLAUDE_COST_PROFILES[profileKey];
+      const withoutProfileArgs = withoutConfiguredClaudeProfile(baseArgv);
+      const executable = withoutProfileArgs[0];
+      if (!executable) throw new Error('Claude launch command is empty.');
+      baseArgv = [
+        executable, '--model', profile.model, '--effort', profile.reasoningEffort,
+        ...withoutProfileArgs.slice(1),
+      ];
+    }
     return {
       cwd: project.path,
       argv: [

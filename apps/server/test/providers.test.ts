@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
@@ -60,6 +60,60 @@ describe('provider history discovery', () => {
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
     expect(conversations[0]?.title).toContain('Plan the auth flow');
+  });
+
+  it('streams Codex transcript records instead of buffering the entire file', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-stream-'));
+    const transcriptPath = path.join(tempDir, 'rollout-streamed-transcript.jsonl');
+    await fs.writeFile(transcriptPath, [
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:00.000Z',
+        type: 'session_meta',
+        payload: { id: 'streamed-transcript', cwd: '/tmp/demo-project' },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Parse this without a whole-file read.' }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:02.000Z',
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'x'.repeat(2 * 1024 * 1024) },
+      }),
+      JSON.stringify({
+        timestamp: '2026-03-07T00:00:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'The streamed parse completed.' }],
+        },
+      }),
+    ].join('\n'));
+
+    const wholeFileRead = vi.spyOn(fs, 'readFile');
+    try {
+      const parsed = await parseCodexConversationFile({
+        filePath: transcriptPath,
+        provider: 'codex',
+        projectSlug: 'demo',
+        conversationRef: 'streamed-transcript',
+      });
+
+      expect(wholeFileRead).not.toHaveBeenCalled();
+      expect(parsed.displayMessages.map((message) => message.text)).toEqual([
+        'Parse this without a whole-file read.',
+        'The streamed parse completed.',
+      ]);
+    } finally {
+      wholeFileRead.mockRestore();
+    }
   });
 
   it('finds pending Codex adoption candidates by parsed user hash when prompts contain escaped text', async () => {

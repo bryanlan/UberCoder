@@ -55,6 +55,10 @@ function isLikelyFooterStatus(line: string): boolean {
     return false;
   }
 
+  if (/^gpt-\d[\w.-]*(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?\s*·\s*[\/~]/i.test(normalized)) {
+    return true;
+  }
+
   if (/bypass permissions on/i.test(normalized)) {
     return true;
   }
@@ -69,7 +73,7 @@ function parsePromptInput(line: string): string | undefined {
     return undefined;
   }
   const text = match[1]?.replace(/\u00a0/g, ' ').trim();
-  if (isClaudeStartupPlaceholderPromptText(text ?? '')) {
+  if (isClaudeStartupPlaceholderPromptText(text ?? '') || /^Ask Codex to do anything$/i.test(text ?? '')) {
     return '';
   }
   if (!text) {
@@ -82,7 +86,7 @@ function parsePromptInput(line: string): string | undefined {
 }
 
 function isCodexStartupPlaceholderPromptText(text: string): boolean {
-  return /^(?:Implement \{feature\}|Write tests for @filename|Improve documentation in @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits|Run \/review on my current changes)$/i.test(text);
+  return /^(?:Ask Codex to do anything|Implement \{feature\}|Write tests for @filename|Improve documentation in @filename|Find and fix a bug in @filename|Explain this codebase|Summarize recent commits|Run \/review on my current changes)$/i.test(text);
 }
 
 function isCodexStartupPlaceholderPrompt(line: string): boolean {
@@ -154,7 +158,8 @@ function looksLikeSlashCommandSuggestion(line: string): boolean {
 
 function isInteractivePickerHint(line: string): boolean {
   const normalized = normalizeWhitespace(line);
-  return /Enter to confirm · Esc to exit/i.test(normalized)
+  return /Enter (?:select|default) · (?:s session · )?Esc back/i.test(normalized)
+    || /Enter to confirm · Esc to exit/i.test(normalized)
     || /Press enter to confirm or esc to go back/i.test(normalized)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
@@ -437,10 +442,10 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     const footerCtxMatch = footerText.match(/(\d{1,3})% left/);
     if (footerCtxMatch) {
       finalContextPercent = Number(footerCtxMatch[1]);
-      const footerModelMatch = footerText.match(/^([^·]+?)·/);
-      if (footerModelMatch) {
-        finalModel = footerModelMatch[1]!.trim();
-      }
+    }
+    const footerModelMatch = footerText.match(/^\s*((?:gpt-\d[\w.-]*)(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?)\s*·/i);
+    if (footerModelMatch) {
+      finalModel = footerModelMatch[1]!.trim();
     }
   }
   finalModel ??= extractClaudeVisibleModel(lines);
