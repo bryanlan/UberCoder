@@ -24,7 +24,7 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - E2E: `npm run test:e2e`
 
 ## Repo Map
-- `apps/server/` — Fastify backend, provider adapters, SQLite cache, routes, proxy, auth, indexing, and tmux session management.
+- `apps/server/` — Fastify backend, provider adapters, durable SQLite state and derived indexes, routes, proxy, auth, indexing, and tmux session management.
 - `apps/web/` — React/Vite PWA for projects, conversations, settings, login, and live session display.
 - `packages/shared/` — shared TypeScript contracts used by server and web.
 - `config/` — example runtime configuration and project/proxy/auth settings shape.

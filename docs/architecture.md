@@ -150,7 +150,7 @@ user's actual prompt.
 - Codex working state follows provider `task_started`, `task_complete`, and `turn_aborted` events, not the output-recency cooldown. Completion/interruption schedules the server-owned model queue immediately; completion recency still waits for the output idle window. Model switching rereads provider lifecycle under the session command lock, verifies tmux ownership, and defers on drafts, provider-queued messages, or interactive terminal state. Claude uses its parsed terminal readiness and working status for the same queue. The confirmed active profile is updated only after verified startup. A durable applying marker prevents a backend restart from blindly repeating an ambiguous process restart. A previous completion cannot acknowledge newly submitted input, and older screen polls cannot override newer session updates in the browser.
 - Opening or binding an unindexed provider conversation registers its native transcript path and notifies session watchers. Pending adoption registers the same path atomically with the native binding; turn monitoring must not depend on a later project-wide discovery refresh.
 - tmux is the session execution boundary; the backend captures pane state and logs normalized events.
-- SQLite via `better-sqlite3` stores config-derived indexes, bound session state, auth/session state, pending conversations, and UI preferences.
+- The main SQLite database via `better-sqlite3` stores config-derived indexes alongside durable bound session, authentication, pending-conversation, agent-coordination, and UI-preference records. The database as a whole must not be treated as a rebuildable cache.
 - Tailscale identity headers can bootstrap a cookie session when explicitly trusted and allowlisted.
 - The localhost proxy exposes only authenticated project-local ports listed in config; it is not a generic localhost gateway.
 
@@ -235,7 +235,7 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 
 ## Agent wiki
 
-`apps/server/src/wiki/` owns durable pages and append-only revisions keyed by Git common directory, so worktrees share a wiki. It stores them in a private SQLite file separate from the rebuildable Console cache and maintains a consistent SQLite backup snapshot. Authenticated browser routes and the `agent_wiki` MCP/CLI surface provide explicit read, search, history and compare-and-set edit operations. The browser's Wiki view renders links between pages. Wiki text is peer data and never authorizes source edits or external actions. See [the wiki contract](agent-wiki.md).
+`apps/server/src/wiki/` owns durable pages and append-only revisions keyed by Git common directory, so worktrees share a wiki. It stores them in a private SQLite file separate from Console's main database and maintains a consistent local SQLite backup snapshot. Both databases contain records that must be preserved. Authenticated browser routes and the `agent_wiki` MCP/CLI surface provide explicit read, search, history and compare-and-set edit operations. The browser's Wiki view renders links between pages. Wiki text is peer data and never authorizes source edits or external actions. See [the wiki contract](agent-wiki.md).
 
 
 ## Provider run failures and bounded recovery
