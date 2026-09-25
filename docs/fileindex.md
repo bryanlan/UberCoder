@@ -225,6 +225,13 @@ Test and verification anchors:
 - `apps/web/src/components/CoordinationPanel.tsx` — peer work and delivery status outside the user conversation.
 - `docs/agent-coordination.md` — operating and deployment contract.
 
+## Agent wiki
+
+- `apps/server/src/wiki/{service,routes}.ts` — per-repository wiki storage, revisions, source provenance, access counts and authenticated browser routes.
+- `apps/web/src/pages/WikiPage.tsx` — project wiki reader, search, history and editor.
+- `scripts/agent-coord.mjs` — `agent_wiki` MCP tool and `wiki` CLI action, alongside coordination.
+- `docs/agent-wiki.md` — page semantics, storage and pilot review.
+
 
 Run recovery ownership:
 - `apps/server/src/providers/transcripts/codex-run-state.ts` — typed Codex lifecycle

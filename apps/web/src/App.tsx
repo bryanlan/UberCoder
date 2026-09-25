@@ -42,6 +42,7 @@ import {
 } from './features/realtime/reducers';
 import { LoginPage } from './pages/LoginPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { WikiPage } from './pages/WikiPage';
 
 function useLocalStorageBoolean(key: string, fallback: boolean) {
   const [value, setValue] = useState<boolean>(() => {
@@ -156,7 +157,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.conversation.ref]);
 
   useEffect(() => {
-    if (routeSelection.isConsoleRoute) {
+    if (routeSelection.isConsoleRoute && routeSelection.kind !== 'wiki') {
       setLastConsolePath(location.pathname);
     }
   }, [location.pathname, routeSelection.isConsoleRoute, setLastConsolePath]);
@@ -954,6 +955,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {project && !routeSelection.inSettings && <Link
+                to={routeSelection.kind === 'wiki' ? lastConsolePath : `/projects/${encodeURIComponent(project.slug)}/wiki`}
+                className="inline-flex items-center rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+              >{routeSelection.kind === 'wiki' ? 'Back to Console' : 'Wiki'}</Link>}
               <Link
                 to={routeSelection.inSettings ? lastConsolePath : '/settings'}
                 className="inline-flex rounded-xl border border-slate-700 p-2 text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
@@ -1019,7 +1024,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
           </div>
         )}
 
-        {project && !routeSelection.inSettings && <CoordinationPanel checkout={project.path} />}
+        {project && !routeSelection.inSettings && routeSelection.kind !== 'wiki' && <CoordinationPanel checkout={project.path} />}
         <main className="min-h-0 flex-1 overflow-hidden">
           {routeSelection.inSettings ? (
             <SettingsPage
@@ -1030,8 +1035,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               csrfToken={authQuery.data?.csrfToken}
               backHref={lastConsolePath}
             />
-          ) : routeSelection.kind === 'not-found' ? (
+          ) : routeSelection.kind === 'not-found' || (routeSelection.kind === 'wiki' && !project) ? (
             <NotFoundPane />
+          ) : routeSelection.kind === 'wiki' && project ? (
+            <WikiPage projectSlug={project.slug} projectName={project.displayName} csrfToken={authQuery.data?.csrfToken} />
           ) : (
             <ConversationPane
               projects={treeQuery.data?.projects}
@@ -1086,6 +1093,7 @@ export function ConsoleRoutes({ Shell = RoutedAppShell }: { Shell?: ComponentTyp
       <Route path="/login" element={<Shell kind="login" />} />
       <Route path="/settings" element={<Shell kind="settings" />} />
       <Route path="/projects/:projectSlug" element={<Shell kind="project" />} />
+      <Route path="/projects/:projectSlug/wiki" element={<Shell kind="wiki" />} />
       <Route path="/projects/:projectSlug/:provider" element={<Shell kind="provider" />} />
       <Route path="/projects/:projectSlug/:provider/:conversationRef" element={<Shell kind="conversation" />} />
       <Route path="*" element={<Shell kind="not-found" />} />

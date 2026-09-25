@@ -233,6 +233,10 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 
 `apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver context without entering the tmux user-input path. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
 
+## Agent wiki
+
+`apps/server/src/wiki/` owns durable pages and append-only revisions keyed by Git common directory, so worktrees share a wiki. It stores them in a private SQLite file separate from the rebuildable Console cache and maintains a consistent SQLite backup snapshot. Authenticated browser routes and the `agent_wiki` MCP/CLI surface provide explicit read, search, history and compare-and-set edit operations. The browser's Wiki view renders links between pages. Wiki text is peer data and never authorizes source edits or external actions. See [the wiki contract](agent-wiki.md).
+
 
 ## Provider run failures and bounded recovery
 

@@ -20,6 +20,10 @@ import type {
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
   UpdateUiPreferencesRequest,
+  WikiHistoryResponse,
+  WikiListResponse,
+  WikiPage,
+  WikiSearchResponse,
 } from '@agent-console/shared';
 
 export class ApiError extends Error {
@@ -65,6 +69,23 @@ export const api = {
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),
+  wikiList: (projectSlug: string, offset = 0) => request<WikiListResponse>(
+    `/api/wiki/${encodeURIComponent(projectSlug)}/pages?offset=${offset}`,
+  ),
+  wikiSearch: (projectSlug: string, query: string) => request<WikiSearchResponse>(
+    `/api/wiki/${encodeURIComponent(projectSlug)}/search?${new URLSearchParams({ query })}`,
+  ),
+  wikiRead: (projectSlug: string, title: string, revision?: number) => {
+    const params = new URLSearchParams({ title });
+    if (revision !== undefined) params.set('revision', String(revision));
+    return request<{ page: WikiPage | null }>(`/api/wiki/${encodeURIComponent(projectSlug)}/page?${params}`);
+  },
+  wikiHistory: (projectSlug: string, title: string, offset = 0) => request<WikiHistoryResponse>(
+    `/api/wiki/${encodeURIComponent(projectSlug)}/history?${new URLSearchParams({ title, offset: String(offset) })}`,
+  ),
+  wikiWrite: (projectSlug: string, body: { title: string; body: string; baseRevision: number | null; summary?: string }, csrfToken?: string) =>
+    request<{ page: WikiPage }>(`/api/wiki/${encodeURIComponent(projectSlug)}/page`,
+      { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
   searchConversations: (query: string, options: { limit?: number; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams({ q: query });
     if (options.limit !== undefined) {

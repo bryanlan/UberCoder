@@ -379,6 +379,10 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'update', 'send', 'ack', 'finish']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
+    const wikiTool = JSON.parse(result.stdout).result.tools[1];
+    expect(wikiTool.name).toBe('agent_wiki');
+    expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);
+    expect(wikiTool.inputSchema.required).toContain('checkout');
   });
 
   it('reports malformed configuration without blocking lifecycle hooks', () => {

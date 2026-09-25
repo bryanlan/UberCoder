@@ -43,6 +43,13 @@ describe('ConsoleRoutes', () => {
     expect(screen.getByTestId('console')).toHaveTextContent('false');
   });
 
+  it('opens the project wiki without selecting a provider', () => {
+    renderRoute('/projects/demo/wiki');
+    expect(screen.getByTestId('kind')).toHaveTextContent('wiki');
+    expect(screen.getByTestId('project')).toHaveTextContent('demo');
+    expect(screen.getByTestId('provider')).toBeEmptyDOMElement();
+  });
+
   it('routes unmatched paths to the not-found pane state', () => {
     renderRoute('/missing/page');
 

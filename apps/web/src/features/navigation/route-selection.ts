@@ -1,6 +1,6 @@
 import { PROVIDERS, type ProviderId } from '@agent-console/shared';
 
-export type ConsoleRouteKind = 'home' | 'project' | 'provider' | 'conversation' | 'settings' | 'login' | 'not-found';
+export type ConsoleRouteKind = 'home' | 'project' | 'provider' | 'conversation' | 'wiki' | 'settings' | 'login' | 'not-found';
 
 export interface ConsoleRouteSelection {
   kind: ConsoleRouteKind;

@@ -83,6 +83,11 @@ export class CoordinationService {
     if (!row || row.token_hash !== digest(token)) throw new Error('Invalid coordination credential.');
   }
 
+  agentIdentity(id: string): { kind: 'agent'; id: string; provider: string } {
+    const assignment = this.assignment(id);
+    return { kind: 'agent', id, provider: assignment.provider };
+  }
+
   reconcileProcesses(): void {
     const rows = this.db.sqlite.prepare("select id, pid, process_start from coordination_assignments where status in ('active','waiting')")
       .all() as { id: string; pid: number; process_start: string }[];

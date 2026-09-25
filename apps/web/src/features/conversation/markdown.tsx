@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
 
-function renderInlineMarkdown(text: string): ReactNode[] {
+export type WikiLinkRenderer = (title: string, label: string, key: string) => ReactNode;
+
+function renderInlineMarkdown(text: string, wikiLink?: WikiLinkRenderer): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  const pattern = wikiLink ? /(\[\[[^\]\n]+\]\]|`[^`]+`|\*\*[^*]+\*\*)/g : /(`[^`]+`|\*\*[^*]+\*\*)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
@@ -10,7 +12,10 @@ function renderInlineMarkdown(text: string): ReactNode[] {
       nodes.push(text.slice(cursor, match.index));
     }
     const token = match[0];
-    if (token.startsWith('`')) {
+    if (wikiLink && token.startsWith('[[')) {
+      const [title, label] = token.slice(2, -2).split('|', 2);
+      nodes.push(wikiLink(title?.trim() ?? '', label?.trim() || title?.trim() || '', `${match.index}:wiki`));
+    } else if (token.startsWith('`')) {
       nodes.push(
         <code key={`${match.index}:code`} className="font-mono text-[0.92em] text-inherit">
           {token.slice(1, -1)}
@@ -27,9 +32,9 @@ function renderInlineMarkdown(text: string): ReactNode[] {
   return nodes;
 }
 
-function renderInlineLines(lines: string[]): ReactNode[] {
+function renderInlineLines(lines: string[], wikiLink?: WikiLinkRenderer): ReactNode[] {
   return lines.flatMap((line, index) => [
-    ...renderInlineMarkdown(line),
+    ...renderInlineMarkdown(line, wikiLink && ((title, label, key) => wikiLink(title, label, `${index}:${key}`))),
     ...(index < lines.length - 1 ? [<br key={`br:${index}`} />] : []),
   ]);
 }
@@ -44,7 +49,7 @@ function isMarkdownBlockStart(line: string): boolean {
     || /^\d+[.)]\s+/.test(trimmed);
 }
 
-export function renderMessageMarkdown(text: string): ReactNode[] {
+export function renderMessageMarkdown(text: string, wikiLink?: WikiLinkRenderer): ReactNode[] {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
   const blocks: ReactNode[] = [];
   let index = 0;
@@ -79,7 +84,7 @@ export function renderMessageMarkdown(text: string): ReactNode[] {
     if (headingMatch) {
       blocks.push(
         <div key={`heading:${index}`} className="mt-4 text-base font-semibold text-inherit first:mt-0">
-          {renderInlineMarkdown(headingMatch[2] ?? '')}
+          {renderInlineMarkdown(headingMatch[2] ?? '', wikiLink)}
         </div>,
       );
       index += 1;
@@ -100,7 +105,7 @@ export function renderMessageMarkdown(text: string): ReactNode[] {
       }
       blocks.push(
         <blockquote key={`quote:${index}`} className="my-3 pl-3 text-inherit">
-          {renderInlineLines(quoteLines)}
+          {renderInlineLines(quoteLines, wikiLink)}
         </blockquote>,
       );
       continue;
@@ -114,7 +119,7 @@ export function renderMessageMarkdown(text: string): ReactNode[] {
       }
       blocks.push(
         <ul key={`ul:${index}`} className="my-3 list-disc space-y-1 pl-5">
-          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}
+          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item, wikiLink)}</li>)}
         </ul>,
       );
       continue;
@@ -128,7 +133,7 @@ export function renderMessageMarkdown(text: string): ReactNode[] {
       }
       blocks.push(
         <ol key={`ol:${index}`} className="my-3 list-decimal space-y-1 pl-5">
-          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item)}</li>)}
+          {items.map((item, itemIndex) => <li key={itemIndex}>{renderInlineMarkdown(item, wikiLink)}</li>)}
         </ol>,
       );
       continue;
@@ -142,7 +147,7 @@ export function renderMessageMarkdown(text: string): ReactNode[] {
     }
     blocks.push(
       <p key={`p:${index}`} className="my-3 first:mt-0 last:mb-0">
-        {renderInlineLines(paragraphLines)}
+        {renderInlineLines(paragraphLines, wikiLink)}
       </p>,
     );
   }

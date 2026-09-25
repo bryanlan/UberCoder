@@ -431,3 +431,51 @@ export interface ApiErrorShape {
   error: string;
   details?: unknown;
 }
+
+export interface WikiPage {
+  revision: number;
+  title: string;
+  body: string;
+  summary: string;
+  author: string;
+  checkout: string;
+  branch: string | null;
+  headCommit: string | null;
+  createdAt: string;
+  links: string[];
+  backlinks: string[];
+}
+
+export interface WikiPageSummary {
+  title: string;
+  revision: number;
+  updatedAt: string;
+  author: string;
+  summary: string;
+}
+
+export interface WikiHistoryEntry {
+  revision: number;
+  summary: string;
+  author: string;
+  checkout: string;
+  branch: string | null;
+  headCommit: string | null;
+  createdAt: string;
+}
+
+export interface WikiListResponse {
+  pages: WikiPageSummary[];
+  total: number;
+  nextOffset: number | null;
+}
+
+export interface WikiHistoryResponse {
+  revisions: WikiHistoryEntry[];
+  total: number;
+  nextOffset: number | null;
+}
+
+export interface WikiSearchResponse {
+  results: Array<{ title: string; revision: number; updatedAt: string; snippet: string }>;
+}

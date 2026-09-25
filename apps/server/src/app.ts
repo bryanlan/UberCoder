@@ -27,6 +27,8 @@ import { RestartService } from './runtime/restart-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
 import { CoordinationService } from './coordination/service.js';
 import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
+import { WikiService } from './wiki/service.js';
+import { registerWikiRoutes } from './wiki/routes.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -57,6 +59,8 @@ export async function buildApp(options: AppOptions = {}) {
   });
   const authService = new AuthService(config, db);
   const coordination = new CoordinationService(db, config.coordination);
+  const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
+  await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
   const restartService = new RestartService(() => app.close());
 
   await app.register(fastifyCookie);
@@ -96,6 +100,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
   await registerCoordinationRoutes(app, authService, coordination);
+  registerWikiRoutes(app, authService, wiki, projectService);
   new LocalhostProxyService(projectService, authService).register(app);
 
   if (fs.existsSync(config.server.webDistPath)) {
@@ -123,9 +128,11 @@ export async function buildApp(options: AppOptions = {}) {
     });
   }
 
-  const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir) : undefined;
+  const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki) : undefined;
   const coordinationTimer = config.coordination.enabled ? setInterval(() => coordination.reconcileProcesses(), 15_000) : undefined;
   coordinationTimer?.unref();
+  const wikiBackupTimer = setInterval(() => { wiki.backup().catch((error) => app.log.warn({ err: error }, 'Wiki backup failed.')); }, 60 * 60 * 1000);
+  wikiBackupTimer.unref();
   await indexing.loadProjectMetadata();
   await indexing.start();
   sessions.startSessionReconciliation();
@@ -141,11 +148,14 @@ export async function buildApp(options: AppOptions = {}) {
 
   app.addHook('onClose', async () => {
     if (coordinationTimer) clearInterval(coordinationTimer);
+    clearInterval(wikiBackupTimer);
     await coordinationSocket?.close();
     await indexing.stop();
     await Promise.all([runtimeCleanup, searchBackfill]);
     await sessions.stop();
     liveOutputReader.clear();
+    await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Final wiki backup failed.'));
+    wiki.close();
     db.close();
   });
 
