@@ -9,6 +9,7 @@ const scopeColumns = `assignment_id as assignmentId, checkout, repository, summa
 const eventColumns = `seq, assignment_id as assignmentId, checkout, kind, text, timestamp`;
 const messageColumns = `id, sender_id as senderId, recipient_id as recipientId, text, created_at as createdAt, supplied_at as suppliedAt, acknowledged_at as acknowledgedAt`;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+const compact = (value: string, limit: number) => value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 
 export function processStart(pid: number): string {
   try {
@@ -103,9 +104,39 @@ export class CoordinationService {
         .run(input.description ?? current.description, input.status ?? current.status, new Date().toISOString(), id);
       if (identity) this.db.sqlite.prepare(`insert into coordination_scopes values(?,?,?,?) on conflict(assignment_id,checkout) do update set summary=excluded.summary`)
         .run(id, identity.checkout, identity.repository, input.summary ?? 'Scope added');
-      this.event(id, identity?.checkout ?? null, 'update', input.summary ?? input.description ?? `Status: ${input.status}`);
-      return this.poll(id, 0, false);
+      // Turn-start and turn-end status changes are state, not peer announcements.
+      if (identity || input.summary !== undefined || input.description !== undefined) {
+        this.event(id, identity?.checkout ?? null, 'update', input.summary ?? input.description ?? 'Scope added');
+      }
+      return { assignment: this.assignment(id) };
     }).immediate();
+  }
+
+  agentStatus(id: string, directory?: string, offset = 0) {
+    const empty = { enabled: false, assignment: null, peers: [], unscoped: false, totalPeerScopes: 0, nextOffset: null, pendingMessageCount: 0 };
+    if (!this.settings.enabled || (directory && !this.eligible(directory))) return empty;
+    this.reconcileProcesses();
+    const current = this.assignment(id);
+    const repositories = directory
+      ? [checkoutIdentity(directory).repository]
+      : (this.db.sqlite.prepare('select distinct repository from coordination_scopes where assignment_id=?').all(id) as Array<{ repository: string }>).map((row) => row.repository);
+    const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
+    const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160) };
+    // Before the first scope announcement, show live pilot work rather than an empty view.
+    const repositoryFilter = repositories.length > 0 ? `and s.repository in (${repositories.map(() => '?').join(',')})` : '';
+    const rows = this.db.sqlite.prepare(`select a.id, a.provider, a.status, a.description, a.last_seen_at as lastSeenAt,
+      s.checkout, s.summary from coordination_assignments a join coordination_scopes s on s.assignment_id=a.id
+      where a.id!=? and a.status in ('active','waiting') ${repositoryFilter}
+      order by case a.status when 'active' then 0 else 1 end, a.last_seen_at desc, a.id, s.checkout`)
+      .all(id, ...repositories) as Array<{ id: string; provider: string; status: string; description: string; lastSeenAt: string; checkout: string; summary: string }>;
+    const peers: Array<{ id: string; provider: string; status: string; description: string; lastSeenAt: string; checkout: string; summary: string }> = [];
+    for (const row of rows.slice(offset)) {
+      const peer = { ...row, description: compact(row.description, 120), checkout: compact(row.checkout, 220), summary: compact(row.summary, 220) };
+      if (JSON.stringify({ assignment, peers: [...peers, peer], totalPeerScopes: rows.length, pendingMessageCount }).length > 3400) break;
+      peers.push(peer);
+    }
+    return { enabled: true, assignment, peers, unscoped: !directory && repositories.length === 0, totalPeerScopes: rows.length,
+      nextOffset: offset + peers.length < rows.length ? offset + peers.length : null, pendingMessageCount };
   }
 
   send(id: string, input: { id: string; recipientId: string; text: string }) {
@@ -137,7 +168,8 @@ export class CoordinationService {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       this.db.sqlite.prepare('update coordination_assignments set last_seen_at=? where id=?').run(new Date().toISOString(), id);
-      const candidates = this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where seq>? and assignment_id!=? and (
+      const candidates = this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where seq>? and assignment_id!=?
+      and not (kind='update' and checkout is null and text in ('Status: active','Status: waiting')) and (
       exists(select 1 from coordination_scopes mine join coordination_scopes theirs on mine.repository=theirs.repository where mine.assignment_id=? and theirs.assignment_id=e.assignment_id)
       ) order by seq limit 25`).all(after, id, id) as CoordinationEvent[];
       const messages = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null

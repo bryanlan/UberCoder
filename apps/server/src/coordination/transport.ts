@@ -14,6 +14,7 @@ const inputSchema = z.object({
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
+  offset: z.number().int().nonnegative().default(0),
   recipientId: z.string().uuid().optional(), messageId: z.string().uuid().optional(),
   text: text.max(2000).optional(), messageIds: z.array(z.string().uuid()).max(100).optional(),
 }).strict();
@@ -28,12 +29,9 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
   const id = need(input.assignmentId, 'assignmentId');
   service.authenticate(id, need(input.token, 'token'));
   switch (input.action) {
-    case 'status': return service.snapshot(input.checkout);
+    case 'status': return service.agentStatus(id, input.checkout, input.offset);
     case 'poll': return service.poll(id, input.after);
-    case 'update': {
-      service.update(id, input);
-      return { ...service.poll(id, input.after, false), activity: service.snapshot(input.checkout) };
-    }
+    case 'update': return service.update(id, input);
     case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text') });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
     case 'finish': return service.finish(id, need(input.summary, 'summary'));

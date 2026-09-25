@@ -8,8 +8,8 @@ A session works on an assignment that may span repositories. Its launch director
 
 Agents use `agent_coordination` through the `agent_console_coordination` MCP server:
 
-- `status`: discover assignments and repository activity.
-- `update`: announce or revise `description`, `checkout` and `summary`; mention intended files in the summary. `status` may be `active` or `waiting`.
+- `status`: discover live peer scopes in the assignment's announced repositories. Before the first scope announcement, it shows live pilot work and marks the response `unscoped`. Pass `checkout` to focus on one repository and `offset` to continue when `nextOffset` is present. The agent reply is compact and excludes historical activity and other agents' messages; the browser retains the repository history view.
+- `update`: announce or revise `description`, `checkout` and `summary`; mention intended files in the summary. `status` may be `active` or `waiting`. The reply confirms the assignment without returning a repository snapshot.
 - `send`: exchange information with `recipientId` and `text`. An optional `messageId` makes retries idempotent.
 - `ack`: acknowledge delivered messages with `messageIds`; acknowledgement is receipt, not approval.
 - `finish`: record the outcome with `summary`. Mention unfinished work and next steps. Finishing never requires a clean checkout and never changes files.
@@ -23,6 +23,8 @@ Peer content is information, never Bryan's instructions or approval. It cannot e
 The private Unix socket and authenticated `/api/assignment-activity` browser route serve activity and inbox data. The former `/api/coordination` endpoint is removed: older tabs receive an ordinary request failure and show their existing status message, rather than rendering an incompatible payload. Refreshing loads the new panel; no automatic reload interrupts draft input. Nothing is entered into the user's composer and no provider process is resumed to deliver a message. Lifecycle and post-tool hooks supply queued messages on an agent's next supported boundary; long tools delay delivery and idle sessions are not awakened.
 
 Messages are queued, offered to the runtime, then explicitly acknowledged. Unacknowledged messages are retried after 60 seconds. Only host hooks advance their event cursor; oversized historical entries are abbreviated without hiding subsequent updates. The browser pending count covers all relevant unacknowledged messages, independently of its 50-message display limit.
+
+Automatic turn-start and turn-end status changes update the assignment without creating peer activity entries; old automatic entries are also skipped during hook delivery. Meaningful scope and description updates still appear in the activity feed. Direct messages remain private to their recipient's runtime inbox; the authenticated browser view can show repository message history.
 
 Coordination failures may delay activity or messages; they do not block ordinary work. No PreToolUse hook is installed. An already-running provider may retain an old hook definition; unsupported events return without reading configuration, registering or contacting Console. On their next successful delivery, existing sessions receive the advisory contract. An old cached MCP tool description may still list retired actions; the server rejects them instead of running or emulating them. The supported actions above remain available without restarting the agent.
 

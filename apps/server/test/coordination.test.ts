@@ -134,6 +134,73 @@ describe('assignment coordination', () => {
     expect(service.poll(a.id, 0).events.some((e) => e.checkout === linked)).toBe(true);
   });
 
+  it('keeps agent status small and pages through live peer scopes despite large history', async () => {
+    const { checkout, service, register } = fixture();
+    const self = register();
+    for (let i = 0; i < 45; i++) {
+      const old = register();
+      service.update(old.id, { checkout, summary: `Historical work ${i}: ${'x'.repeat(1500)}` });
+      service.finish(old.id, 'Complete');
+    }
+    const active = Array.from({ length: 14 }, (_, i) => {
+      const peer = register(i % 2 ? 'codex' : 'claude');
+      service.update(peer.id, { checkout, summary: `Current work ${i}: ${'y'.repeat(1500)}` });
+      return peer.id;
+    });
+    const unscoped = service.register({ provider: 'codex', token: randomUUID(), nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout }).assignmentId!;
+    const initialView = service.agentStatus(unscoped);
+    expect(initialView.unscoped).toBe(true);
+    expect(initialView.totalPeerScopes).toBe(active.length + 1);
+    expect(initialView.peers.length).toBeGreaterThan(0);
+    const privateText = 'OTHER_AGENT_MESSAGE_MUST_NOT_APPEAR_IN_STATUS';
+    service.send(active[0]!, { id: randomUUID(), recipientId: active[1]!, text: privateText });
+    const seen = new Set<string>();
+    let offset = 0;
+    do {
+      const page = await dispatchCoordination(service, { action: 'status', assignmentId: self.id, token: self.token, checkout, offset }) as ReturnType<CoordinationService['agentStatus']>;
+      expect(JSON.stringify(page).length).toBeLessThan(3600);
+      expect(JSON.stringify(page)).not.toContain(privateText);
+      expect(page).not.toHaveProperty('events');
+      expect(page.totalPeerScopes).toBe(active.length);
+      for (const peer of page.peers) seen.add(peer.id);
+      if (page.nextOffset === null) break;
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    } while (true);
+    expect(seen).toEqual(new Set(active));
+    expect(service.snapshot(checkout).assignments.length).toBe(60);
+    expect(service.snapshot(checkout).messages[0]?.text).toBe(privateText);
+  });
+
+  it('confirms updates without returning history or turning lifecycle changes into peer events', async () => {
+    const { checkout, db, service, register } = fixture();
+    const self = register(); const peer = register('claude');
+    const messageId = randomUUID();
+    service.send(peer.id, { id: messageId, recipientId: self.id, text: 'Deliver on the next hook.' });
+    const countEvents = () => (db.sqlite.prepare('select count(*) as n from coordination_events').get() as { n: number }).n;
+    const before = countEvents();
+    const result = await dispatchCoordination(service, { action: 'update', assignmentId: self.id, token: self.token, status: 'waiting' });
+    expect(result).toMatchObject({ assignment: { id: self.id, status: 'waiting' } });
+    expect(JSON.stringify(result).length).toBeLessThan(1000);
+    expect(result).not.toHaveProperty('activity');
+    expect(result).not.toHaveProperty('messages');
+    expect(countEvents()).toBe(before);
+    expect(() => service.acknowledge(self.id, [messageId])).toThrow('supplied');
+    expect(service.poll(self.id, 0).messages[0]?.id).toBe(messageId);
+    expect(service.acknowledge(self.id, [messageId])).toEqual({ acknowledged: [messageId] });
+    service.update(self.id, { status: 'active' });
+    expect(countEvents()).toBe(before);
+    service.update(self.id, { checkout, summary: 'Editing coordination files' });
+    expect(countEvents()).toBe(before + 1);
+    expect(service.poll(peer.id, 0).events.some((event) => event.text === 'Editing coordination files')).toBe(true);
+    db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
+      .run(peer.id, null, 'update', 'Status: active', new Date().toISOString());
+    service.update(peer.id, { checkout, summary: 'Real peer update after old turn noise' });
+    const delivered = service.poll(self.id, 0).events.map((event) => event.text);
+    expect(delivered).not.toContain('Status: active');
+    expect(delivered).toContain('Real peer update after old turn noise');
+  });
+
   it('authenticates the sender, deduplicates messages and separates supply from acknowledgement', async () => {
     const { service, register } = fixture();
     const a = register(); const b = register('claude');
@@ -186,6 +253,7 @@ describe('assignment coordination', () => {
     expect(snapshot.messages.map((message) => message.id)).toEqual([pendingId]);
     expect(snapshot.pendingMessageCount).toBe(1);
     expect(service.snapshot(outside).pendingMessageCount).toBe(0);
+    expect(service.agentStatus(a.id, checkout).peers.every((item) => item.id !== peer)).toBe(true);
   });
 
   it('counts all pending messages independently of the bounded displayed history', () => {
@@ -309,6 +377,7 @@ describe('assignment coordination', () => {
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
     expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'update', 'send', 'ack', 'finish']);
+    expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
   });
 
