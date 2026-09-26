@@ -672,6 +672,13 @@ describe('SessionManager lifecycle', () => {
       project, provider, providerSettings,
       conversationRef: 'history:expired-work', title: 'Expired work', kind: 'history',
     });
+    const transcriptPath = path.join(tempDir, 'expired-work.jsonl');
+    await fs.writeFile(transcriptPath, '{"type":"session_meta"}\n');
+    db.conversationIndex.upsert({
+      ref: session.conversationRef, kind: 'history', projectSlug: project.slug,
+      provider: provider.id, title: 'Expired work', updatedAt: new Date().toISOString(),
+      transcriptPath, isBound: true, degraded: false,
+    });
     const old = new Date(Date.now() - 121 * 60 * 60 * 1000).toISOString();
     db.boundSessions.upsert({
       ...db.boundSessions.getById(session.id)!,
@@ -689,6 +696,44 @@ describe('SessionManager lifecycle', () => {
     expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
     expect(manager.listActiveSessions()).not.toContainEqual(expect.objectContaining({ id: session.id }));
+    await manager.stop();
+    db.close();
+  });
+
+  it('retains an expired history session when Browse has no readable transcript', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:missing-transcript', title: 'Missing transcript', kind: 'history',
+    });
+    await fs.appendFile(session.eventLogPath!, `${JSON.stringify({
+      type: 'status', text: 'Console-only history', timestamp: new Date().toISOString(),
+    })}\n`);
+    const old = new Date(Date.now() - 121 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: old, lastOutputAt: old, lastCompletedAt: old,
+      lastResponseAt: old, isWorking: false,
+    });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(old, session.id);
+
+    await manager.reconcileSessions();
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('Console-only history');
+
+    const transcriptPath = path.join(tempDir, 'missing-transcript.jsonl');
+    db.conversationIndex.upsert({
+      ref: session.conversationRef, kind: 'history', projectSlug: project.slug,
+      provider: provider.id, title: 'Missing transcript', updatedAt: old,
+      transcriptPath, isBound: true, degraded: false,
+    });
+    await manager.reconcileSessions();
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('Console-only history');
+
     await manager.stop();
     db.close();
   });

@@ -108,7 +108,9 @@ search, because the durable transcript is the source for those conversations.
 `IndexingService` owns search-index refresh and repair. Normal indexing replaces FTS rows from
 provider conversations, while `backfillMissingSearchIndexRows()` fills missing FTS rows from the
 cached conversation index on startup or when cached projects become active without re-listing the
-provider tree. A failed individual transcript load should not break the conversation tree.
+provider tree. Search updates commit one conversation at a time and pause between writes so a
+full refresh does not hold the live database writer lock for an entire project. A failed individual
+transcript load should not break the conversation tree.
 
 The top-left refresh action explicitly requests recent Codex auto-tracking. The server first
 re-indexes every configured active project, then may resume unbound Codex history with real
@@ -168,7 +170,7 @@ user's actual prompt.
 - Explicit recent-conversation auto-tracking uses `autoTrackedAt` only for provenance in the sidebar.
   It must not write `lastActivityAt`, `lastCompletedAt`, or `lastResponseAt`, reorder projects as if user or
   agent work occurred, or run during Settings' ordinary project-tree refresh.
-- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 120 hours. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 120 hours without user or agent activity, removing them from Work mode. Release leaves provider transcript files untouched, but Browse visibility requires a configured project and an indexed transcript. Release removes the Console runtime log even when a history session has no provider transcript. Automatically releasing a pending session also removes its pending record. The existing 48-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
+- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 120 hours. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 120 hours without user or agent activity, removing them from Work mode. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. The existing 48-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
 - Claude transcripts can contain multiple parent-linked branches when the same provider session is
   resumed concurrently. The transcript adapter follows the last message leaf back through
   `parentUuid` and exposes that active branch instead of flattening sibling turns together.

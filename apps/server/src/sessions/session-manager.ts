@@ -577,6 +577,7 @@ export class SessionManager {
           await this.runtimes.run(session.id, 'releaseExpiredWorkSession', async () => {
             const current = this.db.boundSessions.getById(session.id);
             if (!current || !this.isWorkReleaseDue(current)) return;
+            if (!current.conversationRef.startsWith('pending:') && !(await this.hasReadableIndexedTranscript(current))) return;
             const liveness = await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
             if (liveness === 'unknown') return;
             if (liveness === 'alive') {
@@ -626,6 +627,19 @@ export class SessionManager {
     if (!session.shouldRestore || session.isWorking || session.modelProfileRequest) return false;
     const idleSinceMs = this.sessionIdleTimestampMs(session);
     return idleSinceMs > 0 && Date.now() - idleSinceMs >= WORK_SESSION_RELEASE_MS;
+  }
+
+  private async hasReadableIndexedTranscript(session: BoundSession): Promise<boolean> {
+    const indexed = this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
+    if (indexed?.kind !== 'history' || !indexed.transcriptPath) return false;
+    try {
+      const stat = await fs.promises.stat(indexed.transcriptPath);
+      if (!stat.isFile() || stat.size === 0) return false;
+      await fs.promises.access(indexed.transcriptPath, fs.constants.R_OK);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private isIdleSuspendable(session: BoundSession): boolean {

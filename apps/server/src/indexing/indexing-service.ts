@@ -21,6 +21,7 @@ import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } fr
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
+const SEARCH_INDEX_WRITE_PAUSE_MS = 5;
 
 export function getProviderTranscriptWatchPaths(providerId: ProviderId, discoveryRoot: string): string[] {
   if (providerId === 'codex') {
@@ -529,16 +530,18 @@ export class IndexingService {
     if (options.shouldCommit && !options.shouldCommit()) {
       return;
     }
-    this.db.transaction(() => {
-      // Conversations that failed to load had no chunks under the old wholesale
-      // rebuild either — drop any stale rows instead of serving old content.
-      for (const ref of [...vanishedRefs, ...failedRefs]) {
-        this.db.searchIndex.deleteConversation(project.slug, providerId, ref);
-      }
-      for (const update of updates) {
-        this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
-      }
-    });
+    // Each repository call commits one conversation. A full refresh must not
+    // hold the SQLite writer lock across an entire project's search index.
+    for (const ref of [...vanishedRefs, ...failedRefs]) {
+      if (options.shouldCommit && !options.shouldCommit()) return;
+      this.db.searchIndex.deleteConversation(project.slug, providerId, ref);
+      await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
+    }
+    for (const update of updates) {
+      if (options.shouldCommit && !options.shouldCommit()) return;
+      this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
+      await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
+    }
   }
 
   private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {

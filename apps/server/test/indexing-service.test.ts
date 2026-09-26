@@ -941,6 +941,54 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('lets another database writer proceed between search updates in a full refresh', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const db = new AppDatabase(databasePath);
+    const otherWriter = new AppDatabase(databasePath);
+    otherWriter.sqlite.pragma('busy_timeout = 100');
+    const conversations: ConversationSummary[] = ['first', 'second'].map((ref) => ({
+      ref, kind: 'history', projectSlug: project.slug, provider: 'claude',
+      title: ref, updatedAt: '2026-03-07T00:00:00.000Z', isBound: false, degraded: false,
+    }));
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          ...providerSettings, id: providerId, enabled: providerId === 'claude',
+        }),
+      } as never,
+      {
+        get: () => ({
+          listConversations: async () => conversations,
+          getConversation: async (_project: ActiveProject, ref: string) => ({
+            summary: conversations.find((conversation) => conversation.ref === ref)!,
+            messages: [{ id: `${ref}-message`, role: 'user', text: `${ref} searchable text`, timestamp: '2026-03-07T00:00:00.000Z' }],
+          }),
+        }),
+      } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+    const replaceConversation = db.searchIndex.replaceConversation.bind(db.searchIndex);
+    let replacements = 0;
+    const replacement = vi.spyOn(db.searchIndex, 'replaceConversation').mockImplementation((...args) => {
+      if (++replacements === 2) otherWriter.meta.set('concurrent-write', 'succeeded');
+      replaceConversation(...args);
+    });
+
+    await indexing.refreshAll();
+
+    expect(replacements).toBe(2);
+    expect(otherWriter.meta.get('concurrent-write')).toBe('succeeded');
+    expect(db.searchIndex.getConversationStates(project.slug, 'claude').size).toBe(2);
+    replacement.mockRestore();
+    await indexing.stop();
+    otherWriter.close();
+    db.close();
+  });
+
   it('coalesces concurrent explicit refreshes instead of starting overlapping scans', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
