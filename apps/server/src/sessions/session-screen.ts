@@ -276,6 +276,24 @@ function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
   return lines.filter((line) => isLikelyFooterStatus(line.plain));
 }
 
+function splitTrailingClaudeAgentRows(lines: ScreenLine[]): { screenLines: ScreenLine[]; agentRows: ScreenLine[] } {
+  let footerIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (/bypass permissions on/i.test(lines[index]!.plain)) {
+      footerIndex = index;
+      break;
+    }
+  }
+  if (footerIndex < 0) return { screenLines: lines, agentRows: [] };
+
+  const trailing = lines.slice(footerIndex + 1);
+  const agentRows = trailing.filter((line) => line.plain.trim());
+  if (!agentRows.length || agentRows.some((line) => !/^\s*[●◯○]\s+\S/u.test(line.plain))) {
+    return { screenLines: lines, agentRows: [] };
+  }
+  return { screenLines: lines.slice(0, footerIndex + 1), agentRows };
+}
+
 function toScreenLines(snapshot: string): ScreenLine[] {
   return snapshot
     .replace(/\r\n?/g, '\n')
@@ -385,13 +403,14 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso()): SessionScreen {
   const lines = toScreenLines(snapshot);
 
-  const visibleLines = collapseBlankRuns(
+  const visibleSnapshotLines = collapseBlankRuns(
     trimLeadingTerminalChrome(lines).filter((line, index, all) => {
       if (isBoxDrawingOnly(line.plain)) return false;
       if (isPromptFollowedByCodexStartupChrome(all, index)) return false;
       return true;
     }),
   );
+  const { screenLines: visibleLines, agentRows } = splitTrailingClaudeAgentRows(visibleSnapshotLines);
 
   let lastNonEmptyIndex = -1;
   for (let index = visibleLines.length - 1; index >= 0; index -= 1) {
@@ -454,8 +473,8 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     content,
     contentAnsi,
     inputText,
-    status: footerText || plainStatus,
-    statusAnsi: footerAnsi || statusLineRaw || plainStatus,
+    status: joinPlain([...footerStatusLines, ...agentRows]) || plainStatus,
+    statusAnsi: joinAnsi([...footerStatusLines, ...agentRows]) || statusLineRaw || plainStatus,
     capturedAt,
     model: finalModel,
     contextPercent: finalContextPercent,

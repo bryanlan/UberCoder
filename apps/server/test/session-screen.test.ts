@@ -244,6 +244,26 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.status).toContain('bypass permissions on');
   });
 
+  it('recognizes a Claude draft and ready prompt above background agent rows', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      'Answer already delivered.',
+      '✻ Waiting for 1 background agent to finish',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ waltium-planner is fine, keep going conceptually first',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage',
+      '',
+      '  ● main',
+      '  ◯ general-purpose (+2)  Re-checking Social Security 8m 19s',
+    ].join('\n'));
+
+    expect(screen.inputText).toBe('waltium-planner is fine, keep going conceptually first');
+    expect(screen.status).toContain('bypass permissions on');
+    expect(screen.status).toContain('general-purpose');
+    expect(screen.content).toContain('Answer already delivered.');
+  });
+
   it('does not treat Claude slash-command suggestions as active composer input', () => {
     const screen = parseSessionScreenSnapshot([
       'Claude Code v2.1.197',
