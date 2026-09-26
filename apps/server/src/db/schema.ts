@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 11;
+export const CURRENT_SCHEMA_VERSION = 12;
 
 interface Migration {
   version: number;
@@ -239,6 +239,12 @@ const MIGRATIONS: Migration[] = [
   { version: 11, name: 'claude-cost-profile', up(sqlite) {
     if (tableExists(sqlite, 'bound_sessions')) {
       addColumnIfMissing(sqlite, 'bound_sessions', 'claude_profile', 'claude_profile text');
+    }
+  } },
+  { version: 12, name: 'provider-response-time', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'last_response_at', 'last_response_at text');
+      sqlite.exec('update bound_sessions set last_response_at = last_completed_at where last_response_at is null');
     }
   } },
 ];

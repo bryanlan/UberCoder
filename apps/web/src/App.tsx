@@ -66,10 +66,6 @@ function useLocalStorageString(key: string, fallback: string) {
 const defaultUiPreferences: UiPreferences = {
   recentActivitySortEnabled: true,
   manualProjectOrder: [],
-  sessionFreshnessThresholds: {
-    yellowMinutes: 60,
-    redMinutes: 24 * 60,
-  },
 };
 const LIVE_MESSAGE_REFRESH_THROTTLE_MS = 3000;
 
@@ -910,7 +906,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         onToggleWorkMode={() => setWorkMode((current) => !current)}
         recentActivitySortEnabled={uiPreferences.recentActivitySortEnabled}
         manualProjectOrder={uiPreferences.manualProjectOrder}
-        sessionFreshnessThresholds={uiPreferences.sessionFreshnessThresholds}
         onToggleRecentActivity={handleToggleRecentActivity}
         onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
@@ -1029,9 +1024,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
           {routeSelection.inSettings ? (
             <SettingsPage
               settings={settingsQuery.data}
-              uiPreferences={uiPreferences}
-              onUpdateUiPreferences={handleUpdateUiPreferences}
-              updatingUiPreferences={updateUiPreferencesMutation.isPending}
               csrfToken={authQuery.data?.csrfToken}
               backHref={lastConsolePath}
             />

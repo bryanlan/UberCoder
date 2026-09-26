@@ -24,10 +24,10 @@ export class BoundSessionsRepo {
       this.sqlite.prepare(`
         insert into bound_sessions (
           id, provider, codex_profile, claude_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
-          started_at, updated_at, last_activity_at, last_output_at, last_completed_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
+          started_at, updated_at, last_activity_at, last_output_at, last_completed_at, last_response_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
           @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
-          @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @auto_tracked_at, @is_working, @pid, @raw_log_path, @event_log_path
+          @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, @raw_log_path, @event_log_path
         )
         on conflict(id) do update set
           conversation_ref = excluded.conversation_ref,
@@ -51,6 +51,7 @@ export class BoundSessionsRepo {
           last_activity_at = excluded.last_activity_at,
           last_output_at = excluded.last_output_at,
           last_completed_at = excluded.last_completed_at,
+          last_response_at = excluded.last_response_at,
           auto_tracked_at = excluded.auto_tracked_at,
           is_working = excluded.is_working,
           pid = excluded.pid,
@@ -73,6 +74,7 @@ export class BoundSessionsRepo {
         last_activity_at: session.lastActivityAt ?? null,
         last_output_at: session.lastOutputAt ?? null,
         last_completed_at: session.lastCompletedAt ?? null,
+        last_response_at: session.lastResponseAt ?? null,
         auto_tracked_at: session.autoTrackedAt ?? null,
         is_working: boolAsInt(Boolean(session.isWorking)),
         pid: session.pid ?? null,
@@ -239,6 +241,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     lastActivityAt: optionalString(row.last_activity_at),
     lastOutputAt: optionalString(row.last_output_at),
     lastCompletedAt: optionalString(row.last_completed_at),
+    lastResponseAt: optionalString(row.last_response_at),
     autoTrackedAt: optionalString(row.auto_tracked_at),
     isWorking: Boolean(row.is_working),
     pid: numberOrUndefined(row.pid),

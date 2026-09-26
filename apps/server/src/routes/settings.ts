@@ -45,19 +45,12 @@ const updateGlobalSettingsBodySchema = z.object({
   trustTailscaleHeaders: z.boolean(),
 });
 
-const updateUiPreferencesBodySchema = z.object({
+const updateUiPreferencesBodySchema = z.strictObject({
   recentActivitySortEnabled: z.boolean().optional(),
   manualProjectOrder: z.array(z.string().trim().min(1)).optional(),
-  sessionFreshnessThresholds: z.object({
-    yellowMinutes: z.number().int().min(1).max(24 * 60),
-    redMinutes: z.number().int().min(1).max(24 * 60),
-  }).refine((value) => value.yellowMinutes < value.redMinutes, {
-    message: 'Freshness thresholds must increase from yellow to red.',
-  }).optional(),
 }).refine((value) => (
   value.recentActivitySortEnabled !== undefined
   || value.manualProjectOrder !== undefined
-  || value.sessionFreshnessThresholds !== undefined
 ), {
   message: 'Expected at least one UI preference field.',
 });
@@ -67,10 +60,6 @@ const browseDirectoriesQuerySchema = z.object({
 });
 
 const SIDEBAR_UI_PREFERENCES_KEY = 'sidebar';
-const DEFAULT_SESSION_FRESHNESS_THRESHOLDS = {
-  yellowMinutes: 60,
-  redMinutes: 24 * 60,
-} as const;
 
 function isTailscaleIpv4Address(address: string): boolean {
   const octets = address.split('.').map((part) => Number.parseInt(part, 10));
@@ -128,21 +117,6 @@ function normalizeUiPreferences(input: Partial<UiPreferences> | undefined, avail
   return {
     recentActivitySortEnabled: input?.recentActivitySortEnabled ?? true,
     manualProjectOrder: dedupedOrder,
-    sessionFreshnessThresholds: (() => {
-      const thresholds = input?.sessionFreshnessThresholds;
-      if (
-        thresholds
-        && !Object.hasOwn(thresholds, 'orangeMinutes')
-        && thresholds.yellowMinutes > 0
-        && thresholds.yellowMinutes < thresholds.redMinutes
-      ) {
-        return {
-          yellowMinutes: thresholds.yellowMinutes,
-          redMinutes: thresholds.redMinutes,
-        };
-      }
-      return DEFAULT_SESSION_FRESHNESS_THRESHOLDS;
-    })(),
   };
 }
 

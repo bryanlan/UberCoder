@@ -113,10 +113,6 @@ describe('settings routes', () => {
       expect(initialUiPreferences.json()).toEqual({
         recentActivitySortEnabled: true,
         manualProjectOrder: ['demo'],
-        sessionFreshnessThresholds: {
-          yellowMinutes: 60,
-          redMinutes: 1440,
-        },
       });
 
       const directories = await app.inject({
@@ -197,10 +193,6 @@ describe('settings routes', () => {
         payload: {
           recentActivitySortEnabled: false,
           manualProjectOrder: ['alpha--service', 'demo'],
-          sessionFreshnessThresholds: {
-            yellowMinutes: 2,
-            redMinutes: 11,
-          },
         },
       });
       expect(updateUiPreferences.statusCode).toBe(200);
@@ -208,10 +200,6 @@ describe('settings routes', () => {
         preferences: {
           recentActivitySortEnabled: false,
           manualProjectOrder: ['alpha--service', 'demo', 'empty-workspace'],
-          sessionFreshnessThresholds: {
-            yellowMinutes: 2,
-            redMinutes: 11,
-          },
         },
       });
 

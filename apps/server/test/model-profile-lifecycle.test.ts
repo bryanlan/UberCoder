@@ -70,6 +70,7 @@ describe('model switching at provider turn boundaries', () => {
     await fs.appendFile(transcript, event(type));
     // The transcript watcher must release the browser queue without waiting for a screen poll.
     await expect.poll(() => db.boundSessions.getById(session.id)?.isWorking, { timeout: 3000 }).toBe(false);
+    if (type === 'task_complete') expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBeDefined();
     expect(db.boundSessions.getById(session.id)?.lastCompletedAt).toBeUndefined();
     expect((await manager.getSessionScreen(session.id))?.session.isWorking).toBe(false);
     // A terminal repaint can lag behind the authoritative completion event.

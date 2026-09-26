@@ -9,6 +9,7 @@ import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
+import type { ProviderRunState } from '../providers/types.js';
 import { isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
@@ -83,6 +84,7 @@ const DEFAULT_SESSION_EAGER_RESTORE_MS = 48 * 60 * 60 * 1000;
 // Restoring a session does not move recency, so a freshly restored idle session
 // gets this long before the reaper may suspend it again.
 const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
+const WORK_SESSION_RELEASE_MS = 120 * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
 interface SessionRecoveryDependencies {
@@ -323,10 +325,18 @@ export class SessionManager {
         this.eventBus.emit({ type: 'session.updated', session: updated });
       },
       publish: (session) => this.eventBus.emit({ type: 'session.updated', session }),
-      onRunState: (id) => {
+      onRunState: (id, run) => {
         const session = this.db.boundSessions.getById(id);
         if (session?.shouldRestore && session.status === 'bound') {
-          this.syncSessionWorkingState(session, { screenShowsWorking: false, capturedAt: nowIso() });
+          if (run.status === 'completed' && session.provider === 'codex') {
+            this.recordProviderResponse(session, run);
+          } else if (run.status === 'completed' && session.provider === 'claude') {
+            void this.confirmClaudeResponse(id, run).catch((error: unknown) => {
+              this.logger?.warn({ err: error, sessionId: id }, 'Failed to confirm Claude prompt readiness.');
+            });
+          } else {
+            this.syncSessionWorkingState(session, { screenShowsWorking: false, capturedAt: nowIso() });
+          }
         }
         this.scheduleModelProfileDrain(id);
       },
@@ -435,8 +445,45 @@ export class SessionManager {
     if (!run) return undefined;
     // A previous completion cannot acknowledge a newly submitted turn.
     if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
+    const session = this.db.boundSessions.getById(sessionId);
+    // Claude can emit end_turn before another Stop hook continues the turn.
+    // A completed record only clears working after the input prompt is visible.
+    if (session?.provider === 'claude' && run.status === 'completed'
+      && (!session.lastResponseAt || run.timestamp > session.lastResponseAt)) return true;
     state.submittedTurnAt = undefined;
     return run.status === 'running';
+  }
+
+  private recordProviderResponse(session: BoundSession, run: ProviderRunState): void {
+    if (run.status !== 'completed' || !session.shouldRestore || session.status !== 'bound') return;
+    const submittedAt = this.runtimeState(session.id).submittedTurnAt;
+    if (submittedAt && run.timestamp < submittedAt) return;
+    const completedMs = Date.parse(run.timestamp);
+    if (!Number.isFinite(completedMs)) return;
+    const priorResponseMs = Date.parse(session.lastResponseAt ?? '');
+    const updated: BoundSession = (!Number.isFinite(priorResponseMs) || completedMs > priorResponseMs)
+      ? { ...session, lastResponseAt: run.timestamp, updatedAt: nowIso() }
+      : session;
+    if (updated === session && !session.isWorking) return;
+    if (updated !== session) this.db.boundSessions.upsert(updated);
+    this.syncSessionWorkingState(updated, { screenShowsWorking: false, capturedAt: nowIso() });
+    if (!session.isWorking && updated !== session) this.eventBus.emit({ type: 'session.updated', session: updated });
+    if (session.provider === 'claude') this.scheduleModelProfileDrain(session.id);
+  }
+
+  private confirmClaudeResponseFromScreen(session: BoundSession, screen: SessionScreen): void {
+    if (session.provider !== 'claude' || !screenLooksReadyForLiteralPrompt(screen)) return;
+    const run = this.runRecovery.getRunState(session.id);
+    if (run?.status !== 'completed') return;
+    this.recordProviderResponse(session, run);
+  }
+
+  private async confirmClaudeResponse(sessionId: string, run: ProviderRunState): Promise<void> {
+    const session = this.db.boundSessions.getById(sessionId);
+    if (!session || session.provider !== 'claude' || session.status !== 'bound') return;
+    const screen = await this.captureSessionScreen(session, false);
+    if (this.runRecovery.getRunState(sessionId)?.timestamp !== run.timestamp) return;
+    this.confirmClaudeResponseFromScreen(this.db.boundSessions.getById(sessionId) ?? session, screen);
   }
 
   private shouldWatchSession(session: BoundSession): boolean {
@@ -525,6 +572,28 @@ export class SessionManager {
 
   async reconcileSessions(): Promise<void> {
     for (const session of this.listRestorableSessions()) {
+      if (this.isWorkReleaseDue(session)) {
+        try {
+          await this.runtimes.run(session.id, 'releaseExpiredWorkSession', async () => {
+            const current = this.db.boundSessions.getById(session.id);
+            if (!current || !this.isWorkReleaseDue(current)) return;
+            const liveness = await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
+            if (liveness === 'unknown') return;
+            if (liveness === 'alive') {
+              const screen = await this.captureSessionScreen(current, false);
+              const hasProviderFooter = /^gpt-\d/i.test(screen.status) || /bypass permissions on/i.test(screen.status);
+              if (sessionScreenShowsWorking(screen) || (screenIsStartingUp(screen) && !hasProviderFooter)
+                || screen.inputText.trim() || screenShowsInteractiveSelectionHint(screen)
+                || screenShowsQueuedMessageHint(screen)) return;
+            }
+            this.runRecovery.cancel(current.id);
+            await this.releaseSessionInternal(current.id, true);
+          });
+        } catch (error) {
+          this.logger?.warn({ err: error, sessionId: session.id }, 'Failed to release expired Work session.');
+        }
+        continue;
+      }
       if (session.modelProfileRequest) {
         await this.runtimes.run(session.id, 'reconcileModelProfileRequest', () => this.drainModelProfileRequestInternal(session.id));
         const current = this.db.boundSessions.getById(session.id);
@@ -542,7 +611,7 @@ export class SessionManager {
   }
 
   private sessionIdleTimestampMs(session: BoundSession): number {
-    const candidates = [session.lastActivityAt, session.lastOutputAt, session.lastCompletedAt, session.startedAt];
+    const candidates = [session.lastActivityAt, session.lastOutputAt, session.lastCompletedAt, session.lastResponseAt, session.startedAt];
     let latest = 0;
     for (const candidate of candidates) {
       const parsed = candidate ? Date.parse(candidate) : Number.NaN;
@@ -551,6 +620,12 @@ export class SessionManager {
       }
     }
     return latest;
+  }
+
+  private isWorkReleaseDue(session: BoundSession): boolean {
+    if (!session.shouldRestore || session.isWorking || session.modelProfileRequest) return false;
+    const idleSinceMs = this.sessionIdleTimestampMs(session);
+    return idleSinceMs > 0 && Date.now() - idleSinceMs >= WORK_SESSION_RELEASE_MS;
   }
 
   private isIdleSuspendable(session: BoundSession): boolean {
@@ -1944,7 +2019,7 @@ export class SessionManager {
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
 
-  private async releaseSessionInternal(sessionId: string): Promise<void> {
+  private async releaseSessionInternal(sessionId: string, removePendingConversation = false): Promise<void> {
     let session = this.mustGetSession(sessionId);
     if (session.modelProfileRequest) {
       session = this.db.boundSessions.replaceModelProfileRequest(session.id, undefined, nowIso()) ?? session;
@@ -2007,7 +2082,9 @@ export class SessionManager {
     this.db.boundSessions.upsert(ended);
     if (session.conversationRef.startsWith('pending:')) {
       const pending = this.db.pendingConversations.get(session.conversationRef);
-      if (pending) {
+      if (removePendingConversation) {
+        this.db.pendingConversations.delete(session.conversationRef);
+      } else if (pending) {
         this.db.pendingConversations.put({
           ...pending,
           isBound: false,
@@ -2074,7 +2151,9 @@ export class SessionManager {
       return undefined;
     }
     const snapshot = await this.tmuxClient.capturePane(liveSession.tmuxSessionName, options.startLine).catch(() => '');
-    const screen = this.decorateScreenForSession(liveSession, parseSessionScreenSnapshot(snapshot, nowIso()));
+    const rawScreen = parseSessionScreenSnapshot(snapshot, nowIso());
+    this.confirmClaudeResponseFromScreen(this.mustGetSession(liveSession.id), rawScreen);
+    const screen = this.decorateScreenForSession(liveSession, rawScreen);
     this.syncSessionWorkingState(this.mustGetSession(liveSession.id), {
       screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
     });
@@ -2459,6 +2538,12 @@ export class SessionManager {
     }
 
     state.lastScreenHash = nextHash;
+    const run = this.runRecovery.getRunState(session.id);
+    if (session.provider === 'claude' && run?.status === 'completed') {
+      void this.confirmClaudeResponse(session.id, run).catch((error: unknown) => {
+        this.logger?.warn({ err: error, sessionId: session.id }, 'Failed to confirm Claude prompt readiness.');
+      });
+    }
     this.syncSessionWorkingState(this.mustGetSession(session.id), {
       screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
     });

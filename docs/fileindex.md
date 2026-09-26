@@ -52,6 +52,7 @@
   user messages by their recorded text hash.
 - `apps/server/src/providers/transcripts/claude.ts` - Claude JSONL parsing and active-branch
   selection for parent-linked sibling resume histories.
+- `apps/server/src/providers/transcripts/claude-run-state.ts` - incremental Claude turn lifecycle reading for Work-mode readiness.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
 - `apps/server/src/lib/provider-conversation-cache.ts` - transcript parse cache; small changing
   transcripts re-parse during active turns, while transcripts above the shared large-transcript
@@ -80,7 +81,7 @@
   event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution,
   canonical conversation ownership, startup verification, recovery,
-  bounded recent-conversation auto-tracking, working state, event-log observation, text entry,
+  bounded recent-conversation auto-tracking, working state, confirmed response timestamps, timed Work-mode release, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
@@ -101,8 +102,8 @@
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
-  404 selection, sidebar ordering, work-mode derivation, and separation of auto-track indicator
-  freshness from genuine activity ordering.
+  404 selection, sidebar ordering, work-mode derivation, and separation of provider response status
+  from genuine activity ordering.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation

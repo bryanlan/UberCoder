@@ -171,7 +171,6 @@ describe('deriveSidebarProjects', () => {
     expect(visibleProjects.map((item) => item.slug)).toEqual(['genuinely-newer', 'auto-tracked']);
     expect(visibleProjects[1]?.combinedConversations[0]).toMatchObject({
       activityTimestamp: '2026-07-01T09:00:00.000Z',
-      indicatorTimestamp: '2026-07-01T12:00:00.000Z',
       autoTrackedAt: '2026-07-01T12:00:00.000Z',
     });
   });

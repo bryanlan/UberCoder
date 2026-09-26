@@ -1,12 +1,13 @@
 import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Plus, RefreshCcw, Search, Sparkles, X } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import type { ConversationSearchResult, ProjectSummary, ProviderId, RunFailure, SessionFreshnessThresholds, TreeResponse } from '@agent-console/shared';
+import type { ConversationSearchResult, ProjectSummary, ProviderId, RunFailure, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
+import { getConversationStatusClass } from '../features/navigation/work-status';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
@@ -24,7 +25,6 @@ interface SidebarProps {
   onToggleWorkMode: () => void;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
-  sessionFreshnessThresholds: SessionFreshnessThresholds;
   onToggleRecentActivity: () => Promise<void>;
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
@@ -41,35 +41,6 @@ interface SidebarProps {
 }
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
-
-const ANCIENT_CONVERSATION_MINUTES = 7 * 24 * 60;
-
-function getConversationFreshnessClass(
-  isBound: boolean,
-  freshnessTimestamp: string | undefined,
-  thresholds: SessionFreshnessThresholds,
-  nowMs: number,
-): string {
-  const parsedTime = freshnessTimestamp ? Date.parse(freshnessTimestamp) : Number.NaN;
-  const ageMinutes = Number.isFinite(parsedTime) ? Math.max(0, nowMs - parsedTime) / 60_000 : undefined;
-
-  if (ageMinutes !== undefined && ageMinutes >= ANCIENT_CONVERSATION_MINUTES) {
-    return isBound ? 'bg-violet-500' : 'border border-violet-500/70 bg-violet-500/25';
-  }
-  if (!isBound) {
-    return 'border border-slate-700 bg-transparent';
-  }
-  if (ageMinutes === undefined) {
-    return 'bg-emerald-400';
-  }
-  if (ageMinutes >= thresholds.redMinutes) {
-    return 'bg-rose-500';
-  }
-  if (ageMinutes >= thresholds.yellowMinutes) {
-    return 'bg-amber-400';
-  }
-  return 'bg-emerald-400';
-}
 
 function formatRelativeAge(timestamp: string | undefined, nowMs: number): string {
   const parsed = timestamp ? Date.parse(timestamp) : Number.NaN;
@@ -233,10 +204,10 @@ function ConversationLink({
   rebinding,
   renaming,
   lastInteractionAt,
-  indicatorTimestamp,
+  lastResponseAt,
+  isWorking,
   runFailure,
   autoTrackedAt,
-  sessionFreshnessThresholds,
 }: {
   project: ProjectSummary;
   provider: ProviderId;
@@ -251,10 +222,10 @@ function ConversationLink({
   rebinding: boolean;
   renaming: boolean;
   lastInteractionAt?: string;
-  indicatorTimestamp?: string;
+  lastResponseAt?: string;
+  isWorking: boolean;
   runFailure?: RunFailure;
   autoTrackedAt?: string;
-  sessionFreshnessThresholds: SessionFreshnessThresholds;
 }) {
   const location = useLocation();
   const nowMs = useNowMs();
@@ -264,7 +235,7 @@ function ConversationLink({
   const rowRef = useRef<HTMLDivElement | null>(null);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
-  const indicatorClassName = getConversationFreshnessClass(isBound, indicatorTimestamp, sessionFreshnessThresholds, nowMs);
+  const indicatorClassName = getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
 
   useEffect(() => {
     if (!editing) {
@@ -349,6 +320,7 @@ function ConversationLink({
         <span
           className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
           title={[
+            !isBound ? 'History' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
             `Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`,
             autoTrackedAt ? `Auto-tracked: ${formatRelativeAge(autoTrackedAt, nowMs)}` : undefined,
           ].filter(Boolean).join(' · ')}
@@ -428,7 +400,6 @@ function ProjectSection({
   rebindingConversationKey,
   renamingConversationKey,
   tailscaleIpv4,
-  sessionFreshnessThresholds,
 }: {
   project: SidebarProject;
   workMode: boolean;
@@ -449,7 +420,6 @@ function ProjectSection({
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
   tailscaleIpv4?: string;
-  sessionFreshnessThresholds: SessionFreshnessThresholds;
 }) {
   const location = useLocation();
   const [editingProject, setEditingProject] = useState(false);
@@ -682,7 +652,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, activityTimestamp, indicatorTimestamp, autoTrackedAt, runFailure }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, autoTrackedAt, runFailure }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -698,10 +668,10 @@ function ProjectSection({
                 rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 lastInteractionAt={activityTimestamp}
-                indicatorTimestamp={indicatorTimestamp}
+                lastResponseAt={lastResponseAt}
+                isWorking={isWorking}
                 runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
-                sessionFreshnessThresholds={sessionFreshnessThresholds}
               />
             ))}
             {hasHiddenConversations ? (
@@ -732,7 +702,6 @@ export function Sidebar({
   onToggleWorkMode,
   recentActivitySortEnabled,
   manualProjectOrder,
-  sessionFreshnessThresholds,
   onToggleRecentActivity,
   onReorderProjects,
   onNewConversation,
@@ -926,7 +895,6 @@ export function Sidebar({
                 rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
                 tailscaleIpv4={tailscaleIpv4}
-                sessionFreshnessThresholds={sessionFreshnessThresholds}
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">

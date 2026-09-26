@@ -13,7 +13,7 @@ interface RecoveryOptions {
   submit: (session: BoundSession, text: string) => Promise<void>;
   publish: (session: BoundSession) => void;
   onError: (error: unknown) => void;
-  onRunState?: (sessionId: string) => void;
+  onRunState?: (sessionId: string, run: ProviderRunState) => void;
   delaysMs?: readonly number[];
   now?: () => number;
 }
@@ -107,7 +107,7 @@ export class RunRecovery {
     observation.lastTurnId = run.turnId;
     observation.lastStatus = run.status;
     observation.run = run;
-    this.options.onRunState?.(id);
+    this.options.onRunState?.(id, run);
     const session = this.options.db.boundSessions.getById(id);
     if (!session || !session.shouldRestore || session.status !== 'bound') return;
     const prior = session.runFailure;

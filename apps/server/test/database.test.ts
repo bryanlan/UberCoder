@@ -23,6 +23,7 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
     lastActivityAt: input.lastActivityAt,
     lastOutputAt: input.lastOutputAt,
     lastCompletedAt: input.lastCompletedAt,
+    lastResponseAt: input.lastResponseAt,
     autoTrackedAt: input.autoTrackedAt,
     isWorking: input.isWorking ?? false,
     pid: input.pid,
@@ -84,6 +85,7 @@ describe('AppDatabase', () => {
       'should_restore',
       'last_output_at',
       'last_completed_at',
+      'last_response_at',
       'auto_tracked_at',
       'is_working',
       'model_profile_request_json',
@@ -95,6 +97,23 @@ describe('AppDatabase', () => {
       resumeConversationRef: 'legacy-ref',
     });
     db.close();
+  });
+
+  it('backfills provider response time when upgrading a version 11 database', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v11-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const before = new AppDatabase(databasePath);
+    const completedAt = '2026-09-20T12:00:00.000Z';
+    before.boundSessions.upsert(boundSession({
+      id: 'completed-session', conversationRef: 'completed-ref', updatedAt: completedAt,
+      lastCompletedAt: completedAt,
+    }));
+    before.sqlite.exec('alter table bound_sessions drop column last_response_at; delete from schema_version where version = 12');
+    before.close();
+
+    const after = new AppDatabase(databasePath);
+    expect(after.boundSessions.getById('completed-session')?.lastResponseAt).toBe(completedAt);
+    after.close();
   });
 
   it('round-trips auto-tracked session provenance separately from activity recency', async () => {

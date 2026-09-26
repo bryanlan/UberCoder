@@ -225,6 +225,8 @@ export interface BoundSession {
   lastActivityAt?: string;
   lastOutputAt?: string;
   lastCompletedAt?: string;
+  /** Provider-confirmed response time, independent of the recency idle window. */
+  lastResponseAt?: string;
   autoTrackedAt?: string;
   isWorking?: boolean;
   pid?: number | null;
@@ -291,15 +293,9 @@ export interface TreeResponse {
   lastIndexedAt?: string;
 }
 
-export interface SessionFreshnessThresholds {
-  yellowMinutes: number;
-  redMinutes: number;
-}
-
 export interface UiPreferences {
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
-  sessionFreshnessThresholds: SessionFreshnessThresholds;
 }
 
 export interface SettingsSummary {
@@ -359,7 +355,6 @@ export interface CreateDirectoryRequest {
 export interface UpdateUiPreferencesRequest {
   recentActivitySortEnabled?: boolean;
   manualProjectOrder?: string[];
-  sessionFreshnessThresholds?: SessionFreshnessThresholds;
 }
 
 export interface RenameConversationRequest {

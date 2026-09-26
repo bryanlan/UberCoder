@@ -7,7 +7,8 @@ export interface SidebarConversation {
   provider: ProviderId;
   conversation: ConversationItem;
   activityTimestamp: string;
-  indicatorTimestamp: string;
+  lastResponseAt?: string;
+  isWorking: boolean;
   autoTrackedAt?: string;
   runFailure?: BoundSessionItem['runFailure'];
 }
@@ -25,10 +26,6 @@ function getConversationRecencyTimestamp(
     return conversation.updatedAt;
   }
   return session.lastCompletedAt ?? conversation.updatedAt;
-}
-
-function newestTimestamp(first: string, second?: string): string {
-  return second && second > first ? second : first;
 }
 
 export function deriveSidebarProjects({
@@ -60,7 +57,8 @@ export function deriveSidebarProjects({
             provider,
             conversation,
             activityTimestamp,
-            indicatorTimestamp: newestTimestamp(activityTimestamp, session?.autoTrackedAt),
+            lastResponseAt: session?.lastResponseAt,
+            isWorking: session?.isWorking === true,
             autoTrackedAt: session?.autoTrackedAt,
             runFailure: session?.runFailure,
           };

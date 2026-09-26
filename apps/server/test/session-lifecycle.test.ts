@@ -591,16 +591,16 @@ describe('SessionManager lifecycle', () => {
       title: 'Idle suspend',
       kind: 'history',
     });
-    const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    const beforeRelease = new Date(Date.now() - 119 * 60 * 60 * 1000).toISOString();
     db.boundSessions.upsert({
       ...db.boundSessions.getById(session.id)!,
-      lastActivityAt: sixDaysAgo,
-      lastOutputAt: sixDaysAgo,
-      lastCompletedAt: sixDaysAgo,
+      lastActivityAt: beforeRelease,
+      lastOutputAt: beforeRelease,
+      lastCompletedAt: beforeRelease,
       isWorking: false,
     });
     // started_at is insert-only in the repo; backdate it directly.
-    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(sixDaysAgo, session.id);
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(beforeRelease, session.id);
 
     await manager.reconcileSessions();
 
@@ -663,7 +663,92 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
-  it('never suspends idle pending sessions', async () => {
+  it('releases a history session after 120 hours of inactivity', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:expired-work', title: 'Expired work', kind: 'history',
+    });
+    const old = new Date(Date.now() - 121 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: old,
+      lastOutputAt: old,
+      lastCompletedAt: old,
+      lastResponseAt: old,
+      isWorking: false,
+    });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(old, session.id);
+    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+
+    await manager.reconcileSessions();
+
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+    expect(manager.listActiveSessions()).not.toContainEqual(expect.objectContaining({ id: session.id }));
+    await manager.stop();
+    db.close();
+  });
+
+  it('releases an expired pending session and removes its Console-only input log', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'pending:expired-work', title: 'Expired pending work', kind: 'pending',
+    });
+    db.pendingConversations.put({
+      ref: session.conversationRef, kind: 'pending', projectSlug: project.slug,
+      provider: provider.id, title: 'Expired pending work', updatedAt: new Date().toISOString(),
+      isBound: true, boundSessionId: session.id, degraded: false,
+    });
+    await manager.sendInput(session.id, 'Pending user input');
+    expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('Pending user input');
+    const old = new Date(Date.now() - 121 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({
+      ...db.boundSessions.getById(session.id)!,
+      lastActivityAt: old, lastOutputAt: old, lastCompletedAt: old, isWorking: false,
+    });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(old, session.id);
+    tmux.alive.clear();
+
+    await manager.reconcileSessions();
+
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
+    expect(db.pendingConversations.get(session.conversationRef)).toBeUndefined();
+    await expect.poll(async () => fs.stat(session.eventLogPath!).then(() => true, () => false)).toBe(false);
+    await manager.stop();
+    db.close();
+  });
+
+  it('keeps an apparently old session when its live terminal is still working', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:old-but-working', title: 'Old but working', kind: 'history',
+    });
+    const old = new Date(Date.now() - 121 * 60 * 60 * 1000).toISOString();
+    db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, lastActivityAt: old, isWorking: false });
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(old, session.id);
+    tmux.paneText = 'OpenAI Codex\n• Working (20s • esc to interrupt)';
+
+    await manager.reconcileSessions();
+
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    await manager.stop();
+    db.close();
+  });
+
+  it('keeps pending sessions active before the 120-hour release cutoff', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -677,13 +762,13 @@ describe('SessionManager lifecycle', () => {
       title: 'Idle pending',
       kind: 'pending',
     });
-    const sixDaysAgo = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString();
+    const fourDaysAgo = new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString();
     db.boundSessions.upsert({
       ...db.boundSessions.getById(session.id)!,
-      lastActivityAt: sixDaysAgo,
+      lastActivityAt: fourDaysAgo,
       isWorking: false,
     });
-    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(sixDaysAgo, session.id);
+    db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(fourDaysAgo, session.id);
 
     await manager.reconcileSessions();
 

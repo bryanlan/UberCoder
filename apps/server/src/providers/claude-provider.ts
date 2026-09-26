@@ -10,6 +10,7 @@ import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provide
 import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache } from './types.js';
 import { conversationBelongsToProject, deriveConversationRef, loadCachedTranscriptParse } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
+import { ClaudeRunMonitor } from './transcripts/claude-run-state.js';
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
@@ -79,6 +80,8 @@ async function readClaudeHistory(projectPaths: string[], claudeHome: string): Pr
 
 export class ClaudeProvider implements ProviderAdapter {
   readonly id = 'claude' as const;
+
+  createRunMonitor(): ClaudeRunMonitor { return new ClaudeRunMonitor(); }
 
   constructor(private readonly parseCache?: TranscriptParseCache) {}
 
