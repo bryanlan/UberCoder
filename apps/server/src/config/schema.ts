@@ -54,9 +54,13 @@ const serverConfigSchema = z.object({
 const sessionsConfigSchema = z.object({
   eagerRestoreHours: z.number().positive().default(48),
   restoreGraceHours: z.number().positive().default(24),
+  pressureSuspendAvailableMiB: z.number().positive().default(3072),
+  pressureSuspendIdleMinutes: z.number().positive().default(60),
 }).default({
   eagerRestoreHours: 48,
   restoreGraceHours: 24,
+  pressureSuspendAvailableMiB: 3072,
+  pressureSuspendIdleMinutes: 60,
 });
 
 export const appConfigSchema = z.object({

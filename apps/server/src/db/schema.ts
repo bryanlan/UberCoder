@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 13;
+export const CURRENT_SCHEMA_VERSION = 14;
 
 interface Migration {
   version: number;
@@ -250,6 +250,11 @@ const MIGRATIONS: Migration[] = [
   { version: 13, name: 'manual-session-suspension', up(sqlite) {
     if (tableExists(sqlite, 'bound_sessions')) {
       addColumnIfMissing(sqlite, 'bound_sessions', 'manual_suspended_at', 'manual_suspended_at text');
+    }
+  } },
+  { version: 14, name: 'pressure-session-suspension', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'pressure_suspended_at', 'pressure_suspended_at text');
     }
   } },
 ];

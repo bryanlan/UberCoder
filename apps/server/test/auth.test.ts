@@ -20,6 +20,8 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
     sessions: {
       eagerRestoreHours: 48,
       restoreGraceHours: 24,
+      pressureSuspendAvailableMiB: 3072,
+      pressureSuspendIdleMinutes: 60,
     },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',

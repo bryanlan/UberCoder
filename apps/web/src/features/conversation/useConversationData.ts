@@ -6,7 +6,7 @@ import {
   useQuery,
   type QueryClient,
 } from '@tanstack/react-query';
-import type { BoundSession, ConversationTimeline, NormalizedMessage, ProviderId } from '@agent-console/shared';
+import { isBoundSessionSuspended, type BoundSession, type ConversationTimeline, type NormalizedMessage, type ProviderId } from '@agent-console/shared';
 import { api } from '../../lib/api';
 
 const TIMELINE_MESSAGE_PAGE_SIZE = 80;
@@ -259,22 +259,22 @@ export function useConversationData({
         selectedMetaTimeline, selectedProjectSlug, selectedProvider, selectedConversationRef,
       )) return;
     resumeSelectionRef.current.consumed = true;
-    if (selectedBoundSession?.manualSuspendedAt) {
+    if (selectedBoundSession && isBoundSessionSuspended(selectedBoundSession)) {
       void resumeSelectedSession(selectedBoundSession.id, selectedProjectSlug!, selectedProvider!, selectedConversationRef!);
     }
   }, [authenticated, csrfToken, metaQuery.isFetching, resumeSelectedSession, selectedBoundSession, selectedConversationRef,
     selectedMetaTimeline, selectedProjectSlug, selectedProvider, selectionKey]);
 
   const retryResume = useCallback(async (): Promise<void> => {
-    if (!selectedBoundSession?.manualSuspendedAt || !selectedProjectSlug || !selectedProvider || !selectedConversationRef) return;
+    if (!selectedBoundSession || !isBoundSessionSuspended(selectedBoundSession) || !selectedProjectSlug || !selectedProvider || !selectedConversationRef) return;
     await resumeSelectedSession(selectedBoundSession.id, selectedProjectSlug, selectedProvider, selectedConversationRef);
   }, [resumeSelectedSession, selectedBoundSession, selectedConversationRef, selectedProjectSlug, selectedProvider]);
 
   const liveScreenQuery = useQuery({
     queryKey: sessionScreenQueryKey(selectedBoundSession?.id),
     queryFn: () => api.sessionScreen(selectedBoundSession!.id),
-    enabled: Boolean(selectedBoundSession?.id && !selectedBoundSession.manualSuspendedAt),
-    refetchInterval: selectedBoundSession && !selectedBoundSession.manualSuspendedAt ? 1000 : false,
+    enabled: Boolean(selectedBoundSession?.id && !isBoundSessionSuspended(selectedBoundSession)),
+    refetchInterval: selectedBoundSession && !isBoundSessionSuspended(selectedBoundSession) ? 1000 : false,
   });
 
   const messagesQuery = useInfiniteQuery({
@@ -330,7 +330,7 @@ export function useConversationData({
     if (!meta) {
       return undefined;
     }
-    const liveScreenData = selectedBoundSession?.manualSuspendedAt ? undefined : liveScreenQuery.data;
+    const liveScreenData = isBoundSessionSuspended(selectedBoundSession) ? undefined : liveScreenQuery.data;
     const refreshedLiveScreen = liveScreenData && liveScreenData.session.id === selectedBoundSession?.id
       ? liveScreenData.screen
       : undefined;
@@ -339,7 +339,7 @@ export function useConversationData({
       ...meta,
       boundSession: refreshedBoundSession,
       messages: pagedTimelineMessages,
-      liveScreen: selectedBoundSession?.manualSuspendedAt ? undefined : refreshedLiveScreen ?? meta.liveScreen,
+      liveScreen: isBoundSessionSuspended(selectedBoundSession) ? undefined : refreshedLiveScreen ?? meta.liveScreen,
       messagePage: messagePages.at(-1)?.messagePage ?? meta.messagePage,
     };
   }, [
@@ -348,6 +348,7 @@ export function useConversationData({
     pagedTimelineMessages,
     selectedBoundSession?.id,
     selectedBoundSession?.manualSuspendedAt,
+    selectedBoundSession?.pressureSuspendedAt,
     selectedMetaTimeline,
   ]);
 
@@ -358,8 +359,8 @@ export function useConversationData({
   const rawOutputQuery = useQuery({
     queryKey: ['raw-output', boundSession?.id],
     queryFn: () => api.rawOutput(boundSession!.id),
-    enabled: Boolean(debugOpen && boundSession?.id && !boundSession.manualSuspendedAt),
-    refetchInterval: realtimeDegraded && boundSession && !boundSession.manualSuspendedAt ? 1000 : false,
+    enabled: Boolean(debugOpen && boundSession?.id && !isBoundSessionSuspended(boundSession)),
+    refetchInterval: realtimeDegraded && boundSession && !isBoundSessionSuspended(boundSession) ? 1000 : false,
   });
 
   const loadOlderMessages = useCallback(async (): Promise<void> => {
@@ -393,7 +394,7 @@ export function useConversationData({
     resuming: Boolean(boundSession && resumeAttempt?.sessionId === boundSession.id && resumeAttempt.pending),
     retryResume,
     loading: metaQuery.isLoading || (messagesQuery.isLoading && !messagesQuery.data),
-    rawOutput: boundSession?.manualSuspendedAt ? undefined : rawOutputQuery.data?.text,
+    rawOutput: isBoundSessionSuspended(boundSession) ? undefined : rawOutputQuery.data?.text,
     rawLoading: rawOutputQuery.isLoading,
     hasOlderMessages: Boolean(messagesQuery.hasNextPage),
     loadingOlderMessages: messagesQuery.isFetchingNextPage,

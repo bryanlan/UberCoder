@@ -56,6 +56,8 @@ export async function buildApp(options: AppOptions = {}) {
   }, app.log, {
     eagerRestoreWindowMs: config.sessions.eagerRestoreHours * 60 * 60 * 1000,
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
+    pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
+    pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
   });
   const authService = new AuthService(config, db);
   const coordination = new CoordinationService(db, config.coordination);

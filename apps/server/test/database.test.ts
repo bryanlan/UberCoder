@@ -90,6 +90,7 @@ describe('AppDatabase', () => {
       'is_working',
       'model_profile_request_json',
       'claude_profile',
+      'pressure_suspended_at',
     ]));
     expect(session).toMatchObject({
       id: 'legacy-session',
@@ -161,6 +162,29 @@ describe('AppDatabase', () => {
 
     const reopened = new AppDatabase(databasePath);
     expect(reopened.boundSessions.getById(session.id)?.modelProfileRequest).toEqual(request);
+    reopened.close();
+  });
+
+  it('persists pressure suspension independently from ordinary session updates', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const db = new AppDatabase(databasePath);
+    const session = boundSession({
+      id: 'pressure-session', conversationRef: 'pressure-conversation',
+      updatedAt: '2026-09-18T10:00:00.000Z', pid: 4242,
+    });
+    db.boundSessions.upsert(session);
+    const suspendedAt = '2026-09-18T11:00:00.000Z';
+    expect(db.boundSessions.setPressureSuspendedAt(session.id, suspendedAt)).toMatchObject({
+      pressureSuspendedAt: suspendedAt, pid: undefined, isWorking: false,
+    });
+    db.boundSessions.upsert({ ...session, updatedAt: '2026-09-18T12:00:00.000Z' });
+    expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBe(suspendedAt);
+    db.close();
+
+    const reopened = new AppDatabase(databasePath);
+    expect(reopened.boundSessions.getById(session.id)?.pressureSuspendedAt).toBe(suspendedAt);
+    expect(reopened.boundSessions.setPressureSuspendedAt(session.id, undefined)?.pressureSuspendedAt).toBeUndefined();
     reopened.close();
   });
 

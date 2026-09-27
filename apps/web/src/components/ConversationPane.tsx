@@ -1,6 +1,6 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, Pause, PlugZap, Unplug } from 'lucide-react';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -1627,14 +1627,15 @@ export function ConversationPane({
   }
 
   const proxyLinks = project?.allowedLocalhostPorts ?? [];
+  const sessionSuspended = isBoundSessionSuspended(boundSession);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {boundSession?.runFailure && !boundSession.manualSuspendedAt && <RunFailureNotice failure={boundSession.runFailure}
+      {boundSession?.runFailure && !sessionSuspended && <RunFailureNotice failure={boundSession.runFailure}
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
-      {boundSession?.manualSuspendedAt && (
+      {sessionSuspended && (
         <div className="border-b border-slate-700 bg-slate-800/70 px-4 py-2 text-sm text-slate-200">
-          {resumeError ? `Unable to resume: ${resumeError}` : resuming ? 'Resuming suspended session…' : 'Session suspended.'}
+          {resumeError ? `Unable to resume: ${resumeError}` : resuming ? 'Resuming suspended session…' : boundSession?.pressureSuspendedAt ? 'Session suspended to free memory.' : 'Session suspended.'}
           {!resuming && <button type="button" onClick={() => { void onRetryResume(); }} className="ml-3 text-sky-300 hover:text-sky-200">{resumeError ? 'Retry' : 'Resume'}</button>}
         </div>
       )}
@@ -1664,7 +1665,7 @@ export function ConversationPane({
                   <button
                     type="button"
                     onClick={() => onSuspend(boundSession.id)}
-                    disabled={suspending || releasing || boundSession.isWorking || Boolean(boundSession.manualSuspendedAt)}
+                    disabled={suspending || releasing || boundSession.isWorking || sessionSuspended}
                     title="Keep this conversation in Work and resume it when selected again"
                     className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
                   >
@@ -1723,7 +1724,7 @@ export function ConversationPane({
                     <button
                       type="button"
                       onClick={() => onSuspend(boundSession.id)}
-                      disabled={suspending || releasing || boundSession.isWorking || Boolean(boundSession.manualSuspendedAt)}
+                      disabled={suspending || releasing || boundSession.isWorking || sessionSuspended}
                       title="Keep this conversation in Work and resume it when selected again"
                       className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
                     >
@@ -1838,7 +1839,7 @@ export function ConversationPane({
         )}
       </div>
 
-      {boundSession?.manualSuspendedAt ? (
+      {sessionSuspended ? (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
           Resume this session to use the live input bridge.
         </div>

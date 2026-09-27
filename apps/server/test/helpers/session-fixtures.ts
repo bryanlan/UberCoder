@@ -134,6 +134,7 @@ export function createRecoveryManager(
   eventBus = new RealtimeEventBus(),
   recoveryProvider: ProviderAdapter = provider,
   recoveryProviderSettings: MergedProviderSettings = providerSettings,
+  options: ConstructorParameters<typeof SessionManager>[6] = {},
 ): SessionManager {
   return new SessionManager(db, tmux, runtimeDir, eventBus, {
     projectService: {
@@ -143,5 +144,5 @@ export function createRecoveryManager(
     providerRegistry: {
       get: () => recoveryProvider,
     },
-  });
+  }, undefined, options);
 }

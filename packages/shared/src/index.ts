@@ -230,10 +230,16 @@ export interface BoundSession {
   autoTrackedAt?: string;
   /** Explicitly suspended by the user; selecting the conversation resumes it. */
   manualSuspendedAt?: string;
+  /** Automatically suspended during low available memory; selecting the conversation resumes it. */
+  pressureSuspendedAt?: string;
   isWorking?: boolean;
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;
+}
+
+export function isBoundSessionSuspended(session: BoundSession | undefined): boolean {
+  return Boolean(session?.manualSuspendedAt || session?.pressureSuspendedAt);
 }
 
 export interface SessionInputRequest {

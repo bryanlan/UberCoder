@@ -14,7 +14,9 @@
   },
   "sessions": {
     "eagerRestoreHours": 48,
-    "restoreGraceHours": 24
+    "restoreGraceHours": 24,
+    "pressureSuspendAvailableMiB": 3072,
+    "pressureSuspendIdleMinutes": 60
   },
   "security": {
     "passwordHash": "REPLACE_WITH_OUTPUT_FROM_NPM_RUN_AUTH_HASH",

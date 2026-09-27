@@ -207,6 +207,7 @@ function ConversationLink({
   lastResponseAt,
   isWorking,
   manualSuspendedAt,
+  pressureSuspendedAt,
   runFailure,
   autoTrackedAt,
 }: {
@@ -226,6 +227,7 @@ function ConversationLink({
   lastResponseAt?: string;
   isWorking: boolean;
   manualSuspendedAt?: string;
+  pressureSuspendedAt?: string;
   runFailure?: RunFailure;
   autoTrackedAt?: string;
 }) {
@@ -237,7 +239,8 @@ function ConversationLink({
   const rowRef = useRef<HTMLDivElement | null>(null);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
-  const indicatorClassName = manualSuspendedAt
+  const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt);
+  const indicatorClassName = suspended
     ? 'border border-slate-500 bg-transparent'
     : getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
 
@@ -324,7 +327,7 @@ function ConversationLink({
         <span
           className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
           title={[
-            !isBound ? 'History' : manualSuspendedAt ? 'Suspended · select to resume' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
+            !isBound ? 'History' : pressureSuspendedAt ? 'Suspended to free memory · select to resume' : manualSuspendedAt ? 'Suspended · select to resume' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
             `Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`,
             autoTrackedAt ? `Auto-tracked: ${formatRelativeAge(autoTrackedAt, nowMs)}` : undefined,
           ].filter(Boolean).join(' · ')}
@@ -333,7 +336,7 @@ function ConversationLink({
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
         <span className="line-clamp-1 min-w-0">{title}</span>
-        {manualSuspendedAt && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
+        {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
         </span>}
@@ -657,7 +660,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, autoTrackedAt, runFailure }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, autoTrackedAt, runFailure }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -676,6 +679,7 @@ function ProjectSection({
                 lastResponseAt={lastResponseAt}
                 isWorking={isWorking}
                 manualSuspendedAt={manualSuspendedAt}
+                pressureSuspendedAt={pressureSuspendedAt}
                 runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
               />

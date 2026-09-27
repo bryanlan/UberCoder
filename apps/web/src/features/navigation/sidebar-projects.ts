@@ -10,6 +10,7 @@ export interface SidebarConversation {
   lastResponseAt?: string;
   isWorking: boolean;
   manualSuspendedAt?: string;
+  pressureSuspendedAt?: string;
   autoTrackedAt?: string;
   runFailure?: BoundSessionItem['runFailure'];
 }
@@ -61,6 +62,7 @@ export function deriveSidebarProjects({
             lastResponseAt: session?.lastResponseAt,
             isWorking: session?.isWorking === true,
             manualSuspendedAt: session?.manualSuspendedAt,
+            pressureSuspendedAt: session?.pressureSuspendedAt,
             autoTrackedAt: session?.autoTrackedAt,
             runFailure: session?.runFailure,
           };

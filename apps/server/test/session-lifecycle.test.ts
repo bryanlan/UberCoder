@@ -9,6 +9,16 @@ import { TmuxError } from '../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
+function backdateFinishedSession(db: AppDatabase, sessionId: string, minutesAgo: number): void {
+  const finishedAt = new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  db.sqlite.prepare(`
+    update bound_sessions
+    set started_at = ?, updated_at = ?, last_activity_at = ?, last_output_at = ?,
+        last_completed_at = ?, last_response_at = ?, is_working = 0
+    where id = ?
+  `).run(finishedAt, finishedAt, finishedAt, finishedAt, finishedAt, finishedAt, sessionId);
+}
+
 describe('SessionManager lifecycle', () => {
   it('restarts an idle Codex session with the selected cost profile', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
@@ -622,6 +632,172 @@ describe('SessionManager lifecycle', () => {
 
     await manager.reconcileSessions();
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    db.close();
+  });
+
+  it('keeps manual suspension stopped through reconciliation and resumes on request', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:manual-suspend', title: 'Manual suspend', kind: 'history',
+    });
+
+    const suspended = await manager.suspendSession(session.id);
+    expect(suspended.manualSuspendedAt).toBeTruthy();
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+    await manager.reconcileSessions();
+    expect(tmux.created).toHaveLength(1);
+
+    const resumed = await manager.resumeSession(session.id);
+    expect(resumed.manualSuspendedAt).toBeUndefined();
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    await manager.stop();
+    db.close();
+  });
+
+  it('suspends one oldest finished session per low-memory pass and resumes it on selection', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    let availableKiB = 2 * 1024 * 1024;
+    const options = {
+      pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+      pressureSuspendIdleMs: 60 * 60 * 1000,
+      readMemInfo: () => `MemAvailable: ${availableKiB} kB\n`,
+    };
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(), provider, providerSettings, options);
+    const older = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:pressure-older', title: 'Older', kind: 'history',
+    });
+    const newer = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:pressure-newer', title: 'Newer', kind: 'history',
+    });
+    backdateFinishedSession(db, older.id, 90);
+    backdateFinishedSession(db, newer.id, 70);
+
+    await manager.reconcileSessions();
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(true);
+    availableKiB = 4 * 1024 * 1024;
+    await manager.reconcileSessions();
+    availableKiB = 2 * 1024 * 1024;
+    await manager.reconcileSessions();
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(true);
+
+    await manager.reconcileSessions();
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(false);
+    expect(tmux.alive.has(newer.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(older.id)?.pressureSuspendedAt).toBeTruthy();
+    expect(db.boundSessions.getById(older.id)?.shouldRestore).toBe(true);
+
+    availableKiB = 4 * 1024 * 1024;
+    await manager.stop();
+    const restarted = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(), provider, providerSettings, options);
+    await restarted.reconcileSessions();
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(false);
+    expect(tmux.created).toHaveLength(2);
+
+    await restarted.resumeSession(older.id);
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(older.id)?.pressureSuspendedAt).toBeUndefined();
+    availableKiB = 2 * 1024 * 1024;
+    await restarted.reconcileSessions();
+    await restarted.reconcileSessions();
+    expect(tmux.alive.has(older.tmuxSessionName)).toBe(true);
+    await restarted.stop();
+    db.close();
+  });
+
+  it('keeps a finished dead session stopped instead of relaunching it under memory pressure', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(), provider, providerSettings, {
+        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        readMemInfo: () => 'MemAvailable: 2097152 kB\n',
+      });
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:pressure-dead', title: 'Dead', kind: 'history',
+    });
+    backdateFinishedSession(db, session.id, 90);
+    tmux.alive.delete(session.tmuxSessionName);
+    await manager.reconcileSessions();
+    expect(tmux.created).toHaveLength(1);
+    expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeUndefined();
+
+    await manager.reconcileSessions();
+
+    expect(tmux.created).toHaveLength(1);
+    expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeTruthy();
+    await manager.stop();
+    db.close();
+  });
+
+  it('does not pressure-suspend a session with an unsent draft', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› unsent draft\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(), provider, providerSettings, {
+        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        readMemInfo: () => 'MemAvailable: 2097152 kB\n',
+      });
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:pressure-draft', title: 'Draft', kind: 'history',
+    });
+    backdateFinishedSession(db, session.id, 90);
+    await manager.reconcileSessions();
+    await manager.reconcileSessions();
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeUndefined();
+    await manager.stop();
+    db.close();
+  });
+
+  it('does not pressure-suspend a session owned by an active coordination assignment', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
+      new RealtimeEventBus(), provider, providerSettings, {
+        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        readMemInfo: () => 'MemAvailable: 2097152 kB\n',
+      });
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:pressure-assignment', title: 'Assigned', kind: 'history',
+    });
+    backdateFinishedSession(db, session.id, 90);
+    const now = new Date().toISOString();
+    db.sqlite.prepare(`
+      insert into coordination_assignments (
+        id, provider, native_session_id, token_hash, description, status, pid,
+        process_start, started_at, last_seen_at
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('assignment-1', session.provider, session.conversationRef, 'token-hash', 'Active work',
+      'active', 123, 'process-start', now, now);
+
+    await manager.reconcileSessions();
+    await manager.reconcileSessions();
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeUndefined();
+    await manager.stop();
     db.close();
   });
 

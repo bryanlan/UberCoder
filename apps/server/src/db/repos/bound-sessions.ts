@@ -131,6 +131,23 @@ export class BoundSessionsRepo {
     })();
   }
 
+  // Pressure suspension is independently owned so ordinary status updates cannot restore it.
+  setPressureSuspendedAt(id: string, suspendedAt: string | undefined): BoundSession | undefined {
+    return this.sqlite.transaction(() => {
+      const current = this.getById(id);
+      if (!current) return undefined;
+      this.sqlite.prepare(`
+        update bound_sessions
+        set pressure_suspended_at = ?,
+            pid = case when ? is null then pid else null end,
+            is_working = case when ? is null then is_working else 0 end,
+            updated_at = ?
+        where id = ?
+      `).run(suspendedAt ?? null, suspendedAt ?? null, suspendedAt ?? null, nextUpdatedAt(current.updatedAt, new Date().toISOString()), id);
+      return this.getById(id);
+    })();
+  }
+
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   replaceModelProfileRequest(id: string, request: ModelProfileRequest | undefined, updatedAt: string): BoundSession | undefined {
     return this.sqlite.transaction(() => {
@@ -261,6 +278,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     lastResponseAt: optionalString(row.last_response_at),
     autoTrackedAt: optionalString(row.auto_tracked_at),
     manualSuspendedAt: optionalString(row.manual_suspended_at),
+    pressureSuspendedAt: optionalString(row.pressure_suspended_at),
     isWorking: Boolean(row.is_working),
     pid: numberOrUndefined(row.pid),
     rawLogPath: optionalString(row.raw_log_path),
