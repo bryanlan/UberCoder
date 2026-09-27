@@ -125,6 +125,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const {
     timeline,
     liveMode,
+    resumeError,
+    retryResume,
     loading: timelineLoading,
     rawOutput,
     rawLoading,
@@ -136,6 +138,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     tailKey,
   } = useConversationData({
     authenticated: authQuery.data?.authenticated,
+    csrfToken: authQuery.data?.csrfToken,
     selectedProjectSlug,
     selectedProvider,
     selectedConversationRef,
@@ -567,6 +570,15 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     },
   });
 
+  const suspendMutation = useMutation({
+    mutationFn: (sessionId: string) => api.suspendSession(sessionId, authQuery.data?.csrfToken),
+    onSuccess: () => {
+      setActionError(undefined);
+      navigate('/');
+      queryClient.invalidateQueries({ queryKey: ['tree'] });
+    },
+  });
+
   const logoutMutation = useMutation({
     mutationFn: () => api.logout(authQuery.data?.csrfToken),
     onSuccess: () => {
@@ -617,6 +629,15 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       await releaseMutation.mutateAsync(sessionId);
     } catch (error) {
       setActionError(describeError(error, 'Unable to release this session.'));
+    }
+  }
+
+  async function handleSuspend(sessionId: string): Promise<void> {
+    setActionError(undefined);
+    try {
+      await suspendMutation.mutateAsync(sessionId);
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to suspend this session.'));
     }
   }
 
@@ -1038,6 +1059,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               selectedProvider={selectedProvider}
               timeline={timeline}
               liveMode={liveMode}
+              resumeError={resumeError}
+              onRetryResume={retryResume}
               loading={timelineLoading}
               workMode={workMode}
               mobileChromeHidden={mobileChromeHidden}
@@ -1046,6 +1069,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onToggleMobileControls={() => setMobileControlsHidden((current) => !current)}
               onBind={handleBindExisting}
               onRelease={handleRelease}
+              onSuspend={handleSuspend}
               onSendKeystrokes={handleSendKeystrokes}
               onSetModelProfile={handleSetModelProfile}
               onCancelModelProfileRequest={handleCancelModelProfileRequest}
@@ -1053,6 +1077,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onDiscardLocalSubmittedText={discardSelectedSubmittedMessage}
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
+              suspending={suspendMutation.isPending}
               debugOpen={debugOpen}
               onToggleDebug={() => setDebugOpen((current) => !current)}
               rawOutput={rawOutput}

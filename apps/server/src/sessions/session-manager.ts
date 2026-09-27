@@ -489,6 +489,7 @@ export class SessionManager {
   private shouldWatchSession(session: BoundSession): boolean {
     return !this.stopped
       && session.shouldRestore !== false
+      && !session.manualSuspendedAt
       && (session.status === 'starting' || session.status === 'bound');
   }
 
@@ -572,6 +573,9 @@ export class SessionManager {
 
   async reconcileSessions(): Promise<void> {
     for (const session of this.listRestorableSessions()) {
+      // A user suspension survives reconciliation and backend restarts until
+      // that conversation is explicitly opened again.
+      if (session.manualSuspendedAt) continue;
       if (this.isWorkReleaseDue(session)) {
         try {
           await this.runtimes.run(session.id, 'releaseExpiredWorkSession', async () => {
@@ -1016,11 +1020,14 @@ export class SessionManager {
         pid,
       };
       this.db.boundSessions.upsert(rebound);
-      this.appendEvent(rebound, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
-      this.eventBus.emit({ type: 'session.updated', session: rebound });
-      this.watchSessionOutput(rebound);
-      await this.emitScreenUpdate(rebound);
-      return rebound;
+      const resumed = rebound.manualSuspendedAt
+        ? this.db.boundSessions.setManualSuspendedAt(rebound.id, undefined) ?? rebound
+        : rebound;
+      this.appendEvent(resumed, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: resumed });
+      this.watchSessionOutput(resumed);
+      await this.emitScreenUpdate(resumed);
+      return resumed;
     } catch (error) {
       if (tmuxCreated) {
         await this.cleanupCreatedTmuxSession(restoring);
@@ -2033,6 +2040,67 @@ export class SessionManager {
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
 
+  async suspendSession(sessionId: string): Promise<BoundSession> {
+    return await this.runtimes.run(sessionId, 'suspendSession', async () => {
+      const session = this.mustGetSession(sessionId);
+      if (session.manualSuspendedAt) return session;
+      if (!session.shouldRestore || session.status !== 'bound' || session.isWorking
+        || session.modelProfileRequest || session.conversationRef.startsWith('pending:')) {
+        throw new SessionInputRejectedError('Only an idle, established session can be suspended.');
+      }
+      const assignment = this.db.sqlite.prepare(`
+        select status from coordination_assignments
+        where provider = ? and native_session_id = ?
+      `).get(session.provider, session.conversationRef) as { status: string } | undefined;
+      if (assignment?.status === 'active' || assignment?.status === 'waiting') {
+        throw new SessionInputRejectedError('This session has an active coordination assignment.');
+      }
+      if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive'
+        || await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== session.id) {
+        throw new SessionInputRejectedError('Session ownership or liveness could not be verified.');
+      }
+      const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
+      if (!snapshot.trim()) throw new SessionInputRejectedError('Session screen could not be verified.');
+      const screen = parseSessionScreenSnapshot(snapshot, nowIso());
+      await this.runRecovery.refresh(session.id);
+      const current = this.mustGetSession(session.id);
+      if (current.isWorking || this.providerTurnIsWorking(session.id) === true
+        || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+        || screen.inputText.trim() || screenShowsInteractiveSelectionHint(screen)
+        || screenShowsQueuedMessageHint(screen)
+        || (session.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) {
+        throw new SessionInputRejectedError('The provider is busy, has a draft, or needs your input.');
+      }
+      await this.tmuxClient.killSession(session.tmuxSessionName);
+      if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') {
+        throw new Error('Session did not stop cleanly.');
+      }
+      this.stopWatching(session.id);
+      this.runtimes.clearEphemeral(session.id);
+      this.runRecovery.cancel(session.id);
+      this.suspendedSessionIds.add(session.id);
+      const suspended = this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
+      if (!suspended) throw new Error('Session disappeared while suspending.');
+      this.appendEvent(suspended, { type: 'status', text: 'Session suspended; opening this conversation will resume it.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: suspended });
+      return suspended;
+    });
+  }
+
+  async resumeSession(sessionId: string): Promise<BoundSession> {
+    return await this.runtimes.run(sessionId, 'resumeSession', async () => {
+      const session = this.mustGetSession(sessionId);
+      if (!session.shouldRestore || session.status === 'ended' || session.status === 'releasing') {
+        throw new SessionInputRejectedError('This session can no longer be resumed.');
+      }
+      const restored = await this.refreshSessionState(session, { restoreMissing: true });
+      if (!restored || restored.manualSuspendedAt) {
+        throw new SessionInputRejectedError('The provider session could not be resumed.');
+      }
+      return restored;
+    });
+  }
+
   private async releaseSessionInternal(sessionId: string, removePendingConversation = false): Promise<void> {
     let session = this.mustGetSession(sessionId);
     if (session.modelProfileRequest) {
@@ -2092,8 +2160,9 @@ export class SessionManager {
 
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
-    const ended = { ...releasing, status: 'ended' as const, updatedAt: nowIso(), isWorking: false };
+    let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false };
     this.db.boundSessions.upsert(ended);
+    if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
     if (session.conversationRef.startsWith('pending:')) {
       const pending = this.db.pendingConversations.get(session.conversationRef);
       if (removePendingConversation) {
@@ -2151,11 +2220,12 @@ export class SessionManager {
     options: { startLine?: number } = {},
   ): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
     const session = this.mustGetSession(sessionId);
+    if (session.manualSuspendedAt) return undefined;
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     const liveSession = liveness === 'dead'
       ? await this.runtimes.run(sessionId, 'restoreSessionForScreen', async () => {
           const current = this.mustGetSession(sessionId);
-          if (current.status === 'error') {
+          if (current.status === 'error' || current.manualSuspendedAt) {
             return undefined;
           }
           return await this.refreshSessionState(current, { restoreMissing: true });

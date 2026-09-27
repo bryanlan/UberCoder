@@ -250,6 +250,44 @@ export async function registerSessionRoutes(
     reply.code(204).send();
   });
 
+  app.post('/api/sessions/:sessionId/suspend', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) return;
+    try {
+      return { session: await sessions.suspendSession(sessionId) };
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post('/api/sessions/:sessionId/resume', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch {
+      return;
+    }
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) return;
+    try {
+      return { session: await sessions.resumeSession(sessionId) };
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) {
+        reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
   app.get('/api/sessions/:sessionId/screen', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply, false);

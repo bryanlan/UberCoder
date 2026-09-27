@@ -247,6 +247,11 @@ const MIGRATIONS: Migration[] = [
       sqlite.exec('update bound_sessions set last_response_at = last_completed_at where last_response_at is null');
     }
   } },
+  { version: 13, name: 'manual-session-suspension', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) {
+      addColumnIfMissing(sqlite, 'bound_sessions', 'manual_suspended_at', 'manual_suspended_at text');
+    }
+  } },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {

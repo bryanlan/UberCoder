@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   keepPreviousData,
+  useQueryClient,
   useInfiniteQuery,
   useQuery,
   type QueryClient,
@@ -78,6 +79,7 @@ export function invalidateTimelineMessages(
 
 interface UseConversationDataArgs {
   authenticated?: boolean;
+  csrfToken?: string;
   selectedProjectSlug?: string;
   selectedProvider?: ProviderId;
   selectedConversationRef?: string;
@@ -160,6 +162,7 @@ export function timelineMessagesRefetchInterval(input: {
 
 export function useConversationData({
   authenticated,
+  csrfToken,
   selectedProjectSlug,
   selectedProvider,
   selectedConversationRef,
@@ -167,6 +170,7 @@ export function useConversationData({
   realtimeDegraded,
 }: UseConversationDataArgs) {
   const [historyPrependVersion, setHistoryPrependVersion] = useState(0);
+  const queryClient = useQueryClient();
 
   const enabled = Boolean(authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef);
 
@@ -208,11 +212,27 @@ export function useConversationData({
   ]);
   const selectedBoundSession = selectedMetaTimeline?.boundSession;
 
+  const resumeQuery = useQuery({
+    queryKey: ['resume-suspended-session', selectedBoundSession?.id, selectedBoundSession?.manualSuspendedAt],
+    queryFn: () => api.resumeSession(selectedBoundSession!.id, csrfToken),
+    enabled: Boolean(selectedBoundSession?.manualSuspendedAt && csrfToken),
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (!resumeQuery.data?.session) return;
+    void queryClient.invalidateQueries({ queryKey: ['tree'] });
+    void queryClient.invalidateQueries({
+      queryKey: conversationMetaQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
+      exact: true,
+    });
+  }, [queryClient, resumeQuery.data, selectedProjectSlug, selectedProvider, selectedConversationRef]);
+
   const liveScreenQuery = useQuery({
     queryKey: sessionScreenQueryKey(selectedBoundSession?.id),
     queryFn: () => api.sessionScreen(selectedBoundSession!.id),
-    enabled: Boolean(selectedBoundSession?.id),
-    refetchInterval: selectedBoundSession ? 1000 : false,
+    enabled: Boolean(selectedBoundSession?.id && !selectedBoundSession.manualSuspendedAt),
+    refetchInterval: selectedBoundSession && !selectedBoundSession.manualSuspendedAt ? 1000 : false,
   });
 
   const messagesQuery = useInfiniteQuery({
@@ -326,6 +346,8 @@ export function useConversationData({
   return {
     timeline,
     liveMode,
+    resumeError: resumeQuery.error instanceof Error ? resumeQuery.error.message : undefined,
+    retryResume: async () => { await resumeQuery.refetch(); },
     loading: metaQuery.isLoading || (messagesQuery.isLoading && !messagesQuery.data),
     rawOutput: rawOutputQuery.data?.text,
     rawLoading: rawOutputQuery.isLoading,

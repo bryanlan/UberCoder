@@ -1,5 +1,5 @@
 import { RunFailureNotice } from './RunFailureNotice';
-import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, PlugZap, Unplug } from 'lucide-react';
+import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, Pause, PlugZap, Unplug } from 'lucide-react';
 import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
@@ -1222,6 +1222,8 @@ interface ConversationPaneProps {
   selectedProvider?: ProviderId;
   timeline?: ConversationTimeline;
   liveMode: boolean;
+  resumeError?: string;
+  onRetryResume: () => Promise<void>;
   loading: boolean;
   workMode: boolean;
   mobileChromeHidden: boolean;
@@ -1230,6 +1232,7 @@ interface ConversationPaneProps {
   onToggleMobileControls: () => void;
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
+  onSuspend: (sessionId: string) => Promise<void>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
@@ -1237,6 +1240,7 @@ interface ConversationPaneProps {
   onDiscardLocalSubmittedText: (messageId: string) => void;
   binding: boolean;
   releasing: boolean;
+  suspending: boolean;
   debugOpen: boolean;
   onToggleDebug: () => void;
   rawOutput?: string;
@@ -1345,6 +1349,8 @@ export function ConversationPane({
   selectedProvider,
   timeline,
   liveMode,
+  resumeError,
+  onRetryResume,
   loading,
   workMode,
   mobileChromeHidden,
@@ -1353,6 +1359,7 @@ export function ConversationPane({
   onToggleMobileControls,
   onBind,
   onRelease,
+  onSuspend,
   onSendKeystrokes,
   onSetModelProfile,
   onCancelModelProfileRequest,
@@ -1360,6 +1367,7 @@ export function ConversationPane({
   onDiscardLocalSubmittedText,
   binding,
   releasing,
+  suspending,
   debugOpen,
   onToggleDebug,
   rawOutput,
@@ -1622,6 +1630,12 @@ export function ConversationPane({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {boundSession?.runFailure && <RunFailureNotice failure={boundSession.runFailure}
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
+      {boundSession?.manualSuspendedAt && (
+        <div className="border-b border-slate-700 bg-slate-800/70 px-4 py-2 text-sm text-slate-200">
+          {resumeError ? `Unable to resume: ${resumeError}` : 'Resuming suspended session…'}
+          {resumeError && <button type="button" onClick={() => { void onRetryResume(); }} className="ml-3 text-sky-300 hover:text-sky-200">Retry</button>}
+        </div>
+      )}
       {!hideTopPanel && (
         isMobile ? (
           <div className="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
@@ -1644,15 +1658,27 @@ export function ConversationPane({
                 {debugOpen ? 'Hide debug' : 'Show debug'}
               </button>
               {boundSession ? (
-                <button
-                  type="button"
-                  onClick={() => onRelease(boundSession.id)}
-                  disabled={releasing}
-                  className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
-                >
-                  <Unplug className="h-4 w-4" />
-                  Release
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onSuspend(boundSession.id)}
+                    disabled={suspending || releasing || boundSession.isWorking || Boolean(boundSession.manualSuspendedAt)}
+                    title="Keep this conversation in Work and resume it when selected again"
+                    className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
+                  >
+                    <Pause className="h-4 w-4" />
+                    Suspend
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRelease(boundSession.id)}
+                    disabled={releasing || suspending}
+                    className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
+                  >
+                    <Unplug className="h-4 w-4" />
+                    Release
+                  </button>
+                </>
               ) : (
                 <button
                   type="button"
@@ -1691,15 +1717,27 @@ export function ConversationPane({
                   {debugOpen ? 'Hide debug' : 'Show debug'}
                 </button>
                 {boundSession ? (
-                  <button
-                    type="button"
-                    onClick={() => onRelease(boundSession.id)}
-                    disabled={releasing}
-                    className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
-                  >
-                    <Unplug className="h-4 w-4" />
-                    Release
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => onSuspend(boundSession.id)}
+                      disabled={suspending || releasing || boundSession.isWorking || Boolean(boundSession.manualSuspendedAt)}
+                      title="Keep this conversation in Work and resume it when selected again"
+                      className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
+                    >
+                      <Pause className="h-4 w-4" />
+                      Suspend
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRelease(boundSession.id)}
+                      disabled={releasing || suspending}
+                      className="inline-flex items-center gap-2 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200 transition hover:bg-rose-500/20 disabled:opacity-60"
+                    >
+                      <Unplug className="h-4 w-4" />
+                      Release
+                    </button>
+                  </>
                 ) : (
                   <button
                     type="button"

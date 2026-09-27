@@ -228,6 +228,8 @@ export interface BoundSession {
   /** Provider-confirmed response time, independent of the recency idle window. */
   lastResponseAt?: string;
   autoTrackedAt?: string;
+  /** Explicitly suspended by the user; selecting the conversation resumes it. */
+  manualSuspendedAt?: string;
   isWorking?: boolean;
   pid?: number | null;
   rawLogPath?: string;

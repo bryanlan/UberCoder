@@ -114,6 +114,23 @@ export class BoundSessionsRepo {
       .run(failure ? JSON.stringify(failure) : null, id);
   }
 
+  // Suspension is independently owned: status and screen refreshes must not clear it.
+  setManualSuspendedAt(id: string, suspendedAt: string | undefined): BoundSession | undefined {
+    return this.sqlite.transaction(() => {
+      const current = this.getById(id);
+      if (!current) return undefined;
+      this.sqlite.prepare(`
+        update bound_sessions
+        set manual_suspended_at = ?,
+            pid = case when ? is null then pid else null end,
+            is_working = case when ? is null then is_working else 0 end,
+            updated_at = ?
+        where id = ?
+      `).run(suspendedAt ?? null, suspendedAt ?? null, suspendedAt ?? null, nextUpdatedAt(current.updatedAt, new Date().toISOString()), id);
+      return this.getById(id);
+    })();
+  }
+
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   replaceModelProfileRequest(id: string, request: ModelProfileRequest | undefined, updatedAt: string): BoundSession | undefined {
     return this.sqlite.transaction(() => {
@@ -243,6 +260,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     lastCompletedAt: optionalString(row.last_completed_at),
     lastResponseAt: optionalString(row.last_response_at),
     autoTrackedAt: optionalString(row.auto_tracked_at),
+    manualSuspendedAt: optionalString(row.manual_suspended_at),
     isWorking: Boolean(row.is_working),
     pid: numberOrUndefined(row.pid),
     rawLogPath: optionalString(row.raw_log_path),

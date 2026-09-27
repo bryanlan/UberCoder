@@ -120,6 +120,7 @@ function renderPane(input: {
           sessionOverrides: input.sessionOverrides,
         })}
         liveMode
+        onRetryResume={vi.fn()}
         loading={false}
         workMode={false}
         mobileChromeHidden={false}
@@ -128,6 +129,7 @@ function renderPane(input: {
         onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
+        onSuspend={vi.fn()}
         onSendKeystrokes={onSendKeystrokes}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={onCancelModelProfileRequest}
@@ -135,6 +137,7 @@ function renderPane(input: {
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
         releasing={false}
+        suspending={false}
         debugOpen={false}
         onToggleDebug={vi.fn()}
         rawLoading={false}
@@ -203,6 +206,7 @@ it('submits a busy-session profile immediately and does not carry its server que
         selectedProvider="codex"
         timeline={timeline({ sessionOverrides: { id: 'session-2', isWorking: false } })}
         liveMode
+        onRetryResume={vi.fn()}
         loading={false}
         workMode={false}
         mobileChromeHidden={false}
@@ -211,6 +215,7 @@ it('submits a busy-session profile immediately and does not carry its server que
         onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
+        onSuspend={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue(true)}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
@@ -218,6 +223,7 @@ it('submits a busy-session profile immediately and does not carry its server que
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
         releasing={false}
+        suspending={false}
         debugOpen={false}
         onToggleDebug={vi.fn()}
         rawLoading={false}
@@ -259,6 +265,7 @@ it('does not use browser idleness to apply a server-owned queued profile', async
           modelProfileRequest: { requestId: 'request-1', profile: 'high', requestedAt: baseTime, state: 'queued', deferredReason: 'turn_running' },
         } })}
         liveMode
+        onRetryResume={vi.fn()}
         loading={false}
         workMode={false}
         mobileChromeHidden={false}
@@ -267,6 +274,7 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
+        onSuspend={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue(true)}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
@@ -274,6 +282,7 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         onDiscardLocalSubmittedText={vi.fn()}
         binding={false}
         releasing={false}
+        suspending={false}
         debugOpen={false}
         onToggleDebug={vi.fn()}
         rawLoading={false}
@@ -360,6 +369,7 @@ describe('ConversationPane live input bridge', () => {
           selectedProvider="codex"
           timeline={timeline({ inputText: 'recap' })}
           liveMode
+          onRetryResume={vi.fn()}
           loading={false}
           workMode={false}
           mobileChromeHidden={false}
@@ -368,6 +378,7 @@ describe('ConversationPane live input bridge', () => {
           onToggleMobileControls={vi.fn()}
           onBind={vi.fn()}
           onRelease={vi.fn()}
+          onSuspend={vi.fn()}
           onSendKeystrokes={vi.fn(() => send.promise)}
           onSetModelProfile={vi.fn().mockResolvedValue(true)}
           onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
@@ -375,6 +386,7 @@ describe('ConversationPane live input bridge', () => {
           onDiscardLocalSubmittedText={vi.fn()}
           binding={false}
           releasing={false}
+          suspending={false}
           debugOpen={false}
           onToggleDebug={vi.fn()}
           rawLoading={false}
@@ -528,6 +540,7 @@ describe('ConversationPane external Claude handoff', () => {
             selectedProvider="claude"
             timeline={externalTimeline}
             liveMode={false}
+            onRetryResume={vi.fn()}
             loading={false}
             workMode={false}
             mobileChromeHidden={false}
@@ -536,6 +549,7 @@ describe('ConversationPane external Claude handoff', () => {
             onToggleMobileControls={vi.fn()}
             onBind={onBind}
             onRelease={vi.fn()}
+            onSuspend={vi.fn()}
             onSendKeystrokes={vi.fn().mockResolvedValue(true)}
             onSetModelProfile={vi.fn().mockResolvedValue(true)}
             onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
@@ -543,6 +557,7 @@ describe('ConversationPane external Claude handoff', () => {
             onDiscardLocalSubmittedText={vi.fn()}
             binding={false}
             releasing={false}
+            suspending={false}
             debugOpen={false}
             onToggleDebug={vi.fn()}
             rawLoading={false}
