@@ -240,9 +240,7 @@ function ConversationLink({
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
   const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt);
-  const indicatorClassName = suspended
-    ? 'border border-slate-500 bg-transparent'
-    : getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
+  const indicatorClassName = getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
 
   useEffect(() => {
     if (!editing) {
@@ -327,7 +325,8 @@ function ConversationLink({
         <span
           className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
           title={[
-            !isBound ? 'History' : pressureSuspendedAt ? 'Suspended to free memory · select to resume' : manualSuspendedAt ? 'Suspended · select to resume' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
+            !isBound ? 'History' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
+            pressureSuspendedAt ? 'Suspended to free memory · select to resume' : manualSuspendedAt ? 'Suspended · select to resume' : undefined,
             `Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`,
             autoTrackedAt ? `Auto-tracked: ${formatRelativeAge(autoTrackedAt, nowMs)}` : undefined,
           ].filter(Boolean).join(' · ')}
