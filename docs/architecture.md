@@ -181,6 +181,11 @@ user's actual prompt.
   trigger a debounced refresh of that Claude project only, so externally started chats appear in
   their configured project without a global transcript scan. The targeted refresh API likewise
   accepts a project/provider pair for recovery of a pre-existing external transcript.
+- Generated conversation titles retain up to 288 characters. Sidebar and search titles use a
+  wrapped, viewport-constrained hover tooltip after 167 ms; it renders outside the scrolling
+  sidebar so the expanded text is not clipped. Escape, scrolling, navigation, and pointer exit
+  dismiss the tooltip. Parser-version invalidation regenerates older 72-character titles on
+  discovery refresh; explicit title overrides remain authoritative.
 - First-turn pending Codex input must keep prompt submission separate from literal selection
   keystrokes. Review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and

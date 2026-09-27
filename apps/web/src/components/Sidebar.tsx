@@ -8,6 +8,7 @@ import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 import { getConversationStatusClass } from '../features/navigation/work-status';
+import { TitleTooltip } from './TitleTooltip';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
@@ -161,7 +162,7 @@ function SearchResultsPanel({
                 className="flex min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-slate-100 transition hover:bg-slate-800/60"
               >
                 <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
-                <span className="min-w-0 flex-1 truncate font-medium">{result.projectDisplayName}</span>
+                <TitleTooltip text={result.projectDisplayName} className="min-w-0 flex-1 truncate font-medium" />
               </Link>
               <div className="ml-7 border-l border-slate-800 pl-3">
                 <Link
@@ -172,9 +173,9 @@ function SearchResultsPanel({
                   <div className="flex min-w-0 items-center gap-2">
                     <span className={clsx('h-2.5 w-2.5 shrink-0 rounded-full', result.isBound ? 'bg-emerald-400' : 'border border-slate-700 bg-transparent')} />
                     <ProviderIcon className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                    <span className="min-w-0 flex-1 truncate font-medium text-slate-100">
+                    <TitleTooltip text={result.conversationTitle} className="min-w-0 flex-1 truncate font-medium text-slate-100">
                       {renderHighlightedText(result.conversationTitle, query)}
-                    </span>
+                    </TitleTooltip>
                   </div>
                   <div className="mt-1 text-xs uppercase text-slate-500">{meta.label} · {formatRelativeAge(result.conversationUpdatedAt, nowMs)}</div>
                   <p className="mt-1 line-clamp-3 break-words text-xs leading-5 text-slate-400">
@@ -334,7 +335,7 @@ function ConversationLink({
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
-        <span className="line-clamp-1 min-w-0" title={title}>{title}</span>
+        <TitleTooltip text={title} className="line-clamp-1 min-w-0" />
         {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
@@ -558,7 +559,7 @@ function ProjectSection({
               <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-slate-500" />
             )}
             <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
-            <div className="min-w-0 flex-1 truncate font-medium" title={project.displayName}>{project.displayName}</div>
+            <TitleTooltip text={project.displayName} className="min-w-0 flex-1 truncate font-medium" />
           </Link>
         )}
         {!editingProject ? (
