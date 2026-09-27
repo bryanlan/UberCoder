@@ -334,7 +334,7 @@ function ConversationLink({
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
-        <span className="line-clamp-1 min-w-0">{title}</span>
+        <span className="line-clamp-1 min-w-0" title={title}>{title}</span>
         {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
@@ -558,7 +558,7 @@ function ProjectSection({
               <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-slate-500" />
             )}
             <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
-            <div className="min-w-0 flex-1 truncate font-medium">{project.displayName}</div>
+            <div className="min-w-0 flex-1 truncate font-medium" title={project.displayName}>{project.displayName}</div>
           </Link>
         )}
         {!editingProject ? (
