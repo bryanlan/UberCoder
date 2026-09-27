@@ -2093,7 +2093,7 @@ export class SessionManager {
       if (!session.shouldRestore || session.status === 'ended' || session.status === 'releasing') {
         throw new SessionInputRejectedError('This session can no longer be resumed.');
       }
-      const restored = await this.refreshSessionState(session, { restoreMissing: true });
+      const restored = await this.refreshSessionState(session, { restoreMissing: true, resumeManualSuspension: true });
       if (!restored || restored.manualSuspendedAt) {
         throw new SessionInputRejectedError('The provider session could not be resumed.');
       }
@@ -2271,16 +2271,16 @@ export class SessionManager {
 
   private async refreshSessionState(
     staleSession: BoundSession,
-    options: { restoreMissing?: boolean } = {},
+    options: { restoreMissing?: boolean; resumeManualSuspension?: boolean } = {},
   ): Promise<BoundSession | undefined> {
     let session = this.db.boundSessions.getById(staleSession.id);
-    if (!session) {
+    if (!session || (session.manualSuspendedAt && !options.resumeManualSuspension)) {
       return undefined;
     }
     const restoreMissing = options.restoreMissing ?? true;
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     session = this.db.boundSessions.getById(staleSession.id);
-    if (!session) {
+    if (!session || (session.manualSuspendedAt && !options.resumeManualSuspension)) {
       return undefined;
     }
     if (liveness === 'unknown') {

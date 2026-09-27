@@ -1223,6 +1223,7 @@ interface ConversationPaneProps {
   timeline?: ConversationTimeline;
   liveMode: boolean;
   resumeError?: string;
+  resuming?: boolean;
   onRetryResume: () => Promise<void>;
   loading: boolean;
   workMode: boolean;
@@ -1350,6 +1351,7 @@ export function ConversationPane({
   timeline,
   liveMode,
   resumeError,
+  resuming,
   onRetryResume,
   loading,
   workMode,
@@ -1628,12 +1630,12 @@ export function ConversationPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {boundSession?.runFailure && <RunFailureNotice failure={boundSession.runFailure}
+      {boundSession?.runFailure && !boundSession.manualSuspendedAt && <RunFailureNotice failure={boundSession.runFailure}
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
       {boundSession?.manualSuspendedAt && (
         <div className="border-b border-slate-700 bg-slate-800/70 px-4 py-2 text-sm text-slate-200">
-          {resumeError ? `Unable to resume: ${resumeError}` : 'Resuming suspended session…'}
-          {resumeError && <button type="button" onClick={() => { void onRetryResume(); }} className="ml-3 text-sky-300 hover:text-sky-200">Retry</button>}
+          {resumeError ? `Unable to resume: ${resumeError}` : resuming ? 'Resuming suspended session…' : 'Session suspended.'}
+          {!resuming && <button type="button" onClick={() => { void onRetryResume(); }} className="ml-3 text-sky-300 hover:text-sky-200">{resumeError ? 'Retry' : 'Resume'}</button>}
         </div>
       )}
       {!hideTopPanel && (
@@ -1836,7 +1838,11 @@ export function ConversationPane({
         )}
       </div>
 
-      {boundSession ? (
+      {boundSession?.manualSuspendedAt ? (
+        <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
+          Resume this session to use the live input bridge.
+        </div>
+      ) : boundSession ? (
         <LiveSessionInputBridge
           sessionId={boundSession.id}
           projectSlug={timeline.conversation.projectSlug}

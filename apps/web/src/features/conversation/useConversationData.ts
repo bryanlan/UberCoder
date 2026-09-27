@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   keepPreviousData,
   useQueryClient,
@@ -170,6 +170,9 @@ export function useConversationData({
   realtimeDegraded,
 }: UseConversationDataArgs) {
   const [historyPrependVersion, setHistoryPrependVersion] = useState(0);
+  const [resumeAttempt, setResumeAttempt] = useState<{ sessionId: string; pending: boolean; error?: string }>();
+  const resumeSelectionRef = useRef<{ key?: string; consumed: boolean }>({ consumed: false });
+  const resumingSessionIdsRef = useRef(new Set<string>());
   const queryClient = useQueryClient();
 
   const enabled = Boolean(authenticated && selectedProjectSlug && selectedProvider && selectedConversationRef);
@@ -212,21 +215,60 @@ export function useConversationData({
   ]);
   const selectedBoundSession = selectedMetaTimeline?.boundSession;
 
-  const resumeQuery = useQuery({
-    queryKey: ['resume-suspended-session', selectedBoundSession?.id, selectedBoundSession?.manualSuspendedAt],
-    queryFn: () => api.resumeSession(selectedBoundSession!.id, csrfToken),
-    enabled: Boolean(selectedBoundSession?.manualSuspendedAt && csrfToken),
-    retry: false,
-  });
+  const selectionKey = selectedProjectSlug && selectedProvider && selectedConversationRef
+    ? JSON.stringify([selectedProjectSlug, selectedProvider, selectedConversationRef])
+    : undefined;
+
+  const resumeSelectedSession = useCallback(async (
+    sessionId: string,
+    projectSlug: string,
+    provider: ProviderId,
+    conversationRef: string,
+  ): Promise<void> => {
+    if (!csrfToken || resumingSessionIdsRef.current.has(sessionId)) return;
+    resumingSessionIdsRef.current.add(sessionId);
+    setResumeAttempt({ sessionId, pending: true });
+    try {
+      await api.resumeSession(sessionId, csrfToken);
+      void queryClient.invalidateQueries({ queryKey: ['tree'] });
+      void queryClient.invalidateQueries({
+        queryKey: conversationMetaQueryKey(projectSlug, provider, conversationRef),
+        exact: true,
+      });
+    } catch (error) {
+      setResumeAttempt({
+        sessionId,
+        pending: false,
+        error: error instanceof Error ? error.message : 'Unable to resume this session.',
+      });
+    } finally {
+      resumingSessionIdsRef.current.delete(sessionId);
+      setResumeAttempt((current) => current?.sessionId === sessionId && current.pending
+        ? { sessionId, pending: false }
+        : current);
+    }
+  }, [csrfToken, queryClient]);
 
   useEffect(() => {
-    if (!resumeQuery.data?.session) return;
-    void queryClient.invalidateQueries({ queryKey: ['tree'] });
-    void queryClient.invalidateQueries({
-      queryKey: conversationMetaQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
-      exact: true,
-    });
-  }, [queryClient, resumeQuery.data, selectedProjectSlug, selectedProvider, selectedConversationRef]);
+    if (resumeSelectionRef.current.key !== selectionKey) {
+      resumeSelectionRef.current = { key: selectionKey, consumed: false };
+      setResumeAttempt(undefined);
+    }
+    if (!selectionKey || !authenticated || !csrfToken || metaQuery.isFetching || resumeSelectionRef.current.consumed
+      || !selectedMetaTimeline || !timelineMatchesSelection(
+        selectedMetaTimeline, selectedProjectSlug, selectedProvider, selectedConversationRef,
+      )) return;
+    resumeSelectionRef.current.consumed = true;
+    if (selectedBoundSession?.manualSuspendedAt) {
+      void resumeSelectedSession(selectedBoundSession.id, selectedProjectSlug!, selectedProvider!, selectedConversationRef!);
+    }
+  }, [authenticated, csrfToken, metaQuery.isFetching, resumeSelectedSession, selectedBoundSession, selectedConversationRef,
+    selectedMetaTimeline, selectedProjectSlug, selectedProvider, selectionKey]);
+
+  const retryResume = useCallback(async (): Promise<void> => {
+    if (!selectedBoundSession?.manualSuspendedAt || !selectedProjectSlug || !selectedProvider || !selectedConversationRef) return;
+    await resumeSelectedSession(selectedBoundSession.id, selectedProjectSlug, selectedProvider, selectedConversationRef);
+  }, [resumeSelectedSession, selectedBoundSession, selectedConversationRef, selectedProjectSlug, selectedProvider]);
 
   const liveScreenQuery = useQuery({
     queryKey: sessionScreenQueryKey(selectedBoundSession?.id),
@@ -288,7 +330,7 @@ export function useConversationData({
     if (!meta) {
       return undefined;
     }
-    const liveScreenData = liveScreenQuery.data;
+    const liveScreenData = selectedBoundSession?.manualSuspendedAt ? undefined : liveScreenQuery.data;
     const refreshedLiveScreen = liveScreenData && liveScreenData.session.id === selectedBoundSession?.id
       ? liveScreenData.screen
       : undefined;
@@ -297,7 +339,7 @@ export function useConversationData({
       ...meta,
       boundSession: refreshedBoundSession,
       messages: pagedTimelineMessages,
-      liveScreen: refreshedLiveScreen ?? meta.liveScreen,
+      liveScreen: selectedBoundSession?.manualSuspendedAt ? undefined : refreshedLiveScreen ?? meta.liveScreen,
       messagePage: messagePages.at(-1)?.messagePage ?? meta.messagePage,
     };
   }, [
@@ -305,6 +347,7 @@ export function useConversationData({
     messagePages,
     pagedTimelineMessages,
     selectedBoundSession?.id,
+    selectedBoundSession?.manualSuspendedAt,
     selectedMetaTimeline,
   ]);
 
@@ -315,8 +358,8 @@ export function useConversationData({
   const rawOutputQuery = useQuery({
     queryKey: ['raw-output', boundSession?.id],
     queryFn: () => api.rawOutput(boundSession!.id),
-    enabled: Boolean(debugOpen && boundSession?.id),
-    refetchInterval: realtimeDegraded && boundSession ? 1000 : false,
+    enabled: Boolean(debugOpen && boundSession?.id && !boundSession.manualSuspendedAt),
+    refetchInterval: realtimeDegraded && boundSession && !boundSession.manualSuspendedAt ? 1000 : false,
   });
 
   const loadOlderMessages = useCallback(async (): Promise<void> => {
@@ -346,10 +389,11 @@ export function useConversationData({
   return {
     timeline,
     liveMode,
-    resumeError: resumeQuery.error instanceof Error ? resumeQuery.error.message : undefined,
-    retryResume: async () => { await resumeQuery.refetch(); },
+    resumeError: boundSession && resumeAttempt?.sessionId === boundSession.id ? resumeAttempt.error : undefined,
+    resuming: Boolean(boundSession && resumeAttempt?.sessionId === boundSession.id && resumeAttempt.pending),
+    retryResume,
     loading: metaQuery.isLoading || (messagesQuery.isLoading && !messagesQuery.data),
-    rawOutput: rawOutputQuery.data?.text,
+    rawOutput: boundSession?.manualSuspendedAt ? undefined : rawOutputQuery.data?.text,
     rawLoading: rawOutputQuery.isLoading,
     hasOlderMessages: Boolean(messagesQuery.hasNextPage),
     loadingOlderMessages: messagesQuery.isFetchingNextPage,

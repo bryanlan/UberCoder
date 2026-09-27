@@ -126,6 +126,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     timeline,
     liveMode,
     resumeError,
+    resuming,
     retryResume,
     loading: timelineLoading,
     rawOutput,
@@ -1060,6 +1061,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               timeline={timeline}
               liveMode={liveMode}
               resumeError={resumeError}
+              resuming={resuming}
               onRetryResume={retryResume}
               loading={timelineLoading}
               workMode={workMode}
