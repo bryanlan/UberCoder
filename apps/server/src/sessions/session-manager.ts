@@ -2162,7 +2162,9 @@ export class SessionManager {
       select status from coordination_assignments
       where provider = ? and native_session_id = ?
     `).get(session.provider, session.conversationRef) as { status: string } | undefined;
-    return assignment?.status === 'active' || assignment?.status === 'waiting';
+    // Turn-end hooks mark unfinished assignments waiting; provider readiness
+    // checks below still protect work, drafts, and queued input.
+    return assignment?.status === 'active';
   }
 
   private async suspensionBlockReason(session: BoundSession): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
@@ -2197,7 +2199,8 @@ export class SessionManager {
         throw new SessionInputRejectedError('Only an idle, established session can be suspended.');
       }
       const blockReason = await this.suspensionBlockReason(session);
-      if (blockReason === 'assignment') {
+      // Provider readiness checks await I/O; an assignment may have resumed.
+      if (blockReason === 'assignment' || this.hasActiveCoordinationAssignment(this.mustGetSession(session.id))) {
         throw new SessionInputRejectedError('This session has an active coordination assignment.');
       }
       if (blockReason === 'ownership') {

@@ -19,6 +19,17 @@ function backdateFinishedSession(db: AppDatabase, sessionId: string, minutesAgo:
   `).run(finishedAt, finishedAt, finishedAt, finishedAt, finishedAt, finishedAt, sessionId);
 }
 
+function addCoordinationAssignment(db: AppDatabase, session: { provider: string; conversationRef: string }, status: 'active' | 'waiting'): void {
+  const now = new Date().toISOString();
+  db.sqlite.prepare(`
+    insert into coordination_assignments (
+      id, provider, native_session_id, token_hash, description, status, pid,
+      process_start, started_at, last_seen_at
+    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('assignment-1', session.provider, session.conversationRef, 'token-hash', 'Unfinished work',
+    status, 123, 'process-start', now, now);
+}
+
 describe('SessionManager lifecycle', () => {
   it('restarts an idle Codex session with the selected cost profile', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
@@ -659,6 +670,68 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
+  it.each(['active', 'waiting'] as const)('checks manual suspension with coordination status %s', async (status) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:manual-assignment', title: 'Assigned', kind: 'history',
+    });
+    addCoordinationAssignment(db, session, status);
+
+    if (status === 'active') {
+      await expect(manager.suspendSession(session.id)).rejects.toThrow('active coordination assignment');
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+      expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
+    } else {
+      const suspended = await manager.suspendSession(session.id);
+      expect(suspended.manualSuspendedAt).toBeTruthy();
+      expect(suspended.shouldRestore).toBe(true);
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+      await manager.resumeSession(session.id);
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+      expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
+
+      tmux.paneText = 'OpenAI Codex\n› unsent draft\ngpt-5.6-sol medium · 98% left · ~/demo';
+      await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+
+      db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, isWorking: true });
+      await expect(manager.suspendSession(session.id)).rejects.toThrow('Only an idle, established session');
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    }
+    expect(db.sqlite.prepare('select status, description from coordination_assignments where id=?')
+      .get('assignment-1')).toEqual({ status, description: 'Unfinished work' });
+    await manager.stop();
+    db.close();
+  });
+
+  it('rejects manual suspension when a waiting assignment becomes active during readiness checks', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:assignment-race', title: 'Assigned', kind: 'history',
+    });
+    addCoordinationAssignment(db, session, 'waiting');
+    tmux.capturePane = async () => {
+      db.sqlite.prepare("update coordination_assignments set status='active' where id=?").run('assignment-1');
+      return tmux.paneText;
+    };
+
+    await expect(manager.suspendSession(session.id)).rejects.toThrow('active coordination assignment');
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
+    await manager.stop();
+    db.close();
+  });
+
   it('suspends one oldest finished session per low-memory pass and resumes it on selection', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -716,7 +789,7 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
-  it('keeps a finished dead session stopped instead of relaunching it under memory pressure', async () => {
+  it.each(['none', 'waiting'] as const)('keeps a finished dead session with %s assignment stopped under memory pressure', async (status) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -731,6 +804,7 @@ describe('SessionManager lifecycle', () => {
       conversationRef: 'history:pressure-dead', title: 'Dead', kind: 'history',
     });
     backdateFinishedSession(db, session.id, 90);
+    if (status === 'waiting') addCoordinationAssignment(db, session, status);
     tmux.alive.delete(session.tmuxSessionName);
     await manager.reconcileSessions();
     expect(tmux.created).toHaveLength(1);
@@ -768,7 +842,7 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
-  it('does not pressure-suspend a session owned by an active coordination assignment', async () => {
+  it.each(['active', 'waiting'] as const)('checks pressure suspension with coordination status %s', async (status) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-pressure-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -783,20 +857,17 @@ describe('SessionManager lifecycle', () => {
       conversationRef: 'history:pressure-assignment', title: 'Assigned', kind: 'history',
     });
     backdateFinishedSession(db, session.id, 90);
-    const now = new Date().toISOString();
-    db.sqlite.prepare(`
-      insert into coordination_assignments (
-        id, provider, native_session_id, token_hash, description, status, pid,
-        process_start, started_at, last_seen_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run('assignment-1', session.provider, session.conversationRef, 'token-hash', 'Active work',
-      'active', 123, 'process-start', now, now);
+    addCoordinationAssignment(db, session, status);
 
     await manager.reconcileSessions();
-    await manager.reconcileSessions();
-
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
     expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeUndefined();
+    await manager.reconcileSessions();
+
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(status === 'active');
+    expect(Boolean(db.boundSessions.getById(session.id)?.pressureSuspendedAt)).toBe(status === 'waiting');
+    expect(db.sqlite.prepare('select status, description from coordination_assignments where id=?')
+      .get('assignment-1')).toEqual({ status, description: 'Unfinished work' });
     await manager.stop();
     db.close();
   });
