@@ -78,13 +78,14 @@ const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
 const AUTO_TRACK_CONCURRENCY = 2;
 // Sessions idle this long stop being kept alive and stop being auto-restored by
-// reconciliation. Their rows stay bound and tree-visible, so work-mode
-// conversations never disappear; selecting one restores its tmux session on demand.
+// reconciliation. Their rows stay bound and tree-visible until Work-mode release;
+// selecting one before release restores its tmux session on demand.
 const DEFAULT_SESSION_EAGER_RESTORE_MS = 48 * 60 * 60 * 1000;
 // Restoring a session does not move recency, so a freshly restored idle session
 // gets this long before the reaper may suspend it again.
 const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
-const WORK_SESSION_RELEASE_MS = 120 * 60 * 60 * 1000;
+// Purple starts after 48 hours; retain that state for seven full days before release.
+const WORK_SESSION_RELEASE_MS = (48 + 7 * 24) * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
 interface SessionRecoveryDependencies {

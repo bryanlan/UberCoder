@@ -81,7 +81,7 @@
   event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution,
   canonical conversation ownership, startup verification, recovery,
-  bounded recent-conversation auto-tracking, working state, confirmed response timestamps, timed Work-mode release, event-log observation, text entry,
+  bounded recent-conversation auto-tracking, working state, confirmed response timestamps, nine-day Work-mode release, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
@@ -102,7 +102,8 @@
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
-  404 selection, sidebar ordering, work-mode derivation, and separation of provider response status
+  404 selection, sidebar ordering, Work-mode filtering of conversation children while retaining
+  configured active projects, and separation of provider response status
   from genuine activity ordering.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.

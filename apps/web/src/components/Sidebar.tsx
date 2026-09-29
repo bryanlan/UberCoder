@@ -697,7 +697,9 @@ function ProjectSection({
             ) : null}
           </div>
         ) : (
-          <div className="px-3 py-2 text-sm text-slate-500">No conversations indexed yet.</div>
+          <div className="px-3 py-2 text-sm text-slate-500">
+            {workMode ? 'No active conversations.' : 'No conversations indexed yet.'}
+          </div>
         )}
       </div>
     </section>
@@ -908,7 +910,7 @@ export function Sidebar({
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
-                {workMode ? 'No bound sessions are active right now.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
+                No active projects are visible yet. Check your config JSON and refresh.
               </div>
             )}
           </div>

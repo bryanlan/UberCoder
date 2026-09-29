@@ -16,7 +16,9 @@ describe('Work mode status colors', () => {
     [12, 'bg-amber-500'],
     [47.99, 'bg-amber-500'],
     [48, 'bg-violet-500'],
-    [119.9, 'bg-violet-500'],
+    [120, 'bg-violet-500'],
+    [168, 'bg-violet-500'],
+    [215.99, 'bg-violet-500'],
   ])('maps a response age of %s hours to %s', (hours, expected) => {
     expect(getConversationStatusClass(true, ago(hours), false, now)).toBe(expected);
   });

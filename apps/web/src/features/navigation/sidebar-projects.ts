@@ -79,7 +79,6 @@ export function deriveSidebarProjects({
         latestActivityAt,
       };
     })
-    .filter((project) => !workMode || project.combinedConversations.length > 0)
     .sort((a, b) => {
       if (recentActivitySortEnabled) {
         return (b.latestActivityAt || '').localeCompare(a.latestActivityAt || '');

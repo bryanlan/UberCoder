@@ -195,7 +195,7 @@ describe('deriveSidebarProjects', () => {
     expect(visibleProjects.map((item) => item.slug)).toEqual(['beta', 'alpha', 'gamma']);
   });
 
-  it('filters unbound conversations and empty projects in work mode', () => {
+  it.each([true, false])('keeps all projects while filtering unbound conversations in work mode (recent sorting: %s)', (recentActivitySortEnabled) => {
     const tree: TreeResponse = {
       projects: [
         project({
@@ -227,6 +227,7 @@ describe('deriveSidebarProjects', () => {
             updatedAt: '2026-07-01T11:00:00.000Z',
           })],
         }),
+        project({ slug: 'empty', displayName: 'Empty' }),
       ],
       boundSessions: [],
     };
@@ -234,12 +235,21 @@ describe('deriveSidebarProjects', () => {
     const visibleProjects = deriveSidebarProjects({
       tree,
       workMode: true,
-      recentActivitySortEnabled: true,
-      manualProjectOrder: [],
+      recentActivitySortEnabled,
+      manualProjectOrder: ['inactive', 'active', 'empty'],
     });
 
-    expect(visibleProjects.map((item) => item.slug)).toEqual(['active']);
-    expect(visibleProjects[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['bound']);
-    expect(visibleProjects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['bound']);
+    expect(visibleProjects.map((item) => item.slug)).toEqual(recentActivitySortEnabled
+      ? ['active', 'inactive', 'empty']
+      : ['inactive', 'active', 'empty']);
+    const active = visibleProjects.find((item) => item.slug === 'active');
+    expect(active?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['bound']);
+    expect(active?.providers.codex.conversations.map((item) => item.ref)).toEqual(['bound']);
+    for (const slug of ['inactive', 'empty']) {
+      const retained = visibleProjects.find((item) => item.slug === slug);
+      expect(retained?.combinedConversations).toEqual([]);
+      expect(retained?.providers.codex.conversations).toEqual([]);
+      expect(retained?.providers.claude.conversations).toEqual([]);
+    }
   });
 });
