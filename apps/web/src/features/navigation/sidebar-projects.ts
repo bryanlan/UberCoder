@@ -80,6 +80,13 @@ export function deriveSidebarProjects({
       };
     })
     .sort((a, b) => {
+      if (workMode) {
+        const aHasActiveConversation = a.combinedConversations.length > 0;
+        const bHasActiveConversation = b.combinedConversations.length > 0;
+        if (aHasActiveConversation !== bHasActiveConversation) {
+          return aHasActiveConversation ? -1 : 1;
+        }
+      }
       if (recentActivitySortEnabled) {
         return (b.latestActivityAt || '').localeCompare(a.latestActivityAt || '');
       }

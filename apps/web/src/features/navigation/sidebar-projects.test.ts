@@ -195,7 +195,7 @@ describe('deriveSidebarProjects', () => {
     expect(visibleProjects.map((item) => item.slug)).toEqual(['beta', 'alpha', 'gamma']);
   });
 
-  it.each([true, false])('keeps all projects while filtering unbound conversations in work mode (recent sorting: %s)', (recentActivitySortEnabled) => {
+  it.each([true, false])('moves projects without bound conversations below active projects until a chat binds (recent sorting: %s)', (recentActivitySortEnabled) => {
     const tree: TreeResponse = {
       projects: [
         project({
@@ -239,9 +239,7 @@ describe('deriveSidebarProjects', () => {
       manualProjectOrder: ['inactive', 'active', 'empty'],
     });
 
-    expect(visibleProjects.map((item) => item.slug)).toEqual(recentActivitySortEnabled
-      ? ['active', 'inactive', 'empty']
-      : ['inactive', 'active', 'empty']);
+    expect(visibleProjects.map((item) => item.slug)).toEqual(['active', 'inactive', 'empty']);
     const active = visibleProjects.find((item) => item.slug === 'active');
     expect(active?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['bound']);
     expect(active?.providers.codex.conversations.map((item) => item.ref)).toEqual(['bound']);
@@ -251,5 +249,27 @@ describe('deriveSidebarProjects', () => {
       expect(retained?.providers.codex.conversations).toEqual([]);
       expect(retained?.providers.claude.conversations).toEqual([]);
     }
+
+    const reboundTree: TreeResponse = {
+      ...tree,
+      projects: tree.projects.map((item) => item.slug === 'inactive' ? {
+        ...item,
+        providers: {
+          ...item.providers,
+          claude: {
+            ...item.providers.claude,
+            conversations: item.providers.claude.conversations.map((chat) => ({ ...chat, isBound: true })),
+          },
+        },
+      } : item),
+    };
+    const afterRebind = deriveSidebarProjects({
+      tree: reboundTree,
+      workMode: true,
+      recentActivitySortEnabled,
+      manualProjectOrder: ['inactive', 'active', 'empty'],
+    });
+    expect(afterRebind.map((item) => item.slug)).toEqual(['inactive', 'active', 'empty']);
+    expect(afterRebind[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['only-history']);
   });
 });
