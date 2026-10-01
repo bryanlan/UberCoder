@@ -1347,7 +1347,7 @@ export class SessionManager {
         : undefined,
       claudeProfile: input.provider.id === 'claude'
         ? input.claudeProfile ?? (input.kind === 'pending' && !input.providerSettings.commands.newCommand.some((arg) =>
-          arg === '--model' || arg.startsWith('--model=') || arg === '--effort' || arg.startsWith('--effort=')) ? 'medium' : undefined)
+          arg === '--model' || arg.startsWith('--model=')) ? 'medium' : undefined)
         : undefined,
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,

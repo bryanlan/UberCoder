@@ -122,6 +122,17 @@ describe('command construction and proxy allowlisting', () => {
   });
 
   it.each([
+    ['claude', '--effort', 'medium'],
+    ['claude', '--effort=medium'],
+  ])('defaults effort-only Claude command %j to Opus 5.5 xhigh', (...newCommand) => {
+    const configured = { ...claudeSettings, commands: { ...claudeSettings.commands, newCommand } };
+    const command = new ClaudeProvider().getLaunchCommand(project, null, configured);
+    expect(command.argv).toEqual([
+      'claude', '--model', 'claude-opus-5-5', '--effort', 'xhigh', '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it.each([
     ['high', 'claude-fable-5-1', 'xhigh'],
     ['medium', 'claude-opus-5-5', 'xhigh'],
     ['low', 'claude-sonnet-5', 'high'],

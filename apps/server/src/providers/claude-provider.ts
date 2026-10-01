@@ -16,9 +16,8 @@ function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
 }
 
-function hasConfiguredClaudeProfile(argv: string[]): boolean {
-  return argv.some((arg) => arg === '--model' || arg.startsWith('--model=')
-    || arg === '--effort' || arg.startsWith('--effort='));
+function hasConfiguredClaudeModel(argv: string[]): boolean {
+  return argv.some((arg) => arg === '--model' || arg.startsWith('--model='));
 }
 
 function withoutConfiguredClaudeProfile(argv: string[]): string[] {
@@ -179,7 +178,7 @@ export class ClaudeProvider implements ProviderAdapter {
       '--dangerously-skip-permissions',
     );
     const profileKey = options?.claudeProfile
-      ?? (!conversationRef && !hasConfiguredClaudeProfile(baseArgv) ? 'medium' : undefined);
+      ?? (!conversationRef && !hasConfiguredClaudeModel(baseArgv) ? 'medium' : undefined);
     if (profileKey) {
       const profile = CLAUDE_COST_PROFILES[profileKey];
       const withoutProfileArgs = withoutConfiguredClaudeProfile(baseArgv);

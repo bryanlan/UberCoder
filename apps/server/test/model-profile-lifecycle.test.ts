@@ -270,7 +270,7 @@ describe('model switching at provider turn boundaries', () => {
 });
 
 describe('Claude model profiles', () => {
-  async function setupClaude(kind: 'history' | 'pending') {
+  async function setupClaude(kind: 'history' | 'pending', newCommand = ['claude']) {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-model-profile-'));
     const db = new AppDatabase(path.join(dir, 'test.sqlite'));
     const tmux = new FakeTmux();
@@ -281,7 +281,7 @@ describe('Claude model profiles', () => {
       id: 'claude' as const,
       commands: {
         ...providerSettings.commands,
-        newCommand: ['claude'],
+        newCommand,
         resumeCommand: ['claude', '--resume', '{{conversationId}}'],
         continueCommand: ['claude', '--continue'],
       },
@@ -295,6 +295,16 @@ describe('Claude model profiles', () => {
     });
     return { db, tmux, manager, session };
   }
+
+  it.each([
+    ['claude', '--effort', 'medium'],
+    ['claude', '--effort=medium'],
+  ])('persists Medium for effort-only new command %j', async (...newCommand) => {
+    const { db, tmux, session } = await setupClaude('pending', newCommand);
+    expect(session.claudeProfile).toBe('medium');
+    expect(db.boundSessions.getById(session.id)?.claudeProfile).toBe('medium');
+    expect(tmux.createdCommands[0]).toContain("'claude-opus-5-5' '--effort' 'xhigh'");
+  });
 
   it('rebinds the same Claude conversation with the selected H and L models', async () => {
     const { db, tmux, manager, session } = await setupClaude('history');
