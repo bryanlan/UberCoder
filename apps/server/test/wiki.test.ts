@@ -37,6 +37,63 @@ function fixture() {
 }
 
 describe('repository wiki', () => {
+  it('records the exact page revision a different agent read and the demand behind searches and misses', () => {
+    const { checkout, linked, wiki, actor } = fixture();
+    const reader = { kind: 'agent' as const, id: randomUUID(), provider: 'claude' };
+    const first = wiki.write(checkout, { title: 'Home', body: 'Deployment evidence', baseRevision: null }, actor);
+    wiki.read(linked, 'HOME', reader);
+    const second = wiki.write(checkout, { title: 'Home', body: 'New deployment evidence', baseRevision: first.revision }, actor);
+    wiki.read(linked, 'Home', reader, first.revision);
+    wiki.read(linked, 'Home', reader);
+    wiki.search(linked, '  deployment  ', reader);
+    wiki.search(linked, 'missing subject', reader);
+    wiki.read(linked, ' Missing page ', reader);
+    wiki.history(linked, 'Missing page', reader);
+    const reads = wiki.sqlite.prepare(`select a.page_title, a.revision, r.author from wiki_access a
+      join wiki_revisions r on r.id=a.revision where a.action='read' and a.actor=? order by a.id`)
+      .all(`claude:${reader.id}`);
+    expect(reads).toEqual([
+      { page_title: 'Home', revision: first.revision, author: `codex:${actor.id}` },
+      { page_title: 'Home', revision: first.revision, author: `codex:${actor.id}` },
+      { page_title: 'Home', revision: second.revision, author: `codex:${actor.id}` },
+    ]);
+    expect(wiki.sqlite.prepare(`select query, result_count from wiki_access where action='search' order by id`).all())
+      .toEqual([{ query: 'deployment', result_count: 1 }, { query: 'missing subject', result_count: 0 }]);
+    expect(wiki.sqlite.prepare(`select action, page_title, revision, result_count from wiki_access
+      where page_title='Missing page' order by id`).all()).toEqual([
+      { action: 'read', page_title: 'Missing page', revision: null, result_count: 0 },
+      { action: 'history', page_title: 'Missing page', revision: null, result_count: 0 },
+    ]);
+  });
+
+  it('upgrades the previous database without changing pages, revisions or historical access evidence', () => {
+    const { checkout, wiki, wikiPath, actor } = fixture();
+    const first = wiki.write(checkout, { title: 'Home', body: 'Keep the existing knowledge', baseRevision: null }, actor);
+    wiki.read(checkout, 'Home', actor);
+    // Reproduce the schema installed before page/query/revision access logging.
+    wiki.sqlite.exec(`alter table wiki_access drop column page_title;
+      alter table wiki_access drop column query;
+      alter table wiki_access drop column revision;
+      pragma user_version=1;`);
+    const pages = wiki.sqlite.prepare('select * from wiki_pages').all();
+    const revisions = wiki.sqlite.prepare('select * from wiki_revisions').all();
+    const accesses = wiki.sqlite.prepare('select * from wiki_access').all();
+    wiki.close();
+    const upgraded = new WikiService(wikiPath);
+    cleanups.push(() => { if (upgraded.sqlite.open) upgraded.close(); });
+    expect(upgraded.sqlite.pragma('user_version', { simple: true })).toBe(2);
+    expect(upgraded.sqlite.prepare('select * from wiki_pages').all()).toEqual(pages);
+    expect(upgraded.sqlite.prepare('select * from wiki_revisions').all()).toEqual(revisions);
+    expect(upgraded.sqlite.prepare('select * from wiki_access').all()).toEqual(accesses.map((row) => ({
+      ...(row as object), page_title: null, query: null, revision: null,
+    })));
+    expect(upgraded.read(checkout, 'Home', actor)?.revision).toBe(first.revision);
+    upgraded.close();
+    const reopened = new WikiService(wikiPath);
+    cleanups.push(() => reopened.close());
+    expect(reopened.read(checkout, 'Home', actor)?.body).toBe(first.body);
+  });
+
   it('shares pages across worktrees, retains provenance and revisions, and rejects stale edits', () => {
     const { checkout, linked, wiki, actor } = fixture();
     const first = wiki.write(checkout, { title: 'Home', body: '# Home\nSee [[Design]].', baseRevision: null }, actor);

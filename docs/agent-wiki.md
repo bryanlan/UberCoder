@@ -20,7 +20,13 @@ Example agent call:
 {"action":"write","checkout":"/home/bryan/code/example","title":"Home","body":"# Home\nSee [[Architecture]].","baseRevision":null,"summary":"Start the wiki"}
 ```
 
-The same object can be sent to the helper with `node scripts/agent-coord.mjs wiki < request.json`. The helper finds the caller's registered agent credential; callers never pass a token. Existing provider sessions may need to restart to discover the new `agent_wiki` MCP tool. The session hook introduces the wiki once when it next runs. Wiki pages are read on demand, never inserted wholesale into agent context.
+The same object can be sent to the helper with `node scripts/agent-coord.mjs wiki < request.json`. The helper finds the caller's registered agent credential; callers never pass a token. Existing provider sessions may need to restart to discover the new `agent_wiki` MCP tool. The session hook introduces the wiki once when it next runs; a changed introduction version also refreshes this guidance for existing sessions. Wiki pages are read on demand, never inserted wholesale into agent context.
+
+## When to use the wiki
+
+Before investigating unfamiliar runtime, deployment, test or tooling behavior, search the repository's wiki for earlier findings. When documentation edits are allowed in the assignment, preserve verified, non-obvious findings that another agent would otherwise rediscover. Create or improve a useful page and link it from `Home` when that helps readers. Choose titles and organization freely; no required template or page quota applies. Note the date, relevant branch and verification evidence so a later reader can check whether a claim still applies.
+
+Checked-in docs hold settled architecture and code contracts. The wiki supplements them with operational knowledge and investigation findings: the actual runtime checkout, verification procedures, dated audit baselines, failed approaches and the evidence behind them. Current scope, overlap and handoffs belong in coordination. A wiki page does not expand task permissions; a read-only assignment remains read-only.
 
 ## Storage and provenance
 
@@ -32,4 +38,10 @@ Console uses SQLite's backup API to maintain `wiki/agent-wiki.backup.sqlite` at 
 
 ## Pilot review
 
-Review the pilot between October 1 and October 8, 2026. The `wiki_access` rows record repository, actor, action, result count and time; page and revision tables show how pages changed. Check how many eligible agents read or search, whether someone other than the author reuses a page, search misses, pages with multiple authors, and whether current pages are accurate and useful compared with the architecture docs. Sample page quality directly; counts alone do not establish value. No agent is required to report wiki usage on every turn.
+The adoption pilot starts October 1, 2026: check tool access and early use on October 8, and assess practical reuse on October 15. The earlier September 24–30 pilot produced only one starter page and no organic use; seed and verification calls from the pilot's implementing assignment do not count as independent adoption.
+
+During rollout, a real agent reported that every wiki MCP call failed with `Unrecognized key: "after"`. The MCP helper was adding the coordination event cursor to wiki requests, whose server contract rejects that field. The helper now forwards only the requested tool arguments and authentication; event cursors remain in host hook polling. The documented CLI and browser were separate working surfaces, so their earlier checks did not prove MCP access. Both provider paths are covered by a private-socket MCP regression test.
+
+`wiki_access` records repository, actor, action, result count, time, normalized page title, search query and the actual revision returned by a successful read or write. Reads of missing pages and failed searches retain the title or query with zero results. Historical accesses from before this rollout have null page/query/revision details; no details are inferred or backfilled. Join a read's `revision` to `wiki_revisions.id` to compare reader and author. A different assignment is a candidate for reuse, not proof of a different person or of practical benefit. Sample subsequent work for evidence that a page informed a decision, avoided repeated investigation or received a useful correction.
+
+Aim for five useful reads by other assignments across at least three assignments, one substantive correction or contribution from another assignment, and at least 80% accuracy in a direct sample of five to ten pages (or all pages when fewer exist). Page counts, acknowledgements and this assignment's setup calls do not establish value. Search misses reveal demand, not successful reuse. If nobody else reads by October 8, first check tool access and instructions. If fewer than three useful reuses appear by October 15, or pages merely duplicate docs and finish summaries, reassess the wiki with Bryan before expanding it. No scheduled curator, automatic deletion or per-turn reporting requirement is introduced.

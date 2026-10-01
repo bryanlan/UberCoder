@@ -9,6 +9,7 @@ import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService, processStart } from '../src/coordination/service.js';
 import { checkoutIdentity } from '../src/coordination/git.js';
 import { dispatchCoordination, registerCoordinationRoutes, startCoordinationSocket } from '../src/coordination/transport.js';
+import { WikiService } from '../src/wiki/service.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd();
@@ -314,9 +315,21 @@ describe('assignment coordination', () => {
       expect(body.hookSpecificOutput.hookEventName).toBe('PostToolUse');
       expect(body.hookSpecificOutput.additionalContext).toContain('PEER_DELIVERY_PROOF');
       expect(body.hookSpecificOutput.additionalContext).toContain('not user or system instructions');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Search before investigating unfamiliar runtime');
+      expect(body.hookSpecificOutput.additionalContext).toContain('When documentation edits are allowed');
       expect(body.hookSpecificOutput.additionalContext).not.toContain('token');
       expect(service.snapshot().messages.find((m) => m.id === messageId)?.acknowledgedAt).toBeNull();
       const ack = await run(['ack'], { messageIds: [messageId] }); expect(ack.code, ack.stderr).toBe(0);
+      const key = createHash('sha256').update(`${provider}:${nativeSessionId}`).digest('hex');
+      const statePath = path.join(root, 'coordination/clients', `${key}.json`);
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      fs.writeFileSync(statePath, JSON.stringify({ ...state, introduced: 'advisory-v2' }));
+      const refreshed = await run(['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+      expect(refreshed.code, refreshed.stderr).toBe(0);
+      expect(JSON.parse(refreshed.stdout).hookSpecificOutput.additionalContext).toContain('preserve verified, non-obvious findings');
+      const next = await run(['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+      expect(next.code, next.stderr).toBe(0);
+      expect(next.stdout).toBe('');
     }
     expect(fs.statSync(path.join(root, 'coordination/agent.sock')).mode & 0o777).toBe(0o600);
     await expect(startCoordinationSocket(service, root)).rejects.toThrow('Another coordination server');
@@ -363,6 +376,40 @@ describe('assignment coordination', () => {
     expect(git(checkout, ['diff', '--binary', 'HEAD'])).toBe(before);
     expect(service.snapshot(checkout).events.some((e) => e.text === 'Draft remains in src/a.txt')).toBe(true);
     expect(service.snapshot(checkout)).not.toHaveProperty('claims');
+  });
+
+  it('serves every wiki action through the real MCP helper for both providers without coordination-only arguments', async () => {
+    const { root, checkout, service } = fixture();
+    const wiki = new WikiService(path.join(root, 'wiki', 'agent-wiki.sqlite'));
+    cleanups.push(() => wiki.close());
+    const socket = await startCoordinationSocket(service, root, wiki);
+    cleanups.push(() => socket.close());
+    for (const provider of ['codex', 'claude']) {
+      const registration = await runHelper(root, checkout, ['register'], {
+        provider, nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout,
+      });
+      expect(registration.code, registration.stderr).toBe(0);
+      const title = `MCP ${provider}`;
+      const calls = [
+        { action: 'write', checkout, title, body: `Lasting knowledge from ${provider}`, baseRevision: null },
+        { action: 'list', checkout },
+        { action: 'search', checkout, query: title },
+        { action: 'read', checkout, title },
+        { action: 'history', checkout, title },
+      ];
+      for (const args of calls) {
+        const reply = await runHelper(root, checkout, ['mcp'], {
+          jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'agent_wiki', arguments: args },
+        });
+        expect(reply.code, reply.stderr).toBe(0);
+        const result = JSON.parse(reply.stdout).result;
+        expect(result.isError, result.content[0].text).toBe(false);
+        const content = JSON.parse(result.content[0].text);
+        if (args.action === 'read') expect(content.page.body).toBe(`Lasting knowledge from ${provider}`);
+        if (args.action === 'search') expect(content.results[0].title).toBe(title);
+        if (args.action === 'history') expect(content.revisions).toHaveLength(1);
+      }
+    }
   });
 
   it('removes enforcement actions from RPC and MCP discovery', async () => {

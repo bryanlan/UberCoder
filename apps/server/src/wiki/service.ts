@@ -75,26 +75,36 @@ export class WikiService {
     this.backupPath = path.join(directory, 'agent-wiki.backup.sqlite');
     this.sqlite.pragma('journal_mode = WAL');
     const version = this.sqlite.pragma('user_version', { simple: true }) as number;
-    if (version > 1) { this.sqlite.close(); throw new Error(`Wiki schema version ${version} is newer than this Console supports.`); }
-    this.sqlite.exec(`
-      create table if not exists wiki_pages (
-        repository text not null, title_key text not null, title text not null,
-        current_revision integer not null, updated_at text not null,
-        primary key(repository, title_key)
-      );
-      create table if not exists wiki_revisions (
-        id integer primary key autoincrement, repository text not null, title_key text not null,
-        title text not null, body text not null, summary text not null, author text not null,
-        checkout text not null, branch text, head_commit text, created_at text not null
-      );
-      create index if not exists wiki_revisions_page on wiki_revisions(repository, title_key, id desc);
-      create table if not exists wiki_access (
-        id integer primary key autoincrement, repository text not null, actor text not null,
-        action text not null, result_count integer not null, created_at text not null
-      );
-      create index if not exists wiki_access_repo_time on wiki_access(repository, created_at);
-    `);
-    if (version === 0) this.sqlite.pragma('user_version = 1');
+    if (version > 2) { this.sqlite.close(); throw new Error(`Wiki schema version ${version} is newer than this Console supports.`); }
+    this.sqlite.transaction(() => {
+      this.sqlite.exec(`
+        create table if not exists wiki_pages (
+          repository text not null, title_key text not null, title text not null,
+          current_revision integer not null, updated_at text not null,
+          primary key(repository, title_key)
+        );
+        create table if not exists wiki_revisions (
+          id integer primary key autoincrement, repository text not null, title_key text not null,
+          title text not null, body text not null, summary text not null, author text not null,
+          checkout text not null, branch text, head_commit text, created_at text not null
+        );
+        create index if not exists wiki_revisions_page on wiki_revisions(repository, title_key, id desc);
+        create table if not exists wiki_access (
+          id integer primary key autoincrement, repository text not null, actor text not null,
+          action text not null, result_count integer not null, created_at text not null
+        );
+        create index if not exists wiki_access_repo_time on wiki_access(repository, created_at);
+      `);
+      if (version < 2) {
+        // Preserve existing access history; unknown details stay null.
+        this.sqlite.exec(`
+          alter table wiki_access add column page_title text;
+          alter table wiki_access add column query text;
+          alter table wiki_access add column revision integer;
+        `);
+        this.sqlite.pragma('user_version = 2');
+      }
+    }).immediate();
   }
 
   close(): void { this.sqlite.close(); }
@@ -119,9 +129,11 @@ export class WikiService {
     return actor.kind === 'agent' ? `${actor.provider ?? 'agent'}:${actor.id}` : `user:${actor.id}`;
   }
 
-  private access(repository: string, actor: WikiActor, action: string, resultCount: number): void {
-    this.sqlite.prepare('insert into wiki_access(repository,actor,action,result_count,created_at) values(?,?,?,?,?)')
-      .run(repository, this.actorName(actor), action, resultCount, new Date().toISOString());
+  private access(repository: string, actor: WikiActor, action: string, resultCount: number,
+    detail: { title?: string; query?: string; revision?: number } = {}): void {
+    this.sqlite.prepare(`insert into wiki_access(repository,actor,action,result_count,created_at,page_title,query,revision)
+      values(?,?,?,?,?,?,?,?)`).run(repository, this.actorName(actor), action, resultCount,
+      new Date().toISOString(), detail.title ?? null, detail.query ?? null, detail.revision ?? null);
   }
 
   private page(repository: string, key: string): PageRow | undefined {
@@ -146,12 +158,12 @@ export class WikiService {
 
   read(checkout: string, titleInput: string, actor: WikiActor, revision?: number): WikiPage | null {
     const { repository } = wikiIdentity(checkout);
-    const { key } = titleParts(titleInput);
+    const { title, key } = titleParts(titleInput);
     const page = this.page(repository, key);
     const row = page && (revision === undefined
       ? this.revision(page.current_revision)
       : this.sqlite.prepare('select * from wiki_revisions where id=? and repository=? and title_key=?').get(revision, repository, key) as RevisionRow | undefined);
-    this.access(repository, actor, 'read', row ? 1 : 0);
+    this.access(repository, actor, 'read', row ? 1 : 0, { title: page?.title ?? title, revision: row?.id });
     return page && row ? this.result(repository, page, row) : null;
   }
 
@@ -177,22 +189,25 @@ export class WikiService {
       and (instr(lower(p.title),lower(?))>0 or instr(lower(r.body),lower(?))>0)
       order by case when instr(lower(p.title),lower(?))>0 then 0 else 1 end, p.updated_at desc limit 8`)
       .all(repository, query, query, query) as WikiSearchResponse['results'];
-    this.access(repository, actor, 'search', rows.length);
+    this.access(repository, actor, 'search', rows.length, { query });
     return { results: rows };
   }
 
   history(checkout: string, titleInput: string, actor: WikiActor, offset = 0) {
     const { repository } = wikiIdentity(checkout);
-    const { key } = titleParts(titleInput);
+    const { title, key } = titleParts(titleInput);
     const page = this.page(repository, key);
-    if (!page) return { revisions: [], total: 0, nextOffset: null };
+    if (!page) {
+      this.access(repository, actor, 'history', 0, { title });
+      return { revisions: [], total: 0, nextOffset: null };
+    }
     const revisions = this.sqlite.prepare(`select id as revision, summary, author, checkout, branch,
       head_commit as headCommit, created_at as createdAt from wiki_revisions
       where repository=? and title_key=? order by id desc limit 10 offset ?`)
       .all(repository, key, offset) as WikiHistoryEntry[];
     const total = (this.sqlite.prepare('select count(*) as n from wiki_revisions where repository=? and title_key=?')
       .get(repository, key) as { n: number }).n;
-    this.access(repository, actor, 'history', revisions.length);
+    this.access(repository, actor, 'history', revisions.length, { title: page.title });
     return { revisions, total, nextOffset: offset + revisions.length < total ? offset + revisions.length : null };
   }
 
@@ -220,7 +235,7 @@ export class WikiService {
         .run(repository, key, page?.title ?? title, revision, now);
       return this.result(repository, this.page(repository, key)!, this.revision(revision)!);
     }).immediate();
-    this.access(repository, actor, 'write', 1);
+    this.access(repository, actor, 'write', 1, { title: result.title, revision: result.revision });
     return result;
   }
 }
