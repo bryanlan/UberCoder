@@ -2,6 +2,7 @@ import { CONVERSATION_SEARCH_RECENCY_BUCKETS, type ConversationSearchRecencyBuck
 import type { ConversationSearchIndexChunk, AppDatabase } from '../db/database.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
+import { getBoundSessionConversationUpdatedAt } from '../lib/conversation-summary.js';
 import { sanitizeSearchableProse } from '../lib/prose-sanitizer.js';
 import { normalizeWhitespace } from '../lib/text.js';
 import type { ActiveProject, ProjectService } from '../projects/project-service.js';
@@ -314,11 +315,11 @@ export class ConversationSearchService {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
       const liveMessageUpdatedAt = latestSearchableMessageTimestamp(messages);
-      const conversationUpdatedAt = session.lastCompletedAt
-        ?? session.lastOutputAt
-        ?? session.lastActivityAt
-        ?? summary?.updatedAt
-        ?? (isPendingConversation ? session.updatedAt : liveMessageUpdatedAt ?? session.startedAt);
+      const conversationUpdatedAt = getBoundSessionConversationUpdatedAt(
+        session,
+        isPendingConversation ? undefined : summary?.updatedAt,
+        liveMessageUpdatedAt ?? summary?.createdAt,
+      );
 
       for (const message of messages) {
         if (providerHasTranscript && message.role === 'assistant' && message.source === 'live-output') {

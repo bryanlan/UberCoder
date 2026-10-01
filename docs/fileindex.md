@@ -46,6 +46,8 @@
 - `apps/server/src/config/schema.ts` and `service.ts` - config schema, merge behavior, runtime paths, provider/project settings, and security knobs.
 - `apps/server/src/db/database.ts` - SQLite persistence boundary.
 - `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
+- `apps/server/src/lib/conversation-summary.ts` - synthetic bound-conversation summaries and shared
+  activity-date selection for tree placeholders and live search, excluding maintenance timestamps.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor
   transcript discovery and launch command adapters; Codex pending adoption prefilters decoded JSONL

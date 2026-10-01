@@ -167,6 +167,9 @@ user's actual prompt.
 - Session recency is not a generic "screen changed" timestamp. Opening an old session, restoring a
   tmux binding, viewing an old transcript, raw restore output, or the screen merely leaving
   `Working` must not make a conversation look fresh.
+  Synthetic tree rows and live search use the newest valid activity, output, completion, or native
+  transcript timestamp. Binding creation and normalized live-event dates are fallbacks when no
+  activity/transcript timestamp is known; maintenance updates never advance conversation recency.
 - Explicit recent-conversation auto-tracking uses `autoTrackedAt` only for provenance in the sidebar.
   It must not write `lastActivityAt`, `lastCompletedAt`, or `lastResponseAt`, reorder projects as if user or
   agent work occurred, or run during Settings' ordinary project-tree refresh.

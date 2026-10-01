@@ -537,6 +537,125 @@ describe('conversation search', () => {
     db.close();
   });
 
+  it('keeps restored transcript-backed live search recency anchored to the transcript', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-restored-history-recency-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Please inspect the stale recency invariant.', timestamp: '2026-06-18T12:00:00.000Z' }),
+    ].join('\n'), 'utf8');
+    db.conversationIndex.replace('demo', 'codex', [{
+      ref: 'restored-history',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Restored history session',
+      createdAt: '2026-03-01T12:00:00.000Z',
+      updatedAt: '2026-03-01T12:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-restored-history',
+      degraded: false,
+    }]);
+    db.boundSessions.upsert({
+      id: 'session-restored-history',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'restored-history',
+      tmuxSessionName: 'ac-codex-demo-restored-history',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Restored history session',
+      startedAt: '2026-03-01T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:05:00.000Z',
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+    const results = await search.search('stale recency invariant', 10);
+
+    expect(results[0]).toMatchObject({
+      conversationRef: 'restored-history',
+      conversationUpdatedAt: '2026-03-01T12:00:00.000Z',
+    });
+    db.close();
+  });
+
+  it('uses newer live activity over older completed output for restored live search recency', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-restored-history-live-activity-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, [
+      JSON.stringify({ type: 'user-input', text: 'Please inspect the newer live activity recency.', timestamp: '2026-06-18T12:00:00.000Z' }),
+    ].join('\n'), 'utf8');
+    db.conversationIndex.replace('demo', 'codex', [{
+      ref: 'restored-history-live-activity',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Restored history live activity',
+      createdAt: '2026-03-01T12:00:00.000Z',
+      updatedAt: '2026-03-01T12:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-restored-history-live-activity',
+      degraded: false,
+    }]);
+    db.boundSessions.upsert({
+      id: 'session-restored-history-live-activity',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'restored-history-live-activity',
+      tmuxSessionName: 'ac-codex-demo-restored-history-live-activity',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'Restored history live activity',
+      startedAt: '2026-03-01T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:05:00.000Z',
+      lastCompletedAt: '2026-03-01T12:30:00.000Z',
+      lastActivityAt: '2026-06-18T12:00:00.000Z',
+      eventLogPath,
+    });
+
+    const search = new ConversationSearchService(db, {
+      listActiveProjects: async () => [project],
+    });
+    const results = await search.search('newer live activity recency', 10);
+
+    expect(results[0]).toMatchObject({
+      conversationRef: 'restored-history-live-activity',
+      conversationUpdatedAt: '2026-06-18T12:00:00.000Z',
+    });
+    db.close();
+  });
+
+  it('ignores pending maintenance dates and uses normalized input when no activity clock exists', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-pending-maintenance-recency-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const eventLogPath = path.join(tempDir, 'events.jsonl');
+    await fs.writeFile(eventLogPath, JSON.stringify({
+      type: 'user-input', text: 'Find the pending maintenance invariant.', timestamp: '2026-01-01T12:00:00.000Z',
+    }), 'utf8');
+    db.pendingConversations.put({
+      ref: 'pending:maintenance', kind: 'pending', projectSlug: 'demo', provider: 'codex',
+      title: 'Pending maintenance', createdAt: '2026-01-01T11:00:00.000Z',
+      updatedAt: '2026-06-18T12:00:00.000Z', isBound: true,
+      boundSessionId: 'session-pending-maintenance', degraded: false,
+    });
+    db.boundSessions.upsert({
+      id: 'session-pending-maintenance', provider: 'codex', projectSlug: 'demo',
+      conversationRef: 'pending:maintenance', tmuxSessionName: 'ac-codex-demo-pending-maintenance',
+      status: 'bound', startedAt: '2026-06-18T12:00:00.000Z',
+      updatedAt: '2026-06-18T12:05:00.000Z', eventLogPath,
+    });
+    const search = new ConversationSearchService(db, { listActiveProjects: async () => [project] });
+    expect((await search.search('pending maintenance invariant', 10))[0]).toMatchObject({
+      conversationRef: 'pending:maintenance', conversationUpdatedAt: '2026-01-01T12:00:00.000Z',
+      recencyBucket: '60-plus-days',
+    });
+    db.close();
+  });
+
   it('bounds live-session search to the recent event-log tail', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-tail-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
