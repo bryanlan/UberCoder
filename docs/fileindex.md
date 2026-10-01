@@ -107,6 +107,10 @@
   404 selection, sidebar ordering, Work-mode filtering of conversation children while retaining
   configured active projects, and separation of provider response status
   from genuine activity ordering.
+- `apps/web/src/features/navigation/useSidebarWidth.ts` - browser-local desktop sidebar sizing,
+  pointer and keyboard resizing, viewport bounds, and saved width restoration.
+- `apps/web/e2e/sidebar.spec.ts` - browser coverage for sidebar resizing, width persistence,
+  mobile drawer bounds, and the empty conversation rename field.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation

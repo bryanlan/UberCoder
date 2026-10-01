@@ -189,6 +189,12 @@ user's actual prompt.
   trigger a debounced refresh of that Claude project only, so externally started chats appear in
   their configured project without a global transcript scan. The targeted refresh API likewise
   accepts a project/provider pair for recovery of a pre-existing external transcript.
+- Desktop sidebar width is a browser-local preference managed by `useSidebarWidth`. Its right-edge
+  separator supports pointer dragging, arrow keys, and double-click reset. Width defaults to 352px,
+  stays between 280px and 640px, and leaves at least 480px for content on desktop. A smaller viewport
+  clamps the displayed width without overwriting the saved preference; mobile keeps its existing drawer.
+- Conversation rename opens a focused, empty field. Saving a nonempty name uses the existing
+  server-owned title override; cancelling leaves the current title intact.
 - Generated conversation titles retain up to 288 characters. Sidebar and search titles use a
   wrapped, viewport-constrained hover tooltip after 167 ms; it renders outside the scrolling
   sidebar so the expanded text is not clipped. Escape, scrolling, navigation, and pointer exit

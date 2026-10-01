@@ -3,11 +3,12 @@ import { Link, useLocation } from 'react-router-dom';
 import type { ConversationSearchResult, ProjectSummary, ProviderId, RunFailure, TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 import { getConversationStatusClass } from '../features/navigation/work-status';
+import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { TitleTooltip } from './TitleTooltip';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
@@ -236,23 +237,17 @@ function ConversationLink({
   const nowMs = useNowMs();
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [draftTitle, setDraftTitle] = useState(title);
+  const [draftTitle, setDraftTitle] = useState('');
   const rowRef = useRef<HTMLDivElement | null>(null);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
   const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt);
   const indicatorClassName = getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
 
-  useEffect(() => {
-    if (!editing) {
-      setDraftTitle(title);
-    }
-  }, [editing, title]);
-
   async function submitRename(): Promise<void> {
     const nextTitle = draftTitle.trim();
     if (!nextTitle || nextTitle === title) {
-      setDraftTitle(title);
+      setDraftTitle('');
       setEditing(false);
       return;
     }
@@ -279,11 +274,13 @@ function ConversationLink({
             }
             if (event.key === 'Escape') {
               event.preventDefault();
-              setDraftTitle(title);
+              setDraftTitle('');
               setEditing(false);
             }
           }}
           autoFocus
+          aria-label="New conversation name"
+          placeholder="New conversation name"
           disabled={renaming}
           className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-sky-400 disabled:cursor-not-allowed disabled:opacity-60"
         />
@@ -291,7 +288,7 @@ function ConversationLink({
           <button
             type="button"
             onClick={() => {
-              setDraftTitle(title);
+              setDraftTitle('');
               setEditing(false);
             }}
             className="rounded-lg border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
@@ -356,6 +353,7 @@ function ConversationLink({
               type="button"
               onClick={() => {
                 setMenuOpen(false);
+                setDraftTitle('');
                 setEditing(true);
               }}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
@@ -728,6 +726,7 @@ export function Sidebar({
   onRefresh,
   refreshing,
 }: SidebarProps) {
+  const { width, resizing, separatorProps } = useSidebarWidth(open);
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
@@ -788,13 +787,14 @@ export function Sidebar({
   return (
     <>
       <div className={clsx('fixed inset-0 z-20 bg-slate-950/70 lg:hidden', open ? 'block' : 'hidden')} onClick={onClose} />
-      <aside className={clsx(
-        'fixed inset-y-0 left-0 z-30 max-w-[88vw] overflow-hidden backdrop-blur transition-[transform,width,border-color] lg:relative lg:inset-y-auto lg:left-auto lg:z-0 lg:max-w-none',
+      <aside style={{ '--sidebar-width': `${width}px` } as CSSProperties} className={clsx(
+        'fixed inset-y-0 left-0 z-30 max-w-[88vw] shrink-0 overflow-hidden backdrop-blur lg:relative lg:inset-y-auto lg:left-auto lg:z-0 lg:max-w-none',
+        resizing ? 'transition-none' : 'transition-[transform,width,border-color]',
         open
-          ? 'w-[22rem] translate-x-0 border-r border-slate-800'
+          ? 'w-[22rem] translate-x-0 border-r border-slate-800 lg:w-[var(--sidebar-width)]'
           : 'w-[22rem] -translate-x-full border-r border-slate-800 lg:w-0 lg:translate-x-0 lg:border-r-0',
       )}>
-        <div className="flex h-full w-[22rem] max-w-[88vw] flex-col bg-slate-950/95">
+        <div className="flex h-full w-[22rem] max-w-[88vw] flex-col bg-slate-950/95 lg:w-[var(--sidebar-width)] lg:max-w-none">
           <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4">
             <div>
               <div className="text-lg font-semibold">Agent Console</div>
@@ -915,6 +915,14 @@ export function Sidebar({
             )}
           </div>
         </div>
+        {open && <div
+          {...separatorProps}
+          title="Drag to resize; double-click to reset"
+          className={clsx(
+            'absolute inset-y-0 right-0 z-40 hidden w-2 cursor-col-resize touch-none select-none border-r-2 border-transparent transition-colors hover:border-sky-400 focus-visible:border-sky-400 focus-visible:outline-none lg:block',
+            resizing && 'border-sky-400',
+          )}
+        />}
       </aside>
     </>
   );
