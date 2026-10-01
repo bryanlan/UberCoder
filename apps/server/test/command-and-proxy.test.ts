@@ -54,7 +54,7 @@ describe('command construction and proxy allowlisting', () => {
       initialPrompt: 'Reply with exactly: smoke-token',
     });
     expect(command.argv).toEqual([
-      'codex', '--model', 'gpt-6-sol', '-c', 'model_reasoning_effort="xhigh"',
+      'codex', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"',
       '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token',
     ]);
   });

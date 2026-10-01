@@ -152,7 +152,7 @@ describe('model switching at provider turn boundaries', () => {
     expect(accepted.session.modelProfileRequest).toMatchObject({ profile: 'medium', state: 'queued' });
     await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
     expect(tmux.created).toHaveLength(2);
-    expect(tmux.createdCommands.at(-1)).toContain('gpt-6-sol');
+    expect(tmux.createdCommands.at(-1)).toContain('gpt-6.1-sol');
     expect(db.boundSessions.getById(session.id)?.codexProfile).toBe('medium');
   });
 

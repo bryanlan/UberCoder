@@ -161,7 +161,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
-    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-6-sol xhigh · /tmp';
+    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · /tmp';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
     const session = await manager.bindConversation({
       project,

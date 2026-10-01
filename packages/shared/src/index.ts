@@ -4,7 +4,7 @@ export type ProviderId = (typeof PROVIDERS)[number];
 
 export const CODEX_COST_PROFILES = {
   high: { model: 'gpt-6-astra', reasoningEffort: 'xhigh', shortcut: 'H' },
-  medium: { model: 'gpt-6-sol', reasoningEffort: 'xhigh', shortcut: 'M' },
+  medium: { model: 'gpt-6.1-sol', reasoningEffort: 'xhigh', shortcut: 'M' },
   low: { model: 'gpt-6-luna', reasoningEffort: 'xhigh', shortcut: 'L' },
 } as const;
 export type CodexCostProfileKey = keyof typeof CODEX_COST_PROFILES;
