@@ -310,6 +310,22 @@ function toScreenLines(snapshot: string): ScreenLine[] {
     });
 }
 
+function preserveClaudeLoginUrl(lines: ScreenLine[]): ScreenLine[] {
+  const loginPromptIndex = lines.findIndex((line) => /^Browser didn't open\? Use the url below to sign in$/i.test(line.plain.trim()));
+  const pastePromptIndex = lines.findIndex((line) => /^Paste code here if prompted >$/i.test(line.plain.trim()));
+  if (loginPromptIndex === -1 && pastePromptIndex === -1) return lines;
+
+  // Wrapped link labels lose their target when OSC 8 metadata is stripped for plain text.
+  const authUrl = lines.flatMap((line) => [...line.raw.matchAll(/\u001b]8;[^;]*;([^\u0007\u001b]+)(?:\u0007|\u001b\\)/g)]
+    .map((match) => match[1]!))
+    .filter((url) => /^https:\/\/(?:www\.)?claude\.(?:com|ai)\/(?:cai\/)?oauth\/authorize(?:[?#][^\s]*|$)$/i.test(url))
+    .at(-1);
+  if (!authUrl || lines.some((line) => line.plain.includes(authUrl))) return lines;
+
+  const insertionIndex = pastePromptIndex === -1 ? loginPromptIndex + 1 : pastePromptIndex;
+  return [...lines.slice(0, insertionIndex), { raw: authUrl, plain: authUrl }, ...lines.slice(insertionIndex)];
+}
+
 function trimLeadingTerminalChrome(lines: ScreenLine[]): ScreenLine[] {
   let start = 0;
   while (start < lines.length) {
@@ -449,7 +465,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
   const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
-  const visibleContentLines = trimBlankEdges(collapseBlankRuns([...contentLines, ...nonStatusFooterLines]));
+  const visibleContentLines = trimBlankEdges(collapseBlankRuns(preserveClaudeLoginUrl([...contentLines, ...nonStatusFooterLines])));
   const content = joinPlain(visibleContentLines) || 'Waiting for session output…';
   const contentAnsi = joinAnsi(visibleContentLines) || content;
   const footerText = joinPlain(footerStatusLines);

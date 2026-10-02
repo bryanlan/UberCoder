@@ -56,9 +56,11 @@ Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.
 state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses from
 `apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,
 not raw screen content; `apps/web/src/features/conversation/useConversationData.ts` polls the
-screen route separately for the live terminal/status panel. User-visible incremental conversation
-output comes through `apps/server/src/sessions/live-output/reader.ts` and the event log attached to
-the bound session. Codex transcript parsing prefers response-backed display messages over
+screen route separately for the live terminal/status panel.
+The screen parser preserves the full Claude OAuth URL from terminal hyperlink metadata when the
+login screen wraps its visible label. This correction applies only to the interactive screen.
+User-visible incremental conversation output comes through `apps/server/src/sessions/live-output/reader.ts`
+and the event log attached to the bound session. Codex transcript parsing prefers response-backed display messages over
 near-duplicate event messages, removes internal memory-citation blocks before display comparison,
 and hides environment, `AGENTS.md`, and instruction wrapper records from the visible transcript
 while keeping the full parsed message set available for indexing. Codex commentary-phase assistant

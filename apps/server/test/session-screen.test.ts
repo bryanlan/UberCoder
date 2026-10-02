@@ -2,6 +2,53 @@ import { describe, expect, it } from 'vitest';
 import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 
 describe('parseSessionScreenSnapshot', () => {
+  const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
+
+  it.each(['\u0007', '\u001b\\'])('preserves the full wrapped Claude login URL with OSC terminator %j', (terminator) => {
+    for (const pastePrompt of ['', 'Paste code here if prompted >']) {
+      const screen = parseSessionScreenSnapshot([
+        "Browser didn't open? Use the url below to sign in",
+        `\u001b]8;;${authUrl}${terminator}https://claude.com/cai/oauth/authorize?client_id=fixture&\u001b]8;;${terminator}`,
+        `\u001b]8;;${authUrl}${terminator}code_challenge=fixture&state=fixture\u001b]8;;${terminator}`,
+        pastePrompt,
+      ].join('\n'));
+
+      expect(screen.content.split('\n').filter((line) => line === authUrl)).toHaveLength(1);
+      expect(screen.contentAnsi?.split('\n')).toContain(authUrl);
+      expect(screen.content).toContain("Browser didn't open?");
+      if (pastePrompt) expect(screen.content.indexOf(authUrl)).toBeLessThan(screen.content.indexOf(pastePrompt));
+      expect(screen.inputText).toBe('');
+    }
+  });
+
+  it('does not duplicate an already visible Claude login URL', () => {
+    const screen = parseSessionScreenSnapshot([
+      "Browser didn't open? Use the url below to sign in",
+      `\u001b]8;;${authUrl}\u0007${authUrl}\u001b]8;;\u0007`,
+      'Paste code here if prompted >',
+    ].join('\n'));
+    expect(screen.content.split(authUrl)).toHaveLength(2);
+  });
+
+  it.each([
+    'https://claude.com.evil.example/cai/oauth/authorize?fixture=1',
+    'https://claude.com/cai/oauth/authorize-other?fixture=1',
+    'http://claude.com/cai/oauth/authorize?fixture=1',
+  ])('does not expose an unrelated hidden hyperlink on the login screen: %s', (url) => {
+    const screen = parseSessionScreenSnapshot([
+      "Browser didn't open? Use the url below to sign in",
+      `\u001b]8;;${url}\u0007Link label\u001b]8;;\u0007`,
+      'Paste code here if prompted >',
+    ].join('\n'));
+    expect(screen.content).toContain('Link label');
+    expect(screen.content).not.toContain(url);
+  });
+
+  it('keeps hidden OAuth hyperlinks out of ordinary conversation screen content', () => {
+    const screen = parseSessionScreenSnapshot(`\u001b]8;;${authUrl}\u0007Link label\u001b]8;;\u0007`);
+    expect(screen.content).toBe('Link label');
+  });
+
   it('keeps current Codex model and effort menus out of the input buffer', () => {
     for (const [heading, footer] of [
       ['Select Model and Effort', 'enter select · esc back'],

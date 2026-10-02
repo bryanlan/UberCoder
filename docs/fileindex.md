@@ -91,7 +91,8 @@
   rules between durable provider transcript messages and temporary live event-log messages.
 - `apps/server/src/sessions/transcript-watcher.ts` - transcript-file change detection that refreshes
   selected timelines when provider history catches up.
-- `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content.
+- `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content,
+  including complete Claude login URLs recovered from wrapped terminal hyperlinks.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and readable/writable session ownership options.
 - `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,
