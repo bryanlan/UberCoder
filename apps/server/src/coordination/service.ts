@@ -20,6 +20,9 @@ export function processStart(pid: number): string {
 
 export interface CoordinationSettings { enabled: boolean; pilotPaths: string[] }
 
+export const OUTSIDE_PILOT_NOTE = 'This repository is outside the coordination pilot, so it has no activity view. '
+  + 'Your assignment and direct messages still work: call status without checkout to find peers, then send to their id.';
+
 export class CoordinationService {
   constructor(private readonly db: AppDatabase, readonly settings: CoordinationSettings) {}
 
@@ -118,15 +121,22 @@ export class CoordinationService {
   }
 
   agentStatus(id: string, directory?: string, offset = 0) {
-    const empty = { enabled: false, assignment: null, peers: [], unscoped: false, totalPeerScopes: 0, nextOffset: null, pendingMessageCount: 0 };
-    if (!this.settings.enabled || (directory && !this.eligible(directory))) return empty;
+    if (!this.settings.enabled) {
+      return { enabled: false, assignment: null, peers: [], unscoped: false, totalPeerScopes: 0, nextOffset: null, pendingMessageCount: 0 };
+    }
     this.reconcileProcesses();
     const current = this.assignment(id);
+    const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
+    const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160) };
+    // A checkout outside the pilot has no activity view, but the assignment and direct messages
+    // still work. Say so explicitly; an empty "disabled" reply reads as "messaging is unavailable".
+    if (directory && !this.eligible(directory)) {
+      return { enabled: true, assignment, checkoutInPilot: false, note: OUTSIDE_PILOT_NOTE, peers: [], unscoped: false,
+        totalPeerScopes: 0, nextOffset: null, pendingMessageCount };
+    }
     const repositories = directory
       ? [checkoutIdentity(directory).repository]
       : (this.db.sqlite.prepare('select distinct repository from coordination_scopes where assignment_id=?').all(id) as Array<{ repository: string }>).map((row) => row.repository);
-    const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
-    const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160) };
     // Before the first scope announcement, show live pilot work rather than an empty view.
     const repositoryFilter = repositories.length > 0 ? `and s.repository in (${repositories.map(() => '?').join(',')})` : '';
     const rows = this.db.sqlite.prepare(`select a.id, a.provider, a.status, a.description, a.last_seen_at as lastSeenAt,

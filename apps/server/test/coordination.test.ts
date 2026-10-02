@@ -257,6 +257,21 @@ describe('assignment coordination', () => {
     expect(service.agentStatus(a.id, checkout).peers.every((item) => item.id !== peer)).toBe(true);
   });
 
+  it('keeps the assignment and messaging visible when status names a checkout outside the pilot', () => {
+    const { root, service, register } = fixture();
+    const a = register(); const b = register('claude');
+    service.send(b.id, { id: randomUUID(), recipientId: a.id, text: 'Hello from a peer' });
+    const outside = path.join(root, 'outside-pilot'); fs.mkdirSync(outside); git(outside, ['init', '-q']);
+    const view = service.agentStatus(a.id, outside);
+    expect(view.enabled).toBe(true);
+    expect(view.assignment?.id).toBe(a.id);
+    expect(view.checkoutInPilot).toBe(false);
+    expect(view.pendingMessageCount).toBe(1);
+    expect(view.note).toMatch(/direct messages still work/);
+    expect(() => service.send(a.id, { id: randomUUID(), recipientId: b.id, text: 'Reply from outside the pilot' })).not.toThrow();
+    expect(service.agentStatus(b.id).pendingMessageCount).toBe(1);
+  });
+
   it('counts all pending messages independently of the bounded displayed history', () => {
     const { checkout, db, service, register } = fixture();
     const a = register(); const b = register('claude');

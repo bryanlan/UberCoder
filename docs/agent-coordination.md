@@ -8,9 +8,9 @@ A session works on an assignment that may span repositories. Its launch director
 
 Agents use `agent_coordination` through the `agent_console_coordination` MCP server:
 
-- `status`: discover live peer scopes in the assignment's announced repositories. Before the first scope announcement, it shows live pilot work and marks the response `unscoped`. Pass `checkout` to focus on one repository and `offset` to continue when `nextOffset` is present. The agent reply is compact and excludes historical activity and other agents' messages; the browser retains the repository history view.
+- `status`: discover live peer scopes in the assignment's announced repositories. Before the first scope announcement, it shows live pilot work and marks the response `unscoped`. Pass `checkout` to focus on one repository and `offset` to continue when `nextOffset` is present. For a checkout outside the pilot, `status` still returns the assignment and pending-message count, with `checkoutInPilot: false` and a note that direct messages work. The agent reply is compact and excludes historical activity and other agents' messages; the browser retains the repository history view.
 - `update`: announce or revise `description`, `checkout` and `summary`; mention intended files in the summary. `status` may be `active` or `waiting`. The reply confirms the assignment without returning a repository snapshot.
-- `send`: exchange information with `recipientId` and `text`. An optional `messageId` makes retries idempotent.
+- `send`: exchange information with `recipientId` and `text`. Direct messages reach any registered session, whichever repository either session is working in; repository enrollment controls activity views only. An optional `messageId` makes retries idempotent.
 - `ack`: acknowledge delivered messages with `messageIds`; acknowledgement is receipt, not approval.
 - `finish`: record the outcome with `summary`. Mention unfinished work and next steps. Finishing never requires a clean checkout and never changes files.
 
