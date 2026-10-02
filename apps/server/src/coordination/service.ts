@@ -37,11 +37,27 @@ export class CoordinationService {
     return row;
   }
 
+  private pilotCache: { key: string; repositories: Set<string> } | null = null;
+
+  // Pilot repository identities change only with configuration, so resolve them once per
+  // pilotPaths value instead of running Git for every configured path on every check. A
+  // missing or non-Git pilot path is skipped rather than making later pilot paths ineligible.
+  private pilotRepositories(): Set<string> {
+    const key = JSON.stringify(this.settings.pilotPaths);
+    if (this.pilotCache?.key !== key) {
+      const repositories = new Set<string>();
+      for (const candidate of this.settings.pilotPaths) {
+        try { repositories.add(checkoutIdentity(candidate).repository); } catch { /* not a usable repository */ }
+      }
+      this.pilotCache = { key, repositories };
+    }
+    return this.pilotCache.repositories;
+  }
+
   private identity(directory: string) {
     if (!this.settings.enabled) throw new Error('Coordination is disabled.');
     const identity = checkoutIdentity(directory);
-    const enabled = this.settings.pilotPaths.some((candidate) => checkoutIdentity(candidate).repository === identity.repository);
-    if (!enabled) throw new Error('This repository is outside the coordination pilot.');
+    if (!this.pilotRepositories().has(identity.repository)) throw new Error('This repository is outside the coordination pilot.');
     return identity;
   }
 

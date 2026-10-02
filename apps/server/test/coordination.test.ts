@@ -272,6 +272,14 @@ describe('assignment coordination', () => {
     expect(service.agentStatus(b.id).pendingMessageCount).toBe(1);
   });
 
+  it('skips a missing pilot path without hiding the pilot repositories listed after it', () => {
+    const { root, checkout, service, register } = fixture();
+    const a = register();
+    service.settings.pilotPaths.unshift(path.join(root, 'deleted-repository'));
+    expect(service.agentStatus(a.id, checkout).checkoutInPilot).toBeUndefined();
+    expect(() => service.update(a.id, { checkout, summary: 'Still in the pilot' })).not.toThrow();
+  });
+
   it('counts all pending messages independently of the bounded displayed history', () => {
     const { checkout, db, service, register } = fixture();
     const a = register(); const b = register('claude');
