@@ -314,6 +314,14 @@ the session's private `debug.log`; the server also logs session identity, input
 lengths, screen hashes, and wait duration without prompt or screen contents. These
 metadata remain in the server journal if the session is later explicitly released.
 
+Input confirmation uses the provider's parsed composer, including Claude's horizontal
+input-box boundaries. Blank paragraphs, quoted prompts, and bullets inside that box
+belong to the draft. Claude's trailing agent roster is status metadata whether it
+appears before or after the permissions footer. Neither the roster nor a paragraph
+break proves that text was rejected. Submitted prompts followed by assistant output
+and interactive choices still remain outside the composer. A draft already visible
+in the input box is submitted without pasting it a second time.
+
 Codex `task_complete.error` records are authoritative failed-turn outcomes. The
 provider adapter preserves their messages as durable status rows, and its
 incremental lifecycle monitor observes append-only transcript updates independently

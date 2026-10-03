@@ -17,6 +17,10 @@ function isBoxDrawingOnly(line: string): boolean {
   return /^[\s│╭╮╰╯─┌┐└┘├┤┬┴┼█▛▜▐▌▝▘]+$/u.test(line);
 }
 
+function isHorizontalDivider(line: string): boolean {
+  return /^\s*─{3,}\s*$/u.test(line);
+}
+
 function normalizeTerminalChromeLine(line: string): string {
   return normalizeWhitespace(
     line
@@ -182,7 +186,7 @@ function parsePastedTextPlaceholder(line: string): string | undefined {
 }
 
 function isComposerBoundary(line: string): boolean {
-  if (!line.trim()) {
+  if (!line.trim() || isHorizontalDivider(line)) {
     return true;
   }
 
@@ -277,21 +281,22 @@ function filterFooterStatusLines(lines: ScreenLine[]): ScreenLine[] {
 }
 
 function splitTrailingClaudeAgentRows(lines: ScreenLine[]): { screenLines: ScreenLine[]; agentRows: ScreenLine[] } {
-  let footerIndex = -1;
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    if (/bypass permissions on/i.test(lines[index]!.plain)) {
-      footerIndex = index;
-      break;
-    }
-  }
-  if (footerIndex < 0) return { screenLines: lines, agentRows: [] };
-
-  const trailing = lines.slice(footerIndex + 1);
-  const agentRows = trailing.filter((line) => line.plain.trim());
-  if (!agentRows.length || agentRows.some((line) => !/^\s*[●◯○]\s+\S/u.test(line.plain))) {
+  if (!lines.some((line) => /bypass permissions on/i.test(line.plain))) {
     return { screenLines: lines, agentRows: [] };
   }
-  return { screenLines: lines.slice(0, footerIndex + 1), agentRows };
+
+  // Claude can put the roster on either side of its permissions footer.
+  let end = lines.length;
+  while (end > 0 && (!lines[end - 1]!.plain.trim() || isLikelyFooterStatus(lines[end - 1]!.plain))) end -= 1;
+  let start = end;
+  while (start > 0 && (!lines[start - 1]!.plain.trim() || /^\s*[●◯○]\s+\S/u.test(lines[start - 1]!.plain))) start -= 1;
+  const agentRows = lines.slice(start, end).filter((line) => line.plain.trim());
+  const previous = lines.slice(0, start).reverse().find((line) => line.plain.trim());
+  if (!/^\s*●\s+main\s*$/u.test(agentRows[0]?.plain ?? '')
+    || !previous || (!isHorizontalDivider(previous.plain) && !isLikelyFooterStatus(previous.plain))) {
+    return { screenLines: lines, agentRows: [] };
+  }
+  return { screenLines: [...lines.slice(0, start), ...lines.slice(end)], agentRows };
 }
 
 function toScreenLines(snapshot: string): ScreenLine[] {
@@ -331,7 +336,7 @@ function trimLeadingTerminalChrome(lines: ScreenLine[]): ScreenLine[] {
   while (start < lines.length) {
     const line = lines[start]!;
     const normalized = normalizeTerminalChromeLine(line.plain);
-    if (!normalized || isBoxDrawingOnly(line.plain) || isLeadingTerminalChrome(normalized)) {
+    if (!normalized || (isBoxDrawingOnly(line.plain) && !isHorizontalDivider(line.plain)) || isLeadingTerminalChrome(normalized)) {
       start += 1;
       continue;
     }
@@ -360,8 +365,22 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       ? ''
       : promptText;
 
-    const following = contentLines.slice(index + 1).filter((line) => line.plain.trim().length > 0);
-    if (following.some((line) => /^\s*[•●]/u.test(line.plain))) {
+    let openingDivider = index - 1;
+    while (openingDivider >= 0 && !isHorizontalDivider(contentLines[openingDivider]!.plain)) openingDivider -= 1;
+    let firstBoxLine = openingDivider + 1;
+    while (firstBoxLine < index && !contentLines[firstBoxLine]!.plain.trim()) firstBoxLine += 1;
+    const closingDivider = openingDivider < 0 ? -1 : contentLines.findIndex(
+      (line, lineIndex) => lineIndex > index && isHorizontalDivider(line.plain),
+    );
+    // Prompt-looking text inside a quoted draft belongs to its outer input box.
+    if (closingDivider !== -1 && firstBoxLine < index
+      && parsePromptInput(contentLines[firstBoxLine]!.plain) !== undefined) continue;
+    const boxedInput = openingDivider >= 0 && firstBoxLine === index && closingDivider !== -1;
+
+    const following = contentLines.slice(index + 1)
+      .filter((line) => line.plain.trim().length > 0 && !isHorizontalDivider(line.plain));
+    const afterInput = boxedInput ? contentLines.slice(closingDivider + 1) : following;
+    if (afterInput.some((line) => /^\s*[•●]/u.test(line.plain))) {
       continue;
     }
 
@@ -386,9 +405,9 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     const inputParts = [effectivePromptText];
     let nextSectionStart = index + 1;
     let boundaryLine: ScreenLine | undefined;
-    for (let lineIndex = index + 1; lineIndex < contentLines.length; lineIndex += 1) {
+    for (let lineIndex = index + 1; lineIndex < (boxedInput ? closingDivider : contentLines.length); lineIndex += 1) {
       const candidate = contentLines[lineIndex]!;
-      if (isComposerBoundary(candidate.plain)) {
+      if (!boxedInput && isComposerBoundary(candidate.plain)) {
         nextSectionStart = lineIndex;
         boundaryLine = candidate;
         break;
@@ -396,9 +415,10 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       inputParts.push(parsePastedTextPlaceholder(candidate.plain) ?? candidate.plain.trim());
       nextSectionStart = lineIndex + 1;
     }
+    if (boxedInput) nextSectionStart = closingDivider + 1;
 
     const footerLines = collapseBlankRuns(trimBlankEdges(contentLines.slice(nextSectionStart)))
-      .filter((line) => line.plain.trim().length > 0);
+      .filter((line) => line.plain.trim().length > 0 && !isHorizontalDivider(line.plain));
     const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
     if (boundaryLine?.plain.trim().length === 0 && nonStatusFooterLines.length > 1) {
       continue;
@@ -423,7 +443,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
 
   const visibleSnapshotLines = collapseBlankRuns(
     trimLeadingTerminalChrome(lines).filter((line, index, all) => {
-      if (isBoxDrawingOnly(line.plain)) return false;
+      if (isBoxDrawingOnly(line.plain) && !isHorizontalDivider(line.plain)) return false;
       if (isPromptFollowedByCodexStartupChrome(all, index)) return false;
       return true;
     }),
@@ -467,7 +487,8 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
   const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
-  const visibleContentLines = trimBlankEdges(collapseBlankRuns(preserveClaudeLoginUrl([...contentLines, ...nonStatusFooterLines])));
+  const visibleContentLines = trimBlankEdges(collapseBlankRuns(preserveClaudeLoginUrl([...contentLines, ...nonStatusFooterLines])
+    .filter((line) => !isBoxDrawingOnly(line.plain))));
   const content = joinPlain(visibleContentLines) || 'Waiting for session output…';
   const contentAnsi = joinAnsi(visibleContentLines) || content;
   const footerText = joinPlain(footerStatusLines);

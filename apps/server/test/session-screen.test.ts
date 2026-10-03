@@ -328,6 +328,65 @@ describe('parseSessionScreenSnapshot', () => {
     expect(screen.content).toContain('Answer already delivered.');
   });
 
+  it('reads every paragraph inside the Claude input box while background agents are displayed', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code', 'Answer already delivered.', '✻ Waiting for 1 background agent to finish',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ Please check this again', '', '  Here is the second paragraph.',
+      '  It wraps onto another row.',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)', '', '  ● main',
+    ].join('\n'));
+    expect(screen.inputText).toBe('Please check this again  Here is the second paragraph. It wraps onto another row.');
+    expect(screen.content).toContain('Answer already delivered.');
+    expect(screen.content).not.toContain('second paragraph');
+    expect(screen.status).toContain('● main');
+  });
+
+  it('keeps quoted prompts and bullets inside a bounded Claude draft', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code', 'Answer already delivered.',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ Review the following excerpt', '', '  > quoted text', '  ● a bullet in the draft',
+      '  1. a numbered draft line',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    expect(screen.inputText).toBe('Review the following excerpt  > quoted text ● a bullet in the draft 1. a numbered draft line');
+    expect(screen.content).not.toContain('quoted text');
+  });
+
+  it.each(['before', 'after'])('separates a Claude agent roster %s the footer from a collapsed paste', (position) => {
+    const footer = '⏵⏵ bypass permissions on (shift+tab to cycle)';
+    const roster = ['', '  ● main', '  ◯ general-purpose  Reviewing the result 25m 31s'];
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code', 'Answer already delivered.',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ [Pasted text #2]', '  paste again to expand',
+      '────────────────────────────────────────────────────────────────────────────────',
+      ...(position === 'before' ? [...roster, footer] : [footer, ...roster]),
+    ].join('\n'));
+    expect(screen.inputText).toBe('[Pasted text #2] paste again to expand');
+    expect(screen.content).not.toContain('Pasted text');
+    expect(screen.content).not.toContain('● main');
+    expect(screen.status).toContain('general-purpose');
+    expect(screen.status).toContain('bypass permissions on');
+  });
+
+  it('does not promote an earlier boxed prompt after assistant output follows it', () => {
+    const screen = parseSessionScreenSnapshot([
+      'Claude Code',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '❯ Already submitted text',
+      '────────────────────────────────────────────────────────────────────────────────',
+      '● Assistant answer',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('Already submitted text');
+    expect(screen.content).toContain('Assistant answer');
+  });
+
   it('does not treat Claude slash-command suggestions as active composer input', () => {
     const screen = parseSessionScreenSnapshot([
       'Claude Code v2.1.197',
