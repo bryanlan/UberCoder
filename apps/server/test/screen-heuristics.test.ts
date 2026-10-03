@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SessionScreen } from '@agent-console/shared';
 import {
   extractLastClaudeModelFromText,
+  hashScreen,
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
@@ -15,6 +16,7 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
   return {
     content: '',
     inputText: '',
+    inputActive: false,
     status: '',
     capturedAt: '2026-03-01T00:00:00.000Z',
     ...input,
@@ -22,6 +24,11 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
 }
 
 describe('screen heuristics', () => {
+  it('distinguishes an empty composer from a selection with otherwise identical display text', () => {
+    const selection = screen({ content: 'Choose an option', inputActive: false });
+    const composer = { ...selection, inputActive: true };
+    expect(hashScreen(composer)).not.toBe(hashScreen(selection));
+  });
   it.each([
     'enter select · esc back',
     'enter default · s session · esc back',
@@ -38,6 +45,7 @@ describe('screen heuristics', () => {
         'tab to queue message                                        37% context left',
       ].join('\n'),
       inputText: '',
+      inputActive: false,
     });
 
     expect(screenShowsQueuedMessageHint(queued)).toBe(true);

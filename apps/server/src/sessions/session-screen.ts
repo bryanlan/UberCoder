@@ -348,6 +348,7 @@ function trimLeadingTerminalChrome(lines: ScreenLine[]): ScreenLine[] {
 function extractActiveInput(contentLines: ScreenLine[]): {
   contentLines: ScreenLine[];
   inputText: string;
+  inputActive: boolean;
   footerLines: ScreenLine[];
 } {
   // A wrapped composer can occupy the whole captured pane. Locate its prompt
@@ -427,6 +428,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     return {
       contentLines: trimBlankEdges(contentLines.slice(0, index)),
       inputText: inputParts.join(' ').trim(),
+      inputActive: true,
       footerLines,
     };
   }
@@ -434,6 +436,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
   return {
     contentLines,
     inputText: '',
+    inputActive: false,
     footerLines: [],
   };
 }
@@ -463,6 +466,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
       content: 'Waiting for session output…',
       contentAnsi: 'Waiting for session output…',
       inputText: '',
+      inputActive: false,
       status: 'Starting session…',
       statusAnsi: 'Starting session…',
       capturedAt,
@@ -483,7 +487,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     return true;
   });
 
-  const { contentLines, inputText, footerLines } = extractActiveInput(baseContentLines);
+  const { contentLines, inputText, inputActive, footerLines } = extractActiveInput(baseContentLines);
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
   const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));
@@ -512,6 +516,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     content,
     contentAnsi,
     inputText,
+    inputActive,
     status: joinPlain([...footerStatusLines, ...agentRows]) || plainStatus,
     statusAnsi: joinAnsi([...footerStatusLines, ...agentRows]) || statusLineRaw || plainStatus,
     capturedAt,

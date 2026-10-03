@@ -314,6 +314,16 @@ the session's private `debug.log`; the server also logs session identity, input
 lengths, screen hashes, and wait duration without prompt or screen contents. These
 metadata remain in the server journal if the session is later explicitly released.
 
+The screen parser records whether it found an active composer, even when empty.
+Quoted menu instructions above an open composer do not block ordinary chat. When
+an interactive approval or menu replaces the composer, a combined text-and-key
+send rejects nonnumeric chat text before typing or confirming anything and
+identifies the pending selection in the error. Explicit numeric choices and
+key-only controls remain available. Direct terminal typing, including Enter to
+submit a free-text answer to a provider question, remains the existing control
+surface. The
+existing rejection path retains the local draft and binding.
+
 Input confirmation uses the provider's parsed composer, including Claude's horizontal
 input-box boundaries. Blank paragraphs, quoted prompts, and bullets inside that box
 belong to the draft. Claude's trailing agent roster is status metadata whether it

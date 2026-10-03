@@ -157,7 +157,7 @@ export function submittedTextShouldCreateUserTurn(screen: SessionScreen, text: s
 
 export function hashScreen(screen: SessionScreen): string {
   return stableTextHash(
-    `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.statusAnsi ?? screen.status}`,
+    `${screen.contentAnsi ?? screen.content}\n---\n${screen.inputText}\n---\n${screen.inputActive}\n---\n${screen.statusAnsi ?? screen.status}`,
   );
 }
 

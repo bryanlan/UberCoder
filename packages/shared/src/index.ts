@@ -155,6 +155,7 @@ export interface SessionScreen {
   content: string;
   contentAnsi?: string;
   inputText: string;
+  inputActive: boolean;
   status: string;
   statusAnsi?: string;
   capturedAt: string;

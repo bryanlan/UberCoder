@@ -163,6 +163,7 @@ function timeline(input: {
       content: input.screenContent ?? '',
       contentAnsi: input.screenContentAnsi,
       inputText: input.inputText ?? '',
+      inputActive: true,
       status: input.screenStatus ?? 'Session active',
       statusAnsi: input.screenStatusAnsi,
       capturedAt: baseTime,

@@ -1585,6 +1585,7 @@ export class SessionManager {
       const textEntryScreen = latestObservedScreen;
       const transportTextShouldCreateUserTurn = plan.transportTextShouldCreateUserTurn;
       if (!textAlreadyVisible) {
+        this.assertInteractiveChatInputAllowed(liveSession, textEntryScreen, payload);
         if (useBracketedPasteTransport) {
           await this.runInputTmuxAction(
             liveSession,
@@ -2537,6 +2538,31 @@ export class SessionManager {
       });
     }
     return { event, messageId, offset };
+  }
+
+  private assertInteractiveChatInputAllowed(session: BoundSession, screen: SessionScreen, payload: KeystrokeSendPayload): void {
+    const text = payload.submittedText?.trim() || payload.text?.trim();
+    if (!payload.keys?.length || !text || screen.inputActive
+      || !screenShowsInteractiveSelectionHint(screen)
+      || (screenAllowsLiteralSelectionTokenWithoutInput(screen, text)
+        && screenAllowsLiteralSelectionTokenWithoutInput(screen, payload.text))) return;
+
+    this.logger?.warn({
+      sessionId: session.id,
+      provider: session.provider,
+      textLength: text.length,
+      keys: payload.keys,
+      rejectionReason: 'interactive_input',
+    }, 'Live chat input blocked by an interactive selection; session retained.');
+    this.appendDebugTrace(session, {
+      action: 'send-keystrokes-blocked-interactive',
+      text,
+      keys: payload.keys,
+      before: screen,
+      after: screen,
+    });
+    const providerLabel = session.provider === 'claude' ? 'Claude' : 'Codex';
+    throw new SessionKeystrokeRejectedError(`${providerLabel} is waiting for an approval or menu selection. Answer it in the live session before resending your message. The draft was not submitted.`);
   }
 
   private appendDebugTrace(session: BoundSession, input: {

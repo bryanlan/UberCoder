@@ -6,6 +6,7 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
   return {
     content: '',
     inputText: '',
+    inputActive: false,
     status: '',
     capturedAt: '2026-07-01T00:00:00.000Z',
     ...input,
@@ -46,6 +47,7 @@ describe('keystroke transport planner', () => {
   it('keeps combined text plus Enter visible-input expectations explicit', () => {
     const composer = screen({
       inputText: 'recap where we left things',
+      inputActive: true,
     });
     const plan = planKeystrokeSend(
       composer,

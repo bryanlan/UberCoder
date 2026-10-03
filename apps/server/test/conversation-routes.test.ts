@@ -812,6 +812,7 @@ describe('conversation routes', () => {
       screen: {
         content: 'Still working through the direct-load case…',
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T17:02:01.000Z',
       } satisfies SessionScreen,
@@ -1564,6 +1565,7 @@ describe('conversation routes', () => {
       screen: {
         content: `${liveTranscriptTail}\nFresh live-only follow-up.`,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
@@ -1722,6 +1724,7 @@ describe('conversation routes', () => {
       screen: {
         content: repeatedReply,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:02.000Z',
       } satisfies SessionScreen,
@@ -1881,6 +1884,7 @@ describe('conversation routes', () => {
       screen: {
         content: `${staleTranscriptReply}\nPending streamed answer.`,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:03.000Z',
       } satisfies SessionScreen,
@@ -2072,6 +2076,7 @@ describe('conversation routes', () => {
       screen: {
         content: flattenedRepeat,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-07-01T18:37:21.000Z',
       } satisfies SessionScreen,
@@ -2198,6 +2203,7 @@ describe('conversation routes', () => {
       screen: {
         content: `${providerMessages.map((message) => message.text).join('\n')}\nFresh live-only follow-up.`,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:16:01.000Z',
       } satisfies SessionScreen,
@@ -2328,6 +2334,7 @@ describe('conversation routes', () => {
           'Fresh active terminal line.',
         ].join('\n'),
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:01.000Z',
       } satisfies SessionScreen,
@@ -2489,6 +2496,7 @@ describe('conversation routes', () => {
           '● Good news in the run log: this retry ran the proof-of-read wc -l successfully — so local file access is working (the bwrap bypass holds), and Codex is now analyzing. It\'s still running (detached via nohup), output is written at the end. Let me wait for it to finish:',
         ].join('\n'),
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-06-30T12:35:42.000Z',
       } satisfies SessionScreen,
@@ -2625,6 +2633,7 @@ describe('conversation routes', () => {
           '  tmux focus-events off · add \'set -g focus-events on\' to ~/.tmux.conf and rea…',
         ].join('\n'),
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-06-30T19:14:02.000Z',
       } satisfies SessionScreen,
@@ -2776,6 +2785,7 @@ describe('conversation routes', () => {
       screen: {
         content: `${liveTranscriptTail}\nLive model menu is waiting for a selection.`,
         inputText: activeInput,
+        inputActive: true,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
@@ -2883,6 +2893,7 @@ describe('conversation routes', () => {
       screen: {
         content: `${eventOnlyAnswer}\nFresh active terminal line.`,
         inputText: '',
+        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
