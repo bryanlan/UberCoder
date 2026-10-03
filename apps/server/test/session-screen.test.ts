@@ -4,6 +4,23 @@ import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions
 describe('parseSessionScreenSnapshot', () => {
   const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
 
+  it('recognizes a composer spanning more than twelve rows without promoting old submitted text', () => {
+    const wrapped = Array.from({ length: 24 }, (_, index) => `image reference continuation ${index}`);
+    const draft = parseSessionScreenSnapshot([
+      '• Previous answer', '', '› Inspect these screenshots', ...wrapped,
+      'gpt-6.1-sol xhigh · 80% left · ~/demo',
+    ].join('\n'));
+    expect(draft.inputText).toBe(['Inspect these screenshots', ...wrapped].join(' '));
+    expect(draft.content).toContain('Previous answer');
+    expect(draft.status).not.toContain('image reference');
+    const submitted = parseSessionScreenSnapshot([
+      '› Inspect these screenshots', ...wrapped, '', '• Images inspected',
+      'gpt-6.1-sol xhigh · 80% left · ~/demo',
+    ].join('\n'));
+    expect(submitted.inputText).toBe('');
+    expect(submitted.content).toContain('Inspect these screenshots');
+  });
+
   it.each(['\u0007', '\u001b\\'])('preserves the full wrapped Claude login URL with OSC terminator %j', (terminator) => {
     for (const pastePrompt of ['', 'Paste code here if prompted >']) {
       const screen = parseSessionScreenSnapshot([

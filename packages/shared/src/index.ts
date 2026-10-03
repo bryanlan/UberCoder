@@ -125,12 +125,25 @@ export interface ConversationSummary {
   rawMetadata?: Record<string, unknown>;
 }
 
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_PROMPT_IMAGES = 4;
+
+export interface ImageAttachment {
+  id: string;
+  mediaType: 'image/png' | 'image/jpeg' | 'image/webp';
+  name: string;
+  sizeBytes: number;
+  width: number;
+  height: number;
+}
+
 export interface NormalizedMessage {
   id: string;
   provider: ProviderId;
   role: MessageRole;
   lifecycle: MessageLifecycle;
   text: string;
+  images?: ImageAttachment[];
   timestamp: string;
   conversationRef: string;
   source: 'history-file' | 'live-output' | 'synthetic-status' | 'user-input';
@@ -253,6 +266,7 @@ export interface RefreshTreeRequest {
 export interface RecordedUserInput {
   id: string;
   text: string;
+  images?: ImageAttachment[];
   timestamp: string;
 }
 
@@ -267,6 +281,7 @@ export interface SessionKeystrokeRequest {
   deferScreenUpdate?: boolean;
   submittedText?: string;
   clientOptimisticMessageId?: string;
+  imageIds?: string[];
 }
 
 export interface LoginRequest {
@@ -408,6 +423,7 @@ export type SessionEvent =
       conversationRef: string;
       messageId: string;
       text: string;
+      images?: ImageAttachment[];
       timestamp: string;
     }
   | {

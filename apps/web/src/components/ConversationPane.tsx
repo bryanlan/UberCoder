@@ -6,6 +6,7 @@ import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
+import { useClipboardImages } from '../features/conversation/useClipboardImages';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { ExplorerPane, NavigationCrumbs } from '../features/conversation/ExplorerPane';
 import { groupTranscriptTurns, shouldShowInMainTranscript, TranscriptDocumentTurn } from '../features/conversation/transcript-turns';
@@ -250,6 +251,7 @@ function modelProfileRequestStatus(request: ModelProfileRequest): string {
 }
 
 function LiveSessionInputBridge({
+  csrfToken,
   sessionId,
   projectSlug,
   conversationKey,
@@ -274,6 +276,7 @@ function LiveSessionInputBridge({
   visibleModel,
   modelProfileRequest,
 }: {
+  csrfToken?: string;
   sessionId: string;
   projectSlug: string;
   conversationKey: string;
@@ -323,6 +326,8 @@ function LiveSessionInputBridge({
   const activeSessionIdRef = useRef(sessionId);
   activeSessionIdRef.current = sessionId;
   const [profileError, setProfileError] = useState<string>();
+  const clipboardImages = useClipboardImages(conversationKey, sessionId, csrfToken);
+  const [imageSubmitError, setImageSubmitError] = useState<string>();
   const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
   const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
 
@@ -442,8 +447,19 @@ function LiveSessionInputBridge({
   }, [bridgeText, textBypassEnabled]);
 
   function queueKeystrokes(payload: SessionKeystrokeRequest): Promise<boolean> {
+    const withImages = payload.keys?.includes('Enter') && clipboardImages.items.length > 0;
+    if (withImages && !clipboardImages.ready) {
+      setImageSubmitError('Wait for the images to upload, or retry/remove failed images before sending.');
+      return Promise.resolve(false);
+    }
+    setImageSubmitError(undefined);
+    const request = withImages ? { ...payload, imageIds: clipboardImages.images.map(image => image.id) } : payload;
     const task = keyQueueRef.current
-      .then(async () => await onSendKeystrokes(sessionId, payload))
+      .then(async () => {
+        const sent = await onSendKeystrokes(sessionId, request);
+        if (sent && withImages) clipboardImages.clear();
+        return sent;
+      })
       .catch(() => false);
     keyQueueRef.current = task.then(() => undefined, () => undefined);
     return task;
@@ -1008,6 +1024,24 @@ function LiveSessionInputBridge({
               </div>
             </div>
           )}
+          {clipboardImages.items.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2" aria-label="Attached images">
+              {clipboardImages.items.map(item => (
+                <div key={item.localId} className="relative rounded-lg border border-slate-700 bg-slate-900 p-2">
+                  {item.image ? (
+                    <img src={`/api/images/${encodeURIComponent(item.image.id)}`} alt={item.image.name} className="h-20 max-w-40 object-contain" />
+                  ) : item.error ? (
+                    <div className="max-w-64 text-xs text-red-300" role="alert">
+                      {item.error}
+                      <button type="button" onClick={() => { void clipboardImages.retry(item); }} disabled={bridgeBusy} className="ml-2 underline">Retry upload</button>
+                    </div>
+                  ) : <div role="status" className="text-xs text-slate-300">Uploading image…</div>}
+                  <button type="button" aria-label="Remove attached image" disabled={bridgeBusy} onClick={() => clipboardImages.remove(item.localId)} className="absolute -right-1 -top-1 rounded-full bg-slate-700 px-1.5 text-white">×</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {(clipboardImages.error || imageSubmitError) && <div role="alert" className="mb-2 text-xs text-red-300">{clipboardImages.error ?? imageSubmitError}</div>}
           <textarea
             ref={captureRef}
             readOnly={bridgeBusy}
@@ -1051,6 +1085,20 @@ function LiveSessionInputBridge({
             onPaste={(event) => {
               if (bridgeBusy) {
                 event.preventDefault();
+                return;
+              }
+              const files = event.clipboardData.files ? Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')) : [];
+              if (files.length) {
+                event.preventDefault();
+                clipboardImages.paste(files);
+                const text = event.clipboardData.getData('text/plain');
+                if (text) {
+                  if (textBypassEnabled) appendLiteralText(text);
+                  else {
+                    const input = event.currentTarget;
+                    replaceDraftText(draftText.slice(0, input.selectionStart) + text + draftText.slice(input.selectionEnd));
+                  }
+                }
                 return;
               }
               if (!textBypassEnabled) {
@@ -1200,6 +1248,7 @@ function LiveSessionInputBridge({
 }
 
 interface ConversationPaneProps {
+  csrfToken?: string;
   projects?: ProjectSummary[];
   project?: ProjectSummary;
   selectedProvider?: ProviderId;
@@ -1328,6 +1377,7 @@ function shouldShowLiveScreenContent(screen: ConversationTimeline['liveScreen'])
 }
 
 export function ConversationPane({
+  csrfToken,
   projects,
   project,
   selectedProvider,
@@ -1828,6 +1878,7 @@ export function ConversationPane({
         </div>
       ) : boundSession ? (
         <LiveSessionInputBridge
+          csrfToken={csrfToken}
           key={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           sessionId={boundSession.id}
           projectSlug={timeline.conversation.projectSlug}

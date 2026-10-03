@@ -15,7 +15,7 @@ import type { ParsedTranscript, TranscriptParseInput } from './types.js';
 
 function extractClaudeText(container: Record<string, unknown>, role: NormalizedMessage['role']): string {
   const allowedTypes = ['text'];
-  return extractTextFromFields(container, ['text', 'content'], allowedTypes)
+  const text = extractTextFromFields(container, ['text', 'content'], allowedTypes)
     || (asObject(container.message) ? extractTextFromFields(asObject(container.message)!, ['text', 'content'], allowedTypes) : '')
     || (asObject(container.data) ? extractTextFromFields(asObject(container.data)!, ['text', 'content'], allowedTypes) : '')
     || (
@@ -23,6 +23,11 @@ function extractClaudeText(container: Record<string, unknown>, role: NormalizedM
         ? extractTextBlocks(container.content, allowedTypes)
         : ''
     );
+  // Claude wraps bracketed pastes in its native transcript. Restore the input
+  // text before hashing so adoption and live/history matching see the same turn.
+  return role === 'user'
+    ? text.replace(/<pasted_content id="([^"\r\n]+)">\n([\s\S]*?)\n<\/pasted_content id="\1">/g, '$2')
+    : text;
 }
 
 function shouldHideClaudeDisplayMessage(message: NormalizedMessage): boolean {

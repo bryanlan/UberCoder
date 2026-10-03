@@ -345,7 +345,9 @@ function extractActiveInput(contentLines: ScreenLine[]): {
   inputText: string;
   footerLines: ScreenLine[];
 } {
-  for (let index = contentLines.length - 1; index >= Math.max(0, contentLines.length - 12); index -= 1) {
+  // A wrapped composer can occupy the whole captured pane. Locate its prompt
+  // through the existing output/picker/footer checks instead of a row cutoff.
+  for (let index = contentLines.length - 1; index >= 0; index -= 1) {
     const promptText = parsePromptInput(contentLines[index]?.plain ?? '');
     if (promptText === undefined) {
       continue;

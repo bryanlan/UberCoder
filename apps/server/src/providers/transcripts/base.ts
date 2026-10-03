@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { ConversationSummary, MessageRole, NormalizedMessage, ProviderId } from '@agent-console/shared';
+import { imagePromptDisplay } from '../../images/prompt.js';
 import { samePath } from '../../lib/path-utils.js';
 import { coerceText, normalizeComparableText, stableTextHash, truncate } from '../../lib/text.js';
 import type { FileFingerprint } from '../file-utils.js';
@@ -382,7 +383,8 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
       || message.role === 'user'
       || message.role === 'status'
   ));
-  const title = truncate(input.metadata?.title ?? firstUser?.text ?? path.basename(input.filePath, path.extname(input.filePath)), 288);
+  const firstUserDisplay = firstUser ? imagePromptDisplay(firstUser.text) : undefined;
+  const title = truncate(input.metadata?.title ?? (firstUserDisplay ? firstUserDisplay.text || 'Image message' : path.basename(input.filePath, path.extname(input.filePath))), 288);
   const updatedAt = lastVisible?.timestamp ?? lastMeaningful?.timestamp ?? input.fallbackTime;
   const createdAt = sortedMessages[0]?.timestamp ?? input.fallbackTime;
 
@@ -392,7 +394,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
     projectSlug: input.projectSlug,
     provider: input.provider,
     title,
-    excerpt: lastDurableVisible ? truncate(lastDurableVisible.text, 120) : lastVisible ? truncate(lastVisible.text, 120) : undefined,
+    excerpt: lastDurableVisible ? truncate(imagePromptDisplay(lastDurableVisible.text).text || 'Image message', 120) : lastVisible ? truncate(imagePromptDisplay(lastVisible.text).text || 'Image message', 120) : undefined,
     createdAt,
     updatedAt,
     transcriptPath: input.filePath,

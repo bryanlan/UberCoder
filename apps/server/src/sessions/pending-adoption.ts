@@ -3,6 +3,7 @@ import { AppDatabase } from '../db/database.js';
 import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { nowIso } from '../lib/time.js';
 import { normalizeComparableText, stableTextHash, truncate } from '../lib/text.js';
+import { imagePromptDisplay } from '../images/prompt.js';
 
 const PENDING_ADOPTION_MATCH_WINDOW_MS = 30 * 60 * 1000;
 
@@ -25,7 +26,7 @@ export function recordPendingUserInput(input: {
     const inputAt = input.inputAt ?? nowIso();
     const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
     rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(input.text));
-    rawMetadata.lastUserInputPreview = truncate(input.text, 120);
+    rawMetadata.lastUserInputPreview = truncate(imagePromptDisplay(input.text).text || 'Image message', 120);
     rawMetadata.lastUserInputAt = inputAt;
     const updated = {
       ...pending,

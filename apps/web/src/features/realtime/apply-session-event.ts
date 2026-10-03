@@ -144,6 +144,7 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
         conversationRef: event.conversationRef,
         messageId: event.messageId,
         text: event.text,
+        images: event.images,
         timestamp: event.timestamp,
       }),
     });

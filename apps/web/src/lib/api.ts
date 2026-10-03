@@ -1,5 +1,6 @@
 import type {
   AuthState,
+  ImageAttachment,
   BoundSession,
   ModelProfileKey,
   ConversationSearchResponse,
@@ -65,6 +66,12 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 }
 
 export const api = {
+  uploadImage: async (sessionId: string, file: Blob, csrfToken?: string): Promise<ImageAttachment> => {
+    const response = await request<{ image: ImageAttachment }>(`/api/sessions/${encodeURIComponent(sessionId)}/images`, {
+      method: 'POST', body: file, headers: { 'content-type': file.type },
+    }, csrfToken);
+    return response.image;
+  },
   authState: () => request<AuthState>('/api/auth/me'),
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),

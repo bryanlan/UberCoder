@@ -7,7 +7,9 @@ import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
 import { SessionInputRejectedError, SessionManager, type SessionCommandResult } from '../sessions/session-manager.js';
-import type { BoundSession, SessionInputResponse } from '@agent-console/shared';
+import { MAX_PROMPT_IMAGES, type BoundSession, type SessionInputResponse } from '@agent-console/shared';
+import { ImageStore, ImageUploadError } from '../images/store.js';
+import { imagePromptSuffix } from '../images/prompt.js';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 const RAW_OUTPUT_TAIL_BYTES = 256 * 1024;
@@ -32,8 +34,11 @@ const keystrokeBodySchema = z.object({
   deferScreenUpdate: z.boolean().optional(),
   submittedText: z.string().min(1).optional(),
   clientOptimisticMessageId: z.string().min(1).optional(),
+  imageIds: z.array(z.string().uuid()).min(1).max(MAX_PROMPT_IMAGES).optional(),
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
+}).refine((value) => !value.imageIds || (value.keys?.length === 1 && value.keys[0] === 'Enter' && new Set(value.imageIds).size === value.imageIds.length), {
+  message: 'Images require a single Enter submission and unique image IDs.',
 });
 const modelProfileBodySchema = z.object({
   profile: z.enum(['high', 'medium', 'low']),
@@ -124,6 +129,7 @@ export async function registerSessionRoutes(
   projectService: ProjectService,
   providerRegistry: ProviderRegistry,
   sessions: SessionManager,
+  images?: ImageStore,
 ): Promise<void> {
   app.post('/api/sessions/:sessionId/model-profile', async (request, reply) => {
     try {
@@ -377,6 +383,20 @@ export async function registerSessionRoutes(
     if (!session) {
       reply.code(404).send({ error: 'Session not found.' });
       return;
+    }
+    if (parsed.data.imageIds) {
+      if (!images) throw new Error('Image storage was not configured.');
+      const caption = (parsed.data.submittedText ?? parsed.data.text ?? '').trim();
+      if (caption.startsWith('/')) return reply.code(400).send({ error: 'Send images with a chat message, rather than a slash command.' });
+      try {
+        const suffix = imagePromptSuffix(await images.resolve(parsed.data.imageIds, session), session.provider);
+        parsed.data.text = (parsed.data.text ?? '') + suffix;
+        parsed.data.submittedText = caption + suffix;
+      } catch (error) {
+        if (error instanceof ImageUploadError) return reply.code(error.statusCode).send({ error: error.message });
+        throw error;
+      }
+      delete parsed.data.imageIds;
     }
     const submittedPromptText = parsed.data.keys?.includes('Enter')
       ? (parsed.data.submittedText ?? parsed.data.text)?.trim()

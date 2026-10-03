@@ -3,11 +3,96 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane } from './ConversationPane';
+import { api } from '../lib/api';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
 
+const pastedImage = {
+  id: '48f85f7c-5448-4d96-94b4-177a2f8e300e', mediaType: 'image/png' as const,
+  name: 'Pasted image.png', width: 32, height: 24, sizeBytes: 123,
+};
+
+function pasteImage(textbox: HTMLElement) {
+  const file = new File(['image fixture'], 'clipboard.png', { type: 'image/png' });
+  fireEvent.paste(textbox, { clipboardData: { files: [file], getData: () => '' } });
+  return file;
+}
+
 beforeAll(() => {
   Element.prototype.scrollTo ??= vi.fn();
+});
+
+describe('clipboard images', () => {
+  for (const provider of ['codex', 'claude'] as const) {
+    for (const bypass of [false, true]) {
+      it(`${provider} ${bypass ? 'bypass' : 'draft'} image-only submissions retain images on rejection and clear them on success`, async () => {
+        const upload = vi.spyOn(api, 'uploadImage').mockResolvedValue(pastedImage);
+        const send = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        try {
+          renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send });
+          const textbox = screen.getByRole('textbox');
+          if (bypass) {
+            fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+            await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+          }
+          const file = pasteImage(textbox);
+          await waitFor(() => expect(screen.getByAltText('Pasted image.png')).toBeVisible());
+          expect(upload).toHaveBeenCalledWith('session-1', file, undefined);
+          expect(send).not.toHaveBeenCalled();
+          fireEvent.keyDown(textbox, { key: 'Enter' });
+          await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+          expect(send).toHaveBeenLastCalledWith('session-1', { keys: ['Enter'], imageIds: [pastedImage.id] });
+          await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+          expect(screen.getByAltText('Pasted image.png')).toBeVisible();
+          fireEvent.keyDown(textbox, { key: 'Enter' });
+          await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+          await waitFor(() => expect(screen.queryByAltText('Pasted image.png')).not.toBeInTheDocument());
+        } finally { upload.mockRestore(); }
+      });
+    }
+  }
+
+  it('blocks submission while uploading, supports retry and keeps captions on rejected sends', async () => {
+    const pending = deferred<typeof pastedImage>();
+    const upload = vi.spyOn(api, 'uploadImage').mockImplementationOnce(() => pending.promise).mockResolvedValue(pastedImage);
+    const send = vi.fn().mockResolvedValue(false);
+    try {
+      renderPane({ onSendKeystrokes: send });
+      const textbox = screen.getByRole('textbox');
+      fireEvent.change(textbox, { target: { value: 'Please inspect this screenshot' } });
+      pasteImage(textbox);
+      expect(screen.getByText('Uploading image…')).toBeVisible();
+      fireEvent.keyDown(textbox, { key: 'Enter' });
+      await waitFor(() => expect(textbox).toHaveValue('Please inspect this screenshot'));
+      expect(send).not.toHaveBeenCalled();
+      pending.resolve(pastedImage);
+      await waitFor(() => expect(screen.getByAltText('Pasted image.png')).toBeVisible());
+      fireEvent.keyDown(textbox, { key: 'Enter' });
+      await waitFor(() => expect(send).toHaveBeenCalledWith('session-1', {
+        text: 'Please inspect this screenshot', submittedText: 'Please inspect this screenshot', keys: ['Enter'], imageIds: [pastedImage.id],
+      }));
+      await waitFor(() => expect(textbox).toHaveValue('Please inspect this screenshot'));
+      fireEvent.click(screen.getByRole('button', { name: 'Remove attached image' }));
+      expect(screen.queryByAltText('Pasted image.png')).not.toBeInTheDocument();
+      // Clear the text draft so subsequent tests start with an empty composer.
+      fireEvent.change(textbox, { target: { value: '' } });
+    } finally { upload.mockRestore(); }
+  });
+
+  it('offers upload retry and retains attachments across conversation remounts', async () => {
+    const upload = vi.spyOn(api, 'uploadImage').mockRejectedValueOnce(new Error('Upload unavailable')).mockResolvedValue(pastedImage);
+    try {
+      const first = renderPane();
+      pasteImage(screen.getByRole('textbox'));
+      await waitFor(() => expect(screen.getByText('Upload unavailable')).toBeVisible());
+      first.unmount();
+      renderPane();
+      expect(screen.getByText('Upload unavailable')).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry upload' }));
+      await waitFor(() => expect(screen.getByAltText('Pasted image.png')).toBeVisible());
+      fireEvent.click(screen.getByRole('button', { name: 'Remove attached image' }));
+    } finally { upload.mockRestore(); }
+  });
 });
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {

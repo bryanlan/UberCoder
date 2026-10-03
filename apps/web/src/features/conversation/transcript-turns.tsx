@@ -237,6 +237,15 @@ export const TranscriptDocumentTurn = memo(function TranscriptDocumentTurn({ tur
       </div>
       <div className="max-w-none break-words text-sm leading-7 text-slate-100">
         {isUser ? renderUserMessageContent(turnText) : renderMessageMarkdown(turnText)}
+        {turn.messages.some(message => message.images?.length) && (
+          <div className="mt-3 flex flex-wrap gap-3">
+            {turn.messages.flatMap(message => (message.images ?? []).map(image => (
+              <a key={`${message.id}:${image.id}`} href={`/api/images/${encodeURIComponent(image.id)}`} target="_blank" rel="noreferrer">
+                <img src={`/api/images/${encodeURIComponent(image.id)}`} alt={image.name} loading="lazy" className="max-h-48 max-w-full rounded-lg border border-slate-700" />
+              </a>
+            )))}
+          </div>
+        )}
       </div>
     </article>
   );

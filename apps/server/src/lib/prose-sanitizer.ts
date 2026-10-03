@@ -1,4 +1,5 @@
 import { normalizeWhitespace } from './text.js';
+import { imagePromptDisplay } from '../images/prompt.js';
 
 export function looksLikeDiffMarker(trimmedLine: string): boolean {
   return /^(?:diff --git|index [0-9a-f]+\.\.|@@|[+-]{3}\s|[*]{3}\s|---\s)/.test(trimmedLine);
@@ -131,6 +132,7 @@ export function stripCodeLikeContent(text: string): string {
 }
 
 export function sanitizeSearchableProse(text: string): string {
+  text = imagePromptDisplay(text).text;
   return stripCodeLikeContent(text)
     .split(/\n+/)
     .map((line) => normalizeWhitespace(line))

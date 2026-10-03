@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
 import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage } from '@agent-console/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -117,6 +118,7 @@ type MessagePageInfo = ReturnType<typeof paginateMessages<NormalizedMessage>>['p
  * response boundary.
  */
 function toTimelineResponseMessage(message: NormalizedMessage): NormalizedMessage {
+  message = imageMessageDisplay(message);
   if (message.rawMetadata === undefined) {
     return message;
   }

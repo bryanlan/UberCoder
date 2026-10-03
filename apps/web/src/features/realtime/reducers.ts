@@ -1,6 +1,7 @@
 import type { InfiniteData } from '@tanstack/react-query';
 import type {
   BoundSession,
+  ImageAttachment,
   ConversationTimeline,
   NormalizedMessage,
   ProjectSummary,
@@ -346,6 +347,7 @@ export function buildLiveUserMessage(input: {
   text: string;
   timestamp: string;
   optimistic?: boolean;
+  images?: ImageAttachment[];
 }): NormalizedMessage {
   const id = input.messageId
     ?? (input.optimisticNonce ? `optimistic:${input.sessionId}:${input.optimisticNonce}` : undefined)
@@ -356,6 +358,7 @@ export function buildLiveUserMessage(input: {
     role: 'user',
     lifecycle: 'durable',
     text: input.text,
+    images: input.images,
     timestamp: input.timestamp,
     conversationRef: input.conversationRef,
     source: 'user-input',

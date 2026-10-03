@@ -251,6 +251,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
             conversationRef: input.session.conversationRef,
             messageId: input.recordedUserInput.id,
             text: input.recordedUserInput.text,
+            images: input.recordedUserInput.images,
             timestamp: input.recordedUserInput.timestamp,
           }),
         });
@@ -345,6 +346,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         conversationRef,
         messageId: input.recordedUserInput.id,
         text: input.recordedUserInput.text,
+        images: input.recordedUserInput.images,
         timestamp: input.recordedUserInput.timestamp,
       }),
     });
@@ -980,6 +982,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
             <WikiPage projectSlug={project.slug} projectName={project.displayName} csrfToken={authQuery.data?.csrfToken} />
           ) : (
             <ConversationPane
+              csrfToken={authQuery.data?.csrfToken}
               projects={treeQuery.data?.projects}
               project={project}
               selectedProvider={selectedProvider}

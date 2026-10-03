@@ -166,6 +166,12 @@ Test and verification anchors:
 - `apps/server/test/settings.test.ts` - representative test or verification file.
 
 ## Change Hotspots
+- Clipboard image input spans `apps/server/src/images/{store,prompt,routes}.ts`,
+  the session keys route, session screen parsing, public timeline and user-input
+  event normalization, `apps/web/src/features/conversation/useClipboardImages.ts`,
+  `ConversationPane.tsx`, transcript thumbnail rendering and shared image contracts.
+  Coverage lives in `apps/server/test/image-input.test.ts`, the composer tests and
+  `apps/web/e2e/clipboard-images.spec.ts`.
 - Runtime entrypoint changes should be reviewed with adjacent service, route, CLI, or frontend modules and the tests that exercise them.
 - Manifest or dependency changes should be reviewed with setup docs and `docs/agent_docs/running_tests.md`.
 - Documentation-only changes should stay scoped to managed docs unless source-of-truth operator docs are stale.

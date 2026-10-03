@@ -18,6 +18,8 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerSearchRoutes } from './routes/search.js';
 import { registerSessionRoutes } from './routes/sessions.js';
+import { ImageStore } from './images/store.js';
+import { registerImageRoutes } from './images/routes.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
@@ -60,6 +62,7 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
   });
   const authService = new AuthService(config, db);
+  const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));
   const coordination = new CoordinationService(db, config.coordination);
   const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
   await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
@@ -98,7 +101,8 @@ export async function buildApp(options: AppOptions = {}) {
   await registerProjectRoutes(app, authService, indexing, sessions);
   await registerSearchRoutes(app, authService, search);
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader);
-  await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions);
+  await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions, images);
+  registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
   await registerCoordinationRoutes(app, authService, coordination);

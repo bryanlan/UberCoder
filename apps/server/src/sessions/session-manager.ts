@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen } from '@agent-console/shared';
@@ -210,7 +211,7 @@ function recordedUserInputFromEvent(appended: AppendedSessionEvent | undefined):
   }
   return {
     id: appended.messageId,
-    text: appended.event.text,
+    ...imagePromptDisplay(appended.event.text),
     timestamp: appended.event.timestamp,
   };
 }
@@ -2509,7 +2510,7 @@ export class SessionManager {
         provider: session.provider,
         conversationRef: session.conversationRef,
         messageId,
-        text: event.text,
+        ...imagePromptDisplay(event.text),
         timestamp: event.timestamp,
       });
     }

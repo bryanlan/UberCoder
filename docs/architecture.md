@@ -15,7 +15,41 @@ First-class runtime surfaces:
 - React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`, `npm run verify:live-console`.
 
+## Clipboard Images
+
+The live composer accepts pasted PNG, JPEG and WebP images, with previews, removal
+and retry. Images upload as binary bodies to authenticated, CSRF-protected
+`POST /api/sessions/:sessionId/images`; authenticated `GET /api/images/:imageId`
+serves the original bytes with private, no-store caching. Uploads are limited to
+10 MiB and 20 million pixels per image, and four images per submitted prompt.
+The server decodes pixels before storing a file and rejects corrupt, animated
+or mismatched image formats. Files and metadata live in `images/` beside the
+configured Console database, outside the session runtime cleanup tree.
+
+Enter submissions carry image IDs through the existing session keys route. The
+backend resolves those IDs within the selected project and provider, then appends
+local file references and an instruction to inspect them with Codex `view_image`
+or Claude `Read`. This uses the existing tmux writer and provider credentials;
+it does not use the host desktop clipboard or create another provider process.
+Text Bypass appends the image references to the already-typed caption rather than
+typing the caption twice. Pending Codex first-turn launches receive the complete
+caption and image references. Upload errors and rejected sends retain the draft.
+Screen parsing finds the active composer across the captured pane, including
+long wrapped image references, while retaining output and picker exclusion checks.
+
+The generated image envelope remains in event logs and provider history for
+pending adoption, recovery and duplicate matching. At the public timeline,
+recorded-input and user-input event boundaries, it becomes caption text plus
+typed image metadata. The web renders authenticated thumbnails, and search
+indexes the caption rather than transport instructions or local image paths.
+Image files remain available after session cleanup and server restart. Unsent
+composer attachments persist across navigation in the current browser tab;
+they are not persisted across a browser reload.
+The Claude transcript adapter removes Claude's native paste wrappers before
+hashing user turns so a pasted prompt can be adopted and matched to live input.
+
 ## Main Components
+
 - `apps/server/` - Fastify backend, project/config/auth routes, provider adapters, SQLite state,
   indexing, conversation search, tmux session management, live-output normalization, restart
   handling, and localhost proxying.
