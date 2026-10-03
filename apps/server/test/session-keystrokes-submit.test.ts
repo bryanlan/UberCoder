@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
@@ -1183,7 +1183,8 @@ describe('SessionManager keystroke submit', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new InputRejectingTmux();
-    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    const warn = vi.fn();
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), undefined, { warn });
 
     const session = await manager.bindConversation({
       project,
@@ -1199,6 +1200,23 @@ describe('SessionManager keystroke submit', () => {
       keys: ['Enter'],
     })).rejects.toThrow(SessionKeystrokeRejectedError);
     expect(tmux.sentKeys).toEqual([]);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(tmux.created).toHaveLength(1);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: session.id,
+      provider: 'codex',
+      textLength: 'this should stay local until the session accepts input'.length,
+      keys: ['Enter'],
+      beforeScreenHash: expect.any(String),
+      afterScreenHash: expect.any(String),
+    }), 'Live input rejected because typed text was not confirmed; session retained.');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('this should stay local until the session accepts input');
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('Ready for input');
+    const debugLogPath = path.join(path.dirname(session.rawLogPath!), 'debug.log');
+    expect(await fs.readFile(debugLogPath, 'utf8')).toContain('send-keystrokes-rejected');
+    await manager.cleanupEndedSessionRuntimeDirs();
+    expect(await fs.readFile(debugLogPath, 'utf8')).toContain('this should stay local until the session accepts input');
     db.close();
   });
 

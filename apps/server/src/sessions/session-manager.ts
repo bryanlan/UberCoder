@@ -1609,6 +1609,17 @@ export class SessionManager {
             this.publishScreenUpdate(liveSession, textSettledScreen);
           }
           if (expectsVisibleInputChange && transportTextShouldCreateUserTurn && !screenInputChanged(textEntryScreen, latestObservedScreen)) {
+            this.logger?.warn({
+              sessionId: liveSession.id,
+              provider: liveSession.provider,
+              textLength: transportText.length,
+              keys: payload.keys,
+              settleWaitMs: combinedTextKeySettleWaitMs(transportText),
+              beforeInputLength: textEntryScreen.inputText.length,
+              afterInputLength: latestObservedScreen.inputText.length,
+              beforeScreenHash: hashScreen(textEntryScreen),
+              afterScreenHash: hashScreen(latestObservedScreen),
+            }, 'Live input rejected because typed text was not confirmed; session retained.');
             this.appendDebugTrace(liveSession, {
               action: 'send-keystrokes-rejected',
               text: payload.text,
@@ -2544,10 +2555,10 @@ export class SessionManager {
       `  text=${JSON.stringify(input.text ?? '')} keys=${JSON.stringify(input.keys ?? [])}`,
       `  before.input=${JSON.stringify(input.before.inputText)}`,
       `  before.status=${JSON.stringify(input.before.status)}`,
-      `  before.tail=${JSON.stringify(input.before.content.split('\n').slice(-4))}`,
+      `  before.tail=${JSON.stringify(input.before.content.split('\n').slice(-12))}`,
       `  after.input=${JSON.stringify(input.after.inputText)}`,
       `  after.status=${JSON.stringify(input.after.status)}`,
-      `  after.tail=${JSON.stringify(input.after.content.split('\n').slice(-4))}`,
+      `  after.tail=${JSON.stringify(input.after.content.split('\n').slice(-12))}`,
       '',
     ].join('\n');
     fs.appendFileSync(debugLogPath, lines);
