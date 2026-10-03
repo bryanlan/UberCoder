@@ -269,6 +269,17 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 
 ## Provider run failures and bounded recovery
 
+Live input rejection never automatically releases, restarts, rebinds, or replays input
+to a provider session. The browser removes the provisional user bubble, shows the
+error, and preserves the local draft and existing binding. The composer loads a saved
+draft when it mounts and has a separate component identity per conversation, so
+navigating away and back does not overwrite the draft with initial empty state.
+Any restart requires an
+explicit user action. Rejected text entry leaves the before/after screen trace in
+the session's private `debug.log`; the server also logs session identity, input
+lengths, screen hashes, and wait duration without prompt or screen contents. These
+metadata remain in the server journal if the session is later explicitly released.
+
 Codex `task_complete.error` records are authoritative failed-turn outcomes. The
 provider adapter preserves their messages as durable status rows, and its
 incremental lifecycle monitor observes append-only transcript updates independently

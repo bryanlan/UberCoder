@@ -299,8 +299,8 @@ function LiveSessionInputBridge({
   modelProfileRequest?: ModelProfileRequest;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
-  const [draftText, setDraftText] = useState('');
-  const [draftDirty, setDraftDirty] = useState(false);
+  const [draftText, setDraftText] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftText ?? '');
+  const [draftDirty, setDraftDirty] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftDirty ?? false);
   const [bypassPreviewText, setBypassPreviewText] = useState<string>();
   const [copyingLastMessage, setCopyingLastMessage] = useState(false);
   const [copiedLastMessage, setCopiedLastMessage] = useState(false);
@@ -391,23 +391,6 @@ function LiveSessionInputBridge({
     }
     captureRef.current?.focus();
   }, [bridgeOpen]);
-
-  useEffect(() => {
-    pendingTextRef.current = '';
-    textFlushInFlightRef.current = undefined;
-    keepBypassSelectionPinnedRef.current = false;
-    committedInputRef.current = '';
-    setTextBypassEnabled(false);
-    setBypassPreview(undefined);
-    const storedDraft = liveBridgeDraftStore.get(conversationKey);
-    if (storedDraft) {
-      setDraftText(storedDraft.draftText ?? '');
-      setDraftDirty(storedDraft.draftDirty ?? false);
-      return;
-    }
-    setDraftText('');
-    setDraftDirty(false);
-  }, [conversationKey]);
 
   useEffect(() => {
     if (textBypassEnabled || (!draftDirty && !draftText)) {
@@ -1845,6 +1828,7 @@ export function ConversationPane({
         </div>
       ) : boundSession ? (
         <LiveSessionInputBridge
+          key={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           sessionId={boundSession.id}
           projectSlug={timeline.conversation.projectSlug}
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}

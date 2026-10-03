@@ -321,6 +321,26 @@ it('cancels the exact server-owned queued profile request', async () => {
 });
 
 describe('ConversationPane live input bridge', () => {
+  it('restores a rejected draft and keeps it when the conversation is reopened', async () => {
+    const send = deferred<boolean>();
+    const onSendKeystrokes = vi.fn(() => send.promise);
+    const view = renderPane({ onSendKeystrokes });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'keep the background build running' } });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    expect(textbox).toHaveValue('');
+
+    send.resolve(false);
+
+    await waitFor(() => expect(textbox).toHaveValue('keep the background build running'));
+    expect(onSendKeystrokes).toHaveBeenCalledTimes(1);
+
+    view.unmount();
+    renderPane({ onSendKeystrokes });
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('keep the background build running'));
+    expect(onSendKeystrokes).toHaveBeenCalledTimes(1);
+  });
+
   it('clears the normal draft immediately after Enter while the keystroke request is pending', () => {
     const send = deferred<boolean>();
     renderPane({

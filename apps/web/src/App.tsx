@@ -666,42 +666,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  async function forceRebindSelectedConversation(initialPrompt?: string): Promise<BoundSession | undefined> {
-    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
-      return undefined;
-    }
-    if (timeline?.conversation.kind !== 'history') {
-      return undefined;
-    }
-
-    const { session } = await api.bindConversation(
-      selectedProjectSlug,
-      selectedProvider,
-      selectedConversationRef,
-      authQuery.data?.csrfToken,
-      { force: true, initialPrompt },
-    );
-
-    queryClient.setQueryData(['tree'], (current: TreeResponse | undefined) => applySessionUpdateToTree(current, session));
-    queryClient.setQueryData<ConversationTimeline | undefined>(
-      conversationMetaQueryKey(selectedProjectSlug, selectedProvider, selectedConversationRef),
-      (current) => current
-        ? {
-            ...current,
-            conversation: {
-              ...current.conversation,
-              isBound: true,
-              boundSessionId: session.id,
-            },
-            boundSession: session,
-          }
-        : current,
-    );
-    void queryClient.invalidateQueries({ queryKey: ['tree'] });
-    invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
-    return session;
-  }
-
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
@@ -743,45 +707,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       }
       return true;
     } catch (error) {
-      if (
-        error instanceof ApiError
-        && error.status === 409
-        && error.message.includes('did not accept the typed text into its input buffer')
-        && timeline?.boundSession?.id === sessionId
-      ) {
-        try {
-          const recoveryPrompt = selectedProvider === 'codex' ? optimisticSubmittedText : undefined;
-          const reboundSession = await forceRebindSelectedConversation(
-            recoveryPrompt,
-          );
-          if (reboundSession) {
-            if (recoveryPrompt) {
-              applyUpdatedSessionToSelection(reboundSession.id, reboundSession);
-              setActionError(undefined);
-              return true;
-            }
-            const retryResponse = await api.sendKeystrokes(reboundSession.id, body, authQuery.data?.csrfToken);
-            const retriedSession = retryResponse.session;
-            applyUpdatedSessionToSelection(reboundSession.id, retriedSession);
-            if (retryResponse.recordedUserInput) {
-              appendRecordedSubmittedText({
-                session: retriedSession,
-                recordedUserInput: retryResponse.recordedUserInput,
-                optimisticMessage,
-              });
-            }
-            if (refreshTimelineMessages) {
-              scheduleSelectedTimelineMessageRefresh();
-            }
-            setActionError(undefined);
-            return true;
-          }
-        } catch (recoveryError) {
-          discardOptimisticMessage();
-          setActionError(describeError(recoveryError, 'Live session input recovery failed.'));
-          return false;
-        }
-      }
       discardOptimisticMessage();
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
       return false;
