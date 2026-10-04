@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionScreen } from '@agent-console/shared';
+import { parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 import {
   extractLastClaudeModelFromText,
   hashScreen,
@@ -24,6 +25,33 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
 }
 
 describe('screen heuristics', () => {
+  it('recognizes a real Claude composer without requiring the permissions footer', () => {
+    const ready = parseSessionScreenSnapshot('Claude Code\nThe answer is ready.\n────────────────────\n❯ ');
+    expect(ready.inputActive).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(ready)).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(parseSessionScreenSnapshot('Claude Code\n❯ '))).toBe(true);
+  });
+
+  it('requires a composer even when the permissions footer is visible', () => {
+    const footerOnly = screen({ content: 'Finishing Stop hooks…', status: '⏵⏵ bypass permissions on' });
+    expect(screenLooksReadyForLiteralPrompt(footerOnly)).toBe(false);
+  });
+
+  it('keeps quoted picker instructions from blocking a real composer', () => {
+    const ready = parseSessionScreenSnapshot([
+      'Claude Code',
+      'The picker says:',
+      'Enter to confirm · Esc to cancel',
+      'Press enter to confirm or esc to go back',
+      '────────────────────',
+      '❯ ',
+      '────────────────────',
+      '⏵⏵ bypass permissions on',
+    ].join('\n'));
+    expect(ready.inputActive).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(ready)).toBe(true);
+  });
+
   it('distinguishes an empty composer from a selection with otherwise identical display text', () => {
     const selection = screen({ content: 'Choose an option', inputActive: false });
     const composer = { ...selection, inputActive: true };

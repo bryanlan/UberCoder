@@ -9,6 +9,83 @@ const liveOutputReader = new LiveOutputReader();
 const readLiveMessages = liveOutputReader.readLiveMessages.bind(liveOutputReader);
 
 describe('readLiveMessages', () => {
+  it.each(['full', 'compact repaint', 'split', 'truncated'] as const)('excludes a Claude bug-report panel from chat output: %s', async (layout) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-report-panel-'));
+    try {
+      const eventLogPath = path.join(tempDir, 'events.jsonl');
+      const panelLines = [
+        '╭────────────────────────────────────────────────────────────────────╮',
+        '│ ✻ Bug report drafted: A saved instruction was too broad             │',
+        '│ │ - What happened: A rule was applied outside its intended scope.   │',
+        '│ │ This notification is unrelated to the current response.          │',
+        '│ 1 to review · 2 to send · 0 to dismiss                              │',
+        '╰────────────────────────────────────────────────────────────────────╯',
+      ];
+      const panel = (layout === 'truncated' ? panelLines.slice(0, -1) : panelLines).join('\n');
+      const following = [
+        '╭──────────────────────────────────╮',
+        '│ The current answer stays visible. │',
+        '╰──────────────────────────────────╯',
+        'Here is the next step.',
+      ].join('\n');
+      const output = layout === 'split'
+        ? [
+          ['The answer is ready.', ...panelLines.slice(0, 3)].join('\n'),
+          [...panelLines.slice(3), following].join('\n'),
+        ]
+        : [[
+          'The answer is ready.',
+          layout === 'compact repaint' ? panel.replace(/ /g, '') : panel,
+          following,
+        ].join('\n')];
+      await fs.writeFile(eventLogPath, [
+        { type: 'user-input', text: 'Summarize the result.', timestamp: '2026-10-04T14:00:00.000Z' },
+        ...output.map((text, index) => ({ type: 'raw-output', text, timestamp: `2026-10-04T14:00:0${index + 1}.000Z` })),
+      ].map((event) => JSON.stringify(event)).join('\n'));
+      const session: BoundSession = {
+        id: 'claude-report-panel', provider: 'claude', projectSlug: 'demo',
+        conversationRef: 'pending:report-panel', tmuxSessionName: 'ac-claude-demo-report-panel',
+        status: 'bound', eventLogPath,
+        startedAt: '2026-10-04T14:00:00.000Z', updatedAt: '2026-10-04T14:00:05.000Z',
+      };
+      const messages = await new LiveOutputReader().readLiveMessages(session);
+      expect(messages.filter((message) => message.role === 'assistant').map((message) => message.text)).toEqual([
+        'The answer is ready.\nThe current answer stays visible.\nHere is the next step.',
+      ]);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves ordinary assistant boxes and prose that mentions a bug report', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-report-prose-'));
+    try {
+      const eventLogPath = path.join(tempDir, 'events.jsonl');
+      await fs.writeFile(eventLogPath, [
+        { type: 'user-input', text: 'Explain the change.', timestamp: '2026-10-04T14:00:00.000Z' },
+        { type: 'raw-output', text: [
+          'Bug report drafted: The application skipped a validation step.',
+          '╭───────────────────────────────────╮',
+          '│ A normal diagram remains visible. │',
+          '╰───────────────────────────────────╯',
+        ].join('\n'), timestamp: '2026-10-04T14:00:01.000Z' },
+      ].map((event) => JSON.stringify(event)).join('\n'));
+      const session: BoundSession = {
+        id: 'claude-report-prose', provider: 'claude', projectSlug: 'demo',
+        conversationRef: 'pending:report-prose', tmuxSessionName: 'ac-claude-demo-report-prose',
+        status: 'bound', eventLogPath,
+        startedAt: '2026-10-04T14:00:00.000Z', updatedAt: '2026-10-04T14:00:01.000Z',
+      };
+      const messages = await new LiveOutputReader().readLiveMessages(session);
+      expect(messages.find((message) => message.role === 'assistant')?.text).toBe([
+        'Bug report drafted: The application skipped a validation step.',
+        'A normal diagram remains visible.',
+      ].join('\n'));
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps updated Codex model pickers out of conversation messages', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-live-output-'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');

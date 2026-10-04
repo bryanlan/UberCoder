@@ -20,7 +20,27 @@ function record(type: 'user' | 'assistant', timestamp: string, stopReason?: stri
 }
 
 describe('Claude work readiness', () => {
-  it('waits for a real input prompt before recording a completed response, then handles continuation', async () => {
+  it.each([
+    {
+      layout: 'permissions footer',
+      readyScreen: 'Claude Code\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)',
+    },
+    {
+      layout: 'bug report notification without a permissions footer',
+      readyScreen: [
+        'Claude Code',
+        'The answer is ready.',
+        '╭────────────────────────────────────────────────────────────────────╮',
+        '│ ✻ Bug report drafted: A saved instruction was too broad             │',
+        '│ │ - What happened: A rule was applied outside its intended scope.   │',
+        '│ 1 to review · 2 to send · 0 to dismiss                              │',
+        '╰────────────────────────────────────────────────────────────────────╯',
+        '──────────────────────────────────────────────────────────────────────',
+        '❯ ',
+      ].join('\n'),
+    },
+    { layout: 'empty composer without a footer', readyScreen: 'Claude Code\n❯ ' },
+  ])('waits for a real input prompt with $layout, then handles continuation', async ({ readyScreen }) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-ready-'));
     const transcript = path.join(dir, 'transcript.jsonl');
     const started = new Date(Date.now() - 2_000).toISOString();
@@ -49,7 +69,18 @@ describe('Claude work readiness', () => {
     expect(db.boundSessions.getById(session.id)?.isWorking).toBe(true);
     expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBeUndefined();
 
-    tmux.paneText = 'Claude Code\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
+    tmux.paneText = [
+      'Claude Code',
+      'Do you want to proceed?',
+      '❯ 1. Yes',
+      '  2. No',
+      '⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n');
+    await manager.getSessionScreen(session.id);
+    expect(db.boundSessions.getById(session.id)?.isWorking).toBe(true);
+    expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBeUndefined();
+
+    tmux.paneText = readyScreen;
     await manager.getSessionScreen(session.id);
     expect(db.boundSessions.getById(session.id)).toMatchObject({ isWorking: false, lastResponseAt: firstEnd });
 

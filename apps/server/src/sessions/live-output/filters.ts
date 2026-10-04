@@ -424,8 +424,37 @@ function lineHasExactReplyAnswer(line: string, exactReply: string, lastUserInput
     || compactLineIsExactReplyAnswer(compactWithoutPrompt, expectedCompact);
 }
 
+function removeClaudeBugReportPanels(text: string): string {
+  const lines = text.split('\n');
+  const hidden = new Set<number>();
+  const isBoxRow = (line: string): boolean => /^\s*(?:│|╭─|╰─)/u.test(line);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (!/^\s*│/u.test(line)) continue;
+    // Repaint output often loses spaces. Require the provider's boxed header
+    // or control row so ordinary assistant prose and diagrams remain visible.
+    const compact = line.replace(/[\s│✻✽✢✶*]/gu, '').toLowerCase();
+    if (!compact.startsWith('bugreportdrafted:') && compact !== '1toreview·2tosend·0todismiss') continue;
+
+    let start = index;
+    while (start > 0 && isBoxRow(lines[start - 1]!) && !/^\s*╰─/u.test(lines[start - 1]!)) {
+      start -= 1;
+      if (/^\s*╭─/u.test(lines[start]!)) break;
+    }
+    let end = index + 1;
+    while (end < lines.length && isBoxRow(lines[end]!) && !/^\s*╭─/u.test(lines[end]!)) {
+      const closingBorder = /^\s*╰─/u.test(lines[end]!);
+      end += 1;
+      if (closingBorder) break;
+    }
+    for (let cursor = start; cursor < end; cursor += 1) hidden.add(cursor);
+  }
+  return lines.filter((_, index) => !hidden.has(index)).join('\n');
+}
+
 export function normalizeRawOutputLines(text: string, lastUserInput?: string, userInputEchoes: string[] = []): string[] {
-  const cleaned = stripAnsiAndControl(text);
+  // Keep notification boundaries until classified, before removing box chrome.
+  const cleaned = removeClaudeBugReportPanels(stripAnsiAndControl(text));
   const candidateLines = cleaned
     .split(/\n+/)
     .map((rawLine) => normalizeTerminalLine(rawLine))

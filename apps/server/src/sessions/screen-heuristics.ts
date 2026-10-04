@@ -124,20 +124,19 @@ export function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boo
 }
 
 export function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
-  const hasClaudeInputFooter = /bypass permissions on/i.test(screen.status);
+  // Claude can omit its permissions footer when notifications fill the pane.
+  // The parsed composer is the readiness evidence; a footer alone is not.
   if (
-    (screenIsStartingUp(screen) && !hasClaudeInputFooter)
+    !screen.inputActive
     || screenShowsClaudeResumeSessionChoice(screen)
     || sessionScreenShowsWorking(screen)
+    || screenShowsQueuedMessageHint(screen)
   ) {
     return false;
   }
 
   const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
-  return hasClaudeInputFooter
-    && !/Enter to confirm · Esc to cancel/i.test(normalized)
-    && !/Press enter to confirm or esc to go back/i.test(normalized)
-    && !/Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized);
+  return !/starting mcp servers/i.test(normalized);
 }
 
 export function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
