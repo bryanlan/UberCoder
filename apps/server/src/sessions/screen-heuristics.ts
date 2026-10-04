@@ -21,7 +21,11 @@ export function screenInputMatchesText(screen: SessionScreen, text: string | und
   if (!text?.trim()) {
     return false;
   }
-  return normalizeComparableText(screen.inputText) === normalizeComparableText(text);
+  // Native composer rows can wrap inside a word. Keep literal characters and
+  // within-row spaces exact; only a rendered row boundary may add whitespace.
+  const rows = screen.inputText.split('\n').map((row) => normalizeComparableText(row)).filter(Boolean);
+  const pattern = rows.map((row) => row.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join(' ?');
+  return Boolean(pattern) && new RegExp(`^${pattern}$`, 'u').test(normalizeComparableText(text));
 }
 
 export function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {

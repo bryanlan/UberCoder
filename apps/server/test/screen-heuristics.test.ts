@@ -4,6 +4,7 @@ import { parseSessionScreenSnapshot } from '../src/sessions/session-screen.js';
 import {
   extractLastClaudeModelFromText,
   hashScreen,
+  screenInputMatchesText,
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
@@ -25,6 +26,23 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
 }
 
 describe('screen heuristics', () => {
+  it('matches native Codex rows that wrap inside a word without ignoring within-row spaces', () => {
+    const draft = parseSessionScreenSnapshot([
+      '› Explain model usage from 2026-10-01 to 2026-11-',
+      '  01',
+      '  text-generation 1,000 input tokens $0.10',
+      '',
+      '  Include both entries.',
+      '  GPT-6.1-Sol xhigh fast · ~/code/demo',
+    ].join('\n'));
+    const text = 'Explain model usage from 2026-10-01 to 2026-11-01\ntext-generation\t1,000 input tokens $0.10\n\nInclude both entries.';
+    expect(draft.inputText).toContain('2026-11-\n01');
+    expect(screenInputMatchesText(draft, text)).toBe(true);
+    expect(screenInputMatchesText(draft, text.replace('1,000', '2,000'))).toBe(false);
+    expect(screenInputMatchesText(draft, text.replace('input tokens', 'inputtokens'))).toBe(false);
+    expect(screenInputMatchesText(draft, `${text}\n${text}`)).toBe(false);
+  });
+
   it('recognizes a real Claude composer without requiring the permissions footer', () => {
     const ready = parseSessionScreenSnapshot('Claude Code\nThe answer is ready.\n────────────────────\n❯ ');
     expect(ready.inputActive).toBe(true);

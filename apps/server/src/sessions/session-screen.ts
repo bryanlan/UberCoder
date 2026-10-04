@@ -345,12 +345,13 @@ function trimLeadingTerminalChrome(lines: ScreenLine[]): ScreenLine[] {
   return lines.slice(start);
 }
 
-function extractActiveInput(contentLines: ScreenLine[]): {
+function extractActiveInput(contentLines: ScreenLine[], footer: ScreenLine | undefined): {
   contentLines: ScreenLine[];
   inputText: string;
   inputActive: boolean;
   footerLines: ScreenLine[];
 } {
+  const hasCodexFooter = /^\s{2,}gpt-\d[\w.-]*\b/i.test(footer?.plain ?? '');
   // A wrapped composer can occupy the whole captured pane. Locate its prompt
   // through the existing output/picker/footer checks instead of a row cutoff.
   for (let index = contentLines.length - 1; index >= 0; index -= 1) {
@@ -359,6 +360,9 @@ function extractActiveInput(contentLines: ScreenLine[]): {
       continue;
     }
     const sourceLine = contentLines[index]!;
+    // Native Codex puts its composer marker at the left edge. Indented quote
+    // markers in a multiline draft must not displace that outer composer.
+    if (hasCodexFooter && /^\s{2,}/u.test(sourceLine.plain)) continue;
     const effectivePromptText = (
       isCodexStartupPromptAfterChrome(contentLines, index, promptText)
       || isDimStyledCodexStarterSuggestion(sourceLine, promptText)
@@ -380,7 +384,12 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 
     const following = contentLines.slice(index + 1)
       .filter((line) => line.plain.trim().length > 0 && !isHorizontalDivider(line.plain));
-    const afterInput = boxedInput ? contentLines.slice(closingDivider + 1) : following;
+    // Codex has no horizontal input box: its indented continuation rows end
+    // at the native footer. Paragraph breaks inside that region are input.
+    const codexInput = hasCodexFooter && /^[❯›>]/u.test(sourceLine.plain)
+      && following.every((line) => /^\s{2,}/u.test(line.plain) || isLikelyFooterStatus(line.plain));
+    const afterInput = boxedInput ? contentLines.slice(closingDivider + 1)
+      : codexInput ? following.filter((line) => isLikelyFooterStatus(line.plain)) : following;
     if (afterInput.some((line) => /^\s*[•●]/u.test(line.plain))) {
       continue;
     }
@@ -396,7 +405,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     }
 
     const firstPickerHintIndex = following.findIndex((line) => isInteractivePickerHint(line.plain));
-    if (firstPickerHintIndex !== -1) {
+    if (firstPickerHintIndex !== -1 && !codexInput) {
       const pickerContext = following.slice(0, firstPickerHintIndex);
       if (pickerContext.every((line) => looksLikePickerOption(line.plain))) {
         continue;
@@ -408,7 +417,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
     let boundaryLine: ScreenLine | undefined;
     for (let lineIndex = index + 1; lineIndex < (boxedInput ? closingDivider : contentLines.length); lineIndex += 1) {
       const candidate = contentLines[lineIndex]!;
-      if (!boxedInput && isComposerBoundary(candidate.plain)) {
+      if (!boxedInput && (codexInput ? isLikelyFooterStatus(candidate.plain) : isComposerBoundary(candidate.plain))) {
         nextSectionStart = lineIndex;
         boundaryLine = candidate;
         break;
@@ -427,7 +436,7 @@ function extractActiveInput(contentLines: ScreenLine[]): {
 
     return {
       contentLines: trimBlankEdges(contentLines.slice(0, index)),
-      inputText: inputParts.join(' ').trim(),
+      inputText: inputParts.join(codexInput ? '\n' : ' ').trim(),
       inputActive: true,
       footerLines,
     };
@@ -487,7 +496,9 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     return true;
   });
 
-  const { contentLines, inputText, inputActive, footerLines } = extractActiveInput(baseContentLines);
+  const { contentLines, inputText, inputActive, footerLines } = extractActiveInput(
+    baseContentLines, plainStatus === 'Session active' ? undefined : lastLine,
+  );
   const trailingStatusLines = plainStatus === 'Session active' ? [] : [lastLine];
   const footerStatusLines = filterFooterStatusLines([...footerLines, ...trailingStatusLines]);
   const nonStatusFooterLines = footerLines.filter((line) => !isLikelyFooterStatus(line.plain));

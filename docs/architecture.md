@@ -91,6 +91,13 @@ state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses 
 `apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,
 not raw screen content; `apps/web/src/features/conversation/useConversationData.ts` polls the
 screen route separately for the live terminal/status panel.
+Codex's unboxed composer is bounded by its left-edge prompt, indented continuation rows and
+indented native model footer. Paragraph breaks, quoted prompts and bullets inside that region
+remain input. Earlier prompts followed by assistant output remain screen content. Recognizing the
+whole draft lets the normal submission path confirm a multiline paste and reuse an already-visible
+draft without pasting it again. Native Codex input retains its rendered row boundaries;
+the retained-draft comparison allows whitespace at those boundaries because wrapping can
+split a word. Characters and spaces within each row still have to match.
 The screen parser preserves the full Claude OAuth URL from terminal hyperlink metadata when the
 login screen wraps its visible label. This correction applies only to the interactive screen.
 User-visible incremental conversation output comes through `apps/server/src/sessions/live-output/reader.ts`

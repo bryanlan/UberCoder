@@ -4,6 +4,45 @@ import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions
 describe('parseSessionScreenSnapshot', () => {
   const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
 
+  it.each(['plain', 'ansi'])('reads every paragraph of an indented Codex composer with a native footer: %s', (style) => {
+    const prompt = style === 'ansi' ? '\u001b[1m›\u001b[0m' : '›';
+    const screen = parseSessionScreenSnapshot([
+      '• The previous answer is complete.',
+      '',
+      `${prompt} What is this usage for?`,
+      '  text-generation 1,000 input tokens $0.10',
+      '',
+      '  Second usage entry',
+      '  1. 200 output tokens',
+      '  > quoted input text',
+      '  • a bullet in the draft',
+      '',
+      '  Can you explain both?',
+      '',
+      '  GPT-6.1-Sol xhigh fast · ~/code/demo · fixture · f2 to view',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText.replace(/\s+/g, ' ')).toBe(
+      'What is this usage for? text-generation 1,000 input tokens $0.10 Second usage entry 1. 200 output tokens > quoted input text • a bullet in the draft Can you explain both?',
+    );
+    expect(screen.content).toContain('previous answer');
+    expect(screen.content).not.toContain('usage entry');
+    expect(screen.status).toContain('GPT-6.1-Sol');
+    expect(screen.status).not.toContain('usage entry');
+  });
+
+  it('keeps an old multiline prompt in output after a Codex answer follows it', () => {
+    const screen = parseSessionScreenSnapshot([
+      '› Previous question', '  First paragraph', '', '  Second paragraph',
+      '', '• The answer is complete.', '  Its continuation is indented.',
+      '  GPT-6.1-Sol xhigh fast · ~/code/demo',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(false);
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('Second paragraph');
+    expect(screen.content).toContain('answer is complete');
+  });
+
   it('recognizes a composer spanning more than twelve rows without promoting old submitted text', () => {
     const wrapped = Array.from({ length: 24 }, (_, index) => `image reference continuation ${index}`);
     const draft = parseSessionScreenSnapshot([

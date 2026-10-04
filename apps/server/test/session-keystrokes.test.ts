@@ -9,6 +9,47 @@ import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 describe('SessionManager keystrokes', () => {
+  it.each([false, true])('submits a Codex paragraph draft once when already visible is %s', async (alreadyVisible) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-codex-paragraphs-'));
+    const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
+    const text = 'What is this usage for from 2026-10-01 to 2026-11-01?\ntext-generation\t1,000 input tokens\t$0.10\n\nSecond usage entry\ntext-generation\t200 output tokens\t$0.02\n\nCan you explain both?';
+    const render = (draft: string) => {
+      const lines = draft.replace(/\t/g, ' ').replace('2026-11-01?', '2026-11-\n01?').split('\n');
+      return [
+        '• The previous answer is complete.', '', `› ${lines[0]}`,
+        ...lines.slice(1).map((line) => line ? `  ${line}` : ''), '',
+        '  GPT-6.1-Sol xhigh fast · ~/code/demo · fixture · f2 to view',
+      ].join('\n');
+    };
+    class ParagraphTmux extends FakeTmux {
+      override async pasteText(sessionName: string, input: string): Promise<void> {
+        await super.pasteText(sessionName, input);
+        this.paneText = render(input);
+      }
+    }
+    const tmux = new ParagraphTmux();
+    tmux.paneText = render(alreadyVisible ? text : '');
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus());
+    try {
+      const session = await manager.bindConversation({
+        project, provider, providerSettings,
+        conversationRef: 'codex-paragraphs', title: 'Paragraph check', kind: 'history',
+      });
+      const result = await manager.sendKeystrokes(session.id, { text, keys: ['Enter'], submittedText: text });
+      expect(tmux.pasted).toEqual(alreadyVisible ? [] : [text]);
+      expect(tmux.sentKeys).toEqual([['Enter']]);
+      expect(tmux.created).toHaveLength(1);
+      expect(result.session.id).toBe(session.id);
+      expect(result.recordedUserInput?.text).toBe(text);
+      const events = (await fs.readFile(session.eventLogPath!, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+      expect(events.filter((event) => event.type === 'user-input').map((event) => event.text)).toEqual([text]);
+    } finally {
+      await manager.stop();
+      db.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('sends raw keystrokes directly to the tmux session without synthesizing chat input', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
