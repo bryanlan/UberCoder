@@ -44,7 +44,7 @@ export function screenIsStartingUp(screen: SessionScreen): boolean {
 }
 
 export function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
-  if (!text || text.length > 8 || !/^[\w./:-]+$/u.test(text.trim())) {
+  if (screen.inputActive || !text || text.length > 8 || !/^[\w./:-]+$/u.test(text.trim())) {
     return false;
   }
 
@@ -55,7 +55,7 @@ export function screenAllowsLiteralSelectionWithoutInput(screen: SessionScreen, 
   const trailingLines = normalizedLines.slice(-8);
 
   if (trailingLines.some((line) => /Enter (?:select|default) · (?:s session · )?Esc back/i.test(line)
-    || /Enter to confirm · Esc to exit/i.test(line)
+    || /Enter to confirm · Esc to (?:exit|cancel)/i.test(line)
     || /Press enter to confirm or esc to go back/i.test(line)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line))) {
     return true;
@@ -107,7 +107,7 @@ export function screenShowsInteractiveSelectionHint(screen: SessionScreen): bool
     .filter(Boolean)
     .slice(-8)
     .some((line) => /Enter (?:select|default) · (?:s session · )?Esc back/i.test(line)
-      || /Enter to confirm · Esc to exit/i.test(line)
+      || /Enter to confirm · Esc to (?:exit|cancel)/i.test(line)
       || /Press enter to confirm or esc to go back/i.test(line)
       || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
       || /Esc to cancel · Tab to amend/i.test(line)
@@ -127,6 +127,21 @@ export function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boo
     && /Enter to confirm · Esc to cancel/i.test(normalized);
 }
 
+export function claudeFolderTrustSelection(screen: SessionScreen): 'accept' | 'exit' | undefined {
+  if (screen.inputActive) return undefined;
+  const lines = `${screen.content}\n${screen.status}`.split('\n').map(normalizeWhitespace);
+  const text = lines.join(' ');
+  if (!lines.includes('Accessing workspace:')
+    || !/Quick safety check: Is this a project you created or one you trust\?/i.test(text)
+    || !lines.includes('Enter to confirm · Esc to cancel')) return undefined;
+  const options = lines.map((line) => line.replace(/^[❯›>]\s*/u, ''));
+  if (!options.includes('No, exit') || !options.includes('Yes, I trust this folder')) return undefined;
+  const selected = [...lines].reverse().find((line) => /^[❯›>]\s*(?:Yes, I trust this folder|No, exit)$/u.test(line));
+  if (/^[❯›>]\s*Yes, I trust this folder$/u.test(selected ?? '')) return 'accept';
+  if (/^[❯›>]\s*No, exit$/u.test(selected ?? '')) return 'exit';
+  return undefined;
+}
+
 export function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
   // Claude can omit its permissions footer when notifications fill the pane.
   // The parsed composer is the readiness evidence; a footer alone is not.
@@ -144,7 +159,7 @@ export function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean
 }
 
 export function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {
-  return Boolean(text?.trim().match(/^\d{1,8}$/)) && screenShowsInteractiveSelectionHint(screen);
+  return !screen.inputActive && Boolean(text?.trim().match(/^\d{1,8}$/)) && screenShowsInteractiveSelectionHint(screen);
 }
 
 export function submittedTextShouldCreateUserTurn(screen: SessionScreen, text: string | undefined): boolean {

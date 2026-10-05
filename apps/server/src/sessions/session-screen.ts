@@ -163,7 +163,7 @@ function looksLikeSlashCommandSuggestion(line: string): boolean {
 function isInteractivePickerHint(line: string): boolean {
   const normalized = normalizeWhitespace(line);
   return /Enter (?:select|default) · (?:s session · )?Esc back/i.test(normalized)
-    || /Enter to confirm · Esc to exit/i.test(normalized)
+    || /Enter to confirm · Esc to (?:exit|cancel)/i.test(normalized)
     || /Press enter to confirm or esc to go back/i.test(normalized)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
@@ -405,7 +405,7 @@ function extractActiveInput(contentLines: ScreenLine[], footer: ScreenLine | und
     }
 
     const firstPickerHintIndex = following.findIndex((line) => isInteractivePickerHint(line.plain));
-    if (firstPickerHintIndex !== -1 && !codexInput) {
+    if (firstPickerHintIndex !== -1 && !boxedInput && !codexInput) {
       const pickerContext = following.slice(0, firstPickerHintIndex);
       if (pickerContext.every((line) => looksLikePickerOption(line.plain))) {
         continue;

@@ -4,6 +4,34 @@ import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions
 describe('parseSessionScreenSnapshot', () => {
   const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
 
+  it.each(['No, exit', 'Yes, I trust this folder'])('recognizes an unnumbered Claude trust menu with %s selected', (selection) => {
+    const choices = ['No, exit', 'Yes, I trust this folder'];
+    const screen = parseSessionScreenSnapshot([
+      'Accessing workspace:', '', ' /demo/project', '',
+      'Quick safety check: Is this a project you created or one you trust?',
+      'Security guide', '',
+      ...choices.map((choice) => `${choice === selection ? ' ❯' : '  '} ${choice}`),
+      '', ' Enter to confirm · Esc to cancel',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(false);
+    expect(screen.inputText).toBe('');
+    expect(screen.content).toContain('Yes, I trust this folder');
+    expect(screen.content).toContain('Enter to confirm');
+  });
+
+  it('keeps quoted trust-menu controls inside a bounded Claude draft', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '❯ Explain this startup prompt:',
+      '  No, exit', '  Yes, I trust this folder',
+      '  Enter to confirm · Esc to cancel',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText).toContain('Explain this startup prompt:');
+    expect(screen.inputText).toContain('Enter to confirm · Esc to cancel');
+  });
+
   it.each(['plain', 'ansi'])('reads every paragraph of an indented Codex composer with a native footer: %s', (style) => {
     const prompt = style === 'ansi' ? '\u001b[1m›\u001b[0m' : '›';
     const screen = parseSessionScreenSnapshot([

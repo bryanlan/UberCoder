@@ -6,6 +6,7 @@ import {
   hashScreen,
   screenInputMatchesText,
   screenAllowsLiteralSelectionTokenWithoutInput,
+  screenAllowsLiteralSelectionWithoutInput,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
   screenShowsInteractiveSelectionHint,
@@ -26,6 +27,28 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
 }
 
 describe('screen heuristics', () => {
+  it('treats a number in a real composer as chat when older output contains menu controls', () => {
+    const ready = parseSessionScreenSnapshot([
+      'The startup menu used these controls:', 'Enter to confirm · Esc to cancel',
+      '────────────────────────────────────────', '❯ 2',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(ready.inputActive).toBe(true);
+    expect(screenAllowsLiteralSelectionWithoutInput(ready, '2')).toBe(false);
+    expect(screenAllowsLiteralSelectionTokenWithoutInput(ready, '2')).toBe(false);
+    expect(submittedTextShouldCreateUserTurn(ready, '2')).toBe(true);
+  });
+
+  it('recognizes the unnumbered startup trust controls as interactive and not ready', () => {
+    const trust = parseSessionScreenSnapshot([
+      'Accessing workspace: /demo/project', '',
+      ' ❯ No, exit', '   Yes, I trust this folder', '',
+      ' Enter to confirm · Esc to cancel',
+    ].join('\n'));
+    expect(screenShowsInteractiveSelectionHint(trust)).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(trust)).toBe(false);
+  });
+
   it('matches native Codex rows that wrap inside a word without ignoring within-row spaces', () => {
     const draft = parseSessionScreenSnapshot([
       '› Explain model usage from 2026-10-01 to 2026-11-',

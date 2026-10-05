@@ -13,6 +13,7 @@ export interface SessionRuntimeState {
   codexProfile?: import('@agent-console/shared').CodexCostProfileKey;
   claudeProfile?: import('@agent-console/shared').ClaudeCostProfileKey;
   submittedTurnAt?: string;
+  claudeFolderTrustPending?: boolean;
 }
 
 interface SessionRuntime {
@@ -91,6 +92,7 @@ export class SessionRuntimeRegistry {
     state.codexProfile = undefined;
     state.claudeProfile = undefined;
     state.submittedTurnAt = undefined;
+    state.claudeFolderTrustPending = undefined;
   }
 
   delete(sessionId: string): void {

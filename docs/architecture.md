@@ -326,6 +326,15 @@ lengths, screen hashes, and wait duration without prompt or screen contents. The
 metadata remain in the server journal if the session is later explicitly released.
 
 The screen parser records whether it found an active composer, even when empty.
+All configured Agent Console project folders are trusted for Claude. When a bound
+Claude session displays its workspace-trust menu, Console queues acceptance under
+the existing session command lock. It verifies tmux ownership and the provider PID,
+selects `Yes, I trust this folder`, verifies the highlighted choice, and confirms it.
+The same preparation runs before chat submission if the menu appears late. Startup
+acceptance waits for a ready composer or the next interactive control, records a
+status receipt, and creates no user turn or activity timestamp. It also handles an
+existing trust prompt after backend restart. Unnumbered trust-menu choices are
+interactive controls; quoted controls inside a bounded composer remain draft text.
 Quoted menu instructions above an open composer do not block ordinary chat. When
 an interactive approval or menu replaces the composer, a combined text-and-key
 send rejects nonnumeric chat text before typing or confirming anything and

@@ -26,6 +26,7 @@ import {
 } from './pending-adoption.js';
 import {
   combinedTextKeySettleWaitMs,
+  claudeFolderTrustSelection,
   extractLastClaudeModelFromText,
   hashScreen,
   screenAllowsLiteralSelectionTokenWithoutInput,
@@ -53,6 +54,7 @@ import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
+const CLAUDE_FOLDER_TRUST_WAIT_MS = 15_000;
 const QUEUED_MESSAGE_COMPOSER_WAIT_MS = 1_200;
 const DEFERRED_TEXT_READY_TTL_MS = 15_000;
 const RAW_OUTPUT_SCREEN_UPDATE_THROTTLE_MS = 500;
@@ -1442,6 +1444,13 @@ export class SessionManager {
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
+    if (liveSession.provider === 'claude') {
+      const screen = await this.captureSessionScreen(liveSession);
+      const prepared = await this.acceptClaudeFolderTrust(liveSession, screen);
+      if (claudeFolderTrustSelection(screen) !== undefined && !screenLooksReadyForLiteralPrompt(prepared)) {
+        throw new SessionKeystrokeRejectedError('Claude is waiting for another startup control. Answer it in the live session before sending input. The draft was not submitted.');
+      }
+    }
     this.runtimeState(liveSession.id).submittedTurnAt = nowIso();
     await this.runInputTmuxAction(liveSession, () => this.submitTextToSession(liveSession.tmuxSessionName, text));
     const activityAt = nowIso();
@@ -1503,7 +1512,8 @@ export class SessionManager {
         if (
           screenIsStartingUp(preparedScreen)
           || screenShowsQueuedMessageHint(preparedScreen)
-          || (plan.shouldProbeClaudeResumePrompt && screenShowsClaudeResumeSessionChoice(preparedScreen))
+          || (plan.shouldProbeClaudeResumePrompt && (screenShowsClaudeResumeSessionChoice(preparedScreen)
+            || claudeFolderTrustSelection(preparedScreen) !== undefined))
         ) {
           const screenToPrepare = preparedScreen;
           preparedScreen = await this.runInputTmuxAction(
@@ -1568,7 +1578,8 @@ export class SessionManager {
       shouldRecordTextAsUserInput = plan.shouldRecordTextAsUserInput;
       const useBracketedPasteTransport = plan.useBracketedPasteTransport;
       const shouldPrepareClaudeResumePrompt = plan.shouldPrepareClaudeResumePrompt;
-      if ((plan.hasSpecialKeys || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt)) {
+      if ((plan.hasSpecialKeys || useBracketedPasteTransport) && (expectsVisibleInputChange || shouldPrepareClaudeResumePrompt
+        || (liveSession.provider === 'claude' && claudeFolderTrustSelection(latestObservedScreen) !== undefined))) {
         latestObservedScreen = await this.runInputTmuxAction(
           liveSession,
           () => this.prepareScreenForCombinedTextSubmit(liveSession, latestObservedScreen),
@@ -1635,7 +1646,7 @@ export class SessionManager {
     }
     if (plan.hasSpecialKeys) {
       if (payload.keys?.includes('Enter') && !submittedDeferredSelection
-        && submittedTextShouldCreateUserTurn(beforeScreen, submittedText ?? (shouldRecordTextAsUserInput ? payload.text : undefined))) {
+        && submittedTextShouldCreateUserTurn(latestObservedScreen, submittedText ?? (shouldRecordTextAsUserInput ? payload.text : undefined))) {
         this.runtimeState(liveSession.id).submittedTurnAt = nowIso();
       }
       await this.runInputTmuxAction(
@@ -1649,13 +1660,13 @@ export class SessionManager {
       updatedAt: activityAt,
       lastActivityAt: activityAt,
     });
-    const submittedUserTurnText = !submittedDeferredSelection && submittedTextShouldCreateUserTurn(beforeScreen, submittedText)
+    const submittedUserTurnText = !submittedDeferredSelection && submittedTextShouldCreateUserTurn(latestObservedScreen, submittedText)
       ? submittedText
       : undefined;
     const fallbackUserTurnText = submittedText === undefined
       && payload.keys?.includes('Enter')
       && shouldRecordTextAsUserInput
-      && submittedTextShouldCreateUserTurn(beforeScreen, payload.text)
+      && submittedTextShouldCreateUserTurn(latestObservedScreen, payload.text)
       ? payload.text
       : undefined;
     const userInputTextToRecord = submittedUserTurnText
@@ -2811,6 +2822,7 @@ export class SessionManager {
       screenShowsWorking: sessionScreenShowsWorking(screen), capturedAt: screen.capturedAt,
     });
     const currentSession = this.mustGetSession(session.id);
+    this.queueClaudeFolderTrustAcceptance(currentSession, screen);
     this.eventBus.emit({
       type: 'session.screen-updated',
       sessionId: currentSession.id,
@@ -2921,6 +2933,8 @@ export class SessionManager {
       }
     }
 
+    screen = await this.acceptClaudeFolderTrust(session, screen);
+
     if (session.provider === 'codex' && screenShowsQueuedMessageHint(screen)) {
       await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Tab']);
       const composerScreen = await this.waitForScreenChange(
@@ -2962,6 +2976,60 @@ export class SessionManager {
       }
     }
 
+    return screen;
+  }
+
+  private queueClaudeFolderTrustAcceptance(session: BoundSession, screen: SessionScreen): void {
+    if (this.stopped || session.provider !== 'claude' || claudeFolderTrustSelection(screen) === undefined) return;
+    const state = this.runtimeState(session.id);
+    if (state.claudeFolderTrustPending) return;
+    state.claudeFolderTrustPending = true;
+    void this.runtimes.run(session.id, 'acceptClaudeFolderTrust', async () => {
+      if (this.stopped || !this.db.isOpen()) return;
+      const current = this.db.boundSessions.getById(session.id);
+      if (!current || current.status !== 'bound' || current.manualSuspendedAt || current.pressureSuspendedAt) return;
+      await this.acceptClaudeFolderTrust(current, await this.captureSessionScreen(current));
+    }).catch((error: unknown) => {
+      if (!this.stopped) this.logger?.warn({ err: error, sessionId: session.id }, 'Failed to accept Claude folder trust.');
+    }).finally(() => { state.claudeFolderTrustPending = false; });
+  }
+
+  private async acceptClaudeFolderTrust(session: BoundSession, initialScreen: SessionScreen): Promise<SessionScreen> {
+    if (session.provider !== 'claude' || claudeFolderTrustSelection(initialScreen) === undefined) return initialScreen;
+    const verifyOwnership = async () => {
+      const [owner, pid] = await Promise.all([
+        this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id'),
+        this.tmuxClient.getPanePid(session.tmuxSessionName),
+      ]);
+      if (owner !== session.id || !session.pid || pid !== session.pid) {
+        throw new SessionKeystrokeRejectedError('Session ownership changed before accepting Claude folder trust. The draft was not submitted.');
+      }
+    };
+    await verifyOwnership();
+    let screen = await this.captureSessionScreen(session);
+    let selection = claudeFolderTrustSelection(screen);
+    if (selection === undefined) return screen;
+    if (selection === 'exit') {
+      await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Down']);
+      screen = await this.waitForScreenMatch(session, hashScreen(screen), TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS,
+        (candidate) => claudeFolderTrustSelection(candidate) === 'accept') ?? screen;
+    }
+    await verifyOwnership();
+    screen = await this.captureSessionScreen(session);
+    selection = claudeFolderTrustSelection(screen);
+    if (selection !== 'accept') {
+      throw new SessionKeystrokeRejectedError('Claude folder trust could not be selected. The draft was not submitted.');
+    }
+    await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']);
+    screen = await this.waitForScreenMatch(session, hashScreen(screen), CLAUDE_FOLDER_TRUST_WAIT_MS,
+      (candidate) => screenLooksReadyForLiteralPrompt(candidate)
+        || (claudeFolderTrustSelection(candidate) === undefined && screenShowsInteractiveSelectionHint(candidate))) ?? screen;
+    if (!screenLooksReadyForLiteralPrompt(screen)
+      && !(claudeFolderTrustSelection(screen) === undefined && screenShowsInteractiveSelectionHint(screen))) {
+      throw new SessionKeystrokeRejectedError('Claude did not finish folder-trust startup. The draft was not submitted.');
+    }
+    this.appendEvent(session, { type: 'status', text: 'Accepted Claude folder trust for this Console project.', timestamp: nowIso() });
+    this.publishScreenUpdate(session, screen);
     return screen;
   }
 
