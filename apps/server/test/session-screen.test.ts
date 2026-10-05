@@ -4,6 +4,36 @@ import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions
 describe('parseSessionScreenSnapshot', () => {
   const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
 
+  it('treats a dimmed, truncated Claude starter suggestion as an empty composer', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '\u001b[39m❯\u00a0\u001b[2mTry "edit this file to add a longer example…',
+      '\u001b[0m────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText).toBe('');
+    expect(screen.content).not.toContain('Try "edit');
+  });
+
+  it('preserves actual wrapped draft text that begins with Try and a quote', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '❯ Try "edit this file to add a longer example',
+      '  and then check the result"',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputText).toBe('Try "edit this file to add a longer example and then check the result"');
+  });
+
+  it('preserves complete quoted Try text when it is typed rather than dimmed', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────', '❯ Try "edit this file"',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText).toBe('Try "edit this file"');
+  });
+
   it.each(['No, exit', 'Yes, I trust this folder'])('recognizes an unnumbered Claude trust menu with %s selected', (selection) => {
     const choices = ['No, exit', 'Yes, I trust this folder'];
     const screen = parseSessionScreenSnapshot([
@@ -365,7 +395,7 @@ describe('parseSessionScreenSnapshot', () => {
       '▎ with /model.',
       '',
       '────────────────────────────────────────────────────────────────────────────────',
-      '❯ Try "edit session-manager.test.ts to..."',
+      '❯ \u001b[2mTry "edit session-manager.test.ts to..."\u001b[0m',
       '────────────────────────────────────────────────────────────────────────────────',
       '⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
     ].join('\n'));

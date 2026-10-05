@@ -77,7 +77,7 @@ function parsePromptInput(line: string): string | undefined {
     return undefined;
   }
   const text = match[1]?.replace(/\u00a0/g, ' ').trim();
-  if (isClaudeStartupPlaceholderPromptText(text ?? '') || /^Ask Codex to do anything$/i.test(text ?? '')) {
+  if (/^Ask Codex to do anything$/i.test(text ?? '')) {
     return '';
   }
   if (!text) {
@@ -96,10 +96,6 @@ function isCodexStartupPlaceholderPromptText(text: string): boolean {
 function isCodexStartupPlaceholderPrompt(line: string): boolean {
   const promptText = line.match(/^\s*[❯›>]\s*(.*?)\s*$/u)?.[1]?.trim();
   return isCodexStartupPlaceholderPromptText(promptText ?? '');
-}
-
-function isClaudeStartupPlaceholderPromptText(text: string): boolean {
-  return /^Try\s+".*"\s*$/i.test(text);
 }
 
 function isCodexStartupChromeAfterPrompt(line: string): boolean {
@@ -129,8 +125,8 @@ function isCodexStartupPromptAfterChrome(lines: ScreenLine[], index: number, pro
     && previous.every((line) => isCodexStartupContextLine(line.plain));
 }
 
-function isDimStyledCodexStarterSuggestion(line: ScreenLine, promptText: string): boolean {
-  return isCodexStartupPlaceholderPromptText(promptText)
+function isDimStyledStarterSuggestion(line: ScreenLine, promptText: string): boolean {
+  return (isCodexStartupPlaceholderPromptText(promptText) || /^Try\s+"/i.test(promptText))
     && (/\x1b\[2m/.test(line.raw) || /\x1b\[0;2m/.test(line.raw));
 }
 
@@ -365,7 +361,7 @@ function extractActiveInput(contentLines: ScreenLine[], footer: ScreenLine | und
     if (hasCodexFooter && /^\s{2,}/u.test(sourceLine.plain)) continue;
     const effectivePromptText = (
       isCodexStartupPromptAfterChrome(contentLines, index, promptText)
-      || isDimStyledCodexStarterSuggestion(sourceLine, promptText)
+      || isDimStyledStarterSuggestion(sourceLine, promptText)
     )
       ? ''
       : promptText;
