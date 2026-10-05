@@ -335,8 +335,9 @@ acceptance waits for a ready composer or the next interactive control, records a
 status receipt, and creates no user turn or activity timestamp. It also handles an
 existing trust prompt after backend restart. Unnumbered trust-menu choices are
 interactive controls; quoted controls inside a bounded composer remain draft text.
-Dimmed Claude starter suggestions are empty-composer placeholders, including
-previews truncated before their closing quote. Ordinary typed draft text is retained.
+Dimmed Claude prompt suggestions are empty-composer placeholders, including
+truncated startup previews and suggested follow-ups. Typed input with later dim
+annotations and collapsed-paste placeholders remains draft text.
 Quoted menu instructions above an open composer do not block ordinary chat. When
 an interactive approval or menu replaces the composer, a combined text-and-key
 send rejects nonnumeric chat text before typing or confirming anything and

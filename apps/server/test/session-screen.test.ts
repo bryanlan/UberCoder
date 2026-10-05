@@ -4,6 +4,34 @@ import { isWorkingStatusLine, parseSessionScreenSnapshot } from '../src/sessions
 describe('parseSessionScreenSnapshot', () => {
   const authUrl = 'https://claude.com/cai/oauth/authorize?client_id=fixture&code_challenge=fixture&state=fixture';
 
+  it('treats a dimmed Claude follow-up suggestion as empty input', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '\u001b[39m❯\u00a0\u001b[2;39mrun a fresh short story end to end\u001b[0m',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText).toBe('');
+  });
+
+  it('preserves a dimmed collapsed paste as actual input', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '❯ \u001b[2m[Pasted text #1 +30 lines]\u001b[0m',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputText).toBe('[Pasted text #1 +30 lines]');
+  });
+
+  it('preserves typed input when a later segment is dimmed', () => {
+    const screen = parseSessionScreenSnapshot([
+      '────────────────────────────────────────',
+      '❯ Real typed input \u001b[2mwith a dim annotation\u001b[0m',
+      '────────────────────────────────────────', 'bypass permissions on',
+    ].join('\n'));
+    expect(screen.inputText).toBe('Real typed input with a dim annotation');
+  });
+
   it('treats a dimmed, truncated Claude starter suggestion as an empty composer', () => {
     const screen = parseSessionScreenSnapshot([
       '────────────────────────────────────────',

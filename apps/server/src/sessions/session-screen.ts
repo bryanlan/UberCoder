@@ -125,9 +125,21 @@ function isCodexStartupPromptAfterChrome(lines: ScreenLine[], index: number, pro
     && previous.every((line) => isCodexStartupContextLine(line.plain));
 }
 
-function isDimStyledStarterSuggestion(line: ScreenLine, promptText: string): boolean {
-  return (isCodexStartupPlaceholderPromptText(promptText) || /^Try\s+"/i.test(promptText))
-    && (/\x1b\[2m/.test(line.raw) || /\x1b\[0;2m/.test(line.raw));
+function isDimStyledStarterSuggestion(line: ScreenLine, promptText: string, hasCodexFooter: boolean): boolean {
+  const claudeSuggestion = !hasCodexFooter && /^\s*❯/u.test(line.plain)
+    && parsePastedTextPlaceholder(promptText) === undefined;
+  if (!claudeSuggestion && !isCodexStartupPlaceholderPromptText(promptText)) return false;
+  // Suggested prompts start dimmed. A dim annotation later in typed input
+  // does not make the entire composer a placeholder.
+  const prefix = line.raw.match(/^(?:\s|\x1b\[[\d;]*m)*[❯›>](?:\s|\x1b\[[\d;]*m)*/u)?.[0] ?? '';
+  let dimmed = false;
+  for (const match of prefix.matchAll(/\x1b\[([\d;]*)m/g)) {
+    for (const code of match[1]!.split(';').map(Number)) {
+      if (code === 0 || code === 22) dimmed = false;
+      if (code === 2) dimmed = true;
+    }
+  }
+  return dimmed;
 }
 
 function isPromptFollowedByCodexStartupChrome(lines: ScreenLine[], index: number): boolean {
@@ -361,7 +373,7 @@ function extractActiveInput(contentLines: ScreenLine[], footer: ScreenLine | und
     if (hasCodexFooter && /^\s{2,}/u.test(sourceLine.plain)) continue;
     const effectivePromptText = (
       isCodexStartupPromptAfterChrome(contentLines, index, promptText)
-      || isDimStyledStarterSuggestion(sourceLine, promptText)
+      || isDimStyledStarterSuggestion(sourceLine, promptText, hasCodexFooter)
     )
       ? ''
       : promptText;
