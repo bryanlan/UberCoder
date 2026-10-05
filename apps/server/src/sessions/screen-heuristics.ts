@@ -129,14 +129,21 @@ export function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boo
 
 export function claudeFolderTrustSelection(screen: SessionScreen): 'accept' | 'exit' | undefined {
   if (screen.inputActive) return undefined;
-  const lines = `${screen.content}\n${screen.status}`.split('\n').map(normalizeWhitespace);
+  const lines = screen.content.split('\n').map(normalizeWhitespace).filter(Boolean);
   const text = lines.join(' ');
   if (!lines.includes('Accessing workspace:')
     || !/Quick safety check: Is this a project you created or one you trust\?/i.test(text)
     || !lines.includes('Enter to confirm · Esc to cancel')) return undefined;
-  const options = lines.map((line) => line.replace(/^[❯›>]\s*/u, ''));
+  // Only the final choice block is active. Earlier trust dialogs can remain
+  // in captured scrollback while a different approval is on screen.
+  const menu = lines.slice(-3);
+  if (menu[2] !== 'Enter to confirm · Esc to cancel') return undefined;
+  const choices = menu.slice(0, 2);
+  const options = choices.map((line) => line.replace(/^[❯›>]\s*/u, ''));
   if (!options.includes('No, exit') || !options.includes('Yes, I trust this folder')) return undefined;
-  const selected = [...lines].reverse().find((line) => /^[❯›>]\s*(?:Yes, I trust this folder|No, exit)$/u.test(line));
+  const selectedChoices = choices.filter((line) => /^[❯›>]/u.test(line));
+  if (selectedChoices.length !== 1) return undefined;
+  const selected = selectedChoices[0];
   if (/^[❯›>]\s*Yes, I trust this folder$/u.test(selected ?? '')) return 'accept';
   if (/^[❯›>]\s*No, exit$/u.test(selected ?? '')) return 'exit';
   return undefined;

@@ -167,4 +167,20 @@ describe('Claude Console folder trust', () => {
     expect(quote.inputActive).toBe(true);
     expect(claudeFolderTrustSelection(quote)).toBeUndefined();
   });
+
+  it.each([true, false])('ignores old trust text before a later approval with selected marker %s', async (hasMarker) => {
+    const currentApproval = [
+      trustScreen('accept'), '', 'A different approval is required',
+      hasMarker ? '❯ 1. Yes' : 'Yes, proceed',
+      hasMarker ? '  2. No' : 'No, cancel',
+      'Enter to confirm · Esc to cancel',
+    ].join('\n');
+    expect(claudeFolderTrustSelection(parseSessionScreenSnapshot(currentApproval))).toBeUndefined();
+    const f = await fixture(currentApproval);
+    try {
+      await f.manager.ensureSession(f.session.id);
+      expect(f.tmux.sentKeys).toEqual([]);
+      expect(f.tmux.sent).toEqual([]);
+    } finally { await f.close(); }
+  });
 });
