@@ -111,7 +111,8 @@ export function screenShowsInteractiveSelectionHint(screen: SessionScreen): bool
       || /Press enter to confirm or esc to go back/i.test(line)
       || /Enter to set as default · s to use this session only · Esc to cancel/i.test(line)
       || /Esc to cancel · Tab to amend/i.test(line)
-      || /Enter to select · .*Esc to cancel/i.test(line));
+      || /Enter to select · .*Esc to cancel/i.test(line)
+      || /^Enter continue · Esc skip$/i.test(line));
 }
 
 export function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boolean {

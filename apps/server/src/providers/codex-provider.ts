@@ -345,6 +345,10 @@ export class CodexProvider implements ProviderAdapter {
       cwd: project.path,
       argv: [
         ...baseArgv,
+        // Console launches must reach the composer. Host CLI updates are
+        // managed outside restored conversations, never through chat input.
+        '-c',
+        'check_for_update_on_startup=false',
         ...(initialPrompt ? [initialPrompt] : []),
       ],
       env: settings.commands.env,

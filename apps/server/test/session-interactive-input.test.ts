@@ -28,6 +28,20 @@ const modelPicker = [
 const interactiveCases = [
   { adapter: claudeProvider, screen: approvalScreen },
   { adapter: provider, screen: modelPicker },
+  { adapter: provider, screen: [
+    'OpenAI Codex (v0.160.0)',
+    '  Resuming session…',
+    '› Ask Codex to do anything',
+    '',
+    '  Update available · 0.160.0 → 0.160.1',
+    '  Release notes:',
+    '',
+    '› 1. Update now (runs `npm install -g @openai/codex`)',
+    '  2. Skip',
+    '  3. Skip until next version',
+    '',
+    '  enter continue · esc skip',
+  ].join('\n') },
 ];
 
 describe('interactive live input', () => {
@@ -94,7 +108,7 @@ describe('interactive live input', () => {
     const divider = '────────────────────────────────────────';
     const render = (text: string) => [
       'The menu has these controls:',
-      adapter.id === 'claude' ? 'Esc to cancel · Tab to amend' : 'enter select · esc back',
+      adapter.id === 'claude' ? 'Esc to cancel · Tab to amend' : 'enter continue · esc skip',
       ...(adapter.id === 'claude' ? [divider] : []),
       `${adapter.id === 'claude' ? '❯' : '›'} ${text}`,
       ...(adapter.id === 'claude' ? [divider, 'bypass permissions on'] : ['gpt-6-sol xhigh · 65% left · ~/demo']),

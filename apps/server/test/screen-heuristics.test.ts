@@ -101,6 +101,7 @@ describe('screen heuristics', () => {
   it.each([
     'enter select · esc back',
     'enter default · s session · esc back',
+    'enter continue · esc skip',
   ])('recognizes the current Codex model picker control: %s', (footer) => {
     const picker = screen({ content: `Select Model and Effort\n› 2. GPT-6-Sol (current)\n${footer}` });
     expect(screenShowsInteractiveSelectionHint(picker)).toBe(true);

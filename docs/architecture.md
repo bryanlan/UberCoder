@@ -347,6 +347,13 @@ submit a free-text answer to a provider question, remains the existing control
 surface. The
 existing rejection path retains the local draft and binding.
 
+Console-managed Codex launches set `check_for_update_on_startup=false` so new and
+restored conversations reach their composer without a host software-update menu.
+Codex updates remain a host maintenance action. Existing update menus with
+`enter continue · esc skip` are recognized as selection controls: combined chat
+sends reject before typing, while explicit choices and key-only controls remain
+available. Ordinary chat text never confirms an update.
+
 Input confirmation uses the provider's parsed composer, including Claude's horizontal
 input-box boundaries. Blank paragraphs, quoted prompts, and bullets inside that box
 belong to the draft. Claude's trailing agent roster is status metadata whether it

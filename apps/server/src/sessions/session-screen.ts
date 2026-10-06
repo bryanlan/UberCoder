@@ -175,7 +175,8 @@ function isInteractivePickerHint(line: string): boolean {
     || /Press enter to confirm or esc to go back/i.test(normalized)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
-    || /Enter to select · .*Esc to cancel/i.test(normalized);
+    || /Enter to select · .*Esc to cancel/i.test(normalized)
+    || /^Enter continue · Esc skip$/i.test(normalized);
 }
 
 function looksLikePickerOption(line: string): boolean {

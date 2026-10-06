@@ -45,7 +45,10 @@ describe('command construction and proxy allowlisting', () => {
   it('builds the provider resume command from templates', () => {
     const command = new CodexProvider().getLaunchCommand(project, 'session-123', settings);
     expect(command.cwd).toBe('/srv/demo');
-    expect(command.argv).toEqual(['codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123']);
+    expect(command.argv).toEqual([
+      'codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+      '-c', 'check_for_update_on_startup=false',
+    ]);
     expect(command.env).toEqual({ CODEX_HOME: '/home/user/.codex' });
   });
 
@@ -55,7 +58,8 @@ describe('command construction and proxy allowlisting', () => {
     });
     expect(command.argv).toEqual([
       'codex', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"',
-      '--dangerously-bypass-approvals-and-sandbox', 'Reply with exactly: smoke-token',
+      '--dangerously-bypass-approvals-and-sandbox', '-c', 'check_for_update_on_startup=false',
+      'Reply with exactly: smoke-token',
     ]);
   });
 
@@ -66,6 +70,7 @@ describe('command construction and proxy allowlisting', () => {
     expect(command.argv).toEqual([
       'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
       '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+      '-c', 'check_for_update_on_startup=false',
     ]);
   });
 
@@ -83,6 +88,7 @@ describe('command construction and proxy allowlisting', () => {
     expect(command.argv).toEqual([
       'codex', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-6-astra',
       '-c', 'model_reasoning_effort="xhigh"',
+      '-c', 'check_for_update_on_startup=false',
     ]);
   });
 
@@ -105,6 +111,7 @@ describe('command construction and proxy allowlisting', () => {
     expect(command.argv).toEqual([
       'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
       '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+      '-c', 'check_for_update_on_startup=false',
     ]);
   });
 

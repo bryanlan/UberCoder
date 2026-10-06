@@ -27,6 +27,23 @@ function encodeClaudeProjectDir(projectPath: string): string {
 }
 
 describe('provider history discovery', () => {
+  it.each([null, 'history-ref'])('disables startup update prompts for Codex launch %s', (conversationRef) => {
+    const provider = new CodexProvider();
+    const settings = {
+      id: 'codex', enabled: true, discoveryRoot: '/tmp/codex',
+      commands: {
+        newCommand: ['codex', '-c', 'check_for_update_on_startup=true'],
+        resumeCommand: ['codex', '-c', 'check_for_update_on_startup=true', 'resume', '{{conversationId}}'],
+        continueCommand: ['codex', 'resume', '--last'], env: {},
+      },
+    } satisfies MergedProviderSettings;
+    const launch = provider.getLaunchCommand(project, conversationRef, settings, { codexProfile: 'medium' });
+    expect(launch.argv.slice(-2)).toEqual(['-c', 'check_for_update_on_startup=false']);
+    expect(launch.argv).toContain('--model');
+    expect(launch.argv).toContain('--dangerously-bypass-approvals-and-sandbox');
+    if (conversationRef) expect(launch.argv).toContain(conversationRef);
+  });
+
   it('passes an initial prompt through Codex resume launches', async () => {
     const provider = new CodexProvider();
     const settings = {
@@ -45,6 +62,8 @@ describe('provider history discovery', () => {
       '--dangerously-bypass-approvals-and-sandbox',
       'resume',
       'history-ref',
+      '-c',
+      'check_for_update_on_startup=false',
       'resume with this prompt',
     ]);
   });
