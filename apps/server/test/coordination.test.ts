@@ -4,7 +4,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fastify from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService, processStart } from '../src/coordination/service.js';
 import { checkoutIdentity } from '../src/coordination/git.js';
@@ -77,7 +77,7 @@ describe('assignment coordination', () => {
     service.authenticate(a.id, token);
   });
 
-  it('delivers oversized historical events in bounded form and advances to subsequent updates', async () => {
+  it('coalesces oversized history into the latest update without deleting original evidence', async () => {
     const { checkout, db, service, register } = fixture();
     const a = register(); const b = register('claude');
     const cursor = service.poll(b.id, 0).cursor;
@@ -86,10 +86,88 @@ describe('assignment coordination', () => {
     service.update(a.id, { checkout, summary: 'Later update must arrive' });
     const result = service.poll(b.id, cursor);
     expect(result.cursor).toBeGreaterThan(cursor);
-    expect(result.events.some((event) => event.text.includes('abbreviated'))).toBe(true);
-    expect(result.events.some((event) => event.text === 'Later update must arrive')).toBe(true);
-    expect(JSON.stringify({ events: result.events, messages: result.messages }).length).toBeLessThan(8000);
+    expect(result.events.map((event) => event.text)).toEqual(['Later update must arrive']);
+    expect(result.activitySummary).toContain('2 activity updates from 1 assignment');
+    expect(JSON.stringify({ events: result.events, messages: result.messages }).length).toBeLessThan(2000);
+    expect(service.poll(b.id, result.cursor).events).toEqual([]);
     expect((db.sqlite.prepare("select length(text) as n from coordination_events where length(text)>8000").get() as { n: number }).n).toBeGreaterThan(8000);
+  });
+
+  it('summarizes a large backlog in one bounded batch while preserving full direct messages and history', () => {
+    const { checkout, db, service, register } = fixture();
+    const receiver = register('claude');
+    const peers = Array.from({ length: 7 }, () => register());
+    const cursor = service.poll(receiver.id, 0).cursor;
+    for (const [i, peer] of peers.entries()) {
+      for (let j = 0; j < 40; j++) service.update(peer.id, { checkout, summary: `Peer ${i} update ${j}: ${'detail '.repeat(300)}` });
+      db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
+        .run(peer.id, null, 'resumed', 'Automatic lifecycle noise', new Date().toISOString());
+    }
+    const message = 'Full direct message: ' + 'x'.repeat(1900);
+    const messageId = randomUUID();
+    service.send(peers[0]!.id, { id: messageId, recipientId: receiver.id, text: message });
+    const result = service.poll(receiver.id, cursor);
+    expect(result.events).toHaveLength(3);
+    expect(new Set(result.events.map((event) => event.assignmentId)).size).toBe(3);
+    expect(result.events.every((event) => event.text.includes('update 39'))).toBe(true);
+    expect(result.activitySummary).toContain('280 activity updates from 7 assignments');
+    expect(JSON.stringify({ activitySummary: result.activitySummary, events: result.events }).length).toBeLessThan(2000);
+    expect(result.messages[0]?.text).toBe(message);
+    expect(service.poll(receiver.id, result.cursor).events).toEqual([]);
+    expect(service.snapshot(checkout).events.some((event) => event.text.includes('Automatic lifecycle noise'))).toBe(true);
+    expect((db.sqlite.prepare('select count(*) as n from coordination_events where seq>?').get(cursor) as { n: number }).n).toBe(287);
+    expect(service.acknowledge(receiver.id, [messageId])).toEqual({ acknowledged: [messageId] });
+  });
+
+  it('does not inject a shared peer\'s updates from an unrelated repository', () => {
+    const { root, checkout, service, register } = fixture();
+    const receiver = register(); const peer = register('claude');
+    const outside = path.join(root, 'other-repository'); fs.mkdirSync(outside); git(outside, ['init', '-q']);
+    service.settings.pilotPaths.push(outside);
+    const cursor = service.poll(receiver.id, 0).cursor;
+    service.update(peer.id, { checkout, summary: 'Shared repository work' });
+    service.update(peer.id, { checkout: outside, summary: 'Unrelated repository work' });
+    const result = service.poll(receiver.id, cursor);
+    expect(result.events.map((event) => event.text)).toEqual(['Shared repository work']);
+    expect(service.poll(receiver.id, result.cursor).events).toEqual([]);
+    expect(service.snapshot(outside).events[0]?.text).toBe('Unrelated repository work');
+  });
+
+  it('keeps explicit closeout summaries and reports disconnected owners without replaying lifecycle noise', () => {
+    const { checkout, service, register } = fixture();
+    const receiver = register(); const done = register(); const stopped = register();
+    const cursor = service.poll(receiver.id, 0).cursor;
+    service.update(done.id, { checkout, summary: 'Earlier active work' });
+    service.finish(done.id, 'Finished; retained evidence in docs/recovery.md');
+    service.update(stopped.id, { checkout, summary: 'Unfinished source in src/a.txt' });
+    service.disconnect(stopped.id);
+    const result = service.poll(receiver.id, cursor);
+    expect(result.events.find((event) => event.assignmentId === done.id)?.text).toBe('Finished; retained evidence in docs/recovery.md');
+    expect(result.events.find((event) => event.assignmentId === stopped.id)?.text).toBe('[Session disconnected] Unfinished source in src/a.txt');
+    expect(result.events.every((event) => !['started', 'resumed', 'disconnected'].includes(event.kind))).toBe(true);
+  });
+
+  it('pages full history on demand without consuming direct messages or changing delivery state', async () => {
+    const { checkout, db, service, register } = fixture();
+    const receiver = register(); const peer = register('claude');
+    const original = 'Retained full detail: ' + 'x'.repeat(1200);
+    for (let i = 0; i < 23; i++) service.update(peer.id, { checkout, summary: `${i}: ${original}` });
+    const messageId = randomUUID(); service.send(peer.id, { id: messageId, recipientId: receiver.id, text: 'PRIVATE_INBOX_UNCONSUMED' });
+    const beforeSeen = service.snapshot().assignments.find((assignment) => assignment.id === receiver.id)?.lastSeenAt;
+    const gathered = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page = await dispatchCoordination(service, { action: 'history', assignmentId: receiver.id, token: receiver.token, checkout, offset }) as ReturnType<CoordinationService['history']>;
+      expect(page.events.length).toBeLessThanOrEqual(10);
+      gathered.push(...page.events); offset = page.nextOffset;
+    }
+    expect(gathered.filter((event) => event.text.includes(original))).toHaveLength(23);
+    expect(new Set(gathered.map((event) => event.seq)).size).toBe(gathered.length);
+    expect((db.sqlite.prepare('select count(*) as n from coordination_events').get() as { n: number }).n).toBe(gathered.length);
+    expect(service.snapshot().messages.find((message) => message.id === messageId)?.suppliedAt).toBeNull();
+    expect(service.snapshot().assignments.find((assignment) => assignment.id === receiver.id)?.lastSeenAt).toBe(beforeSeen);
+    await expect(dispatchCoordination(service, { action: 'history', assignmentId: receiver.id, token: peer.token, checkout })).rejects.toThrow('credential');
+    await expect(dispatchCoordination(service, { action: 'history', assignmentId: receiver.id, token: receiver.token })).rejects.toThrow('checkout is required');
   });
   it('persists one credential before RPC and reuses it through concurrent registration and client loss', async () => {
     const { root, checkout, service, db } = fixture();
@@ -353,10 +431,71 @@ describe('assignment coordination', () => {
       const next = await run(['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
       expect(next.code, next.stderr).toBe(0);
       expect(next.stdout).toBe('');
+      const resumed = await run(['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'SessionStart' });
+      expect(resumed.code, resumed.stderr).toBe(0);
+      expect(resumed.stdout).toBe('');
     }
     expect(fs.statSync(path.join(root, 'coordination/agent.sock')).mode & 0o777).toBe(0o600);
     await expect(startCoordinationSocket(service, root)).rejects.toThrow('Another coordination server');
   });
+  it('serializes overlapping hooks so each provider receives activity and messages only once', async () => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const sender = register();
+    for (const provider of ['codex', 'claude']) {
+      const nativeSessionId = randomUUID();
+      const registration = await runHelper(root, checkout, ['register'], { provider, nativeSessionId, pid: process.pid, cwd: checkout });
+      const receiver = JSON.parse(registration.stdout).assignmentId;
+      service.update(receiver, { checkout, description: 'Concurrent receiver' });
+      const input = { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' };
+      await runHelper(root, checkout, ['hook', provider], input);
+      service.update(sender.id, { checkout, summary: 'CONCURRENT_ACTIVITY_ONCE' });
+      const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'CONCURRENT_MESSAGE_ONCE' });
+      const originalPoll = service.poll.bind(service);
+      const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) =>
+        new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, after)), 120))) as never);
+      let results;
+      try {
+        results = await Promise.all(Array.from({ length: 4 }, () => runHelper(root, checkout, ['hook', provider], input)));
+      } finally { delayed.mockRestore(); }
+      for (const result of results) expect(result.code, result.stderr).toBe(0);
+      expect(results.filter((result) => result.stdout.includes('CONCURRENT_ACTIVITY_ONCE'))).toHaveLength(1);
+      expect(results.filter((result) => result.stdout.includes('CONCURRENT_MESSAGE_ONCE'))).toHaveLength(1);
+      expect(results.filter((result) => result.stdout === '')).toHaveLength(3);
+      const key = createHash('sha256').update(`${provider}:${nativeSessionId}`).digest('hex');
+      const statePath = path.join(root, 'coordination/clients', `${key}.json`);
+      expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).cursor).toBe(service.poll(receiver, 0, false).cursor);
+      expect(fs.statSync(`${statePath}.lock`).mode & 0o777).toBe(0o600);
+      service.acknowledge(receiver, [messageId]);
+    }
+  });
+
+  it('releases the session delivery lock after a hook process crashes', async () => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const sender = register(); const nativeSessionId = randomUUID();
+    const registered = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const receiver = JSON.parse(registered.stdout).assignmentId;
+    service.update(receiver, { checkout });
+    const key = createHash('sha256').update(`codex:${nativeSessionId}`).digest('hex');
+    const lockPath = path.join(root, 'coordination/clients', `${key}.json.lock`);
+    const holder = spawn(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs'; import { execFileSync } from 'node:child_process';
+      const fd = fs.openSync(process.argv[1], 'a', 0o600);
+      execFileSync('flock', ['--exclusive', '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
+      process.stdout.write('locked'); setInterval(() => {}, 1000);
+    `, lockPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    cleanups.push(() => { holder.kill(); });
+    await new Promise<void>((resolve, reject) => { holder.stdout.once('data', () => resolve()); holder.once('error', reject); });
+    const exited = new Promise<void>((resolve) => holder.once('close', () => resolve()));
+    holder.kill('SIGKILL'); await exited;
+    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'DELIVERY_AFTER_CRASH' });
+    const result = await runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain('DELIVERY_AFTER_CRASH');
+    service.acknowledge(receiver, [messageId]);
+  });
+
   it('keeps ordinary edits and Git independent of every coordinator failure', () => {
     const { root, checkout } = fixture();
     const helper = path.resolve('..', '..', 'scripts', 'agent-coord.mjs');
@@ -435,6 +574,26 @@ describe('assignment coordination', () => {
     }
   });
 
+  it('reads full activity through CLI and MCP history for both providers', async () => {
+    const { root, checkout, service, register } = fixture();
+    const peer = register();
+    service.update(peer.id, { checkout, summary: 'Full historical detail: ' + 'x'.repeat(1000) });
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    for (const provider of ['codex', 'claude']) {
+      const registration = await runHelper(root, checkout, ['register'], { provider, nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
+      expect(registration.code, registration.stderr).toBe(0);
+      const cli = await runHelper(root, checkout, ['history'], { checkout, offset: 0 });
+      expect(cli.code, cli.stderr).toBe(0);
+      expect(JSON.parse(cli.stdout).events.some((event: { text: string }) => event.text === 'Full historical detail: ' + 'x'.repeat(1000))).toBe(true);
+      const mcp = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+        name: 'agent_coordination', arguments: { action: 'history', checkout, offset: 0 },
+      } });
+      expect(mcp.code, mcp.stderr).toBe(0);
+      expect(JSON.parse(mcp.stdout).result.isError).toBe(false);
+      expect(JSON.parse(JSON.parse(mcp.stdout).result.content[0].text)).toEqual(JSON.parse(cli.stdout));
+    }
+  });
+
   it('removes enforcement actions from RPC and MCP discovery', async () => {
     const { root, checkout, service, register } = fixture();
     const a = register();
@@ -446,7 +605,7 @@ describe('assignment coordination', () => {
     const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
-    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'update', 'send', 'ack', 'finish']);
+    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
     const wikiTool = JSON.parse(result.stdout).result.tools[1];

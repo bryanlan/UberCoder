@@ -9,7 +9,7 @@ import { WikiService } from '../wiki/service.js';
 
 const text = z.string().trim().min(1);
 const inputSchema = z.object({
-  action: z.enum(['register', 'poll', 'status', 'update', 'send', 'ack', 'finish', 'disconnect']),
+  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(['codex', 'claude']).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
@@ -40,6 +40,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
   service.authenticate(id, need(input.token, 'token'));
   switch (input.action) {
     case 'status': return service.agentStatus(id, input.checkout, input.offset);
+    case 'history': return service.history(id, need(input.checkout, 'checkout'), input.offset);
     case 'poll': return service.poll(id, input.after);
     case 'update': return service.update(id, input);
     case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text') });

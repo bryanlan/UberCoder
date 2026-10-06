@@ -199,38 +199,54 @@ export class CoordinationService {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       this.db.sqlite.prepare('update coordination_assignments set last_seen_at=? where id=?').run(new Date().toISOString(), id);
-      const candidates = this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where seq>? and assignment_id!=?
-      and not (kind='update' and checkout is null and text in ('Status: active','Status: waiting')) and (
-      exists(select 1 from coordination_scopes mine join coordination_scopes theirs on mine.repository=theirs.repository where mine.assignment_id=? and theirs.assignment_id=e.assignment_id)
-      ) order by seq limit 25`).all(after, id, id) as CoordinationEvent[];
+      const maximum = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events').get() as { seq: number };
+      // Automatic activity is a current summary, not a replay of every old update.
+      // Keep the original log intact for the browser, and include only updates in
+      // shared repositories (plus explicit assignment closeouts).
+      const candidates = this.db.sqlite.prepare(`with relevant as (
+        select e.* from coordination_events e where seq>? and seq<=? and assignment_id!=?
+        and kind in ('update','finished')
+        and not (kind='update' and checkout is null and text in ('Status: active','Status: waiting'))
+        and exists(select 1 from coordination_scopes mine join coordination_scopes theirs on mine.repository=theirs.repository
+          where mine.assignment_id=? and theirs.assignment_id=e.assignment_id
+          and (e.checkout is null or theirs.checkout=e.checkout))
+      ), latest as (
+        select assignment_id, max(seq) as seq, count(*) as updates from relevant group by assignment_id
+      ) select e.seq, e.assignment_id as assignmentId, e.checkout, e.kind, e.text, e.timestamp, a.status as assignmentStatus,
+        count(*) over () as peerCount, sum(latest.updates) over () as updateCount
+        from coordination_events e join latest on latest.seq=e.seq
+        join coordination_assignments a on a.id=e.assignment_id
+        order by e.seq desc limit 3`).all(after, maximum.seq, id, id) as Array<CoordinationEvent & {
+          assignmentStatus: string; peerCount: number; updateCount: number;
+        }>;
       const messages = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
         and (supplied_at is null or supplied_at<?) order by created_at limit 3`).all(id, new Date(Date.now() - 60_000).toISOString()) as CoordinationMessage[];
-      let remaining = 8000 - JSON.stringify(messages).length;
-      const events: CoordinationEvent[] = [];
-      for (const candidate of candidates) {
-        // Old events can be arbitrarily large (for example a directory's claim
-        // list). Bound only their delivery representation; retain the full log.
-        let delivered = candidate;
-        if (JSON.stringify(delivered).length > 4000) {
-          delivered = { ...candidate, text: '[Event abbreviated; use status for full activity.]' };
-          while (JSON.stringify(delivered).length > 4000 && delivered.checkout) delivered.checkout = delivered.checkout.slice(0, -256);
-          let prefix = '';
-          for (const character of candidate.text) {
-            const next = { ...delivered, text: `${prefix}${character}… [abbreviated; use status for full activity]` };
-            if (JSON.stringify(next).length > 4000) break;
-            prefix += character;
-            delivered = next;
-          }
-        }
-        const size = JSON.stringify(delivered).length;
-        if (size > remaining) break;
-        events.push(delivered); remaining -= size;
-      }
+      const events: CoordinationEvent[] = candidates.map(({ assignmentStatus, peerCount, updateCount, ...event }) => ({
+        ...event,
+        // Never turn an abbreviated checkout into a path an agent might use.
+        checkout: event.checkout && event.checkout.length <= 200 ? event.checkout : null,
+        text: compact(`${assignmentStatus === 'disconnected' ? '[Session disconnected] ' : ''}${event.text.replace(/\s+/g, ' ')}`, 240),
+      }));
+      const latest = candidates[0];
+      const activitySummary = latest
+        ? `${latest.updateCount} activity updates from ${latest.peerCount} ${latest.peerCount === 1 ? 'assignment' : 'assignments'} summarized; showing ${events.length} latest. Use status for current scopes or history with checkout and offset for full activity.`
+        : null;
       if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
-      const maximum = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events').get() as { seq: number };
-      const incomplete = events.length < candidates.length || candidates.length === 25;
-      return { assignment: current, events, messages, cursor: incomplete ? (events.at(-1)?.seq ?? after) : maximum.seq };
+      return { assignment: current, activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
     }).immediate();
+  }
+
+  history(id: string, directory: string, offset = 0) {
+    this.assignment(id);
+    const identity = this.identity(directory);
+    const filter = `exists(select 1 from coordination_scopes s where s.repository=? and s.assignment_id=e.assignment_id
+      and (e.checkout is null or s.checkout=e.checkout))`;
+    const totalEvents = (this.db.sqlite.prepare(`select count(*) as n from coordination_events e where ${filter}`)
+      .get(identity.repository) as { n: number }).n;
+    const events = this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where ${filter}
+      order by seq desc limit 10 offset ?`).all(identity.repository, offset) as CoordinationEvent[];
+    return { repository: identity.repository, events, totalEvents,
+      nextOffset: offset + events.length < totalEvents ? offset + events.length : null };
   }
 
   finish(id: string, summary: string) {
