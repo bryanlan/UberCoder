@@ -646,11 +646,14 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
-  it('keeps manual suspension stopped through reconciliation and resumes on request', async () => {
+  it.each([
+    'gpt-5.6-sol medium · 98% left · ~/demo',
+    'GPT-6.1-Sol xhigh fast · ~/code/Omnilearner · Ass…  ⚠ 2 warnings · f2 to view',
+  ])('keeps manual suspension stopped and resumes on request with footer %s', async (footer) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
-    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    tmux.paneText = `OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\n${footer}`;
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
     const session = await manager.bindConversation({
       project, provider, providerSettings,
@@ -674,7 +677,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
-    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\nGPT-6.1-Sol xhigh fast · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
     const session = await manager.bindConversation({
       project, provider, providerSettings,
@@ -695,7 +698,11 @@ describe('SessionManager lifecycle', () => {
       expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
       expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
 
-      tmux.paneText = 'OpenAI Codex\n› unsent draft\ngpt-5.6-sol medium · 98% left · ~/demo';
+      tmux.paneText = 'OpenAI Codex\n› unsent draft\nGPT-6.1-Sol xhigh fast · ~/demo';
+      await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+
+      tmux.paneText = 'OpenAI Codex\nSelect Model and Effort\n1. GPT-6-Astra\n› 2. GPT-6-Sol (current)\nenter select · esc back\nGPT-6.1-Sol xhigh fast · ~/demo';
       await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
       expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
 

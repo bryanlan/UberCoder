@@ -205,11 +205,18 @@ describe('parseSessionScreenSnapshot', () => {
     }
   });
 
-  it('reads the current Codex model footer even when the CLI omits context percentage', () => {
+  it.each([
+    ['GPT-6-Sol xhigh · /tmp', 'GPT-6-Sol xhigh'],
+    ['GPT-6.1-Sol xhigh fast · ~/code/Omnilearner · Ass…  ⚠ 2 warnings · f2 to view', 'GPT-6.1-Sol xhigh'],
+    ['gpt-6.1-sol fast · /tmp', 'gpt-6.1-sol'],
+  ])('reads the Codex model without context percentage: %s', (footer, model) => {
     const screen = parseSessionScreenSnapshot([
-      'OpenAI Codex', '› Ask Codex to do anything', 'GPT-6-Sol xhigh · /tmp',
+      'OpenAI Codex', '› Ask Codex to do anything', footer,
     ].join('\n'));
-    expect(screen.model).toBe('GPT-6-Sol xhigh');
+    expect(screen.model).toBe(model);
+    expect(screen.inputActive).toBe(true);
+    expect(screen.inputText).toBe('');
+    expect(screen.status).toBe(footer);
     expect(screen.contextPercent).toBeUndefined();
   });
   it('does not treat the Codex empty-composer placeholder as an unsent draft', () => {

@@ -59,7 +59,7 @@ function isLikelyFooterStatus(line: string): boolean {
     return false;
   }
 
-  if (/^gpt-\d[\w.-]*(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?\s*·\s*[\/~]/i.test(normalized)) {
+  if (/^gpt-\d[\w.-]*(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?(?:\s+fast)?\s*·\s*[\/~]/i.test(normalized)) {
     return true;
   }
 
@@ -525,7 +525,7 @@ export function parseSessionScreenSnapshot(snapshot: string, capturedAt = nowIso
     if (footerCtxMatch) {
       finalContextPercent = Number(footerCtxMatch[1]);
     }
-    const footerModelMatch = footerText.match(/^\s*((?:gpt-\d[\w.-]*)(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?)\s*·/i);
+    const footerModelMatch = footerText.match(/^\s*((?:gpt-\d[\w.-]*)(?:\s+(?:default|low|medium|high|xhigh|max|ultra))?)(?:\s+fast)?\s*·/i);
     if (footerModelMatch) {
       finalModel = footerModelMatch[1]!.trim();
     }
