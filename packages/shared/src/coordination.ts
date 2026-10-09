@@ -36,6 +36,19 @@ export interface CoordinationMessage {
   acknowledgedAt: string | null;
 }
 
+export interface CoordinationSendReceipt {
+  id: string;
+  queued: boolean;
+  recipient: {
+    status: 'working' | 'idle' | 'stopped';
+    provider: string;
+    lastSeenAt: string;
+    resumableInConsole: boolean;
+  };
+  delivery: 'next_step' | 'next_turn' | 'on_resume' | 'offered' | 'acknowledged';
+  note: string;
+}
+
 export interface CoordinationSnapshot {
   enabled: boolean;
   assignments: CoordinationAssignment[];

@@ -37,6 +37,50 @@ function fixture() {
 }
 
 describe('repository wiki', () => {
+  it('finds reordered query words and favors an exact title over a body phrase', () => {
+    const { checkout, wiki, actor } = fixture();
+    wiki.write(checkout, { title: 'Worker deployment', body: 'Operational procedure.', baseRevision: null }, actor);
+    wiki.write(checkout, { title: 'Other notes', body: 'Worker deployment is discussed here.', baseRevision: null }, actor);
+    expect(wiki.search(checkout, 'worker deployment', actor).results.map((r) => r.title)).toEqual(['Worker deployment', 'Other notes']);
+    const reordered = wiki.search(checkout, 'deployment worker', actor);
+    expect(reordered.pageCount).toBe(2);
+    expect(reordered.results).toHaveLength(2);
+    expect(reordered.results[0]?.matchedTerms).toEqual(['deployment', 'worker']);
+  });
+
+  it('ranks focused evidence above widely scattered matches and excerpts the matching text', () => {
+    const { checkout, wiki, actor } = fixture();
+    wiki.write(checkout, { title: 'Focused evidence', body: `${'Unrelated introduction. '.repeat(100)}worker deployment verification passed.${' Trailing background.'.repeat(30)}`, baseRevision: null }, actor);
+    wiki.write(checkout, { title: 'Broad notes', body: `worker ${'miscellaneous '.repeat(180)}deployment`, baseRevision: null }, actor);
+    const result = wiki.search(checkout, 'deployment worker', actor);
+    expect(result.results.map((r) => r.title)).toEqual(['Focused evidence', 'Broad notes']);
+    expect(result.results[0]?.snippet).toContain('worker deployment verification passed');
+    expect(result.results[0]?.snippet).toHaveLength(222);
+    expect(result.results[0]?.snippet.startsWith('…')).toBe(true);
+  });
+
+  it('matches word starts and literal identifiers rather than interior substrings or regex patterns', () => {
+    const { checkout, wiki, actor } = fixture();
+    wiki.write(checkout, { title: 'Runtime', body: 'Deployment uses TLS and apps/server/dist with config.toml.', baseRevision: null }, actor);
+    wiki.write(checkout, { title: 'Unrelated', body: 'configXtoml is a different identifier.', baseRevision: null }, actor);
+    expect(wiki.search(checkout, 'deploy', actor).results.map((r) => r.title)).toEqual(['Runtime']);
+    expect(wiki.search(checkout, 'ploy', actor).results).toEqual([]);
+    expect(wiki.search(checkout, 'apps/server/dist TLS', actor).results[0]?.matchedTerms).toEqual(['apps/server/dist', 'tls']);
+    expect(wiki.search(checkout, 'config.toml', actor).results.map((r) => r.title)).toEqual(['Runtime']);
+  });
+
+  it('requires meaningful coverage, bounds results, and distinguishes an empty wiki', () => {
+    const { checkout, wiki, actor } = fixture();
+    expect(wiki.search(checkout, 'missing subject', actor)).toEqual({ pageCount: 0, results: [] });
+    for (let i = 0; i < 12; i++) wiki.write(checkout, { title: `Runtime ${i}`, body: 'worker deployment diagnostics', baseRevision: null }, actor);
+    wiki.write(checkout, { title: 'Sparse match', body: 'worker alone', baseRevision: null }, actor);
+    expect(wiki.search(checkout, 'worker deployment unknown unavailable', actor).results).toEqual([]);
+    expect(wiki.search(checkout, 'worker deployment', actor).results).toHaveLength(8);
+    expect(wiki.search(checkout, 'worker deployment', actor).results.some((r) => r.title === 'Sparse match')).toBe(false);
+    expect(wiki.search(checkout, 'how the', actor)).toEqual({ pageCount: 13, results: [] });
+    expect(wiki.search(checkout, 'missing subject', actor)).toEqual({ pageCount: 13, results: [] });
+  });
+
   it('records the exact page revision a different agent read and the demand behind searches and misses', () => {
     const { checkout, linked, wiki, actor } = fixture();
     const reader = { kind: 'agent' as const, id: randomUUID(), provider: 'claude' };

@@ -9,7 +9,7 @@ Every agent call requires `checkout`, which can be any path inside a Git checkou
 ## Agent actions
 
 - `list`: recent pages, with `offset` for more.
-- `search`: page titles and current bodies matching `query`.
+- `search`: ranked title and current-body word/phrase matches for `query`. The reply includes the repository `pageCount`, up to eight results, the `matchedTerms` and an excerpt around the match. An empty wiki is distinguishable from a query with no matches.
 - `read`: `title`, optionally an old `revision`; returns `page` with text, source checkout/branch/commit, links and backlinks. A missing page has `page: null`.
 - `history`: `title`, with `offset` for older revisions.
 - `write`: `title`, `body`, optional `summary`, and required `baseRevision`. Use `null` to create a page; use the revision returned by `read` to edit. A stale revision is rejected. Read the current page and merge before retrying. Repeating a write whose body is already current does not create another revision.
@@ -21,6 +21,8 @@ Example agent call:
 ```
 
 The same object can be sent to the helper with `node scripts/agent-coord.mjs wiki < request.json`. The helper finds the caller's registered agent credential; callers never pass a token. Existing provider sessions may need to restart to discover the new `agent_wiki` MCP tool. The session hook introduces the wiki once when it next runs; a changed introduction version also refreshes this guidance for existing sessions. Wiki pages are read on demand, never inserted wholesale into agent context.
+
+Search normalizes case and whitespace, ignores common query words, and considers up to eight distinct meaningful terms. It matches at word starts (so deploy can find deployment), preserves punctuation inside identifiers and paths, and requires every meaningful term in any order. Ranking favors title phrases, body phrases, title terms and nearby matching word positions; recency breaks remaining ties. Excerpts contain at most 220 characters plus ellipsis markers. Organization remains under the agents' control; there is no separate search index or model call.
 
 ## When to use the wiki
 

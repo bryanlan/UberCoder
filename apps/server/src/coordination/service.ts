@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot } from '@agent-console/shared';
+import type { CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 
@@ -170,18 +170,47 @@ export class CoordinationService {
       nextOffset: offset + peers.length < rows.length ? offset + peers.length : null, pendingMessageCount };
   }
 
-  send(id: string, input: { id: string; recipientId: string; text: string }) {
+  private sendReceipt(message: Pick<CoordinationMessage, 'id' | 'recipientId' | 'suppliedAt' | 'acknowledgedAt'>): CoordinationSendReceipt {
+    const assignment = this.assignment(message.recipientId);
+    const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
+      .get(message.recipientId) as { pid: number; process_start: string };
+    const alive = Boolean(owner.process_start) && processStart(owner.pid) === owner.process_start;
+    // Native conversation IDs are the providers' authoritative Console refs.
+    // A pending Console row can already carry its resumable native ref.
+    const sessions = this.db.sqlite.prepare(`select is_working, manual_suspended_at, pressure_suspended_at from bound_sessions
+      where provider=? and should_restore=1 and status in ('starting','bound')
+      and (conversation_ref=? or resume_conversation_ref=?) limit 2`)
+      .all(assignment.provider, assignment.nativeSessionId, assignment.nativeSessionId) as Array<{
+        is_working: number; manual_suspended_at: string | null; pressure_suspended_at: string | null;
+      }>;
+    const session = sessions.length === 1 ? sessions[0] : undefined;
+    const stopped = !alive || Boolean(session?.manual_suspended_at || session?.pressure_suspended_at);
+    const status = stopped ? 'stopped' : (session ? Boolean(session.is_working) : assignment.status === 'active') ? 'working' : 'idle';
+    const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
+      resumableInConsole: Boolean(session) };
+    if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
+    if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
+    const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
+    const note = status === 'stopped'
+      ? `Queued, not received. The recipient process is stopped or suspended. ${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists.'} No process was started.`
+      : status === 'idle' ? 'Queued, not received. The live recipient is idle; delivery waits for its next turn. No turn was started.'
+        : 'Queued, not received. Expected at the next supported tool or session hook; a long-running tool can delay delivery.';
+    return { id: message.id, queued: true, recipient, delivery, note };
+  }
+
+  send(id: string, input: { id: string; recipientId: string; text: string }): CoordinationSendReceipt {
     this.assignment(input.recipientId);
     if (this.assignment(input.recipientId).status === 'finished') throw new Error('Recipient assignment is finished.');
-    const existing = this.db.sqlite.prepare('select sender_id, recipient_id, text from coordination_messages where id=?').get(input.id) as { sender_id: string; recipient_id: string; text: string } | undefined;
+    const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
+      .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
     if (existing) {
       if (existing.sender_id !== id || existing.recipient_id !== input.recipientId || existing.text !== input.text) throw new Error('Message ID already used for different content.');
-      return { id: input.id };
+      return this.sendReceipt(existing);
     }
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
     this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
-    return { id: input.id };
+    return this.sendReceipt({ id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
   }
 
   acknowledge(id: string, messages: string[]) {

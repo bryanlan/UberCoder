@@ -14,6 +14,61 @@ type RevisionRow = {
   checkout: string; branch: string | null; head_commit: string | null; created_at: string;
 };
 
+type SearchPage = { title: string; revision: number; updatedAt: string; body: string };
+const searchStopwords = new Set('an and are as at be by for from how in is it of on or that the this to was were what when where which with'.split(' '));
+const searchText = (text: string) => text.normalize('NFKC').replace(/\s+/g, ' ').trim();
+const searchPattern = (text: string) => new RegExp('(^|[^\\p{L}\\p{N}_])' + text.replace(/[.*+?^{}()|[\]\\$]/g, '\\$&'), 'gu');
+
+/** Small repository wikis need ranked word matches, not another stored index. */
+export function searchWikiPages(pages: SearchPage[], queryInput: string): WikiSearchResponse {
+  const query = searchText(queryInput).toLowerCase();
+  const terms = [...new Set(query.split(' ').map((term) => term.replace(/^[^\p{L}\p{N}_]+|[^\p{L}\p{N}_]+$/gu, ''))
+    .filter((term) => term.length >= 2 && !searchStopwords.has(term)))].slice(0, 8);
+  if (!terms.length) return { pageCount: pages.length, results: [] };
+  const patterns = terms.map(searchPattern);
+  const ranked = pages.flatMap((page) => {
+    const title = searchText(page.title).toLowerCase();
+    const body = searchText(page.body);
+    const lowerBody = body.toLowerCase();
+    const text = `${title} ${lowerBody}`;
+    const hits = patterns.flatMap((pattern, term) => [...text.matchAll(pattern)].map((match) => ({
+      start: match.index! + match[1]!.length, term,
+    }))).sort((a, b) => a.start - b.start || a.term - b.term);
+    const matched = new Set(hits.map((hit) => hit.term));
+    const titlePhrase = Number(searchPattern(query).test(title));
+    const phrase = searchPattern(query).exec(lowerBody);
+    const bodyPhraseAt = phrase ? phrase.index + phrase[1]!.length : -1;
+    if (matched.size !== terms.length) return [];
+    // Smallest window covering every matched term prevents long catch-all pages
+    // with widely scattered words from outranking a focused investigation.
+    const counts = new Map<number, number>();
+    let left = 0; let windowStart = hits[0]?.start ?? 0; let span = Infinity;
+    for (let right = 0; right < hits.length; right++) {
+      const hit = hits[right]!;
+      counts.set(hit.term, (counts.get(hit.term) ?? 0) + 1);
+      while (counts.size === matched.size && left <= right) {
+        const first = hits[left++]!;
+        const width = hit.start - first.start;
+        if (width < span) { span = width; windowStart = first.start; }
+        const count = counts.get(first.term)! - 1;
+        if (count) counts.set(first.term, count); else counts.delete(first.term);
+      }
+    }
+    const bodyHits = hits.filter((hit) => hit.start > title.length);
+    const focus = bodyPhraseAt >= 0 ? bodyPhraseAt
+      : Math.max(0, windowStart > title.length ? windowStart - title.length - 1 : (bodyHits[0]?.start ?? title.length + 1) - title.length - 1);
+    const start = Math.max(0, Math.min(focus - 60, body.length - 220));
+    const snippet = `${start ? '…' : ''}${body.slice(start, start + 220)}${start + 220 < body.length ? '…' : ''}`;
+    return [{ result: { title: page.title, revision: page.revision, updatedAt: page.updatedAt, snippet,
+      matchedTerms: terms.filter((_, i) => matched.has(i)) }, titlePhrase, coverage: matched.size,
+      bodyPhrase: Number(bodyPhraseAt >= 0), titleTerms: new Set(hits.filter((hit) => hit.start < title.length).map((hit) => hit.term)).size, span }];
+  });
+  ranked.sort((a, b) => b.titlePhrase - a.titlePhrase || b.coverage - a.coverage || b.bodyPhrase - a.bodyPhrase
+    || b.titleTerms - a.titleTerms || a.span - b.span || b.result.updatedAt.localeCompare(a.result.updatedAt)
+    || a.result.title.localeCompare(b.result.title));
+  return { pageCount: pages.length, results: ranked.slice(0, 8).map((page) => page.result) };
+}
+
 function titleParts(input: string): { title: string; key: string } {
   const title = input.normalize('NFKC').replace(/\s+/g, ' ').trim();
   if (!title || title.length > 160 || /[\u0000-\u001f\u007f\[\]]/.test(title)) throw new Error('Wiki title must be 1–160 characters without brackets or control characters.');
@@ -183,14 +238,12 @@ export class WikiService {
     const { repository } = wikiIdentity(checkout);
     const query = queryInput.trim();
     if (!query || query.length > 160) throw new Error('Wiki search query must be 1–160 characters.');
-    const rows = this.sqlite.prepare(`select p.title, p.current_revision as revision, p.updated_at as updatedAt,
-      substr(replace(r.body, char(10), ' '), 1, 180) as snippet from wiki_pages p
+    const pages = this.sqlite.prepare(`select p.title, p.current_revision as revision, p.updated_at as updatedAt, r.body from wiki_pages p
       join wiki_revisions r on r.id=p.current_revision where p.repository=?
-      and (instr(lower(p.title),lower(?))>0 or instr(lower(r.body),lower(?))>0)
-      order by case when instr(lower(p.title),lower(?))>0 then 0 else 1 end, p.updated_at desc limit 8`)
-      .all(repository, query, query, query) as WikiSearchResponse['results'];
-    this.access(repository, actor, 'search', rows.length, { query });
-    return { results: rows };
+      order by p.title_key`).all(repository) as SearchPage[];
+    const result = searchWikiPages(pages, query);
+    this.access(repository, actor, 'search', result.results.length, { query });
+    return result;
   }
 
   history(checkout: string, titleInput: string, actor: WikiActor, offset = 0) {

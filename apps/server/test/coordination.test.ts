@@ -56,6 +56,71 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('reports working and idle delivery expectations without polling or acknowledging the message', async () => {
+    const { checkout, db, service, register } = fixture();
+    const sender = register(); const recipient = register('claude');
+    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Direct coordination question' };
+    const beforeSeen = service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt;
+    const working = await dispatchCoordination(service, { action: 'send', assignmentId: sender.id, token: sender.token,
+      messageId: input.id, recipientId: input.recipientId, text: input.text }) as ReturnType<CoordinationService['send']>;
+    expect(working).toMatchObject({ id: input.id, queued: true, delivery: 'next_step', recipient: { status: 'working', provider: 'claude', resumableInConsole: false } });
+    expect(working.note).toContain('not received');
+    expect(service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt).toBe(beforeSeen);
+    service.update(recipient.id, { status: 'waiting' });
+    const idleSeen = service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt;
+    expect(service.send(sender.id, input)).toMatchObject({ queued: true, delivery: 'next_turn', recipient: { status: 'idle' } });
+    expect((db.sqlite.prepare('select supplied_at,acknowledged_at from coordination_messages where id=?').get(input.id))).toEqual({ supplied_at: null, acknowledged_at: null });
+    expect(service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt).toBe(idleSeen);
+    expect((db.sqlite.prepare('select count(*) as n from coordination_messages').get() as { n: number }).n).toBe(1);
+    service.poll(recipient.id, 0);
+    expect(service.send(sender.id, input)).toMatchObject({ queued: true, delivery: 'offered' });
+    service.acknowledge(recipient.id, [input.id]);
+    expect(service.send(sender.id, input)).toMatchObject({ queued: false, delivery: 'acknowledged' });
+    expect(() => service.send(sender.id, { ...input, text: 'Different content' })).toThrow('different content');
+    service.finish(recipient.id, 'Done');
+    expect(() => service.send(sender.id, { ...input, id: randomUUID() })).toThrow('finished');
+  });
+
+  it('derives idle and suspended availability from the exact Console binding without resuming it', () => {
+    const { db, service, register } = fixture();
+    const sender = register(); const recipient = register('claude');
+    const sessionId = randomUUID(); const timestamp = new Date().toISOString();
+    db.boundSessions.upsert({ id: sessionId, provider: 'claude', projectSlug: 'demo', conversationRef: recipient.nativeSessionId,
+      tmuxSessionName: 'test-not-running', status: 'bound', shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: false });
+    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Please check current overlap' };
+    // Registration can still say active while the authoritative Console knows
+    // this session has no working turn.
+    expect(service.send(sender.id, input)).toMatchObject({ delivery: 'next_turn', recipient: { status: 'idle', resumableInConsole: true } });
+    db.boundSessions.setPressureSuspendedAt(sessionId, timestamp);
+    expect(service.send(sender.id, input)).toMatchObject({ delivery: 'on_resume', recipient: { status: 'stopped', resumableInConsole: true } });
+    expect(db.boundSessions.getById(sessionId)?.pressureSuspendedAt).toBe(timestamp);
+    expect(db.boundSessions.getById(sessionId)?.isWorking).toBe(false);
+    expect(db.boundSessions.getById(sessionId)?.pid).toBeUndefined();
+    db.boundSessions.setPressureSuspendedAt(sessionId, undefined);
+    db.boundSessions.setManualSuspendedAt(sessionId, timestamp);
+    expect(service.send(sender.id, input).recipient.status).toBe('stopped');
+    expect(db.boundSessions.getById(sessionId)?.manualSuspendedAt).toBe(timestamp);
+  });
+
+  it('checks process identity and treats released or ambiguous bindings as unavailable for resume', () => {
+    const { db, service, register } = fixture();
+    const sender = register(); const recipient = register();
+    const timestamp = new Date().toISOString();
+    const first = { id: randomUUID(), provider: 'codex' as const, projectSlug: 'one', conversationRef: recipient.nativeSessionId,
+      tmuxSessionName: 'first', status: 'bound' as const, shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: true };
+    db.boundSessions.upsert(first);
+    db.sqlite.prepare('update coordination_assignments set process_start=? where id=?').run('not-the-current-process', recipient.id);
+    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Queued for a stopped process' };
+    expect(service.send(sender.id, input)).toMatchObject({ delivery: 'on_resume', recipient: { status: 'stopped', resumableInConsole: true } });
+    db.boundSessions.upsert({ ...first, id: randomUUID(), projectSlug: 'two', tmuxSessionName: 'second' });
+    expect(service.send(sender.id, input).recipient.resumableInConsole).toBe(false);
+    db.sqlite.prepare("update bound_sessions set status='ended',should_restore=0").run();
+    expect(service.send(sender.id, input).recipient.resumableInConsole).toBe(false);
+    expect(service.send(sender.id, input).note).toContain('No unique resumable');
+    // Receipts must not silently repair registration or start a process.
+    expect((db.sqlite.prepare('select process_start from coordination_assignments where id=?').get(recipient.id) as { process_start: string }).process_start).toBe('not-the-current-process');
+  });
+
   it('registers outside the pilot and joins an explicitly announced pilot checkout', () => {
     const { root, checkout, service } = fixture();
     const result = service.register({ provider: 'codex', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: root });

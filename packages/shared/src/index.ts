@@ -497,5 +497,6 @@ export interface WikiHistoryResponse {
 }
 
 export interface WikiSearchResponse {
-  results: Array<{ title: string; revision: number; updatedAt: string; snippet: string }>;
+  pageCount: number;
+  results: Array<{ title: string; revision: number; updatedAt: string; snippet: string; matchedTerms: string[] }>;
 }
