@@ -31,6 +31,9 @@ function extractClaudeText(container: Record<string, unknown>, role: NormalizedM
 }
 
 function shouldHideClaudeDisplayMessage(message: NormalizedMessage): boolean {
+  if (message.role === 'status' && message.statusKind === 'compaction') {
+    return false;
+  }
   if (message.role !== 'user' && message.role !== 'assistant') {
     return true;
   }
@@ -94,7 +97,12 @@ function activeClaudeBranchRecordUuids(records: Array<{ record: Record<string, u
   while (cursor && !activeUuids.has(cursor)) {
     activeUuids.add(cursor);
     const record = recordsByUuid.get(cursor);
-    cursor = typeof record?.parentUuid === 'string' ? record.parentUuid : undefined;
+    // Compaction resets Claude's model-context chain. Its logical parent keeps
+    // the earlier conversation available to history readers on this branch.
+    const parent = record?.type === 'system' && record.subtype === 'compact_boundary'
+      ? record.logicalParentUuid
+      : record?.parentUuid;
+    cursor = typeof parent === 'string' ? parent : undefined;
   }
   return activeUuids;
 }
@@ -102,6 +110,17 @@ function activeClaudeBranchRecordUuids(records: Array<{ record: Record<string, u
 export async function parseClaudeConversationFile(input: TranscriptParseInput): Promise<ParsedTranscript> {
   const { records, fallbackTime } = await loadJsonlRecords(input.filePath);
   const activeBranchUuids = activeClaudeBranchRecordUuids(records);
+  const compactionTriggers = new Map<string, unknown>();
+  for (const { record } of records) {
+    if (record.type === 'system' && record.subtype === 'compact_boundary' && typeof record.uuid === 'string') {
+      const metadata = asObject(record.compactMetadata);
+      compactionTriggers.set(record.uuid, metadata?.trigger);
+      // Retained messages can sit between the boundary and summary. Claude's
+      // preserved-segment anchor identifies that summary directly.
+      const summaryUuid = asObject(metadata?.preservedSegment)?.anchorUuid;
+      if (typeof summaryUuid === 'string') compactionTriggers.set(summaryUuid, metadata?.trigger);
+    }
+  }
   const messages: NormalizedMessage[] = [];
   const projectPaths = new Set<string>();
   const authoritativeProjectPaths = new Set<string>();
@@ -139,12 +158,19 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     const extracted = extractClaudeMessage(record);
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
+    const isSummary = record.isCompactSummary === true;
+    const compactionTrigger = recordUuid !== undefined && compactionTriggers.has(recordUuid)
+      ? compactionTriggers.get(recordUuid)
+      : typeof record.parentUuid === 'string' ? compactionTriggers.get(record.parentUuid) : undefined;
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: extracted.role,
+      role: isSummary ? 'status' : extracted.role,
       lifecycle: 'durable',
-      text: extracted.text,
+      text: isSummary
+        ? compactionTrigger === 'auto' ? '[Claude auto summarized]' : '[Claude summarized]'
+        : extracted.text,
+      ...(isSummary ? { statusKind: 'compaction' as const } : {}),
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

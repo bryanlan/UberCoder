@@ -3,7 +3,8 @@ import type { ProviderRunMonitor, ProviderRunState } from '../types.js';
 
 /** Claude's user records include tool results. Only a real submitted prompt starts a turn. */
 function isSubmittedPrompt(record: Record<string, unknown>): boolean {
-  if (record.type !== 'user' || record.isSidechain === true || record.isMeta === true) return false;
+  if (record.type !== 'user' || record.isSidechain === true || record.isMeta === true
+    || record.isCompactSummary === true) return false;
   const message = record.message as Record<string, unknown> | undefined;
   const content = message?.content;
   return typeof content === 'string'

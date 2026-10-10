@@ -132,6 +132,15 @@ The web conversation pane may mirror local text-bypass typing
 optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
 pending user transcript row.
 
+Claude compaction summaries are provider bookkeeping, not submitted prompts. The Claude
+history parser follows `logicalParentUuid` at `compact_boundary` records to retain earlier
+messages on the selected branch. It displays `isCompactSummary` records as durable
+`compaction` status markers with the text `[Claude auto summarized]` for an `auto` trigger
+and `[Claude summarized]` otherwise, retaining the original
+summary only in internal record metadata. These markers do not replace real user prompt
+hashes, advance conversation activity, enter conversation search, or start a working turn.
+The ready indicator continues to use the last confirmed response and its age.
+
 When debugging duplicated bubbles, missing assistant text, terminal repaint noise, or stale live
 output, route the investigation by text source instead of by visual symptom. Durable history starts
 in the provider transcript parser (`apps/server/src/providers/transcripts/codex.ts` or the Claude
@@ -155,7 +164,11 @@ search, because the durable transcript is the source for those conversations.
 `IndexingService` owns search-index refresh and repair. Normal indexing replaces FTS rows from
 provider conversations, while `backfillMissingSearchIndexRows()` fills missing FTS rows from the
 cached conversation index on startup or when cached projects become active without re-listing the
-provider tree. Search updates commit one conversation at a time and pause between writes so a
+provider tree. The existing metadata store records the transcript parser version for each
+project/provider search index after its refresh completes. A missing or outdated version
+rebuilds search content even when transcript sizes and modification times have not changed;
+startup backfill also checks that version. Interrupted refreshes do not advance it.
+Search updates commit one conversation at a time and pause between writes so a
 full refresh does not hold the live database writer lock for an entire project. A failed individual
 transcript load should not break the conversation tree.
 

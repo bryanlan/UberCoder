@@ -145,9 +145,9 @@ export async function buildApp(options: AppOptions = {}) {
   const runtimeCleanup = sessions.cleanupEndedSessionRuntimeDirs().catch((error) => {
     app.log.warn({ err: error }, 'Startup session-runtime cleanup failed.');
   });
-  // Rebuild search rows for any project/provider whose FTS index is empty (e.g.
-  // after the v3 migration reconciled a database predating search-state
-  // tracking). No-op when rows exist; runs off the startup path.
+  // Rebuild empty or outdated search indexes from cached conversations. Parser
+  // upgrades invalidate search content even when transcript files are unchanged.
+  // This runs off the startup path and yields between conversation writes.
   const searchBackfill = indexing.loadProjectMetadata({ backfillSearchIndex: true }).catch(() => {
     app.log.warn('Startup search-index backfill failed; use project refresh to rebuild.');
   });

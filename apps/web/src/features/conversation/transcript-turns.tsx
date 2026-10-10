@@ -199,7 +199,8 @@ export function groupTranscriptTurns(messages: NormalizedMessage[]): TranscriptT
 }
 
 export function shouldShowInMainTranscript(message: NormalizedMessage): boolean {
-  if (message.role === 'status' && message.statusKind === 'run-failure' && message.lifecycle === 'durable' && message.source === 'history-file') return true;
+  if (message.role === 'status' && (message.statusKind === 'run-failure' || message.statusKind === 'compaction')
+    && message.lifecycle === 'durable' && message.source === 'history-file') return true;
   if (message.role !== 'user' && message.role !== 'assistant') {
     return false;
   }
@@ -225,6 +226,14 @@ function combinedTurnText(turn: TranscriptTurn): string {
 }
 
 export const TranscriptDocumentTurn = memo(function TranscriptDocumentTurn({ turn }: { turn: TranscriptTurn }) {
+  if (turn.role === 'status' && turn.messages[0]?.statusKind === 'compaction') {
+    return (
+      <article className="py-3 text-xs text-slate-500">
+        <span className="font-semibold text-emerald-500">{turn.messages[0].text}</span>
+        <time className="ml-3">{formatTimestampRange(turn.startedAt, turn.endedAt)}</time>
+      </article>
+    );
+  }
   const isPending = turn.lifecycle === 'pending';
   const isUser = turn.role === 'user';
   const turnText = combinedTurnText(turn);

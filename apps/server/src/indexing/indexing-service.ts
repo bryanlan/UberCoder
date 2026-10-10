@@ -15,13 +15,17 @@ import { getClaudeProjectTranscriptRoots } from '../providers/claude-provider.js
 import type { ConversationSummary } from '@agent-console/shared';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
-import type { ProviderAdapter } from '../providers/types.js';
+import { TRANSCRIPT_PARSER_VERSION, type ProviderAdapter } from '../providers/types.js';
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
 import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const SEARCH_INDEX_WRITE_PAUSE_MS = 5;
+
+function searchParserVersionKey(projectSlug: string, providerId: ProviderId): string {
+  return `searchParserVersion:${projectSlug}:${providerId}`;
+}
 
 export function getProviderTranscriptWatchPaths(providerId: ProviderId, discoveryRoot: string): string[] {
   if (providerId === 'codex') {
@@ -475,6 +479,9 @@ export class IndexingService {
     conversations: ConversationSummary[],
     options: { shouldCommit?: () => boolean } = {},
   ): Promise<void> {
+    const parserVersionKey = searchParserVersionKey(project.slug, providerId);
+    const parserVersion = String(TRANSCRIPT_PARSER_VERSION);
+    const hasCurrentParserVersion = this.db.meta.get(parserVersionKey) === parserVersion;
     const deduped = new Map<string, ConversationSummary>();
     for (const summary of conversations.filter(isConversationVisibleInDiscovery)) {
       deduped.set(summary.ref, pickPreferredConversation(deduped.get(summary.ref), summary));
@@ -491,7 +498,8 @@ export class IndexingService {
       const stat = summary.transcriptPath ? await statFileSafe(summary.transcriptPath) : undefined;
       const indexed = indexedStates.get(summary.ref);
       if (
-        indexed
+        hasCurrentParserVersion
+        && indexed
         && indexed.transcriptPath === summary.transcriptPath
         && stat
         && indexed.size === stat.size
@@ -542,6 +550,10 @@ export class IndexingService {
       this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
       await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
     }
+    // Stamp only a completed refresh. Interrupted work keeps the old version
+    // so the next refresh cannot mistake partially rebuilt rows for current ones.
+    if (options.shouldCommit && !options.shouldCommit()) return;
+    this.db.meta.set(parserVersionKey, parserVersion);
   }
 
   private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {
@@ -570,7 +582,10 @@ export class IndexingService {
           conversation.projectSlug === project.slug
           && conversation.provider === providerId
         ));
-        if (scopedConversations.length === 0 || this.db.searchIndex.hasRowsFor(project.slug, providerId)) {
+        const hasCurrentParserVersion = this.db.meta.get(searchParserVersionKey(project.slug, providerId))
+          === String(TRANSCRIPT_PARSER_VERSION);
+        if (scopedConversations.length === 0
+          || (hasCurrentParserVersion && this.db.searchIndex.hasRowsFor(project.slug, providerId))) {
           continue;
         }
         const provider = this.providerRegistry.get(providerId);
