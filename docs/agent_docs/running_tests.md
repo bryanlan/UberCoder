@@ -10,6 +10,12 @@
   and cached-index backfill coverage.
 
 ## Targeted Test Patterns
+- Authentication/CSRF recovery: `npm run build -w @agent-console/shared`, then
+  `NODE_ENV=test npm run test -w @agent-console/server -- auth` and
+  `NODE_ENV=test npm run test -w @agent-console/web -- api`. Browser coverage:
+  `NODE_ENV=test npm run test:e2e -- apps/web/e2e/csrf-*.spec.ts`. The auth
+  cancellation case uses a private HTTP server and Chromium's real cookie jar
+  to verify that an aborted older auth response cannot replace the renewed login.
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.

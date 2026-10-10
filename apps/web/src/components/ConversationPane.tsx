@@ -568,6 +568,8 @@ function LiveSessionInputBridge({
   }
 
   function restoreDraftSubmitPreview(text: string): void {
+    // Authentication recovery may have unmounted the composer to show sign-in.
+    upsertLiveBridgeDraft(conversationKey, () => ({ draftText: text, draftDirty: true }));
     flushSync(() => {
       setDraftText(text);
       setDraftDirty(true);

@@ -217,6 +217,17 @@ user's actual prompt.
 - tmux is the session execution boundary; the backend captures pane state and logs normalized events.
 - The main SQLite database via `better-sqlite3` stores config-derived indexes alongside durable bound session, authentication, pending-conversation, agent-coordination, and UI-preference records. The database as a whole must not be treated as a rebuildable cache.
 - Tailscale identity headers can bootstrap a cookie session when explicitly trusted and allowlisted.
+- Login sessions have a fixed configured lifetime. A background read can bootstrap a new
+  Tailscale cookie session after expiry while an open page still has the previous CSRF token.
+  The authentication guard returns HTTP 403 with `code: "invalid_csrf_token"` before an
+  action executes. Only this rejection permits the shared browser API client to refresh
+  `/api/auth/me`, update the same authentication query cache used by React, and retry the
+  original request once. Concurrent rejections share the refresh; delayed rejections can
+  use an already recovered token. Auth queries forward React Query's abort signal to
+  fetch so recovery cancels older HTTP responses before their cookies can replace the
+  renewed login. Network errors, other HTTP failures, and a second CSRF
+  rejection never trigger replay. Failed recovery leaves the draft intact; an unauthenticated
+  refresh shows sign-in. The server and browser error-code contract must deploy together.
 - The localhost proxy exposes only authenticated project-local ports listed in config; it is not a generic localhost gateway.
 
 ## Key Decisions

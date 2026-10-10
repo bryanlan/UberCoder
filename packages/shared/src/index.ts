@@ -300,6 +300,9 @@ export interface AuthState {
   csrfToken?: string;
 }
 
+// Only the authentication guard may emit this code, before executing an action.
+export const INVALID_CSRF_TOKEN_CODE = 'invalid_csrf_token';
+
 export interface EditableProjectSettings {
   directoryName: string;
   path: string;

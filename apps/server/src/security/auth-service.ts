@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import type { AuthState } from '@agent-console/shared';
+import { INVALID_CSRF_TOKEN_CODE, type AuthState } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
 import { nowIso } from '../lib/time.js';
 import { generateCsrfToken, generateSessionId, sealCookieValue, unsealCookieValue, verifyPasswordHash } from './password.js';
@@ -34,7 +34,7 @@ export class AuthService {
     if (requireCsrf) {
       const header = request.headers['x-csrf-token'];
       if (typeof header !== 'string' || header !== session.csrfToken) {
-        reply.code(403).send({ error: 'Invalid CSRF token.' });
+        reply.code(403).send({ error: 'Invalid CSRF token.', code: INVALID_CSRF_TOKEN_CODE });
         throw new Error('Invalid CSRF token');
       }
     }

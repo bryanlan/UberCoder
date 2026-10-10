@@ -26,6 +26,8 @@ import type {
   WikiPage,
   WikiSearchResponse,
 } from '@agent-console/shared';
+import { INVALID_CSRF_TOKEN_CODE } from '@agent-console/shared';
+import { queryClient } from './query-client';
 
 export class ApiError extends Error {
   details?: unknown;
@@ -39,13 +41,39 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(input: string, init: RequestInit = {}, csrfToken?: string): Promise<T> {
+let authRefresh: Promise<AuthState> | undefined;
+
+async function refreshAuthentication(rejectedToken: string | undefined): Promise<AuthState> {
+  const current = queryClient.getQueryData<AuthState>(['auth']);
+  // A concurrent request or normal auth refetch may have already repaired the cache.
+  if (current?.authenticated && current.csrfToken && current.csrfToken !== rejectedToken) {
+    return current;
+  }
+  if (!authRefresh) {
+    authRefresh = (async () => {
+      // Abort older auth HTTP responses as well as their cache writes: a late
+      // Set-Cookie header could otherwise replace the recovered login cookie.
+      await queryClient.cancelQueries({ queryKey: ['auth'], exact: true });
+      const state = await request<AuthState>('/api/auth/me', { cache: 'no-store' });
+      queryClient.setQueryData(['auth'], state);
+      return state;
+    })().finally(() => {
+      authRefresh = undefined;
+    });
+  }
+  return authRefresh;
+}
+
+async function request<T>(input: string, init: RequestInit = {}, csrfToken?: string, retryCsrf = true): Promise<T> {
+  const mutating = !['GET', 'HEAD', 'OPTIONS'].includes((init.method ?? 'GET').toUpperCase());
+  const current = queryClient.getQueryData<AuthState>(['auth']);
+  const token = mutating && current ? current.csrfToken : csrfToken;
   const headers = new Headers(init.headers);
   if (init.body !== undefined && !headers.has('content-type')) {
     headers.set('content-type', 'application/json');
   }
-  if (csrfToken) {
-    headers.set('x-csrf-token', csrfToken);
+  if (token) {
+    headers.set('x-csrf-token', token);
   }
 
   const response = await fetch(input, {
@@ -60,6 +88,14 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 
   const body = await response.json().catch(() => undefined);
   if (!response.ok) {
+    if (retryCsrf && mutating && response.status === 403 && body?.code === INVALID_CSRF_TOKEN_CODE) {
+      const state = await refreshAuthentication(token);
+      if (!state.authenticated || !state.csrfToken) {
+        throw new ApiError('Authentication required. Sign in to submit your draft.', { status: 401 });
+      }
+      // The server rejected CSRF before executing the action. Never replay other failures.
+      return request<T>(input, init, state.csrfToken, false);
+    }
     throw new ApiError(body?.error ?? 'Request failed.', { details: body?.details, status: response.status });
   }
   return body as T;
@@ -72,7 +108,8 @@ export const api = {
     }, csrfToken);
     return response.image;
   },
-  authState: () => request<AuthState>('/api/auth/me'),
+  authState: ({ signal }: { signal?: AbortSignal } = {}) =>
+    request<AuthState>('/api/auth/me', { cache: 'no-store', signal }),
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),

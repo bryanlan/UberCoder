@@ -121,7 +121,8 @@
   `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES`, which must stay aligned between the server cache,
   conversation route response, and web warning.
 - `apps/web/src/pages/SettingsPage.tsx` - explicit project/config management UI.
-- `apps/web/src/lib/api.ts` - web API client boundary.
+- `apps/web/src/lib/api.ts` - web API client boundary and bounded CSRF recovery.
+- `apps/web/src/lib/query-client.ts` - authentication cache shared by the API client and React.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
 - `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
