@@ -330,6 +330,11 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 
 ## Assignment coordination
 
+Peer-wake audit is an owner-owned, read-only CLI over durable SQLite attempts and native
+provider turn usage. Waltium owns periodic warning checks, daily rollups and deduplicated
+operator visibility. Audit thresholds do not affect message delivery or session lifecycle.
+See [the audit contract](peer-wake-audit.md).
+
 `apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver peer data separately from human input. Direct messages request a guarded backend response turn using a fixed coordination notice; transcript adapters classify that notice separately. Durable per-message attempts prevent repeated or ambiguous submission across restart. Automatically sleeping conversations can resume when memory allows; manual pauses stay paused. Idle suspension and restore grace default to one hour, with native prompt, draft and ownership checks before suspension. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
 
 ## Agent wiki

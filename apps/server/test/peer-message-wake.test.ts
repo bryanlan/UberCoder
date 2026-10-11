@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
-import { PEER_WAKE_PROMPT, peerWakeAttemptKey } from '../src/coordination/wake.js';
+import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeRestoreKey } from '../src/coordination/wake.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
@@ -65,6 +65,7 @@ describe('Peer message wake and one-hour sleep', () => {
     expect(f.tmux.sent.join('')).toBe(PEER_WAKE_PROMPT);
     expect(f.tmux.sentKeys).toEqual(id === 'codex' ? [] : [['Enter']]);
     expect(f.db.boundSessions.getById(f.session.id)?.isWorking).toBe(true);
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ restoration: 'already_loaded' });
     expect(fs.readFileSync(f.session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
     expect(f.service.send(f.sender, message)).toMatchObject({ delivery: 'wake_started', queued: true });
     const inbox = await dispatchCoordination(f.service, { action: 'poll', assignmentId: f.recipient, token: f.token });
@@ -162,11 +163,44 @@ describe('Peer message wake and one-hour sleep', () => {
     f.db.boundSessions.setPressureSuspendedAt(f.session.id, new Date().toISOString());
     f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
     f.tmux.alive.clear();
-    f.send();
+    const message = f.send();
     await f.manager.wakePendingPeerMessages();
     expect(f.tmux.created).toEqual([f.session.tmuxSessionName, f.session.tmuxSessionName]);
     expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ conversationRef: f.session.conversationRef, pressureSuspendedAt: undefined, isWorking: true });
     expect(f.tmux.sent.join('')).toBe(PEER_WAKE_PROMPT);
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ restoration: 'restored' });
+  });
+
+  it('retains cold-restore measurement across provider startup deferral and consumes it after the first wake', async () => {
+    const f = await fixture('claude');
+    f.db.boundSessions.upsert({ ...f.session, startedAt: new Date(Date.now() - 120 * 60_000).toISOString(),
+      lastResponseAt: new Date(Date.now() - 60 * 60_000).toISOString() });
+    f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
+    f.tmux.alive.clear(); f.tmux.paneText = 'Starting Claude';
+    const first = f.send();
+    await f.manager.wakePendingPeerMessages();
+    expect(f.db.meta.get(peerWakeAttemptKey(first.id))).toBeUndefined();
+    f.tmux.paneText = claudeReady;
+    await f.manager.wakePendingPeerMessages();
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(first.id))!)).toMatchObject({ restoration: 'restored' });
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    const next = f.send();
+    await f.manager.wakePendingPeerMessages();
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(next.id))!)).toMatchObject({ restoration: 'already_loaded' });
+  });
+
+  it('records a warm wake if the restored process completed another response during startup deferral', async () => {
+    const f = await fixture('claude');
+    f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
+    f.tmux.alive.clear(); f.tmux.paneText = 'Starting Claude';
+    const message = f.send();
+    await f.manager.wakePendingPeerMessages();
+    const restore = JSON.parse(f.db.meta.get(peerWakeRestoreKey(f.session.id))!) as { restoredAt: string };
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false,
+      lastResponseAt: new Date(Date.parse(restore.restoredAt) + 1).toISOString() });
+    f.tmux.paneText = claudeReady;
+    await f.manager.wakePendingPeerMessages();
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ restoration: 'already_loaded' });
   });
 
   it('never launches a second writer when the original provider survives outside the tmux binding', async () => {

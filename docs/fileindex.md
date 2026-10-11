@@ -237,6 +237,9 @@ Test and verification anchors:
 
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
 - `apps/server/src/coordination/wake.ts` — fixed peer-response notice, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
+- `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.
+- `apps/server/src/providers/transcripts/peer-wake-usage.ts` — exact native coordination-turn usage and outcomes; streamed requests are counted once.
+- `docs/peer-wake-audit.md` — measurement, warning, usage coverage and scheduler ownership contracts.
 - `packages/shared/src/coordination.ts` — browser/server coordination contracts.
 - `scripts/agent-coord.mjs` — provider lifecycle hooks, host MCP server and local operator client.
 - `scripts/install-coordination.mjs` — reviewed pilot installation with private configuration backups.

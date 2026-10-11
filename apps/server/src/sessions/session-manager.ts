@@ -53,7 +53,7 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -425,6 +425,7 @@ export class SessionManager {
             return;
           }
           current = restored;
+          this.db.meta.set(peerWakeRestoreKey(current.id), JSON.stringify({ pid: current.pid, restoredAt: nowIso() }));
         }
         if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id) return;
         await this.runRecovery.refresh(current.id);
@@ -456,11 +457,15 @@ export class SessionManager {
         const messages = pending();
         if (!messages.length) return;
         const timestamp = nowIso();
+        const restoreRecord = this.db.meta.get(peerWakeRestoreKey(current.id));
+        const restore = restoreRecord ? JSON.parse(restoreRecord) as { pid: number; restoredAt: string } : undefined;
+        const restoration: PeerWakeAttempt['restoration'] = restore && typeof current.pid === 'number' && restore.pid === current.pid
+          && (!current.lastResponseAt || current.lastResponseAt < restore.restoredAt) ? 'restored' : 'already_loaded';
         // Persist before touching the terminal. An interrupted or ambiguous submission
         // is never automatically repeated, including after a backend restart.
         const saveAttempt = (status: PeerWakeAttempt['status'], reason?: string) => {
           for (const message of messages) this.db.meta.set(peerWakeAttemptKey(message.id),
-            JSON.stringify({ status, sessionId: current!.id, timestamp, reason } satisfies PeerWakeAttempt));
+            JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');
         const runtime = this.runtimeState(current.id);
@@ -470,6 +475,7 @@ export class SessionManager {
           if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path);
           else await this.runInputTmuxAction(current, () => this.submitTextToSession(current!.tmuxSessionName, PEER_WAKE_PROMPT));
           saveAttempt('submitted');
+          if (restoreRecord) this.db.meta.set(peerWakeRestoreKey(current.id), '');
           const updated = this.updateBoundSessionFields(current.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
           this.appendEvent(updated, { type: 'status', text: 'Started a coordination response turn for pending peer messages.', timestamp });
           this.eventBus.emit({ type: 'session.updated', session: updated });
