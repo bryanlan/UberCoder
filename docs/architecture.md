@@ -97,6 +97,14 @@ after the provider transcript catches up. `apps/server/src/sessions/transcript-w
 provider transcript file updates and should be considered part of the same timeline freshness
 contract.
 
+Live-output echo detection restores the last recorded user prompt through a streamed asynchronous
+event-log read once per session. The session runtime caches that derived value, updates it after
+each durable user-input append, and protects newer input from an older in-flight restoration.
+Output waiting on restoration remains in arrival order, retains its arrival-time activity
+decision, and yields between batches. Stopping a watcher invalidates its delayed batches,
+including across suspension and resume.
+Output updates must not synchronously load or scan the whole event history.
+
 Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
 state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses from
 `apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,

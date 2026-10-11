@@ -87,6 +87,8 @@
   literal selection-keystroke detection, and recency timestamps.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
+- `apps/server/src/sessions/last-user-input.ts` - asynchronous prompt restoration and session-local
+  echo-detection cache, superseded by durable input appends.
 - `apps/server/src/sessions/timeline-merge.ts` - server-owned merge and duplicate-suppression
   rules between durable provider transcript messages and temporary live event-log messages.
 - `apps/server/src/sessions/transcript-watcher.ts` - transcript-file change detection that refreshes

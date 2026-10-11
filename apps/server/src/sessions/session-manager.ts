@@ -14,6 +14,7 @@ import type { ProviderRunState } from '../providers/types.js';
 import { isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
+import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import {
@@ -101,6 +102,7 @@ interface SessionRecoveryDependencies {
 }
 
 interface SessionManagerOptions {
+  readLastUserInput?: typeof readLastUserInput;
   eagerRestoreWindowMs?: number;
   restoreGraceMs?: number;
   pressureSuspendAvailableBytes?: number;
@@ -154,33 +156,6 @@ function readTextTailSync(filePath: string | undefined, maxBytes: number): strin
   } catch {
     return '';
   }
-}
-
-function readLastUserInput(eventLogPath: string | undefined): string | undefined {
-  if (!eventLogPath) {
-    return undefined;
-  }
-
-  try {
-    const lines = fs.readFileSync(eventLogPath, 'utf8').split(/\r?\n/);
-    for (const line of lines.reverse()) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const event = JSON.parse(line) as { type?: unknown; text?: unknown };
-        if (event.type === 'user-input' && typeof event.text === 'string') {
-          return event.text;
-        }
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return undefined;
-  }
-
-  return undefined;
 }
 
 function readLastStatusEventText(eventLogPath: string | undefined): string | undefined {
@@ -293,6 +268,7 @@ export class SessionManager {
   private readonly pressureSuspendAvailableBytes?: number;
   private readonly pressureSuspendIdleMs: number;
   private readonly readMemInfo: () => string;
+  private readonly readLastUserInput: typeof readLastUserInput;
   private readonly queueCodexNotice: typeof queueCodexPeerWake;
   private consecutiveLowMemorySamples = 0;
   private autoTrackActiveLaunches = 0;
@@ -314,6 +290,7 @@ export class SessionManager {
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
     this.pressureSuspendIdleMs = options.pressureSuspendIdleMs ?? 60 * 60 * 1000;
     this.readMemInfo = options.readMemInfo ?? (() => fs.readFileSync('/proc/meminfo', 'utf8'));
+    this.readLastUserInput = options.readLastUserInput ?? readLastUserInput;
     this.queueCodexNotice = options.queueCodexNotice ?? queueCodexPeerWake;
     fs.mkdirSync(this.runtimeDir, { recursive: true });
     this.runtimes = new SessionRuntimeRegistry({
@@ -2680,6 +2657,7 @@ export class SessionManager {
     const messageId = liveMessageId(session.id, offset);
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
     if (event.type === 'user-input') {
+      (this.runtimeState(session.id).lastUserInput ??= new LastUserInputCache(this.readLastUserInput)).record(session.eventLogPath, event.text);
       this.eventBus.emit({
         type: 'session.user-input',
         sessionId: session.id,
@@ -2761,6 +2739,8 @@ export class SessionManager {
     }
 
     this.watchSessionTranscript(session);
+    const state = this.runtimeState(session.id);
+    void (state.lastUserInput ??= new LastUserInputCache(this.readLastUserInput)).read(session.eventLogPath);
 
     if (session.rawLogPath && !this.outputWatchers.has(session.id)) {
       const initialOffset = session.eventLogPath && fs.existsSync(session.eventLogPath) && fs.statSync(session.eventLogPath).size > 0 && fs.existsSync(session.rawLogPath)
@@ -2770,7 +2750,7 @@ export class SessionManager {
         sessionId: session.id,
         rawLogPath: session.rawLogPath,
         initialOffset,
-        onChunk: (chunk) => this.flushPendingChunk(session.id, chunk),
+        onChunk: (chunk) => { void this.flushPendingChunk(session.id, chunk); },
       });
     }
   }
@@ -2821,6 +2801,8 @@ export class SessionManager {
   private stopWatching(sessionId: string): void {
     this.runRecovery.stopWatching(sessionId);
     this.outputWatchers.stop(sessionId, { flush: true }, (chunk) => this.flushPendingChunk(sessionId, chunk));
+    const state = this.runtimeState(sessionId);
+    state.rawOutputGeneration = (state.rawOutputGeneration ?? 0) + 1;
     this.transcriptWatchers.stop(sessionId);
     this.clearWorkingExpiry(sessionId);
     this.clearRawOutputScreenUpdate(sessionId);
@@ -2910,12 +2892,58 @@ export class SessionManager {
 
   private flushPendingChunk(sessionId: string, chunk: string): void {
     if (!chunk.trim()) return;
-    const now = nowIso();
     try {
+      const prior = this.mustGetSession(sessionId);
+      const state = this.runtimeState(sessionId);
+      const cache = state.lastUserInput ??= new LastUserInputCache(this.readLastUserInput);
+      const cached = cache.current(prior.eventLogPath);
+      const arrivedAt = nowIso();
+      const shouldTrackOnArrival = this.shouldTrackRawOutputForRecency(prior);
+      const generation = state.rawOutputGeneration ?? 0;
+      const waited = Boolean(state.rawOutputFlush) || !cached;
+      const flush = () => this.flushChunkInOrder(prior, state, cache, cached,
+        chunk, arrivedAt, shouldTrackOnArrival, generation, waited);
+      // Calling the first warm flush runs it synchronously. A cold flush keeps
+      // subsequent batches in arrival order even if new input warms the cache.
+      const next = state.rawOutputFlush ? state.rawOutputFlush.then(async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await flush();
+      }) : flush();
+      state.rawOutputFlush = next;
+      void next.finally(() => {
+        if (state.rawOutputFlush === next) state.rawOutputFlush = undefined;
+      }).catch(() => undefined);
+    } catch {
+      // A released session cannot consume output from its old watcher.
+    }
+  }
+
+  private async flushChunkInOrder(
+    prior: BoundSession,
+    state: SessionRuntimeState,
+    cache: LastUserInputCache,
+    cached: { text?: string } | undefined,
+    chunk: string,
+    arrivedAt: string,
+    shouldTrackOnArrival: boolean,
+    generation: number,
+    waited: boolean,
+  ): Promise<void> {
+    const sessionId = prior.id;
+    try {
+      const lastInput = cached ? cached.text : await cache.read(prior.eventLogPath);
+      if (!this.runtimes.has(sessionId) || this.runtimeState(sessionId) !== state) return;
+      if ((state.rawOutputGeneration ?? 0) !== generation) return;
       const session = this.mustGetSession(sessionId);
-      const outputLines = normalizeRawOutputLines(chunk, readLastUserInput(session.eventLogPath));
+      if (session.eventLogPath !== prior.eventLogPath) return;
+      // stop() deliberately flushes a warm watcher after marking the manager
+      // stopped. Preserve that synchronous final append; only deferred work
+      // needs to re-check lifecycle admission.
+      if (waited && !this.shouldWatchSession(session)) return;
+      const now = nowIso();
+      const outputLines = normalizeRawOutputLines(chunk, lastInput);
       const hasMeaningfulOutput = outputLines.length > 0;
-      const shouldTrackOutput = hasMeaningfulOutput && this.shouldTrackRawOutputForRecency(session);
+      const shouldTrackOutput = shouldTrackOnArrival && hasMeaningfulOutput && this.shouldTrackRawOutputForRecency(session);
       const updated = shouldTrackOutput
         ? {
             ...session,
@@ -2928,7 +2956,7 @@ export class SessionManager {
       if (shouldTrackOutput) {
         this.db.boundSessions.upsert(updated);
         this.scheduleWorkingExpiry(sessionId, now);
-        this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: now });
+        this.appendEvent(updated, { type: 'raw-output', text: chunk, timestamp: arrivedAt });
       }
       this.scheduleRawOutputScreenUpdate(updated);
     } catch (updateError) {

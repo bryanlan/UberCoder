@@ -4,6 +4,9 @@ export interface DeferredSelectionInput {
 }
 
 export interface SessionRuntimeState {
+  lastUserInput?: import('./last-user-input.js').LastUserInputCache;
+  rawOutputFlush?: Promise<void>;
+  rawOutputGeneration?: number;
   lastScreenHash?: string;
   deferredTextReadyUntil?: number;
   deferredSelectionInput?: DeferredSelectionInput;
