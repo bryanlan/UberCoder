@@ -602,6 +602,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
 
     const session = await manager.bindConversation({
@@ -746,6 +747,7 @@ describe('SessionManager lifecycle', () => {
     tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
     let availableKiB = 2 * 1024 * 1024;
     const options = {
+      eagerRestoreWindowMs: 48 * 60 * 60 * 1000,
       pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
       pressureSuspendIdleMs: 60 * 60 * 1000,
       readMemInfo: () => `MemAvailable: ${availableKiB} kB\n`,
@@ -803,7 +805,8 @@ describe('SessionManager lifecycle', () => {
     tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
       new RealtimeEventBus(), provider, providerSettings, {
-        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        eagerRestoreWindowMs: 48 * 60 * 60 * 1000,
+      pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
         readMemInfo: () => 'MemAvailable: 2097152 kB\n',
       });
     const session = await manager.bindConversation({
@@ -832,7 +835,8 @@ describe('SessionManager lifecycle', () => {
     tmux.paneText = 'OpenAI Codex\n› unsent draft\ngpt-5.6-sol medium · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
       new RealtimeEventBus(), provider, providerSettings, {
-        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        eagerRestoreWindowMs: 48 * 60 * 60 * 1000,
+      pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
         readMemInfo: () => 'MemAvailable: 2097152 kB\n',
       });
     const session = await manager.bindConversation({
@@ -856,7 +860,8 @@ describe('SessionManager lifecycle', () => {
     tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'),
       new RealtimeEventBus(), provider, providerSettings, {
-        pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
+        eagerRestoreWindowMs: 48 * 60 * 60 * 1000,
+      pressureSuspendAvailableBytes: 3 * 1024 * 1024 * 1024,
         readMemInfo: () => 'MemAvailable: 2097152 kB\n',
       });
     const session = await manager.bindConversation({
@@ -930,6 +935,7 @@ describe('SessionManager lifecycle', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
     const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
     const session = await manager.bindConversation({
       project, provider, providerSettings,
@@ -957,7 +963,7 @@ describe('SessionManager lifecycle', () => {
       else db.boundSessions.setPressureSuspendedAt(session.id, old);
       tmux.alive.clear();
     }
-    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
+    tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-5.6-sol medium · 98% left · ~/demo';
 
     await manager.reconcileSessions();
 

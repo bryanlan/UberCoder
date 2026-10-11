@@ -147,7 +147,7 @@ export interface NormalizedMessage {
   timestamp: string;
   conversationRef: string;
   source: 'history-file' | 'live-output' | 'synthetic-status' | 'user-input';
-  statusKind?: 'run-failure' | 'compaction';
+  statusKind?: 'run-failure' | 'compaction' | 'coordination';
   rawMetadata?: Record<string, unknown>;
 }
 

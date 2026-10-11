@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
+import { peerWakeAttemptKey, type PeerWakeAttempt } from './wake.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -24,7 +25,8 @@ export const OUTSIDE_PILOT_NOTE = 'This repository is outside the coordination p
   + 'Your assignment and direct messages still work: call status without checkout to find peers, then send to their id.';
 
 export class CoordinationService {
-  constructor(private readonly db: AppDatabase, readonly settings: CoordinationSettings) {}
+  constructor(private readonly db: AppDatabase, readonly settings: CoordinationSettings,
+    private readonly requestWake?: () => void) {}
 
   private event(id: string, checkout: string | null, kind: string, text: string): void {
     this.db.sqlite.prepare('insert into coordination_events(assignment_id, checkout, kind, text, timestamp) values(?,?,?,?,?)')
@@ -190,6 +192,20 @@ export class CoordinationService {
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
+    const attemptText = this.db.meta.get(peerWakeAttemptKey(message.id));
+    if (attemptText) {
+      const attempt = JSON.parse(attemptText) as PeerWakeAttempt;
+      return { id: message.id, queued: true, recipient,
+        delivery: attempt.status === 'submitted' ? 'wake_started' : 'wake_blocked',
+        note: attempt.status === 'submitted' ? 'A coordination response turn was started; receipt still requires acknowledgement.'
+          : `Automatic wake was not confirmed and will not be replayed: ${attempt.reason ?? 'submission was interrupted'}. The message remains in the inbox.` };
+    }
+    if (this.requestWake && session && status !== 'working') {
+      return { id: message.id, queued: true, recipient, delivery: session.manual_suspended_at ? 'on_resume' : 'wake_pending',
+        note: session.manual_suspended_at ? 'Queued, not received. The recipient is manually suspended; automatic wake respects that pause.'
+          : session.pressure_suspended_at ? 'Queued, not received. Console can wake the original conversation when sufficient memory is available.'
+            : 'Queued, not received. Console will wake the original conversation for a peer-inbox response when the provider is ready. Drafts are preserved and interactive prompts defer wake.' };
+    }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'
       ? `Queued, not received. The recipient process is stopped or suspended. ${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists.'} No process was started.`
@@ -205,11 +221,13 @@ export class CoordinationService {
       .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
     if (existing) {
       if (existing.sender_id !== id || existing.recipient_id !== input.recipientId || existing.text !== input.text) throw new Error('Message ID already used for different content.');
+      this.requestWake?.();
       return this.sendReceipt(existing);
     }
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
     this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+    this.requestWake?.();
     return this.sendReceipt({ id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
   }
 

@@ -132,7 +132,10 @@ export class ShellTmuxClient implements TmuxClient {
 
   async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    await runTmux(['pipe-pane', '-o', '-t', sessionName, `cat >> ${shellEscape(filePath)}`]);
+    // Evaluate and attach in tmux's command queue without replacing a live pipe.
+    const attachCommand = ['pipe-pane', '-t', sessionName, `cat >> ${shellEscape(filePath)}`]
+      .map(shellEscape).join(' ');
+    await runTmux(['if-shell', '-F', '-t', sessionName, '#{==:#{pane_pipe},0}', attachCommand]);
   }
 
   async closePanePipe(sessionName: string): Promise<void> {

@@ -9,8 +9,10 @@ import {
   screenAllowsLiteralSelectionWithoutInput,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
+  claudeFullSessionResumeSelection,
   screenShowsInteractiveSelectionHint,
   screenShowsQueuedMessageHint,
+  screenShowsBackgroundWork,
   shouldUseBracketedPasteTransport,
   submittedTextShouldCreateUserTurn,
 } from '../src/sessions/screen-heuristics.js';
@@ -25,6 +27,25 @@ function screen(input: Partial<SessionScreen>): SessionScreen {
     ...input,
   };
 }
+
+describe('Native background work indicators', () => {
+  it.each([
+    'Completed reply.\n1 background terminal running · /ps to view · /stop to close\n› Ask Codex to do anything\n  GPT-6.1-Sol xhigh · ~/demo',
+    'Completed reply.\n────────────────────\n❯ \n────────────────────\n  ⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage',
+    'Completed reply.\n✻ Waiting for 1 background agent to finish\n────────────────────\n❯ \n────────────────────\n⏵⏵ bypass permissions on\n  ● main\n  ◯ general-purpose  Reviewing the result 25m 31s',
+  ])('detects live task chrome even when the composer is ready', (snapshot) => {
+    const parsed = parseSessionScreenSnapshot(snapshot);
+    expect(parsed.inputActive).toBe(true);
+    expect(screenShowsBackgroundWork(parsed)).toBe(true);
+  });
+
+  it('ignores old background-task prose and the main-agent roster alone', () => {
+    const parsed = parseSessionScreenSnapshot('Earlier there was 1 background terminal running.\nThe work has finished.\n────────────────────\n❯ \n────────────────────\n⏵⏵ bypass permissions on\n  ● main');
+    expect(screenShowsBackgroundWork(parsed)).toBe(false);
+    expect(screenShowsBackgroundWork(screen({ content: '1 background terminal running · /ps to view · /stop to close\nCompleted a later reply.', status: 'GPT-6.1-Sol xhigh · ~/demo' }))).toBe(false);
+    expect(screenShowsBackgroundWork(screen({ status: '⏵⏵ bypass permissions on · 0 shells · ↓ to manage' }))).toBe(false);
+  });
+});
 
 describe('screen heuristics', () => {
   it('treats a number in a real composer as chat when older output contains menu controls', () => {
@@ -136,6 +157,19 @@ describe('screen heuristics', () => {
 
     expect(screenShowsClaudeResumeSessionChoice(resumePrompt)).toBe(true);
     expect(screenLooksReadyForLiteralPrompt(resumePrompt)).toBe(false);
+    expect(claudeFullSessionResumeSelection(resumePrompt)).toBe('summary');
+  });
+
+  it('recognizes only the active complete full-session resume choice block', () => {
+    const menu = ['This session is 12 days old and 186k tokens.', '❯ 1. Resume from summary (recommended)',
+      '  2. Resume full session as-is', "  3. Don't ask me again", 'Enter to confirm · Esc to cancel'].join('\n');
+    expect(claudeFullSessionResumeSelection(screen({ content: menu.replace('❯ 1.', '  1.').replace('  2.', '❯ 2.') }))).toBe('full');
+    expect(claudeFullSessionResumeSelection(screen({ content: menu.replace('❯ 1.', '  1.').replace('  3.', '❯ 3.') }))).toBe('always');
+    expect(claudeFullSessionResumeSelection(screen({ content: menu.replace('(recommended)', '(instant, recommended)') }))).toBe('summary');
+    expect(claudeFullSessionResumeSelection(screen({ content: menu, inputActive: true }))).toBeUndefined();
+    expect(claudeFullSessionResumeSelection(screen({ content: `${menu}\nApproval required\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel` }))).toBeUndefined();
+    expect(claudeFullSessionResumeSelection(screen({ content: menu.replace('  2. Resume full session as-is', '  2. Start a new session') }))).toBeUndefined();
+    expect(claudeFullSessionResumeSelection(screen({ content: menu.replace('  2.', '❯ 2.') }))).toBeUndefined();
   });
 
   it('treats numeric selection tokens as UI control input rather than user turns', () => {

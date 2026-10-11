@@ -15,6 +15,7 @@ import {
   iterateJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
+import { isPeerWakePrompt } from '../../coordination/wake.js';
 
 const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
 
@@ -295,13 +296,14 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
     const extracted = extractCodexMessage(record);
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
+    const peerWake = extracted.role === 'user' && isPeerWakePrompt(extracted.text);
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: extracted.role,
-      statusKind: codexRunState(record)?.status === 'failed' ? 'run-failure' : undefined,
+      role: peerWake ? 'status' : extracted.role,
+      statusKind: peerWake ? 'coordination' : codexRunState(record)?.status === 'failed' ? 'run-failure' : undefined,
       lifecycle: codexMessageLifecycle(record, extracted.role),
-      text: extracted.text,
+      text: peerWake ? 'Agent responding to peer messages.' : extracted.text,
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

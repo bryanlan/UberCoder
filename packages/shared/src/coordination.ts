@@ -45,7 +45,7 @@ export interface CoordinationSendReceipt {
     lastSeenAt: string;
     resumableInConsole: boolean;
   };
-  delivery: 'next_step' | 'next_turn' | 'on_resume' | 'offered' | 'acknowledged';
+  delivery: 'next_step' | 'next_turn' | 'on_resume' | 'wake_pending' | 'wake_started' | 'wake_blocked' | 'offered' | 'acknowledged';
   note: string;
 }
 

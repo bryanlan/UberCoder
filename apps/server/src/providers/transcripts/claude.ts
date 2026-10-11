@@ -12,6 +12,7 @@ import {
   loadJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
+import { isPeerWakePrompt } from '../../coordination/wake.js';
 
 function extractClaudeText(container: Record<string, unknown>, role: NormalizedMessage['role']): string {
   const allowedTypes = ['text'];
@@ -159,18 +160,20 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
     const isSummary = record.isCompactSummary === true;
+    const peerWake = extracted.role === 'user' && isPeerWakePrompt(extracted.text);
     const compactionTrigger = recordUuid !== undefined && compactionTriggers.has(recordUuid)
       ? compactionTriggers.get(recordUuid)
       : typeof record.parentUuid === 'string' ? compactionTriggers.get(record.parentUuid) : undefined;
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: isSummary ? 'status' : extracted.role,
+      role: isSummary || peerWake ? 'status' : extracted.role,
       lifecycle: 'durable',
       text: isSummary
         ? compactionTrigger === 'auto' ? '[Claude auto summarized]' : '[Claude summarized]'
-        : extracted.text,
+        : peerWake ? 'Agent responding to peer messages.' : extracted.text,
       ...(isSummary ? { statusKind: 'compaction' as const } : {}),
+      ...(peerWake ? { statusKind: 'coordination' as const } : {}),
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

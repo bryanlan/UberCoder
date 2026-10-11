@@ -63,7 +63,8 @@ export async function buildApp(options: AppOptions = {}) {
   });
   const authService = new AuthService(config, db);
   const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));
-  const coordination = new CoordinationService(db, config.coordination);
+  const wakePeers = () => { void sessions.wakePendingPeerMessages().catch((error: unknown) => app.log.warn({ err: error }, 'Peer-message wake failed.')); };
+  const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakePeers : undefined);
   const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
   await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
   const restartService = new RestartService(() => app.close());
@@ -135,7 +136,7 @@ export async function buildApp(options: AppOptions = {}) {
   }
 
   const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki) : undefined;
-  const coordinationTimer = config.coordination.enabled ? setInterval(() => coordination.reconcileProcesses(), 15_000) : undefined;
+  const coordinationTimer = config.coordination.enabled ? setInterval(() => { coordination.reconcileProcesses(); wakePeers(); }, 15_000) : undefined;
   coordinationTimer?.unref();
   const wikiBackupTimer = setInterval(() => { wiki.backup().catch((error) => app.log.warn({ err: error }, 'Wiki backup failed.')); }, 60 * 60 * 1000);
   wikiBackupTimer.unref();

@@ -93,6 +93,7 @@
   selected timelines when provider history catches up.
 - `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content,
   including complete Claude login URLs recovered from wrapped terminal hyperlinks.
+- `apps/server/src/sessions/screen-heuristics.ts` - native readiness, input-selection and background-work indicators used by lifecycle guards.
 - `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
   default pane capture, interrupts, session kill, and readable/writable session ownership options.
 - `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,
@@ -235,6 +236,7 @@ Test and verification anchors:
 ## Assignment coordination
 
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
+- `apps/server/src/coordination/wake.ts` — fixed peer-response notice, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `packages/shared/src/coordination.ts` — browser/server coordination contracts.
 - `scripts/agent-coord.mjs` — provider lifecycle hooks, host MCP server and local operator client.
 - `scripts/install-coordination.mjs` — reviewed pilot installation with private configuration backups.

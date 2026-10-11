@@ -52,13 +52,13 @@ const serverConfigSchema = z.object({
 });
 
 const sessionsConfigSchema = z.object({
-  eagerRestoreHours: z.number().positive().default(48),
-  restoreGraceHours: z.number().positive().default(24),
+  eagerRestoreHours: z.number().positive().default(1),
+  restoreGraceHours: z.number().positive().default(1),
   pressureSuspendAvailableMiB: z.number().positive().default(3072),
   pressureSuspendIdleMinutes: z.number().positive().default(60),
 }).default({
-  eagerRestoreHours: 48,
-  restoreGraceHours: 24,
+  eagerRestoreHours: 1,
+  restoreGraceHours: 1,
   pressureSuspendAvailableMiB: 3072,
   pressureSuspendIdleMinutes: 60,
 });

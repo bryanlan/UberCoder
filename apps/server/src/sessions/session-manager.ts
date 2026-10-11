@@ -34,7 +34,9 @@ import {
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
+  claudeFullSessionResumeSelection,
   screenShowsQueuedMessageHint,
+  screenShowsBackgroundWork,
   screenShowsInteractiveSelectionHint,
   sessionScreenShowsWorking,
   shouldUseBracketedPasteTransport,
@@ -50,6 +52,8 @@ import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transp
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
+import { processStart } from '../coordination/service.js';
+import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -83,10 +87,10 @@ const AUTO_TRACK_CONCURRENCY = 2;
 // Sessions idle this long stop being kept alive and stop being auto-restored by
 // reconciliation. Their rows stay bound and tree-visible until Work-mode release;
 // selecting one before release restores its tmux session on demand.
-const DEFAULT_SESSION_EAGER_RESTORE_MS = 48 * 60 * 60 * 1000;
+const DEFAULT_SESSION_EAGER_RESTORE_MS = 60 * 60 * 1000;
 // Restoring a session does not move recency, so a freshly restored idle session
 // gets this long before the reaper may suspend it again.
-const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 60 * 60 * 1000;
 // Purple starts after 48 hours; retain that state for seven full days before release.
 const WORK_SESSION_RELEASE_MS = (48 + 7 * 24) * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
@@ -102,6 +106,7 @@ interface SessionManagerOptions {
   pressureSuspendAvailableBytes?: number;
   pressureSuspendIdleMs?: number;
   readMemInfo?: () => string;
+  queueCodexNotice?: typeof queueCodexPeerWake;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -288,9 +293,11 @@ export class SessionManager {
   private readonly pressureSuspendAvailableBytes?: number;
   private readonly pressureSuspendIdleMs: number;
   private readonly readMemInfo: () => string;
+  private readonly queueCodexNotice: typeof queueCodexPeerWake;
   private consecutiveLowMemorySamples = 0;
   private autoTrackActiveLaunches = 0;
   private reconciliationRun?: Promise<void>;
+  private peerWakeRun?: Promise<void>;
   private stopped = false;
 
   constructor(
@@ -307,6 +314,7 @@ export class SessionManager {
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
     this.pressureSuspendIdleMs = options.pressureSuspendIdleMs ?? 60 * 60 * 1000;
     this.readMemInfo = options.readMemInfo ?? (() => fs.readFileSync('/proc/meminfo', 'utf8'));
+    this.queueCodexNotice = options.queueCodexNotice ?? queueCodexPeerWake;
     fs.mkdirSync(this.runtimeDir, { recursive: true });
     this.runtimes = new SessionRuntimeRegistry({
       onSlowCommand: ({ sessionId, label, elapsedMs }) => {
@@ -367,6 +375,115 @@ export class SessionManager {
     return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
+  /** New messages start a response turn; retries of the same message never replay input. */
+  wakePendingPeerMessages(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.peerWakeRun) return this.peerWakeRun;
+    this.peerWakeRun = this.drainPeerMessages().finally(() => { this.peerWakeRun = undefined; });
+    return this.peerWakeRun;
+  }
+
+  private async drainPeerMessages(): Promise<void> {
+    const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
+      a.pid, a.process_start as processStart from coordination_assignments a
+      join coordination_messages m on m.recipient_id=a.id
+      where a.status!='finished' and m.acknowledged_at is null`).all() as Array<{
+        id: string; provider: string; nativeSessionId: string; pid: number; processStart: string;
+      }>;
+    for (const recipient of recipients) {
+      if (this.stopped) return;
+      const sessions = this.listRestorableSessions().filter((session) => session.provider === recipient.provider
+        && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
+      if (sessions.length !== 1) continue;
+      const session = sessions[0]!;
+      await this.runtimes.run(session.id, 'peerMessageWake', async () => {
+        const pending = () => (this.db.sqlite.prepare(`select id from coordination_messages
+          where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string }>)
+          .filter((message) => !this.db.meta.get(peerWakeAttemptKey(message.id)));
+        if (!pending().length || this.stopped) return;
+        let current = this.db.boundSessions.getById(session.id);
+        if (!current || this.getCurrentRestorableSession(current)?.id !== current.id
+          || current.isWorking || current.modelProfileRequest || current.manualSuspendedAt
+          || current.conversationRef.startsWith('pending:')) return;
+        const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
+        if (!project) return;
+        const providerSettings = this.recoveryDependencies!.projectService.getMergedProviderSettings(project, current.provider);
+        if (!providerSettings.enabled) return;
+        const available = this.availableMemoryBytes();
+        if (this.pressureSuspendAvailableBytes !== undefined
+          && (available === undefined || available < this.pressureSuspendAvailableBytes)) return;
+        const liveness = await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
+        if (liveness === 'unknown') return;
+        if (liveness === 'dead') {
+          // A surviving provider outside this tmux binding must never get a second writer.
+          if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
+          const restored = await this.restoreSession(current);
+          if (!restored) {
+            for (const message of pending()) this.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({
+              status: 'failed', sessionId: current.id, timestamp: nowIso(), reason: 'The original conversation could not be restored. Resume it explicitly before retrying delivery.',
+            } satisfies PeerWakeAttempt));
+            return;
+          }
+          current = restored;
+        }
+        if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id) return;
+        await this.runRecovery.refresh(current.id);
+        let screen = await this.captureSessionScreen(current, false);
+        if (this.stopped) return;
+        if (current.provider === 'claude' && claudeFullSessionResumeSelection(screen) !== undefined) {
+          try {
+            screen = await this.resumeFullClaudeSessionForPeerWake(current, screen);
+          } catch (error) {
+            // No durable control attempt means no input was submitted. A
+            // shutdown or transient ownership read must only defer delivery.
+            if (!this.db.meta.get(peerResumeAttemptKey(current))) return;
+            for (const message of pending()) this.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({
+              status: 'failed', sessionId: current.id, timestamp: nowIso(),
+              reason: error instanceof Error ? error.message : 'The original Claude session could not finish resuming.',
+            } satisfies PeerWakeAttempt));
+            return;
+          }
+        }
+        current = this.db.boundSessions.getById(current.id);
+        const assignment = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
+        if (this.stopped || !current || this.getCurrentRestorableSession(current)?.id !== current.id
+          || !assignment || assignment.status === 'finished' || current.status !== 'bound'
+          || current.isWorking || this.providerTurnIsWorking(current.id) === true
+          || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
+          || !screen.inputActive || (current.provider === 'claude' && screen.inputText.trim()) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+          || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
+          || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
+        const messages = pending();
+        if (!messages.length) return;
+        const timestamp = nowIso();
+        // Persist before touching the terminal. An interrupted or ambiguous submission
+        // is never automatically repeated, including after a backend restart.
+        const saveAttempt = (status: PeerWakeAttempt['status'], reason?: string) => {
+          for (const message of messages) this.db.meta.set(peerWakeAttemptKey(message.id),
+            JSON.stringify({ status, sessionId: current!.id, timestamp, reason } satisfies PeerWakeAttempt));
+        };
+        saveAttempt('submitting');
+        const runtime = this.runtimeState(current.id);
+        const previousSubmittedTurnAt = runtime.submittedTurnAt;
+        runtime.submittedTurnAt = timestamp;
+        try {
+          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path);
+          else await this.runInputTmuxAction(current, () => this.submitTextToSession(current!.tmuxSessionName, PEER_WAKE_PROMPT));
+          saveAttempt('submitted');
+          const updated = this.updateBoundSessionFields(current.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
+          this.appendEvent(updated, { type: 'status', text: 'Started a coordination response turn for pending peer messages.', timestamp });
+          this.eventBus.emit({ type: 'session.updated', session: updated });
+        } catch (error) {
+          // The durable attempt still prevents replay. A transport rejection
+          // must not make the previous completed provider turn look running.
+          if (runtime.submittedTurnAt === timestamp) runtime.submittedTurnAt = previousSubmittedTurnAt;
+          saveAttempt('failed', error instanceof Error ? error.message : 'Provider input failed.');
+          this.logger?.warn({ err: error, sessionId: current.id }, 'Peer-message wake failed; ambiguous input will not be replayed.');
+        }
+      }).catch((error: unknown) => this.logger?.warn({ err: error, sessionId: session.id }, 'Peer-message wake deferred.'));
+    }
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) {
       return;
@@ -374,6 +491,7 @@ export class SessionManager {
     const sessionsToDetach = this.listRestorableSessions()
       .filter((session) => session.rawLogPath && (session.status === 'starting' || session.status === 'bound'));
     this.stopped = true;
+    await this.peerWakeRun;
     this.scheduledModelProfileDrains.clear();
     this.requestedModelProfileRedrains.clear();
     this.runRecovery.stop();
@@ -793,6 +911,15 @@ export class SessionManager {
       return;
     }
     if (liveness === 'alive') {
+      const blocked = await this.suspensionBlockReason(session, false);
+      if (blocked) {
+        // Retained live sessions still need their pipe/watchers after restart.
+        // Ownership and unreadable-screen failures must not attach to a pane.
+        if (blocked === 'busy') await this.refreshSessionState(session, { restoreMissing: false });
+        return;
+      }
+      const latest = this.db.boundSessions.getById(session.id);
+      if (!latest || !this.isIdleSuspendable(latest)) return;
       try {
         await this.tmuxClient.killSession(session.tmuxSessionName);
       } catch {
@@ -2192,8 +2319,11 @@ export class SessionManager {
     return assignment?.status === 'active';
   }
 
-  private async suspensionBlockReason(session: BoundSession): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
-    if (this.hasActiveCoordinationAssignment(session)) return 'assignment';
+  private async suspensionBlockReason(session: BoundSession, protectActiveAssignment = true): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
+    // An assignment can remain active after SessionStart without a running
+    // turn. Ordinary idle sleep uses native activity; explicit and pressure
+    // suspension retain their assignment policy.
+    if (protectActiveAssignment && this.hasActiveCoordinationAssignment(session)) return 'assignment';
     if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive'
       || await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== session.id) {
       return 'ownership';
@@ -2203,13 +2333,15 @@ export class SessionManager {
     const screen = parseSessionScreenSnapshot(snapshot, nowIso());
     await this.runRecovery.refresh(session.id);
     const current = this.db.boundSessions.getById(session.id);
+    const idleResumeChoice = session.provider === 'claude' && claudeFullSessionResumeSelection(screen) !== undefined;
     if (!current || !current.shouldRestore || current.status !== 'bound' || current.isWorking
       || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
       || current.conversationRef.startsWith('pending:') || this.providerTurnIsWorking(session.id) === true
       || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
-      || screen.inputText.trim() || screenShowsInteractiveSelectionHint(screen)
+      || screenShowsBackgroundWork(screen)
+      || screen.inputText.trim() || (!idleResumeChoice && (!screen.inputActive || screenShowsInteractiveSelectionHint(screen)))
       || screenShowsQueuedMessageHint(screen)
-      || (session.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) {
+      || (session.provider === 'codex' ? !screen.model : !idleResumeChoice && !screenLooksReadyForLiteralPrompt(screen))) {
       return 'busy';
     }
     return undefined;
@@ -2911,6 +3043,55 @@ export class SessionManager {
         return latestChangedScreen;
       }
       await sleep(35);
+    }
+  }
+
+  private async resumeFullClaudeSessionForPeerWake(session: BoundSession, initialScreen: SessionScreen): Promise<SessionScreen> {
+    const key = peerResumeAttemptKey(session);
+    if (this.db.meta.get(key)) throw new Error('A previous automatic Claude resume confirmation was already attempted. Resume the original session explicitly.');
+    const save = (status: PeerWakeAttempt['status'], reason?: string) => this.db.meta.set(key,
+      JSON.stringify({ status, sessionId: session.id, timestamp: nowIso(), reason } satisfies PeerWakeAttempt));
+    const verifyOwnership = async () => {
+      const current = this.db.boundSessions.getById(session.id);
+      const [owner, pid] = await Promise.all([
+        this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id'),
+        this.tmuxClient.getPanePid(session.tmuxSessionName),
+      ]);
+      if (this.stopped || !current || this.getCurrentRestorableSession(current)?.id !== session.id
+        || current.manualSuspendedAt || current.pressureSuspendedAt || current.modelProfileRequest
+        || !session.pid || current.pid !== session.pid || owner !== session.id || pid !== session.pid) {
+        throw new Error('Session ownership or availability changed before confirming the original Claude session resume.');
+      }
+    };
+    let screen = initialScreen;
+    await verifyOwnership();
+    screen = await this.captureSessionScreen(session, false);
+    let selection = claudeFullSessionResumeSelection(screen);
+    if (selection === undefined) return screen;
+    // This control confirmation has its own durable attempt. A failed or
+    // interrupted Enter must never later reach the conversation composer.
+    try {
+      if (selection !== 'full') {
+        save('submitting');
+        await this.tmuxClient.sendKeys(session.tmuxSessionName, [selection === 'summary' ? 'Down' : 'Up']);
+        screen = await this.waitForScreenMatch(session, hashScreen(screen), TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS,
+          (candidate) => claudeFullSessionResumeSelection(candidate) === 'full') ?? screen;
+      }
+      await verifyOwnership();
+      screen = await this.captureSessionScreen(session, false);
+      selection = claudeFullSessionResumeSelection(screen);
+      if (selection !== 'full') throw new Error('Claude full-session resume could not be selected. No peer notice was submitted.');
+      save('submitting');
+      await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']);
+      save('submitted');
+      screen = await this.waitForScreenMatch(session, hashScreen(screen), CLAUDE_RESUME_READY_WAIT_MS,
+        (candidate) => claudeFullSessionResumeSelection(candidate) === undefined) ?? screen;
+      this.appendEvent(session, { type: 'status', text: 'Resumed the full original Claude session for peer messages.', timestamp: nowIso() });
+      this.publishScreenUpdate(session, screen);
+      return screen;
+    } catch (error) {
+      if (this.db.meta.get(key)) save('failed', error instanceof Error ? error.message : 'Claude resume confirmation failed.');
+      throw error;
     }
   }
 

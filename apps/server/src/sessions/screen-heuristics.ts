@@ -13,6 +13,20 @@ export function sessionScreenShowsWorking(screen: SessionScreen): boolean {
     .some((line) => isWorkingStatusLine(line));
 }
 
+/** Native task chrome can stay present while the foreground composer is ready. */
+export function screenShowsBackgroundWork(screen: SessionScreen): boolean {
+  const statusLines = stripAnsiAndControl(screen.status).split('\n').map(normalizeWhitespace);
+  if (statusLines.some((line) => /(?:^|·)\s*[1-9]\d*\s+(?:shells?|(?:background\s+)?agents?|tasks?)(?:\s*·|$)/i.test(line)
+    // Claude's native roster is separated into status by the screen parser.
+    // A child remains part of this session until its roster row disappears.
+    || /^[●◯○]\s+(?!main(?:\s|$))\S/u.test(line))) return true;
+  const lastContentLine = stripAnsiAndControl(screen.content).split('\n').map(normalizeWhitespace).filter(Boolean).at(-1) ?? '';
+  // Codex renders this live row immediately above its composer. Do not scan
+  // older conversation prose mentioning a previously running terminal.
+  return /^[1-9]\d* background terminals? running · \/ps to view · \/stop to close$/i.test(lastContentLine)
+    || /^[✻✽✶✢✳*]\s+Waiting for [1-9]\d* background agents? to finish$/i.test(lastContentLine);
+}
+
 export function screenInputChanged(previous: SessionScreen, next: SessionScreen): boolean {
   return normalizeComparableText(previous.inputText) !== normalizeComparableText(next.inputText);
 }
@@ -126,6 +140,23 @@ export function screenShowsClaudeResumeSessionChoice(screen: SessionScreen): boo
     && /Resume full session as-is/i.test(normalized)
     && /Don't ask me again/i.test(normalized)
     && /Enter to confirm · Esc to cancel/i.test(normalized);
+}
+
+/** Only the active, complete native resume menu may be answered automatically. */
+export function claudeFullSessionResumeSelection(screen: SessionScreen): 'summary' | 'full' | 'always' | undefined {
+  if (screen.inputActive || screen.inputText.trim()) return undefined;
+  const lines = stripAnsiAndControl(screen.content).split('\n').map(normalizeWhitespace).filter(Boolean);
+  const menu = lines.slice(-4);
+  if (menu[3] !== 'Enter to confirm · Esc to cancel'
+    || !lines.slice(-12, -4).some((line) => /^This session is .+ old and .+ tokens\.?$/i.test(line))) return undefined;
+  const choices = menu.slice(0, 3);
+  const options = choices.map((line) => line.replace(/^[❯›>]\s*/u, ''));
+  if (!/^1\. Resume from summary \((?:instant, )?recommended\)$/.test(options[0] ?? '')
+    || options[1] !== '2. Resume full session as-is'
+    || options[2] !== "3. Don't ask me again") return undefined;
+  const selected = choices.map((line, index) => /^[❯›>]\s*/u.test(line) ? index : -1).filter((index) => index >= 0);
+  if (selected.length !== 1) return undefined;
+  return (['summary', 'full', 'always'] as const)[selected[0]!];
 }
 
 export function claudeFolderTrustSelection(screen: SessionScreen): 'accept' | 'exit' | undefined {
