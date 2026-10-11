@@ -173,9 +173,9 @@ describe('Claude compaction search upgrade', () => {
     cleanup.push(() => indexing.stop());
 
     await indexing.loadProjectMetadata({ backfillSearchIndex: true });
-    expect(db.searchIndex.search(buildFtsQuery('text I typed before the summary')!, 10)).toHaveLength(1);
-    expect(db.searchIndex.search(buildFtsQuery('internal summary body')!, 10)).toEqual([]);
-    expect(db.searchIndex.search(buildFtsQuery('Claude auto summarized')!, 10)).toEqual([]);
+    expect((await db.searchIndex.search(buildFtsQuery('text I typed before the summary')!, 10))).toHaveLength(1);
+    expect((await db.searchIndex.search(buildFtsQuery('internal summary body')!, 10))).toEqual([]);
+    expect((await db.searchIndex.search(buildFtsQuery('Claude auto summarized')!, 10))).toEqual([]);
     expect(db.meta.get(versionKey)).toBe(String(TRANSCRIPT_PARSER_VERSION));
     expect(writes).toHaveBeenCalledTimes(1);
     expect((await fs.stat(filePath)).mtimeMs).toBe(stat.mtimeMs);
@@ -214,10 +214,10 @@ describe('Claude compaction search upgrade', () => {
 
     await expect(indexing.loadProjectMetadata({ backfillSearchIndex: true })).rejects.toThrow('Interrupted write');
     expect(db.meta.get(versionKey)).toBe(String(TRANSCRIPT_PARSER_VERSION - 1));
-    expect(db.searchIndex.search(buildFtsQuery('internal summary body')!, 10)).toHaveLength(1);
+    expect((await db.searchIndex.search(buildFtsQuery('internal summary body')!, 10))).toHaveLength(1);
     await indexing.loadProjectMetadata({ backfillSearchIndex: true });
-    expect(db.searchIndex.search(buildFtsQuery('internal summary body')!, 10)).toEqual([]);
-    expect(db.searchIndex.search(buildFtsQuery('text I typed before the summary')!, 10)).toHaveLength(2);
+    expect((await db.searchIndex.search(buildFtsQuery('internal summary body')!, 10))).toEqual([]);
+    expect((await db.searchIndex.search(buildFtsQuery('text I typed before the summary')!, 10))).toHaveLength(2);
     expect(db.meta.get(versionKey)).toBe(String(TRANSCRIPT_PARSER_VERSION));
     expect(writes).toHaveBeenCalledTimes(4);
   });

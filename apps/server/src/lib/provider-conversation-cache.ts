@@ -8,6 +8,8 @@ interface CachedProviderConversation {
   conversation: ProviderConversation;
   mtimeMs: number;
   size: number;
+  identity: string;
+  generation: number;
 }
 
 // Parsed messages retain provider metadata and normalized text, so source bytes are
@@ -23,8 +25,10 @@ const MAX_CACHED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 const STALE_WHILE_CHANGING_MIN_BYTES = LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES;
 
 const transcriptConversationCache = new Map<string, CachedProviderConversation>();
+const inFlightParses = new Map<string, { fingerprint: string; promise: Promise<ProviderConversation | null> }>();
 
 let cachedTranscriptBytes = 0;
+let nextParseGeneration = 0;
 
 function refreshCacheRecency(key: string, entry: CachedProviderConversation): void {
   transcriptConversationCache.delete(key);
@@ -77,13 +81,16 @@ export async function loadProviderConversationFromSummary(
     return null;
   }
 
+  const transcriptPath = summary.transcriptPath;
   try {
-    const stat = await fs.stat(summary.transcriptPath);
+    const stat = await fs.stat(transcriptPath);
+    const identity = `${stat.dev}:${stat.ino}`;
     const cached = transcriptConversationCache.get(key);
     const allowStale = options.allowStaleWhileChanging === true
       && stat.size >= STALE_WHILE_CHANGING_MIN_BYTES;
     if (
       cached
+      && cached.identity === identity
       && (
         allowStale
         || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
@@ -93,34 +100,50 @@ export async function loadProviderConversationFromSummary(
       return cached.conversation;
     }
 
-    const parsed = summary.provider === 'claude'
-      ? await parseClaudeConversationFile({
-          filePath: summary.transcriptPath,
-          provider: summary.provider,
-          projectSlug: summary.projectSlug,
-          conversationRef: summary.ref,
-          collectPathMetadata: false,
-        })
-      : await parseCodexConversationFile({
-          filePath: summary.transcriptPath,
-          provider: summary.provider,
-          projectSlug: summary.projectSlug,
-          conversationRef: summary.ref,
-          collectPathMetadata: false,
+    const fingerprint = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    const pending = inFlightParses.get(key);
+    if (pending?.fingerprint === fingerprint) return await pending.promise;
+
+    const generation = ++nextParseGeneration;
+    const promise: Promise<ProviderConversation | null> = Promise.resolve().then(async () => {
+      try {
+        const parsed = summary.provider === 'claude'
+          ? await parseClaudeConversationFile({
+              filePath: transcriptPath,
+              provider: summary.provider,
+              projectSlug: summary.projectSlug,
+              conversationRef: summary.ref,
+              collectPathMetadata: false,
+            })
+          : await parseCodexConversationFile({
+              filePath: transcriptPath,
+              provider: summary.provider,
+              projectSlug: summary.projectSlug,
+              conversationRef: summary.ref,
+              collectPathMetadata: false,
+            });
+
+        const conversation: ProviderConversation = {
+          summary: parsed.summary,
+          messages: parsed.displayMessages,
+          allMessages: parsed.messages,
+        };
+
+        // Warm stale reads even while a newer parse runs, without replacing a
+        // newer completed result when parses finish out of order.
+        if ((transcriptConversationCache.get(key)?.generation ?? -1) < generation) insertCacheEntry(key, {
+          conversation, mtimeMs: stat.mtimeMs, size: stat.size, identity, generation,
         });
-
-    const conversation: ProviderConversation = {
-      summary: parsed.summary,
-      messages: parsed.displayMessages,
-      allMessages: parsed.messages,
-    };
-
-    insertCacheEntry(key, {
-      conversation,
-      mtimeMs: stat.mtimeMs,
-      size: stat.size,
+        return conversation;
+      } catch {
+        if (inFlightParses.get(key)?.promise === promise) deleteCacheEntry(key);
+        return null;
+      } finally {
+        if (inFlightParses.get(key)?.promise === promise) inFlightParses.delete(key);
+      }
     });
-    return conversation;
+    inFlightParses.set(key, { fingerprint, promise });
+    return await promise;
   } catch {
     deleteCacheEntry(key);
     return null;

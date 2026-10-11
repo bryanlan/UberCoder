@@ -276,7 +276,7 @@ export class ConversationSearchService {
 
     const activeProjects = await this.projectService.listActiveProjects();
     const now = new Date();
-    const persistedResults = this.db.searchIndex.search(ftsQuery, limit * SEARCH_RESULT_MULTIPLIER, {
+    const persistedResults = await this.db.searchIndex.search(ftsQuery, limit * SEARCH_RESULT_MULTIPLIER, {
       projectSlugs: activeProjects.map((project) => project.slug),
       now: now.toISOString(),
       terms,

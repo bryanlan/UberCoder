@@ -314,25 +314,6 @@ function extractExactReplyRequest(text: string | undefined): string | undefined 
   return expected || undefined;
 }
 
-export function removePreviouslySeenAssistantText(line: string, messages: NormalizedMessage[]): string {
-  const normalizedLine = line.trim();
-  const currentAssistantRun: NormalizedMessage[] = [];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (message.role === 'user') {
-      break;
-    }
-    if (message.role === 'assistant' && message.source === 'live-output') {
-      currentAssistantRun.push(message);
-    }
-  }
-  const previousAssistantLines = new Set(currentAssistantRun
-    .flatMap((message) => message.text.split(/\n+/))
-    .map((text) => text.trim())
-    .filter((text) => text.length >= 6));
-  return previousAssistantLines.has(normalizedLine) ? '' : line;
-}
-
 export function shouldDropPreSubmitPromptEcho(
   previous: NormalizedMessage | undefined,
   inputText: string,

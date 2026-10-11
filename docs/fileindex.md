@@ -242,6 +242,10 @@ Test and verification anchors:
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.
 - `apps/server/src/coordination/telemetry.ts` and `scripts/coordination-telemetry.{mjs,d.mts}` — bounded private measurements, backend-independent failure recording and read-only audit summaries.
 - `apps/server/src/db/repos/search-index.ts` and migration 15 in `db/schema.ts` — atomic FTS row ownership and indexed identity updates.
+- `apps/server/src/db/read-query-worker.ts` — bounded read-only SQLite search worker;
+  `apps/server/test/read-query-worker.test.ts` verifies responsiveness, lifecycle and queue bounds.
+- `apps/server/test/live-output-incremental.test.ts` — append/tail parity, UTF-8 offsets,
+  partial records, truncation, replacement and per-turn duplicate resets.
 - `apps/server/src/providers/transcripts/peer-wake-usage.ts` — exact native coordination-turn usage and outcomes; streamed requests are counted once.
 - `docs/peer-wake-audit.md` — measurement, warning, usage coverage and scheduler ownership contracts.
 - `packages/shared/src/coordination.ts` — browser/server coordination contracts.

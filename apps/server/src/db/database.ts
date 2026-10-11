@@ -32,6 +32,7 @@ export class AppDatabase {
     this.sqlite = new Database(databasePath);
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('foreign_keys = ON');
+    this.sqlite.pragma('cache_size = -65536');
     migrateDatabase(this.sqlite);
 
     this.meta = new MetaRepo(this.sqlite);
@@ -46,6 +47,7 @@ export class AppDatabase {
   }
 
   close(): void {
+    void this.searchIndex.close();
     this.sqlite.close();
   }
 

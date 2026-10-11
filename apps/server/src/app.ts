@@ -172,6 +172,7 @@ export async function buildApp(options: AppOptions = {}) {
     liveOutputReader.clear();
     await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Final wiki backup failed.'));
     wiki.close();
+    await db.searchIndex.close();
     db.close();
   });
 

@@ -17,6 +17,7 @@ export interface ReadLiveMessagesOptions {
 
 export interface EventLogReadPlan {
   cacheKey: string;
+  identity: string;
   size: number;
   maxBytes?: number;
 }
@@ -37,11 +38,13 @@ export async function getEventLogReadPlan(
   const maxBytes = options.maxBytesFromEnd;
   const cacheKey = [
     filePath,
+    stat.dev,
+    stat.ino,
     stat.size,
     stat.mtimeMs,
     maxBytes ?? 'all',
   ].join(':');
-  return { cacheKey, size: stat.size, maxBytes };
+  return { cacheKey, identity: `${stat.dev}:${stat.ino}`, size: stat.size, maxBytes };
 }
 
 export async function readEventLogText(
@@ -49,20 +52,20 @@ export async function readEventLogText(
   plan: { size: number; maxBytes?: number },
 ): Promise<EventLogReadResult> {
   if (!plan.maxBytes || plan.size <= plan.maxBytes) {
-    return { text: await fs.readFile(filePath, 'utf8'), startOffset: 0 };
+    return { text: (await readFileBytes(filePath, 0, plan.size)).toString('utf8'), startOffset: 0 };
   }
 
   const start = Math.max(0, plan.size - plan.maxBytes);
   const length = plan.size - start;
-  const text = await readFileSlice(filePath, start, length);
+  const bytes = await readFileBytes(filePath, start, length);
   if (start === 0) {
-    return { text, startOffset: 0 };
+    return { text: bytes.toString('utf8'), startOffset: 0 };
   }
 
-  const firstNewline = text.indexOf('\n');
+  const firstNewline = bytes.indexOf(10);
   if (firstNewline !== -1) {
     const rowStart = start + firstNewline + 1;
-    const completeTail = text.slice(firstNewline + 1);
+    const completeTail = bytes.subarray(firstNewline + 1).toString('utf8');
     if (completeTail.trim()) {
       return {
         text: completeTail,
@@ -77,16 +80,17 @@ export async function readEventLogText(
     return { text: '', startOffset: plan.size };
   }
   return {
-    text: await readFileSlice(filePath, rowStart, plan.size - rowStart),
+    text: (await readFileBytes(filePath, rowStart, plan.size - rowStart)).toString('utf8'),
     startOffset: rowStart,
     lastUserInputBeforeText: await findLastUserInputBefore(filePath, rowStart),
   };
 }
 
-export function parseSessionEventEntries(readResult: EventLogReadResult): SessionEventEntry[] {
+export async function parseSessionEventEntries(readResult: EventLogReadResult): Promise<SessionEventEntry[]> {
   const entries: SessionEventEntry[] = [];
   let cursor = 0;
   let byteOffset = readResult.startOffset;
+  let yieldedAt = performance.now();
 
   while (cursor < readResult.text.length) {
     const nextNewline = readResult.text.indexOf('\n', cursor);
@@ -105,9 +109,46 @@ export function parseSessionEventEntries(readResult: EventLogReadResult): Sessio
       break;
     }
     cursor = nextNewline + 1;
+    if (performance.now() - yieldedAt >= 8) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      yieldedAt = performance.now();
+    }
   }
 
   return entries;
+}
+
+/** Reuse an append-only tail, verifying file identity and the old EOF anchor.
+ * A changed/truncated file or a partial last record is reconstructed normally. */
+export async function readAppendedEventLogText(
+  filePath: string,
+  plan: EventLogReadPlan,
+  previous?: { plan: EventLogReadPlan; read: EventLogReadResult },
+): Promise<EventLogReadResult> {
+  if (!previous || previous.plan.identity !== plan.identity
+    || plan.size <= previous.plan.size || !previous.read.text.endsWith('\n')
+    || plan.size - previous.plan.size > (plan.maxBytes ?? 2 * 1024 * 1024)) {
+    return readEventLogText(filePath, plan);
+  }
+  const old = Buffer.from(previous.read.text, 'utf8');
+  if (previous.read.startOffset + old.length !== previous.plan.size) return readEventLogText(filePath, plan);
+  const anchorSize = Math.min(256, old.length);
+  const anchor = await readFileBytes(filePath, previous.plan.size - anchorSize, anchorSize);
+  if (!anchor.equals(old.subarray(old.length - anchorSize))) return readEventLogText(filePath, plan);
+  const appended = await readFileBytes(filePath, previous.plan.size, plan.size - previous.plan.size);
+  const combined = Buffer.concat([old, appended]);
+  const cutoff = plan.maxBytes && plan.size > plan.maxBytes ? plan.size - plan.maxBytes : 0;
+  if (cutoff < previous.read.startOffset) return readEventLogText(filePath, plan);
+  if (cutoff === 0) return { text: combined.toString('utf8'), startOffset: 0 };
+  const newline = combined.indexOf(10, cutoff - previous.read.startOffset);
+  if (newline < 0 || !combined.subarray(newline + 1).toString('utf8').trim()) return readEventLogText(filePath, plan);
+  const startOffset = previous.read.startOffset + newline + 1;
+  return {
+    text: combined.subarray(newline + 1).toString('utf8'),
+    startOffset,
+    lastUserInputBeforeText: startOffset === previous.read.startOffset
+      ? previous.read.lastUserInputBeforeText : await findLastUserInputBefore(filePath, startOffset),
+  };
 }
 
 function parseSessionEventLine(line: string): SessionEventLine | undefined {
@@ -118,7 +159,7 @@ function parseSessionEventLine(line: string): SessionEventLine | undefined {
   }
 }
 
-async function readFileSlice(filePath: string, start: number, length: number): Promise<string> {
+async function readFileBytes(filePath: string, start: number, length: number): Promise<Buffer> {
   const buffer = Buffer.alloc(length);
   const handle = await fs.open(filePath, 'r');
   try {
@@ -130,7 +171,7 @@ async function readFileSlice(filePath: string, start: number, length: number): P
       }
       offset += bytesRead;
     }
-    return buffer.subarray(0, offset).toString('utf8');
+    return buffer.subarray(0, offset);
   } finally {
     await handle.close();
   }
@@ -138,8 +179,8 @@ async function readFileSlice(filePath: string, start: number, length: number): P
 
 async function findBoundedRowStart(filePath: string, offset: number): Promise<number | undefined> {
   const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
-  const prefix = await readFileSlice(filePath, backtrackStart, offset - backtrackStart);
-  const previousNewline = prefix.lastIndexOf('\n');
+  const prefix = await readFileBytes(filePath, backtrackStart, offset - backtrackStart);
+  const previousNewline = prefix.lastIndexOf(10);
   if (previousNewline !== -1) {
     return backtrackStart + previousNewline + 1;
   }
@@ -152,7 +193,7 @@ async function findLastUserInputBefore(filePath: string, offset: number): Promis
   }
 
   const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
-  const prefix = await readFileSlice(filePath, backtrackStart, offset - backtrackStart);
+  const prefix = (await readFileBytes(filePath, backtrackStart, offset - backtrackStart)).toString('utf8');
   const lines = prefix.split(/\r?\n/).filter(Boolean);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const event = parseSessionEventLine(lines[index] ?? '');

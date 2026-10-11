@@ -8,6 +8,7 @@ import {
 } from '@agent-console/shared';
 import { treeVisibleBoundSessionSql } from '../../lib/bound-session-state.js';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
+import { ReadQueryWorker } from '../read-query-worker.js';
 
 export interface ConversationSearchIndexChunk {
   projectSlug: string;
@@ -73,6 +74,7 @@ export interface ConversationSearchStateRow {
 }
 
 export class SearchIndexRepo {
+  private readonly reader: ReadQueryWorker;
   private readonly insertChunkStatement: Database.Statement;
   private readonly insertRowStatement: Database.Statement;
   private readonly deleteConversationChunksStatement: Database.Statement;
@@ -81,6 +83,7 @@ export class SearchIndexRepo {
   private readonly upsertConversationStateStatement: Database.Statement;
 
   constructor(private readonly sqlite: Database.Database) {
+    this.reader = new ReadQueryWorker(sqlite.name);
     this.insertChunkStatement = sqlite.prepare(`
       insert into conversation_search_fts (
         conversation_title, project_display_name, project_tags, text, project_slug, project_path,
@@ -235,7 +238,11 @@ export class SearchIndexRepo {
     `).run(input.displayName, input.path, input.tags.join(' '), input.projectSlug);
   }
 
-  search(ftsQuery: string, limit: number, options: { projectSlugs?: string[]; now?: string; terms?: string[] } = {}): ConversationSearchResult[] {
+  close(): Promise<void> {
+    return this.reader.close();
+  }
+
+  async search(ftsQuery: string, limit: number, options: { projectSlugs?: string[]; now?: string; terms?: string[] } = {}): Promise<ConversationSearchResult[]> {
     const projectSlugs = options.projectSlugs;
     if (projectSlugs && projectSlugs.length === 0) {
       return [];
@@ -243,7 +250,7 @@ export class SearchIndexRepo {
     const projectFilter = projectSlugs
       ? `and conversation_search_fts.project_slug in (${projectSlugs.map(() => '?').join(', ')})`
       : '';
-    const rows = this.sqlite.prepare(`
+    const rows = await this.reader.query(`
       with matched_chunks as (
         select
           conversation_search_fts.rowid as fts_rowid,
@@ -322,7 +329,7 @@ export class SearchIndexRepo {
       where ranked_matches.conversation_rank = 1
       order by ranked_matches.recency_bucket asc, ranked_matches.rank asc, ranked_matches.conversation_updated_at desc
       limit ?
-    `).all(
+    `, [
       options.now ?? new Date().toISOString(),
       options.now ?? new Date().toISOString(),
       options.now ?? new Date().toISOString(),
@@ -330,7 +337,7 @@ export class SearchIndexRepo {
       ftsQuery,
       ...(projectSlugs ?? []),
       limit,
-    ) as SqliteRow[];
+    ]);
 
     return rows.map((row) => ({
       projectSlug: String(row.project_slug),

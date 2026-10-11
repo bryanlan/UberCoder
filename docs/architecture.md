@@ -26,6 +26,12 @@ whole-table update scan. Refreshes commit and yield between conversations. Searc
 derived state in the existing database; private-copy performance evidence gates activation.
 Keep a consistent SQLite backup before migration: older binaries reject schema 15.
 
+FTS searches use one lazy, read-only SQLite worker connection, so cold queries cannot
+block the server's coordination and session event loop. The owning connection still
+performs all writes. Each connection has a 64 MiB page-cache budget; the read worker
+accepts at most 16 outstanding requests with a 10-second deadline and is closed during
+server shutdown. No schema migration is needed for these read-path optimizations.
+
 ## Clipboard Images
 
 The live composer accepts pasted PNG, JPEG and WebP images, with previews, removal
@@ -90,6 +96,10 @@ above `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES` in `packages/shared/src/index.ts`
 parse during the active turn to avoid expensive poll-time reparsing; the conversation route returns
 `transcriptSizeBytes`, and `ConversationPane.tsx` shows a dismissible large-chat warning for that
 case.
+Concurrent requests for the same transcript fingerprint share one parse. File identity,
+size and modification time distinguish reads. Completed parses warm stale reads while
+newer work runs; parse generations prevent an older result replacing a newer completed
+result in the cache.
 `apps/server/src/sessions/timeline-merge.ts` owns the duplicate-suppression contract between
 durable transcript messages and event-log live messages: it compares role, timestamp buckets, exact
 short-window matches, and longer containment matches so the same assistant output does not reappear
@@ -104,6 +114,13 @@ Output waiting on restoration remains in arrival order, retains its arrival-time
 decision, and yields between batches. Stopping a watcher invalidates its delayed batches,
 including across suspension and resume.
 Output updates must not synchronously load or scan the whole event history.
+
+Live timeline reads cache per-session normalized events and use a set for assistant-line
+duplicate detection. Append reads verify the file identity and previous EOF bytes;
+partial records, truncation and replacement trigger reconstruction. Tail boundaries and
+message offsets use UTF-8 byte positions. Parsing and reconstruction yield between
+bounded batches. Completed live-read entries have a combined 64 MiB estimated-text
+budget and a 64-entry limit, and concurrent reads of the same fingerprint share work.
 
 Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
 state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses from

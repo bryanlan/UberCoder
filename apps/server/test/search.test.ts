@@ -119,7 +119,7 @@ describe('conversation search', () => {
 
     const allocationQuery = buildFtsQuery('allocation review');
     expect(allocationQuery).toBeTruthy();
-    const allocationResults = db.searchIndex.search(allocationQuery!, 10);
+    const allocationResults = (await db.searchIndex.search(allocationQuery!, 10));
     expect(allocationResults[0]).toMatchObject({
       projectSlug: 'demo',
       conversationRef: 'conversation-1',
@@ -128,10 +128,10 @@ describe('conversation search', () => {
     expect(allocationResults[0]?.snippet).toContain('allocation');
 
     const codeQuery = buildFtsQuery('shouldNeverAppear');
-    expect(db.searchIndex.search(codeQuery!, 10)).toEqual([]);
+    expect((await db.searchIndex.search(codeQuery!, 10))).toEqual([]);
 
     db.searchIndex.updateTitle('demo', 'codex', 'conversation-1', 'Renamed allocation session');
-    expect(db.searchIndex.search(allocationQuery!, 10)[0]?.conversationTitle).toBe('Renamed allocation session');
+    expect((await db.searchIndex.search(allocationQuery!, 10))[0]?.conversationTitle).toBe('Renamed allocation session');
     db.close();
   });
 
@@ -157,7 +157,7 @@ describe('conversation search', () => {
 
     const metadataQuery = buildFtsQuery('ops');
     expect(metadataQuery).toBeTruthy();
-    expect(db.searchIndex.search(metadataQuery!, 10)).toEqual([]);
+    expect((await db.searchIndex.search(metadataQuery!, 10))).toEqual([]);
     db.close();
   });
 
@@ -183,7 +183,7 @@ describe('conversation search', () => {
 
     const query = buildFtsQuery('stale bound phrase');
     expect(query).toBeTruthy();
-    expect(db.searchIndex.search(query!, 10)[0]?.isBound).toBe(false);
+    expect((await db.searchIndex.search(query!, 10))[0]?.isBound).toBe(false);
 
     db.boundSessions.upsert({
       id: 'session-current',
@@ -198,7 +198,7 @@ describe('conversation search', () => {
       updatedAt: '2026-06-18T12:01:00.000Z',
     });
 
-    expect(db.searchIndex.search(query!, 10)[0]?.isBound).toBe(true);
+    expect((await db.searchIndex.search(query!, 10))[0]?.isBound).toBe(true);
     db.close();
   });
 
@@ -968,7 +968,7 @@ describe('conversation search', () => {
       await indexing.start();
       const query = buildFtsQuery('cached upgrade phrase');
       expect(query).toBeTruthy();
-      const results = db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] });
+      const results = (await db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] }));
 
       expect(results).toEqual([]);
       expect(listConversationCalls).toBe(0);
@@ -1042,7 +1042,7 @@ describe('conversation search', () => {
       await indexing.loadProjectMetadata({ backfillSearchIndex: true });
       const query = buildFtsQuery('reactivated cached phrase');
       expect(query).toBeTruthy();
-      const results = db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] });
+      const results = (await db.searchIndex.search(query!, 10, { projectSlugs: ['demo'] }));
 
       expect(results[0]?.conversationRef).toBe('reactivated-cached');
     } finally {

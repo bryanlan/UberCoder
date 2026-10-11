@@ -1,4 +1,11 @@
 # Running Tests
+
+Search-read and live-output performance regressions use temporary file-backed SQLite
+databases and event logs. Run `npm run test -w @agent-console/server --
+test/read-query-worker.test.ts test/live-output-incremental.test.ts
+test/provider-conversation-cache.test.ts test/live-output.test.ts test/search.test.ts`.
+The worker suite verifies that a costly SQLite query leaves the owning event loop free;
+it does not query the live Console database.
 ## Primary Commands
 - `npm test` - builds the shared package and runs the server Vitest suite.
 - `npm run typecheck` - builds the shared package, then typechecks the server and web packages.

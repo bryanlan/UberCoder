@@ -22,7 +22,7 @@ function assertOwnership(db: AppDatabase) {
   expect(db.sqlite.prepare(`select rowid,project_slug,provider,conversation_ref from conversation_search_fts order by rowid`).all())
     .toEqual(db.sqlite.prepare(`select fts_rowid as rowid,project_slug,provider,conversation_ref from conversation_search_rows order by fts_rowid`).all());
 }
-it('migrates version 14 without replacing FTS rows or durable application state', () => {
+it('migrates version 14 without replacing FTS rows or durable application state', async () => {
   const db = fixture();
   db.searchIndex.replace('demo', 'codex', [chunk('a'), chunk('b')]);
   db.meta.set('peer-wake-attempt:message', '{"status":"submitted"}');
@@ -38,7 +38,7 @@ it('migrates version 14 without replacing FTS rows or durable application state'
   expect(db.sqlite.prepare('select rowid,* from conversation_search_fts order by rowid').all()).toEqual(before);
   expect(db.sqlite.prepare('select * from coordination_messages').all()).toEqual(messages);
   expect(db.meta.get('peer-wake-attempt:message')).toBe('{"status":"submitted"}');
-  expect(db.searchIndex.search('evidence', 10)).toHaveLength(2);
+  expect((await db.searchIndex.search('evidence', 10))).toHaveLength(2);
   assertOwnership(db);
 });
 it('uses indexed identity and FTS rowid lookups instead of scanning FTS metadata', () => {
@@ -49,7 +49,7 @@ it('uses indexed identity and FTS rowid lookups instead of scanning FTS metadata
   expect(plan.map((r) => r.detail).join('\n')).toContain('conversation_search_rows_identity');
   expect(plan.find((r) => r.detail.includes('VIRTUAL TABLE'))?.detail).toContain('INDEX 0:=');
 });
-it('keeps ownership and unrelated scopes intact through every search write path', () => {
+it('keeps ownership and unrelated scopes intact through every search write path', async () => {
   const db = fixture();
   db.searchIndex.replace('demo', 'codex', [chunk('a'), chunk('b')]);
   db.searchIndex.replace('other', 'claude', [chunk('outside', 'other', 'claude')]);
@@ -57,7 +57,7 @@ it('keeps ownership and unrelated scopes intact through every search write path'
   assertOwnership(db);
   db.searchIndex.updateTitle('demo', 'codex', 'a', 'renamed');
   db.searchIndex.updateProjectMetadata({ projectSlug: 'demo', displayName: 'new display', path: '/new', tags: ['tag'] });
-  expect(db.searchIndex.search('evidence', 10).find((r) => r.conversationRef === 'a'))
+  expect((await db.searchIndex.search('evidence', 10)).find((r) => r.conversationRef === 'a'))
     .toMatchObject({ conversationTitle: 'renamed', projectDisplayName: 'new display' });
   db.searchIndex.deleteConversation('demo', 'codex', 'a');
   assertOwnership(db);
@@ -66,7 +66,7 @@ it('keeps ownership and unrelated scopes intact through every search write path'
   assertOwnership(db);
   expect(db.searchIndex.hasRowsFor('demo', 'codex')).toBe(false);
   expect(db.searchIndex.hasRowsFor('other', 'claude')).toBe(true);
-  expect(db.searchIndex.search('evidence', 10).map((r) => r.conversationRef)).toEqual(['outside']);
+  expect((await db.searchIndex.search('evidence', 10)).map((r) => r.conversationRef)).toEqual(['outside']);
 });
 it('rolls back FTS, mapping and file state together when an insert fails', () => {
   const db = fixture();

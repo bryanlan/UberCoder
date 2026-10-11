@@ -5,14 +5,15 @@ import {
   linesAreOnlyProviderProgressRepaint,
   normalizeRawOutputLines,
   rawOutputStartsProviderProgress,
-  removePreviouslySeenAssistantText,
   shouldDropPreSubmitPromptEcho,
   splitRawOutputAtProviderProgress,
 } from './filters.js';
 import {
   getEventLogReadPlan,
   parseSessionEventEntries,
-  readEventLogText,
+  readAppendedEventLogText,
+  type EventLogReadPlan,
+  type EventLogReadResult,
   type ReadLiveMessagesOptions,
   type SessionEventEntry,
 } from './event-log-reader.js';
@@ -58,32 +59,85 @@ function userInputLooksLikeProviderCommandControl(text: string, events: SessionE
   return /(?:Select model|Select Reasoning Level for|Switch between Claude models|Your pick becomes the default|For other\/previous model names|Enter to set as default|s to use this session only|Set\s*model\s*to|Set\s*mode\s*to|saved as your default for new sessions|Select Model and Effort|Effort not supported|Faster Smarter|lowmediumhighxhighmax|Enter (?:select|default)\s*·\s*(?:s session\s*·\s*)?Esc back|Enter to confirm\s*·\s*Esc to exit|Press enter to confirm or esc to go back)/i.test(context);
 }
 
+interface NormalizedRawEvent {
+  type: SessionEventEntry['event']['type'];
+  text: string;
+  echoContext: string;
+  lines: string[];
+  rawOutputHasProviderProgress: boolean;
+  providerProgress?: ReturnType<typeof splitRawOutputAtProviderProgress>;
+}
+interface LiveSnapshot {
+  plan: EventLogReadPlan;
+  read: EventLogReadResult;
+  messages: NormalizedMessage[];
+  normalizedEvents: Map<number, NormalizedRawEvent>;
+  bytes: number;
+}
+const MAX_LIVE_CACHE_BYTES = 64 * 1024 * 1024;
+
 export class LiveOutputReader {
-  private readonly liveMessageCache = new Map<string, { messages: NormalizedMessage[] }>();
+  private readonly liveMessageCache = new Map<string, LiveSnapshot>();
+  private readonly inFlight = new Map<string, { fingerprint: string; promise: Promise<LiveSnapshot> }>();
+  private cacheBytes = 0;
+  private generation = 0;
 
   clear(): void {
+    this.generation++;
     this.liveMessageCache.clear();
+    this.inFlight.clear();
+    this.cacheBytes = 0;
   }
 
   async readLiveMessages(session: BoundSession, options: ReadLiveMessagesOptions = {}): Promise<NormalizedMessage[]> {
     if (!session.eventLogPath) return [];
     try {
       const plan = await getEventLogReadPlan(session.eventLogPath, options);
-      const cacheKey = `${session.provider}:${session.id}:${session.conversationRef}:${plan.cacheKey}`;
-      const cached = this.liveMessageCache.get(cacheKey);
-      if (cached) {
+      const key = `${session.provider}:${session.id}:${session.conversationRef}:${session.eventLogPath}:${plan.maxBytes ?? 'all'}`;
+      const cached = this.liveMessageCache.get(key);
+      if (cached?.plan.cacheKey === plan.cacheKey) {
+        this.liveMessageCache.delete(key);
+        this.liveMessageCache.set(key, cached);
         return cloneMessages(cached.messages);
       }
-      const readResult = await readEventLogText(session.eventLogPath, plan);
+      const pending = this.inFlight.get(key);
+      if (pending?.fingerprint === plan.cacheKey) return cloneMessages((await pending.promise).messages);
+      const generation = this.generation;
+      const promise = this.reconstruct(session, plan, cached);
+      this.inFlight.set(key, { fingerprint: plan.cacheKey, promise });
+      try {
+        const snapshot = await promise;
+        if (generation === this.generation && this.inFlight.get(key)?.promise === promise) {
+          this.rememberLiveMessages(key, snapshot);
+        }
+        return cloneMessages(snapshot.messages);
+      } finally {
+        if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
+      }
+    } catch {
+      return [];
+    }
+  }
 
-    const events = parseSessionEventEntries(readResult);
+  private async reconstruct(session: BoundSession, plan: EventLogReadPlan, previous?: LiveSnapshot): Promise<LiveSnapshot> {
+    const readResult = await readAppendedEventLogText(session.eventLogPath!, plan,
+      previous ? { plan: previous.plan, read: previous.read } : undefined);
+    const events = await parseSessionEventEntries(readResult);
 
     const grouped: NormalizedMessage[] = [];
     let lastUserInput = readResult.lastUserInputBeforeText;
     let hasTrackedUserTurn = Boolean(readResult.lastUserInputBeforeText?.trim());
     const priorUserInputEchoes = readResult.lastUserInputBeforeText ? [readResult.lastUserInputBeforeText] : [];
     let suppressProviderProgressRepaints = false;
+    const seenAssistantLines = new Set<string>();
+    let echoContext = JSON.stringify(priorUserInputEchoes);
+    let yieldedAt = performance.now();
+    const normalizedEvents = new Map<number, NormalizedRawEvent>();
     for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+      if (performance.now() - yieldedAt >= 8) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        yieldedAt = performance.now();
+      }
       const entry = events[eventIndex]!;
       const event = entry.event;
       if (event.type === 'user-input') {
@@ -96,9 +150,11 @@ export class LiveOutputReader {
         if (shouldDropPreSubmitPromptEcho(grouped.at(-1), text, event.timestamp)) {
           grouped.pop();
         }
+        seenAssistantLines.clear();
         lastUserInput = text;
         hasTrackedUserTurn = true;
         priorUserInputEchoes.push(text);
+        echoContext = JSON.stringify(priorUserInputEchoes);
         grouped.push({
           id: liveMessageId(session.id, entry.offset),
           provider: session.provider,
@@ -118,18 +174,21 @@ export class LiveOutputReader {
         continue;
       }
 
-      const rawOutputHasProviderProgress = event.type === 'raw-output'
-        && rawOutputStartsProviderProgress(event.text);
-      const providerProgress = rawOutputHasProviderProgress
-        ? splitRawOutputAtProviderProgress(event.text, lastUserInput)
-        : undefined;
-      let lines = event.type === 'status'
-        ? [truncate(normalizeWhitespace(stripAnsiAndControl(event.text)), 240)].filter(Boolean)
-        : normalizeRawOutputLines(
-          providerProgress?.progressStarted ? providerProgress.beforeProgressText : event.text,
-          lastUserInput,
-          priorUserInputEchoes,
-        );
+      let normalized = previous?.normalizedEvents.get(entry.offset);
+      if (!normalized || normalized.type !== event.type || normalized.text !== event.text || normalized.echoContext !== echoContext) {
+        const rawOutputHasProviderProgress = event.type === 'raw-output' && rawOutputStartsProviderProgress(event.text);
+        const providerProgress = rawOutputHasProviderProgress
+          ? splitRawOutputAtProviderProgress(event.text, lastUserInput) : undefined;
+        normalized = {
+          type: event.type, text: event.text, echoContext, rawOutputHasProviderProgress, providerProgress,
+          lines: event.type === 'status'
+            ? [truncate(normalizeWhitespace(stripAnsiAndControl(event.text)), 240)].filter(Boolean)
+            : normalizeRawOutputLines(providerProgress?.progressStarted ? providerProgress.beforeProgressText : event.text,
+                lastUserInput, priorUserInputEchoes),
+        };
+      }
+      normalizedEvents.set(entry.offset, normalized);
+      const { rawOutputHasProviderProgress, providerProgress, lines } = normalized;
 
       if (event.type === 'raw-output') {
         if (providerProgress?.progressStarted && rawOutputHasProviderProgress) {
@@ -150,14 +209,22 @@ export class LiveOutputReader {
       }
 
       for (const line of lines) {
+        if (performance.now() - yieldedAt >= 8) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yieldedAt = performance.now();
+        }
         const dedupedLine = event.type === 'raw-output'
-          ? removePreviouslySeenAssistantText(line, grouped)
+          ? seenAssistantLines.has(line.trim()) ? '' : line
           : line;
         if (!dedupedLine) {
           continue;
         }
         const role = event.type === 'status' ? 'status' : classifyChunk(dedupedLine);
         const text = role === 'status' ? truncate(dedupedLine, 240) : dedupedLine;
+        if (role === 'user') seenAssistantLines.clear();
+        else if (role === 'assistant' && event.type === 'raw-output' && text.trim().length >= 6) {
+          seenAssistantLines.add(text.trim());
+        }
         const previous = grouped.at(-1);
         if (previous && previous.role === role && previous.source === 'live-output' && event.type === 'raw-output') {
           previous.text = role === 'status'
@@ -178,22 +245,26 @@ export class LiveOutputReader {
         });
       }
     }
-      this.rememberLiveMessages(cacheKey, grouped);
-      return cloneMessages(grouped);
-    } catch {
-      return [];
-    }
+    const echoContextLength = [...new Set([...normalizedEvents.values()].map((event) => event.echoContext))]
+      .reduce((sum, context) => sum + context.length, 0);
+    const bytes = 2 * (readResult.text.length + grouped.reduce((sum, message) => sum + message.text.length, 0)
+      + echoContextLength + [...normalizedEvents.values()].reduce((sum, event) => sum + event.text.length
+        + event.lines.reduce((n, line) => n + line.length, 0), 0));
+    return { plan, read: readResult, messages: grouped, normalizedEvents, bytes };
   }
 
-  private rememberLiveMessages(cacheKey: string, messages: NormalizedMessage[]): void {
-    this.liveMessageCache.set(cacheKey, { messages: cloneMessages(messages) });
-    if (this.liveMessageCache.size <= MAX_LIVE_MESSAGE_CACHE_ENTRIES) {
-      return;
+  private rememberLiveMessages(key: string, snapshot: LiveSnapshot): void {
+    const previous = this.liveMessageCache.get(key);
+    if (previous) this.cacheBytes -= previous.bytes;
+    this.liveMessageCache.delete(key);
+    if (snapshot.bytes <= MAX_LIVE_CACHE_BYTES) {
+      this.liveMessageCache.set(key, snapshot);
+      this.cacheBytes += snapshot.bytes;
     }
-
-    const oldestKey = this.liveMessageCache.keys().next().value as string | undefined;
-    if (oldestKey) {
-      this.liveMessageCache.delete(oldestKey);
+    while (this.cacheBytes > MAX_LIVE_CACHE_BYTES || this.liveMessageCache.size > MAX_LIVE_MESSAGE_CACHE_ENTRIES) {
+      const oldest = this.liveMessageCache.keys().next().value!;
+      this.cacheBytes -= this.liveMessageCache.get(oldest)!.bytes;
+      this.liveMessageCache.delete(oldest);
     }
   }
 }
