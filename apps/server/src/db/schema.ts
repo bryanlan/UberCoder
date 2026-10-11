@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 14;
+export const CURRENT_SCHEMA_VERSION = 15;
 
 interface Migration {
   version: number;
@@ -256,6 +256,22 @@ const MIGRATIONS: Migration[] = [
     if (tableExists(sqlite, 'bound_sessions')) {
       addColumnIfMissing(sqlite, 'bound_sessions', 'pressure_suspended_at', 'pressure_suspended_at text');
     }
+  } },
+  { version: 15, name: 'indexed-search-row-ownership', up(sqlite) {
+    // Preserve every FTS row and rowid. Its UNINDEXED identity columns cannot
+    // provide bounded lookups for updates on the server's shared event loop.
+    sqlite.exec(`
+      create table conversation_search_rows (
+        fts_rowid integer primary key,
+        project_slug text not null,
+        provider text not null,
+        conversation_ref text not null
+      );
+      create index conversation_search_rows_identity
+        on conversation_search_rows(project_slug, provider, conversation_ref);
+      insert into conversation_search_rows
+        select rowid, project_slug, provider, conversation_ref from conversation_search_fts;
+    `);
   } },
 ];
 

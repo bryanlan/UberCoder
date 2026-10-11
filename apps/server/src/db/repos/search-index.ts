@@ -74,7 +74,9 @@ export interface ConversationSearchStateRow {
 
 export class SearchIndexRepo {
   private readonly insertChunkStatement: Database.Statement;
+  private readonly insertRowStatement: Database.Statement;
   private readonly deleteConversationChunksStatement: Database.Statement;
+  private readonly deleteConversationRowsStatement: Database.Statement;
   private readonly deleteConversationStateStatement: Database.Statement;
   private readonly upsertConversationStateStatement: Database.Statement;
 
@@ -92,8 +94,13 @@ export class SearchIndexRepo {
     `);
     this.deleteConversationChunksStatement = sqlite.prepare(`
       delete from conversation_search_fts
-      where project_slug = ? and provider = ? and conversation_ref = ?
+      where rowid in (select fts_rowid from conversation_search_rows
+        where project_slug = ? and provider = ? and conversation_ref = ?)
     `);
+    this.insertRowStatement = sqlite.prepare(`insert into conversation_search_rows
+      (fts_rowid, project_slug, provider, conversation_ref) values (?, ?, ?, ?)`);
+    this.deleteConversationRowsStatement = sqlite.prepare(`delete from conversation_search_rows
+      where project_slug = ? and provider = ? and conversation_ref = ?`);
     this.deleteConversationStateStatement = sqlite.prepare(`
       delete from conversation_search_state
       where project_slug = ? and provider = ? and ref = ?
@@ -116,7 +123,7 @@ export class SearchIndexRepo {
   hasRowsFor(projectSlug: string, provider: ProviderId): boolean {
     const row = this.sqlite.prepare(`
       select 1
-      from conversation_search_fts
+      from conversation_search_rows
       where project_slug = ? and provider = ?
       limit 1
     `).get(projectSlug, provider) as { 1: number } | undefined;
@@ -124,10 +131,13 @@ export class SearchIndexRepo {
   }
 
   replace(projectSlug: string, provider: ProviderId, chunks: ConversationSearchIndexChunk[]): void {
-    const clear = this.sqlite.prepare(`delete from conversation_search_fts where project_slug = ? and provider = ?`);
+    const clear = this.sqlite.prepare(`delete from conversation_search_fts where rowid in
+      (select fts_rowid from conversation_search_rows where project_slug = ? and provider = ?)`);
+    const clearRows = this.sqlite.prepare(`delete from conversation_search_rows where project_slug = ? and provider = ?`);
     const clearState = this.sqlite.prepare(`delete from conversation_search_state where project_slug = ? and provider = ?`);
     const tx = this.sqlite.transaction(() => {
       clear.run(projectSlug, provider);
+      clearRows.run(projectSlug, provider);
       clearState.run(projectSlug, provider);
       for (const chunk of chunks) {
         this.insertChunk(chunk);
@@ -137,7 +147,7 @@ export class SearchIndexRepo {
   }
 
   private insertChunk(chunk: ConversationSearchIndexChunk): void {
-    this.insertChunkStatement.run({
+    const inserted = this.insertChunkStatement.run({
       conversation_title: chunk.conversationTitle,
       project_display_name: chunk.projectDisplayName,
       project_tags: chunk.projectTags.join(' '),
@@ -153,6 +163,7 @@ export class SearchIndexRepo {
       role: chunk.role,
       timestamp: chunk.timestamp,
     });
+    this.insertRowStatement.run(inserted.lastInsertRowid, chunk.projectSlug, chunk.provider, chunk.conversationRef);
   }
 
   getConversationStates(projectSlug: string, provider: ProviderId): Map<string, ConversationSearchStateRow> {
@@ -177,6 +188,7 @@ export class SearchIndexRepo {
   ): void {
     const tx = this.sqlite.transaction(() => {
       this.deleteConversationChunksStatement.run(projectSlug, provider, conversationRef);
+      this.deleteConversationRowsStatement.run(projectSlug, provider, conversationRef);
       for (const chunk of chunks) {
         this.insertChunk(chunk);
       }
@@ -195,6 +207,7 @@ export class SearchIndexRepo {
   deleteConversation(projectSlug: string, provider: ProviderId, conversationRef: string): void {
     const tx = this.sqlite.transaction(() => {
       this.deleteConversationChunksStatement.run(projectSlug, provider, conversationRef);
+      this.deleteConversationRowsStatement.run(projectSlug, provider, conversationRef);
       this.deleteConversationStateStatement.run(projectSlug, provider, conversationRef);
     });
     tx();
@@ -204,7 +217,8 @@ export class SearchIndexRepo {
     this.sqlite.prepare(`
       update conversation_search_fts
       set conversation_title = ?
-      where project_slug = ? and provider = ? and conversation_ref = ?
+      where rowid in (select fts_rowid from conversation_search_rows
+        where project_slug = ? and provider = ? and conversation_ref = ?)
     `).run(title, projectSlug, provider, conversationRef);
   }
 
@@ -217,7 +231,7 @@ export class SearchIndexRepo {
     this.sqlite.prepare(`
       update conversation_search_fts
       set project_display_name = ?, project_path = ?, project_tags = ?
-      where project_slug = ?
+      where rowid in (select fts_rowid from conversation_search_rows where project_slug = ?)
     `).run(input.displayName, input.path, input.tags.join(' '), input.projectSlug);
   }
 

@@ -53,7 +53,7 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -375,7 +375,7 @@ export class SessionManager {
     return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
-  /** New messages start a response turn; retries of the same message never replay input. */
+  /** One initial response and one guarded receipt follow-up; ambiguous input is never replayed. */
   wakePendingPeerMessages(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.peerWakeRun) return this.peerWakeRun;
@@ -397,9 +397,25 @@ export class SessionManager {
       if (sessions.length !== 1) continue;
       const session = sessions[0]!;
       await this.runtimes.run(session.id, 'peerMessageWake', async () => {
-        const pending = () => (this.db.sqlite.prepare(`select id from coordination_messages
-          where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string }>)
-          .filter((message) => !this.db.meta.get(peerWakeAttemptKey(message.id)));
+        const pending = () => {
+          const state = this.db.boundSessions.getById(session.id);
+          const messages = this.db.sqlite.prepare(`select id, supplied_at as suppliedAt from coordination_messages
+            where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string; suppliedAt: string | null }>;
+          return messages.flatMap((message) => {
+            const initialKey = peerWakeAttemptKey(message.id), stored = this.db.meta.get(initialKey);
+            if (!stored) return [{ id: message.id, key: initialKey }];
+            const initial = JSON.parse(stored) as PeerWakeAttempt, key = peerWakeFollowupKey(message.id);
+            // Wait for a completed turn and for any previous offer's cooldown.
+            // Failed/submitting input is ambiguous and is not eligible. The
+            // separate durable follow-up record preserves the initial attempt.
+            if (!state || initial.status !== 'submitted' || initial.sessionId !== state.id || this.db.meta.get(key)
+              || !Number.isFinite(Date.parse(initial.timestamp))
+              || !state.lastCompletedAt || state.lastCompletedAt <= initial.timestamp
+              || Date.now() - Date.parse(initial.timestamp) < 90_000
+              || (message.suppliedAt && Date.now() - Date.parse(message.suppliedAt) < 60_000)) return [];
+            return [{ id: message.id, key }];
+          });
+        };
         if (!pending().length || this.stopped) return;
         let current = this.db.boundSessions.getById(session.id);
         if (!current || this.getCurrentRestorableSession(current)?.id !== current.id
@@ -419,7 +435,7 @@ export class SessionManager {
           if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
           const restored = await this.restoreSession(current);
           if (!restored) {
-            for (const message of pending()) this.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({
+            for (const message of pending()) this.db.meta.set(message.key, JSON.stringify({
               status: 'failed', sessionId: current.id, timestamp: nowIso(), reason: 'The original conversation could not be restored. Resume it explicitly before retrying delivery.',
             } satisfies PeerWakeAttempt));
             return;
@@ -438,7 +454,7 @@ export class SessionManager {
             // No durable control attempt means no input was submitted. A
             // shutdown or transient ownership read must only defer delivery.
             if (!this.db.meta.get(peerResumeAttemptKey(current))) return;
-            for (const message of pending()) this.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({
+            for (const message of pending()) this.db.meta.set(message.key, JSON.stringify({
               status: 'failed', sessionId: current.id, timestamp: nowIso(),
               reason: error instanceof Error ? error.message : 'The original Claude session could not finish resuming.',
             } satisfies PeerWakeAttempt));
@@ -464,7 +480,7 @@ export class SessionManager {
         // Persist before touching the terminal. An interrupted or ambiguous submission
         // is never automatically repeated, including after a backend restart.
         const saveAttempt = (status: PeerWakeAttempt['status'], reason?: string) => {
-          for (const message of messages) this.db.meta.set(peerWakeAttemptKey(message.id),
+          for (const message of messages) this.db.meta.set(message.key,
             JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');

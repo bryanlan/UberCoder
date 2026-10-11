@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
-import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeRestoreKey } from '../src/coordination/wake.js';
+import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey } from '../src/coordination/wake.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
@@ -58,6 +58,44 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
 }
 
 describe('Peer message wake and one-hour sleep', () => {
+  it.each(['codex', 'claude'] as const)('permits one %s follow-up after completion and never a third automatic turn, even after restart', async (id) => {
+    const f = await fixture(id);
+    const message = f.send();
+    await f.manager.wakePendingPeerMessages();
+    const original = JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!);
+    const initialAt = new Date(Date.now() - 120_000).toISOString();
+    f.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({ ...original, timestamp: initialAt }));
+    const initialRecord = f.db.meta.get(peerWakeAttemptKey(message.id));
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false,
+      lastCompletedAt: new Date(Date.now() - 30_000).toISOString() });
+    await f.manager.wakePendingPeerMessages();
+    expect(f.tmux.sent.join('')).toBe(PEER_WAKE_PROMPT.repeat(2));
+    expect(JSON.parse(f.db.meta.get(peerWakeFollowupKey(message.id))!)).toMatchObject({ status: 'submitted', sessionId: f.session.id });
+    expect(f.db.meta.get(peerWakeAttemptKey(message.id))).toBe(initialRecord);
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false, lastCompletedAt: new Date().toISOString() });
+    await f.manager.stop();
+    const restarted = createRecoveryManager(f.db, f.tmux, f.root, new RealtimeEventBus(), id === 'claude' ? claudeProvider : provider);
+    try { await restarted.wakePendingPeerMessages(); expect(f.tmux.sent).toHaveLength(2); }
+    finally { await restarted.stop(); }
+  });
+
+  it.each(['too_recent', 'not_completed', 'offered_recently', 'acknowledged', 'failed', 'submitting', 'working', 'approval', 'manual_pause'] as const)
+    ('defers or suppresses follow-up when %s', async (guard) => {
+      const f = await fixture(); const message = f.send(); await f.manager.wakePendingPeerMessages();
+      const original = JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!);
+      f.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({ ...original,
+        timestamp: new Date(Date.now() - (guard === 'too_recent' ? 1000 : 120_000)).toISOString(),
+        status: guard === 'failed' || guard === 'submitting' ? guard : 'submitted' }));
+      f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: guard === 'working',
+        lastCompletedAt: guard === 'not_completed' ? new Date(Date.now() - 150_000).toISOString() : new Date().toISOString() });
+      if (guard === 'offered_recently') f.service.poll(f.recipient, 0);
+      if (guard === 'acknowledged') { f.service.poll(f.recipient, 0); f.service.acknowledge(f.recipient, [message.id]); }
+      if (guard === 'manual_pause') f.db.boundSessions.setManualSuspendedAt(f.session.id, new Date().toISOString());
+      if (guard === 'approval') f.tmux.paneText = 'OpenAI Codex\nApproval required\n❯ 1. Yes\n  2. No\nPress enter to confirm or esc to go back\ngpt-6.1-sol xhigh';
+      await f.manager.wakePendingPeerMessages();
+      expect(f.tmux.sent).toHaveLength(1);
+      expect(f.db.meta.get(peerWakeFollowupKey(message.id))).toBeUndefined();
+    });
   it.each(['codex', 'claude'] as const)('wakes idle %s once and delivers authenticated peer data separately from user input', async (id) => {
     const f = await fixture(id);
     const message = f.send();

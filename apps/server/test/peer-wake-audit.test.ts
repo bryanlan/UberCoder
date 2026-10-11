@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { auditPeerWakes } from '../src/coordination/audit.js';
-import { peerWakeAttemptKey } from '../src/coordination/wake.js';
+import { peerWakeAttemptKey, peerWakeFollowupKey } from '../src/coordination/wake.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 const now = Date.parse('2026-10-11T04:30:00Z');
@@ -41,6 +41,51 @@ async function fixture() {
   return { db, manager, service, session, sender, recipient, root, add };
 }
 describe('Peer wake audit', () => {
+  it('keeps both attempts and counts the acknowledgement once', async () => {
+    const f = await fixture(); f.add(now - 5 * minute, { acknowledged: true });
+    const message = f.db.sqlite.prepare('select id from coordination_messages').get() as { id: string };
+    f.db.meta.set(peerWakeFollowupKey(message.id), JSON.stringify({ sessionId: f.session.id, timestamp: new Date(now - 3 * minute).toISOString(), status: 'submitted' }));
+    const result = await auditPeerWakes(f.db.sqlite, { now });
+    expect(result.counts).toMatchObject({ submittedWakes: 2, followupWakes: 1, attemptedMessages: 2, acknowledgedMessages: 1 });
+    expect(result.wakes.map((w) => w.messages[0]?.attempt)).toEqual([1, 2]);
+  });
+  it('retains recovered timeouts and finished versus abandoned offers in the daily audit', async () => {
+    const f = await fixture(); f.add(now - 30 * minute, { acknowledged: true });
+    const message = f.db.sqlite.prepare('select id,created_at,acknowledged_at from coordination_messages').get() as { id: string; created_at: string; acknowledged_at: string };
+    const directory = path.join(f.root, 'coordination/telemetry'); fs.mkdirSync(directory, { recursive: true });
+    const at = now - 30 * minute;
+    const records = [
+      { kind: 'rpc_client', timestamp: at, action: 'poll', outcome: 'error', error: 'timeout', durationMs: 2300 },
+      { kind: 'hook', timestamp: at, outcome: 'error' },
+      { kind: 'offer', timestamp: at, messageId: message.id, offeredAt: at - 500, outcome: 'abandoned' },
+      { kind: 'offer', timestamp: at + 500, messageId: message.id, offeredAt: at, outcome: 'finished' },
+      { kind: 'rpc_client', timestamp: now, action: 'poll', outcome: 'ok', durationMs: 4 },
+    ];
+    fs.writeFileSync(path.join(directory, '2026-10-11.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const result = await auditPeerWakes(f.db.sqlite, { now, runtimeDir: f.root });
+    expect(result.warnings).toEqual([]);
+    expect(result.observedWarnings).toMatchObject([{ kind: 'transport' }]);
+    expect(result.transport).toMatchObject({ clientTimeouts: 1, hookFailures: 1, offerResponsesFinished: 1, offerResponsesAbandoned: 1,
+      firstFinishedOfferDelayMs: { samples: 1, median: 1000 }, finishedOfferToAcknowledgementMs: { samples: 1, median: 1000 } });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_PEER_TEXT');
+  });
+  it('warns after a completed unacknowledged wake well before the old ten-minute pending alert', async () => {
+    const f = await fixture(); f.add(now - 3 * minute);
+    f.db.boundSessions.upsert({ ...f.session, lastCompletedAt: new Date(now - minute).toISOString() });
+    expect((await auditPeerWakes(f.db.sqlite, { now })).warnings).toMatchObject([{ kind: 'delivery' }]);
+  });
+  it('keeps delivery warnings past the audit window and during or after a follow-up until acknowledged', async () => {
+    const f = await fixture(); f.add(now - 130 * minute);
+    const message = f.db.sqlite.prepare('select id from coordination_messages').get() as { id: string };
+    f.db.boundSessions.upsert({ ...f.session, lastCompletedAt: new Date(now - 125 * minute).toISOString() });
+    expect((await auditPeerWakes(f.db.sqlite, { now, hours: 1 })).warnings).toMatchObject([{ kind: 'delivery' }]);
+    f.db.meta.set(peerWakeFollowupKey(message.id), JSON.stringify({ sessionId: f.session.id, timestamp: new Date(now - minute).toISOString(), status: 'submitted' }));
+    const during = await auditPeerWakes(f.db.sqlite, { now, hours: 1 });
+    expect(during.warnings).toMatchObject([{ kind: 'delivery', summary: expect.stringContaining('no further automatic attempts') }]);
+    f.db.sqlite.prepare('update coordination_messages set supplied_at=?,acknowledged_at=? where id=?')
+      .run(new Date(now).toISOString(), new Date(now).toISOString(), message.id);
+    expect((await auditPeerWakes(f.db.sqlite, { now, hours: 1 })).warnings).toEqual([]);
+  });
   it('counts one submission for a message batch and performs no database writes', async () => {
     const f = await fixture(); f.add(now - minute, { batch: 20, acknowledged: true });
     f.db.meta.set('unrelated-measurement', 'not JSON');

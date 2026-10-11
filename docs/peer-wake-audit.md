@@ -14,7 +14,7 @@ node apps/server/dist/coordination/audit-cli.js --hours 24 --usage
 
 Use `--config PATH` for an isolated runtime. The command opens existing SQLite read-only and
 never constructs `AppDatabase`, migrates tables, restores a session or contacts a provider.
-The default check reads only SQLite. The daily `--usage` option streams only the transcripts
+The default check reads SQLite and bounded private transport logs. The daily `--usage` option streams only the transcripts
 of sessions with wake records in the reporting window, once per session.
 
 ## Measurements and warnings
@@ -34,6 +34,43 @@ normal groups only. Their initial conditions are:
 | --- | --- |
 | One agent receives at least 5 submissions in 10 minutes or 20 in one hour | Review frequency |
 | One pair has at least 6 alternating wake submissions in 10 minutes | Review a possible loop |
+| A client timeout, failed hook, abandoned RPC or event-loop delay of at least 1 second in the preceding 10 minutes | Investigate message transport |
+| A successfully submitted peer turn completed but its message is still unacknowledged after 2 minutes | Investigate receipt and follow-up guards |
+| Transport measurements are unavailable, malformed or capped | Audit coverage is incomplete |
+
+Initial and follow-up attempts remain separate, with their ordinal in each message entry.
+A message can contribute two attempts and only one acknowledgement. A follow-up remains
+subject to the delivery guards in the coordination contract; warnings never bypass them.
+
+Native clients and the backend append whitelisted measurements to daily JSONL files under
+`runtimeDir/coordination/telemetry`. The directory is private (0700), files are 0600,
+and records exclude prompts, peer text and credentials. Clients record request durations,
+timeouts and hook failures even when the backend cannot respond. The server records RPC and
+HTTP completion (excluding the long-lived event stream), abandoned responses, ten-second event-loop windows and search update costs.
+Offer history distinguishes a response that finished writing from one abandoned by the client.
+Neither outcome proves the agent read it; only acknowledgement records that claim.
+
+The audit reports queue-to-first-finished-offer and finished-offer-to-acknowledgement delays
+with sample counts, including messages delivered without a wake. First offers mean the first
+observed in the selected report window; earlier offers outside it or before collection remain
+unknown. `firstRecordedAt` and `lastRecordedAt` bound observed coverage.
+The event-loop percentile is explicitly the percentile of ten-second window maxima; it is
+not a percentile of every individual loop sample. Recent transport warnings clear after ten
+minutes; daily `observedWarnings` retains recovered failures throughout the reporting window.
+
+Routine files are capped at 64 MiB per UTC day. Delivery failures, abandoned responses, slow
+event-loop windows and offers have a separate reserved 16 MiB/day budget in `.failures.jsonl`,
+so routine traffic cannot prevent a later failure from being recorded. Both are retained for
+eight days plus the current day. Exhausting either budget produces its own coverage marker.
+A cap marker makes missing counts explicit. The read-only audit streams all records and keeps
+numeric latency samples rather than routine request objects. It retains at most 100,000 offer
+records and one million latency samples per measurement type/window. Counts and maxima continue
+through these reader limits; partial offer timing or percentiles are explicitly marked incomplete.
+Telemetry never enters normal agent context and append failures never change delivery.
+
+Delivery warnings query durable attempt records for each currently pending message, independently
+of the reporting window. A later follow-up does not clear an unacknowledged warning, and an old
+wake does not age it out; acknowledgement or assignment closeout resolves that condition.
 
 These conditions identify conversations to inspect; they do not establish wasted work.
 Checks evaluate both current windows and windows ending at each normal wake in the preceding

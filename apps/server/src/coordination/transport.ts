@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { AuthService } from '../security/auth-service.js';
 import { CoordinationService } from './service.js';
 import { WikiService } from '../wiki/service.js';
+import { recordCoordinationTelemetry } from './telemetry.js';
 
 const text = z.string().trim().min(1);
 const inputSchema = z.object({
@@ -93,8 +94,42 @@ export async function startCoordinationSocket(service: CoordinationService, runt
     await fs.unlink(socketPath);
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const ipc = fastify({ logger: false, bodyLimit: 32 * 1024 });
+  const offers = new WeakMap<object, { ids: string[]; at: number; outcome?: 'ok' | 'error' | 'abandoned'; recorded: boolean }>();
+  const recordOffers = (request: object) => {
+    const offered = offers.get(request);
+    if (!offered?.outcome || offered.recorded || !offered.ids.length) return;
+    offered.recorded = true;
+    for (const messageId of offered.ids) recordCoordinationTelemetry(runtimeDir,
+      { kind: 'offer', messageId, offeredAt: offered.at, outcome: offered.outcome === 'ok' ? 'finished' : 'abandoned' });
+  };
+  ipc.addHook('onRequest', async (request, reply) => {
+    const started = performance.now();
+    const offered = { ids: [] as string[], at: 0, recorded: false, outcome: undefined as 'ok' | 'error' | 'abandoned' | undefined };
+    offers.set(request, offered);
+    let recorded = false;
+    const finish = (outcome: 'ok' | 'abandoned') => {
+      if (recorded) return;
+      recorded = true;
+      offered.outcome = outcome === 'ok' && reply.statusCode >= 400 ? 'error' : outcome;
+      const parsed = request.url === '/wiki' ? wikiSchema.safeParse(request.body) : inputSchema.safeParse(request.body);
+      recordCoordinationTelemetry(runtimeDir, { kind: 'rpc_server', action: parsed.success ? parsed.data.action : undefined,
+        outcome: offered.outcome, durationMs: performance.now() - started });
+      recordOffers(request);
+    };
+    reply.raw.once('finish', () => finish('ok'));
+    reply.raw.once('close', () => { if (!reply.raw.writableFinished) finish('abandoned'); });
+  });
   ipc.post('/rpc', async (request, reply) => {
-    try { return await dispatchCoordination(service, request.body); }
+    try {
+      const result = await dispatchCoordination(service, request.body);
+      if (result && 'messages' in result && Array.isArray(result.messages) && result.messages.length) {
+        const offered = offers.get(request)!;
+        offered.ids = result.messages.map((m: { id: string }) => m.id);
+        offered.at = Date.now();
+        recordOffers(request); // Handles a client that disconnected during dispatch.
+      }
+      return result;
+    }
     catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Coordination request failed.' }); }
   });
   if (wiki) ipc.post('/wiki', { bodyLimit: 96 * 1024 }, async (request, reply) => {

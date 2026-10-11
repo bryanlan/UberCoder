@@ -19,6 +19,7 @@ import { TRANSCRIPT_PARSER_VERSION, type ProviderAdapter } from '../providers/ty
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
 import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
+import type { CoordinationTelemetryRecord } from '../coordination/telemetry.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const SEARCH_INDEX_WRITE_PAUSE_MS = 5;
@@ -80,6 +81,7 @@ export class IndexingService {
     private readonly providerRegistry: ProviderRegistry,
     private readonly db: AppDatabase,
     private readonly eventBus: RealtimeEventBus,
+    private readonly observeSearchStep?: (measurement: CoordinationTelemetryRecord) => void,
   ) {}
 
   async start(): Promise<void> {
@@ -542,12 +544,18 @@ export class IndexingService {
     // hold the SQLite writer lock across an entire project's search index.
     for (const ref of [...vanishedRefs, ...failedRefs]) {
       if (options.shouldCommit && !options.shouldCommit()) return;
+      const started = performance.now();
       this.db.searchIndex.deleteConversation(project.slug, providerId, ref);
+      this.observeSearchStep?.({ kind: 'index', operation: 'delete', project: project.slug,
+        provider: providerId, ref, durationMs: performance.now() - started });
       await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
     }
     for (const update of updates) {
       if (options.shouldCommit && !options.shouldCommit()) return;
+      const started = performance.now();
       this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
+      this.observeSearchStep?.({ kind: 'index', operation: 'replace', project: project.slug,
+        provider: providerId, ref: update.ref, rows: update.chunks.length, durationMs: performance.now() - started });
       await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
     }
     // Stamp only a completed refresh. Interrupted work keeps the old version

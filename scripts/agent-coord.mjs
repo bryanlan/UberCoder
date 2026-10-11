@@ -7,9 +7,14 @@ import http from 'node:http';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import readline from 'node:readline';
+import { performance } from 'node:perf_hooks';
+import { recordCoordinationTelemetry } from './coordination-telemetry.mjs';
 
 let hostConfig;
 let directory;
+let hookDeadline;
+let hookStarted;
+let hookEvent;
 const hookEvents = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'];
 const actions = ['status', 'history', 'update', 'send', 'ack', 'finish'];
 const wikiActions = ['list', 'search', 'read', 'history', 'write'];
@@ -89,13 +94,20 @@ async function withSessionDelivery(provider, nativeSessionId, operation) {
     // The inherited descriptor shares its kernel lock with this process. Closing
     // it (including on a crash) releases delivery; no stale-lock cleanup is needed.
     // This serializes only a session's cursor/registration, never editing or Git.
-    execFileSync('flock', ['--exclusive', '--timeout', '3', '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
+    // Lock and every RPC share a 2.4s hook budget, below the shortest installed
+    // provider hook limit (3s). A contended lock must not consume that budget.
+    const lockSeconds = hookDeadline ? Math.max(0.001, Math.min(1, (hookDeadline - performance.now() - 100) / 1000)) : 3;
+    execFileSync('flock', ['--exclusive', '--timeout', String(lockSeconds), '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
     return await operation();
   } finally { fs.closeSync(fd); }
 }
 
 function rpc(payload, endpoint = '/rpc') {
+  const started = performance.now();
+  let timer;
   return new Promise((resolve, reject) => {
+    const remaining = Math.min(3000, (hookDeadline ?? Infinity) - performance.now() - 100);
+    if (remaining <= 0) { reject(new Error('Coordination server timed out.')); return; }
     const request = http.request({ socketPath: path.join(directory, 'agent.sock'), path: endpoint, method: 'POST', headers: { 'Content-Type': 'application/json' } }, (response) => {
       let body = '';
       response.setEncoding('utf8');
@@ -110,9 +122,18 @@ function rpc(payload, endpoint = '/rpc') {
       });
     });
     request.on('error', reject);
-    request.setTimeout(3000, () => request.destroy(new Error('Coordination server timed out.')));
+    timer = setTimeout(() => request.destroy(new Error('Coordination server timed out.')), remaining);
+    timer.unref();
     request.end(JSON.stringify(payload));
-  });
+  }).then((value) => {
+    recordCoordinationTelemetry(path.dirname(directory), { kind: 'rpc_client', action: payload.action,
+      outcome: 'ok', durationMs: performance.now() - started });
+    return value;
+  }, (error) => {
+    recordCoordinationTelemetry(path.dirname(directory), { kind: 'rpc_client', action: payload.action,
+      outcome: 'error', error: String(error.message).includes('timed out') ? 'timeout' : 'request', durationMs: performance.now() - started });
+    throw error;
+  }).finally(() => clearTimeout(timer));
 }
 
 function readInput() {
@@ -181,13 +202,18 @@ async function runHook(provider, input) {
 async function main() {
   const action = process.argv[2];
   if (action === 'hook') {
+    hookStarted = performance.now();
+    hookDeadline = hookStarted + 2400;
     const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+    hookEvent = input.hook_event_name;
     // Ignore uninstalled events before touching config, credentials or the server.
     // An existing provider may still hold its old PreToolUse definition in memory.
     if (!hookEvents.includes(input.hook_event_name)) return;
     loadConfiguration();
     if (!process.env.AGENT_COORD_RUNTIME && !hostConfig.coordination?.enabled) return;
     await withSessionDelivery(process.argv[3], input.session_id, () => runHook(process.argv[3], input));
+    recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
+      outcome: 'ok', durationMs: performance.now() - hookStarted });
     return;
   }
   loadConfiguration();
@@ -274,7 +300,9 @@ async function serveMcp() {
 
 main().catch((error) => {
   if (process.argv[2] === 'hook') {
+    if (directory) recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
+      outcome: 'error', error: String(error.message).includes('timed out') ? 'timeout' : 'hook', durationMs: performance.now() - hookStarted });
     // Visible failure, never pretend a missing server delivered messages.
-    console.log(JSON.stringify({ systemMessage: `Agent coordination unavailable: ${error.message}. Activity and message delivery are unavailable; ordinary work may continue while preserving unfinished changes.` }));
+    console.log(JSON.stringify({ systemMessage: `Agent coordination unavailable: ${error.message} Messages remain queued for a later delivery hook; status reports only their count and cannot fetch their text. Ordinary work may continue while preserving unfinished changes.` }));
   } else { console.error(error.message); process.exitCode = 1; }
 });

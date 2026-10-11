@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
-import { peerWakeAttemptKey, type PeerWakeAttempt } from './wake.js';
+import { peerWakeAttemptKey, peerWakeFollowupKey, type PeerWakeAttempt } from './wake.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -192,7 +192,7 @@ export class CoordinationService {
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
-    const attemptText = this.db.meta.get(peerWakeAttemptKey(message.id));
+    const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
     if (attemptText) {
       const attempt = JSON.parse(attemptText) as PeerWakeAttempt;
       return { id: message.id, queued: true, recipient,

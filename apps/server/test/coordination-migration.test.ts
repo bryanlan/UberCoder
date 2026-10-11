@@ -7,6 +7,9 @@ it('retires version 6 locks once, preserving assignments, inboxes and ownership 
   const db = new Database(':memory:');
   try {
     createCoordinationSchema(db);
+    // Version 6 also contains the application FTS table. This fixture otherwise
+    // exercises only the retired coordination tables and skipped that schema.
+    db.exec(`create virtual table conversation_search_fts using fts5(project_slug UNINDEXED, provider UNINDEXED, conversation_ref UNINDEXED)`);
     db.exec('create table schema_version (version integer primary key, name text, applied_at text)');
     for (let version = 1; version <= 6; version++) db.prepare('insert into schema_version values(?,?,?)').run(version, 'fixture', 'before');
     db.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')

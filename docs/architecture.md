@@ -15,6 +15,17 @@ First-class runtime surfaces:
 - React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`, `npm run verify:live-console`.
 
+## Search index updates
+
+Search updates use `conversation_search_rows`, an ordinary indexed ownership table mapping
+project/provider/conversation identities to FTS rowids. Migration 15 populates it without
+replacing FTS rows or changing durable session, auth or coordination records. Every search
+insert/delete maintains both tables in one transaction. Identity-based deletes, scope clears
+and metadata updates address FTS by rowid; UNINDEXED FTS identity columns must never drive a
+whole-table update scan. Refreshes commit and yield between conversations. Search remains
+derived state in the existing database; private-copy performance evidence gates activation.
+Keep a consistent SQLite backup before migration: older binaries reject schema 15.
+
 ## Clipboard Images
 
 The live composer accepts pasted PNG, JPEG and WebP images, with previews, removal

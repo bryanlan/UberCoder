@@ -10,6 +10,7 @@ import { CoordinationService, processStart } from '../src/coordination/service.j
 import { checkoutIdentity } from '../src/coordination/git.js';
 import { dispatchCoordination, registerCoordinationRoutes, startCoordinationSocket } from '../src/coordination/transport.js';
 import { WikiService } from '../src/wiki/service.js';
+import { readCoordinationTelemetry } from '../src/coordination/telemetry.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd();
@@ -56,6 +57,32 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('shares one hook deadline across calls and records an abandoned offer exactly once', async () => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const sender = register(), nativeSessionId = randomUUID();
+    const registered = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const recipientId = JSON.parse(registered.stdout).assignmentId;
+    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId, text: 'PRIVATE_DELAYED_PEER' });
+    const originalUpdate = service.update.bind(service), originalPoll = service.poll.bind(service);
+    const update = vi.spyOn(service, 'update').mockImplementation(((id: string, input: Parameters<typeof service.update>[1]) =>
+      new Promise((resolve) => setTimeout(() => resolve(originalUpdate(id, input)), 1800))) as never);
+    const poll = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) =>
+      new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, after)), 1800))) as never);
+    const started = performance.now();
+    try {
+      const result = await runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'UserPromptSubmit' });
+      expect(performance.now() - started).toBeLessThan(2900);
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('Coordination server timed out');
+      expect(result.stdout).toContain('status reports only their count');
+      expect(result.stdout).not.toContain('PRIVATE_DELAYED_PEER');
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      const measurements = await readCoordinationTelemetry(root, Date.now() - 10_000, Date.now() + 1000);
+      expect(measurements.summary).toMatchObject({ clientTimeouts: 1, hookFailures: 1, abandonedRequests: 1 });
+      expect(measurements.offers.filter((r) => r.messageId === messageId)).toMatchObject([{ outcome: 'abandoned' }]);
+    } finally { update.mockRestore(); poll.mockRestore(); }
+  });
   it('reports working and idle delivery expectations without polling or acknowledging the message', async () => {
     const { checkout, db, service, register } = fixture();
     const sender = register(); const recipient = register('claude');
@@ -687,7 +714,7 @@ describe('assignment coordination', () => {
       encoding: 'utf8', env: { ...process.env, AGENT_CONSOLE_CONFIG: config },
     });
     expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).systemMessage).toContain('ordinary work may continue');
+    expect(JSON.parse(result.stdout).systemMessage).toContain('Ordinary work may continue');
   });
 
 });

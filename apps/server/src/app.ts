@@ -31,6 +31,7 @@ import { CoordinationService } from './coordination/service.js';
 import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
 import { WikiService } from './wiki/service.js';
 import { registerWikiRoutes } from './wiki/routes.js';
+import { recordCoordinationTelemetry, startCoordinationTelemetry } from './coordination/telemetry.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -50,7 +51,8 @@ export async function buildApp(options: AppOptions = {}) {
   const projectService = new ProjectService(configService);
   const providerRegistry = new ProviderRegistry(db.transcriptParseCache);
   const liveOutputReader = new LiveOutputReader();
-  const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus);
+  const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus,
+    config.coordination.enabled ? (measurement) => { recordCoordinationTelemetry(config.runtimeDir, measurement); } : undefined);
   const search = new ConversationSearchService(db, projectService, liveOutputReader);
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
@@ -91,6 +93,11 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   const instanceId = randomUUID();
+  if (config.coordination.enabled) app.addHook('onResponse', async (request, reply) => {
+    if (request.routeOptions.url === '/api/events') return; // Stream lifetime is not request latency.
+    recordCoordinationTelemetry(config.runtimeDir, { kind: 'http', durationMs: reply.elapsedTime,
+      outcome: reply.statusCode >= 400 ? 'error' : 'ok' });
+  });
   app.get('/api/health', async (_request, reply) => {
     // Public readiness only: a settings change may move the server to a new
     // origin. No credentials or application data are exposed by this route.
@@ -136,6 +143,7 @@ export async function buildApp(options: AppOptions = {}) {
   }
 
   const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki) : undefined;
+  const stopTelemetry = config.coordination.enabled ? startCoordinationTelemetry(config.runtimeDir) : undefined;
   const coordinationTimer = config.coordination.enabled ? setInterval(() => { coordination.reconcileProcesses(); wakePeers(); }, 15_000) : undefined;
   coordinationTimer?.unref();
   const wikiBackupTimer = setInterval(() => { wiki.backup().catch((error) => app.log.warn({ err: error }, 'Wiki backup failed.')); }, 60 * 60 * 1000);
@@ -154,6 +162,7 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   app.addHook('onClose', async () => {
+    stopTelemetry?.();
     if (coordinationTimer) clearInterval(coordinationTimer);
     clearInterval(wikiBackupTimer);
     await coordinationSocket?.close();
