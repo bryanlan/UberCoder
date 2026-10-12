@@ -7,7 +7,7 @@ export interface SummaryAuditRecord {
   id: string;
   startedAt: string;
   finishedAt: string | null;
-  status: 'started' | 'completed' | 'failed';
+  status: 'started' | 'completed' | 'failed' | 'cancelled';
   model: 'gpt-6-luna';
   effort: 'low';
   workerIds: string[];
@@ -17,7 +17,7 @@ export interface SummaryAuditRecord {
 const MAX_DAILY_BYTES = 8 * 1024 * 1024;
 const count = z.number().int().nonnegative().safe();
 const recordSchema = z.object({ id: z.string().min(1), startedAt: z.string().datetime(), finishedAt: z.string().datetime().nullable(),
-  status: z.enum(['started', 'completed', 'failed']), model: z.literal('gpt-6-luna'), effort: z.literal('low'),
+  status: z.enum(['started', 'completed', 'failed', 'cancelled']), model: z.literal('gpt-6-luna'), effort: z.literal('low'),
   workerIds: z.array(z.string()).max(16), durationMs: count.nullable(), usage: z.object({ inputTokens: count,
     cachedInputTokens: count, cacheWriteTokens: count, outputTokens: count, totalTokens: count }).refine(
     (u) => u.totalTokens === u.inputTokens + u.cachedInputTokens + u.cacheWriteTokens + u.outputTokens).nullable() }).strict();

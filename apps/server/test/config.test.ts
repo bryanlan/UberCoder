@@ -12,6 +12,21 @@ async function writeTempConfig(body: object): Promise<string> {
 }
 
 describe('ConfigService', () => {
+  it('persists the tracking switch across restart without adopting other pending settings', async () => {
+    const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security: {
+      passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) } });
+    try {
+      const service = new ConfigService(configPath);
+      service.updateGlobalSettings({ projectsRoot: '/srv/pending-root', serverHost: '127.0.0.1', serverPort: 9999,
+        sessionTtlHours: 72, cookieSecure: true, trustTailscaleHeaders: false });
+      service.setWorkerTracking(false);
+      expect(service.getConfig().workerSummaries.enabled).toBe(false);
+      expect(service.getConfig().projectsRoot).toBe('/tmp/projects');
+      expect(new ConfigService(configPath).getConfig()).toMatchObject({ projectsRoot: '/srv/pending-root', workerSummaries: { enabled: false } });
+      service.setWorkerTracking(true);
+      expect(new ConfigService(configPath).getConfig().workerSummaries.enabled).toBe(true);
+    } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
+  });
   it('parses config and merges project provider overrides predictably', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-config-project-'));
     const projectsRoot = path.join(tempDir, 'projects');

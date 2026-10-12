@@ -275,6 +275,14 @@ export class ConfigService {
     return [...PROVIDERS];
   }
 
+  setWorkerTracking(enabled: boolean): void {
+    const next = { ...this.storedConfig, workerSummaries: { ...this.storedConfig.workerSummaries, enabled } };
+    // Publish the runtime value only after persistence succeeds; preserve pending restart settings.
+    writeFileSync(this.configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    this.storedConfig = next;
+    this.runtimeConfig = { ...this.runtimeConfig, workerSummaries: { ...this.runtimeConfig.workerSummaries, enabled } };
+  }
+
   private persist(): void {
     writeFileSync(this.configPath, `${JSON.stringify(this.storedConfig, null, 2)}\n`, 'utf8');
   }

@@ -18,9 +18,11 @@ it('requires login and CSRF before any summary request, validates cadence, and s
   app.get('/auth', (request, reply) => auth.getAuthState(request, reply));
   const snapshot = vi.fn(async () => ({ workers: [], workingCount: 0 }));
   const refresh = vi.fn(async () => ({ workers: [], workingCount: 0 }));
-  registerWorkerRoutes(app, auth, { snapshot, refresh } as never);
+  const setTracking = vi.fn(async () => ({ trackingEnabled: false, workers: [], workingCount: 0 }));
+  registerWorkerRoutes(app, auth, { snapshot, refresh, setTracking } as never);
   try {
     expect((await app.inject('/api/workers')).statusCode).toBe(401);
+    expect((await app.inject({ method: 'POST', url: '/api/workers/tracking', payload: { enabled: false } })).statusCode).toBe(401);
     const login = await app.inject({ url: '/auth', headers: { 'tailscale-user-login': 'fixture@example.invalid' } });
     const cookie = String(login.headers['set-cookie']).split(';')[0]!;
     const headers = { cookie, 'x-csrf-token': login.json().csrfToken };
@@ -33,5 +35,12 @@ it('requires login and CSRF before any summary request, validates cadence, and s
     }
     expect((await app.inject({ method: 'POST', url: '/api/workers/refresh', headers, payload: { intervalMinutes: 5 } })).statusCode).toBe(200);
     expect(refresh).toHaveBeenCalledExactlyOnceWith(5);
+    expect((await app.inject({ method: 'POST', url: '/api/workers/tracking', headers: { cookie }, payload: { enabled: false } })).statusCode).toBe(403);
+    expect(setTracking).not.toHaveBeenCalled();
+    for (const payload of [{ enabled: 'false' }, { enabled: false, extra: true }, {}]) {
+      expect((await app.inject({ method: 'POST', url: '/api/workers/tracking', headers, payload })).statusCode).toBe(400);
+    }
+    expect((await app.inject({ method: 'POST', url: '/api/workers/tracking', headers, payload: { enabled: false } })).statusCode).toBe(200);
+    expect(setTracking).toHaveBeenCalledExactlyOnceWith(false);
   } finally { await app.close(); db.close(); await fs.rm(root, { recursive: true, force: true }); }
 });

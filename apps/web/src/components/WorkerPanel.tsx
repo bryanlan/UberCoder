@@ -24,9 +24,13 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
   });
   const query = useQuery({ queryKey, queryFn: api.workers, enabled: visible, refetchInterval: visible ? 5000 : false, retry: false });
   const refresh = useMutation({ mutationFn: () => api.refreshWorkers(minutes),
-    onSuccess: (snapshot) => client.setQueryData(queryKey, snapshot) });
+    onSuccess: () => client.invalidateQueries({ queryKey }) });
+  const tracking = useMutation({ mutationFn: (enabled: boolean) => api.setWorkerTracking(enabled),
+    onMutate: () => client.cancelQueries({ queryKey }),
+    onSuccess: (snapshot) => client.setQueryData(queryKey, snapshot),
+    onSettled: () => client.invalidateQueries({ queryKey }) });
   const hasWorking = Boolean(query.data?.workingCount);
-  const enabled = Boolean(query.data?.enabled);
+  const enabled = Boolean(query.data?.enabled) && !tracking.isPending;
   const trigger = refresh.mutate;
   useEffect(() => {
     localStorage.setItem('agent-console:worker-refresh-minutes', String(minutes));
@@ -45,19 +49,28 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
           <h2 className="font-medium text-slate-100">Workers <span className="text-xs text-slate-400">· {data?.workingCount ?? 0} working</span></h2>
           <button type="button" aria-label="Close worker panel" onClick={onClose} className="rounded p-1 text-slate-400 hover:text-slate-100"><X size={18} /></button>
         </div>
+        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-xs text-slate-300">
+          <span>Worker tracking</span>
+          <button type="button" role="switch" aria-label="Worker tracking" aria-checked={Boolean(data?.trackingEnabled)}
+            disabled={!data || tracking.isPending} onClick={() => tracking.mutate(!data?.trackingEnabled)}
+            className="rounded border border-slate-700 bg-slate-900 px-3 py-1 disabled:opacity-50">
+            {data?.trackingEnabled ? 'On' : 'Off'}
+          </button>
+        </div>
         <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3 text-xs text-slate-300">
           <label htmlFor="worker-refresh">Summaries every</label>
-          <select id="worker-refresh" value={minutes} onChange={(event) => setMinutes(Number(event.target.value))}
+          <select id="worker-refresh" value={minutes} disabled={!data?.trackingEnabled || tracking.isPending} onChange={(event) => setMinutes(Number(event.target.value))}
             className="rounded border border-slate-700 bg-slate-900 px-2 py-1">
             {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} minute{n === 1 ? '' : 's'}</option>)}
           </select>
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
           {(query.error || refresh.error) && <p role="status" className="text-xs text-amber-300">Worker updates are unavailable. Last known summaries may be out of date.</p>}
+          {tracking.error && <p role="alert" className="text-xs text-amber-300">Unable to save worker tracking. Check the switch before leaving.</p>}
           {data?.error && <p role="status" className="text-xs text-amber-300">{data.error}</p>}
-          {data?.generating && <p role="status" className="text-xs text-sky-300">Updating summaries…</p>}
-          {data && !data.workingCount && <p className="text-xs text-slate-400">No workers are running. Summaries are paused.</p>}
-          {data && !data.enabled && !data.error && <p className="text-xs text-slate-400">Summaries are disabled. Worker status still updates.</p>}
+          {data?.generating && <p role="status" className="text-xs text-sky-300">{data.trackingEnabled ? 'Updating summaries…' : 'Stopping summary…'}</p>}
+          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">Worker tracking is off across all tabs. Evidence collection and new summaries are paused.</p>}
+          {data?.trackingEnabled && !data.workingCount && <p className="text-xs text-slate-400">No workers are running. Summaries are paused.</p>}
           {query.isLoading && <p className="text-xs text-slate-400">Loading workers…</p>}
           {data?.workers.map((worker) => (
             <article key={worker.id} className="rounded-xl border border-slate-800 bg-slate-900/50 p-3">

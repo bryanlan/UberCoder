@@ -7,9 +7,9 @@ import type { WorkerPanelSnapshot } from '@agent-console/shared';
 import { api } from '../lib/api';
 import { WorkerPanel } from './WorkerPanel';
 
-vi.mock('../lib/api', () => ({ api: { workers: vi.fn(), refreshWorkers: vi.fn() } }));
+vi.mock('../lib/api', () => ({ api: { workers: vi.fn(), refreshWorkers: vi.fn(), setWorkerTracking: vi.fn() } }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); localStorage.clear(); });
-const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: false, enabled: true, error: null,
+const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: false, enabled: true, trackingEnabled: true, error: null,
   workers: [{ id: 'one', projectSlug: 'alpha', projectName: 'Alpha', provider: 'codex', conversationRef: 'native/one',
     title: 'A very long conversation name that appears in the left sidebar', working: true, task: 'Task', summaryAt: '2026-10-12T12:00:00Z',
     summary: { task: 'Fix schema', latest: 'Checking source readbacks', coordination: 'Asked the Web agent for requirements' }, stale: false }],
@@ -55,4 +55,17 @@ it('does not fetch or generate while the document is hidden', async () => {
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   setup(); await Promise.resolve();
   expect(api.workers).not.toHaveBeenCalled(); expect(api.refreshWorkers).not.toHaveBeenCalled();
+});
+it('switches Off globally and keeps the server setting after remount', async () => {
+  setup(); await screen.findByText('Fix schema');
+  const off = { ...snapshot(), enabled: false, trackingEnabled: false, workers: [], workingCount: 0 };
+  vi.mocked(api.setWorkerTracking).mockImplementation(async () => { vi.mocked(api.workers).mockResolvedValue(off); return off; });
+  await userEvent.click(screen.getByRole('switch', { name: 'Worker tracking' }));
+  await screen.findByText(/Worker tracking is off across all tabs/);
+  expect(api.setWorkerTracking).toHaveBeenCalledWith(false);
+  expect(screen.getByLabelText('Summaries every')).toBeDisabled();
+  cleanup(); vi.mocked(api.refreshWorkers).mockClear();
+  setup(off); await screen.findByText(/Worker tracking is off across all tabs/);
+  expect(screen.getByRole('switch', { name: 'Worker tracking' })).toHaveAttribute('aria-checked', 'false');
+  expect(api.refreshWorkers).not.toHaveBeenCalled();
 });

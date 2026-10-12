@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { WorkerPanelSnapshot } from '@agent-console/shared';
 
 const snapshot: WorkerPanelSnapshot = {
-  enabled: true, generating: false, error: null, workingCount: 2,
+  enabled: true, trackingEnabled: true, generating: false, error: null, workingCount: 2,
   workers: [
     { id: 'one', projectSlug: 'demo', projectName: 'PlaidBasic', provider: 'codex', conversationRef: 'worker-one',
       title: 'Prepare the reminder schema publication', working: true, task: 'Publish the schema',
@@ -30,6 +30,11 @@ async function openConsole(page: Page, data = snapshot) {
   await page.route('**/api/settings/network', (route) => route.fulfill({ json: {} }));
   await page.route('**/api/workers', (route) => route.fulfill({ json: data }));
   await page.route('**/api/workers/refresh', (route) => { refreshes.push(route.request().postDataJSON().intervalMinutes); return route.fulfill({ json: data }); });
+  await page.route('**/api/workers/tracking', (route) => {
+    const enabled = route.request().postDataJSON().enabled;
+    data = { ...data, enabled, trackingEnabled: enabled, workers: enabled ? snapshot.workers : [], workingCount: enabled ? 2 : 0 };
+    return route.fulfill({ json: data });
+  });
   await page.goto('/');
   await page.getByRole('button', { name: 'Open worker panel' }).click();
   await expect(page.getByRole('complementary', { name: 'Active workers' })).toBeVisible();
@@ -71,4 +76,20 @@ test('an idle fleet shows paused summaries and never requests generation', async
   const calls = await openConsole(page, { ...snapshot, workingCount: 0, workers: snapshot.workers.map((w) => ({ ...w, working: false })) });
   await expect(page.getByText('No workers are running. Summaries are paused.')).toBeVisible();
   expect(calls).toHaveLength(0);
+});
+
+test('Off survives page reload and stops further summary requests', async ({ page }) => {
+  const calls = await openConsole(page);
+  const toggle = page.getByRole('switch', { name: 'Worker tracking' });
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await expect(page.getByLabel('Summaries every')).toBeDisabled();
+  const count = calls.length;
+  await page.reload();
+  await expect(toggle).toHaveAttribute('aria-checked', 'false');
+  await expect(page.getByText(/Worker tracking is off across all tabs/)).toBeVisible();
+  expect(calls).toHaveLength(count);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-checked', 'true');
+  await expect.poll(() => calls.length).toBeGreaterThan(count);
 });

@@ -16,4 +16,11 @@ export function registerWorkerRoutes(app: FastifyInstance, auth: AuthService, se
     reply.header('Cache-Control', 'no-store');
     return service.refresh(parsed.data.intervalMinutes);
   });
+  app.post('/api/workers/tracking', async (request, reply) => {
+    try { await auth.ensureAuthenticated(request, reply); } catch { return; }
+    const parsed = z.object({ enabled: z.boolean() }).strict().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'Choose On or Off for worker tracking.' });
+    reply.header('Cache-Control', 'no-store');
+    return service.setTracking(parsed.data.enabled);
+  });
 }

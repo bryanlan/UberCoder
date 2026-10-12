@@ -14,6 +14,15 @@ and is stored in this browser. Live roster reads run every five seconds while th
 Opening the panel requests the first eligible summary. Closing it or hiding the browser stops
 new requests; a batch already started can finish. No background scheduler job is installed.
 
+The On/Off switch at the top is server-owned and persists in the Console config. Off applies
+across all tabs and survives browser/backend restarts. It stops roster/evidence collection for
+this panel, blocks summary requests, and requests cancellation of an in-flight model batch.
+The cheap state/usage endpoint remains available so other tabs see the setting. The switch does
+not stop agents or their ordinary coordination. Tokens already consumed by a cancelled call
+remain counted when the runtime reports them; missing cancellation usage stays explicitly unknown.
+Cancellation before process launch records known zero usage.
+Switching On allows the next eligible refresh; it cannot revive a cancelled batch.
+
 The server shares one in-flight batch across tabs, with the requesting browser's selected
 interval measured from request admission and a one-second allowance for timer/network jitter.
 A batch contains at most 16 changed working agents. Workers never summarized or summarized
@@ -47,8 +56,8 @@ is selected after a failure.
 Install the shared runtime from its owning checkout as documented in
 `/home/bryan/code/ai-skills/codex/agent-consult/references/runtime.md`.
 `workerSummaries.runtimeCommand` defaults to `~/.local/bin/agent-consult`; set it explicitly for
-another installation path. `workerSummaries.enabled=false` disables summaries while preserving
-the roster. These are config-file settings. No OpenAI API key is used.
+another installation path. `workerSummaries.enabled` is also controlled immediately by the panel's
+persisted On/Off switch. No OpenAI API key is used.
 
 Each attempted model call writes a start and final record under
 `runtimeDir/workers/usage-YYYY-MM-DD.jsonl`. Records share one request ID, so usage rollups count
@@ -67,8 +76,9 @@ interrupted run can leave private files; UUID run directories with this componen
 before the next generation, while recent runs and unrelated paths are left alone. The token
 audit remains append-only. Shutdown requests cancellation through the shared runtime.
 
-Both API routes require authentication. `POST /api/workers/refresh` also requires CSRF and a
-validated interval; `GET /api/workers` never starts model work. HTTP responses do not wait for
+All worker API routes require authentication. `POST /api/workers/refresh` and
+`POST /api/workers/tracking` also require CSRF and strictly validated interval/boolean bodies;
+`GET /api/workers` never starts model work. HTTP responses do not wait for
 the provider. A failed generation preserves the previous summary and visibly reports its age/error.
 
 ## Verification

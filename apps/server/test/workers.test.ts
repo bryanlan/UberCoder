@@ -21,14 +21,79 @@ async function fixture() {
   let now = Date.parse('2026-10-12T12:00:00Z');
   const workers = [worker('one')];
   const source = { roster: vi.fn(async () => workers), collect: vi.fn(async (w: WorkerEvidence) => w) };
-  const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn() };
+  const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
   const audit = new WorkerSummaryAudit(directory);
   const service = new WorkerPanelService(source, runner, audit, true, () => now);
   cleanups.push(async () => { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); });
-  return { service, source, workers, runner, directory, advance: (ms = 120_000) => { now += ms; } };
+  return { service, source, workers, runner, audit, directory, advance: (ms = 120_000) => { now += ms; } };
 }
 
 describe('worker summary controller', () => {
+  it('records known zero usage when Off arrives during the start-audit write', async () => {
+    const f = await fixture(); let release!: () => void;
+    const record = f.audit.record.bind(f.audit);
+    vi.spyOn(f.audit, 'record').mockImplementationOnce(async (row) => {
+      await record(row); await new Promise<void>((resolve) => { release = resolve; });
+    });
+    await f.service.refresh(1); await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    await f.service.setTracking(false); release(); await f.service.settled();
+    expect(f.runner.run).not.toHaveBeenCalled();
+    expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, totalTokens: 0, unknownUsageCalls: 0, runningCalls: 0 });
+  });
+
+  it('records known zero usage and never spawns when cancelled during runner setup', async () => {
+    const f = await fixture(); const runs = path.join(f.directory, 'runs');
+    const runtime = new SharedSummaryRuntime(['this-command-must-never-spawn'], runs);
+    const prepare = vi.spyOn(runtime as unknown as { prepare(): Promise<void> }, 'prepare').mockImplementation(async () => {
+      await fs.mkdir(runs); runtime.cancel();
+    });
+    try {
+      const response = await runtime.run([worker('one')], '00000000-0000-0000-0000-000000000020');
+      expect(response).toMatchObject({ summaries: null, usage: { totalTokens: 0, inputTokens: 0 } });
+      expect(await fs.readdir(runs)).toEqual([]);
+    } finally { prepare.mockRestore(); }
+  });
+  it('blocks every tab and evidence collection while off, then resumes on demand', async () => {
+    const f = await fixture(); await f.service.setTracking(false);
+    f.source.roster.mockClear();
+    const view = await f.service.refresh(1); await f.service.settled();
+    expect(view).toMatchObject({ trackingEnabled: false, enabled: false, workers: [], workingCount: 0 });
+    expect(f.source.roster).not.toHaveBeenCalled(); expect(f.source.collect).not.toHaveBeenCalled();
+    expect(f.runner.run).not.toHaveBeenCalled(); expect(f.runner.cancel).toHaveBeenCalledTimes(1);
+    await f.service.setTracking(true); await f.service.refresh(1); await f.service.settled();
+    expect(f.runner.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not revive a collecting batch after a quick Off/On transition', async () => {
+    const f = await fixture(); let finish!: (w: WorkerEvidence) => void;
+    f.source.collect.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    await f.service.refresh(1); await vi.waitFor(() => expect(f.source.collect).toHaveBeenCalledTimes(1));
+    await f.service.setTracking(false); await f.service.setTracking(true);
+    finish(f.workers[0]!); await f.service.settled(); expect(f.runner.run).not.toHaveBeenCalled();
+  });
+
+  it('cancels a running summary, retains consumed usage, and discards its stale result', async () => {
+    const f = await fixture(); let finish!: (r: SummaryResult) => void;
+    vi.mocked(f.runner.run).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    await f.service.refresh(1); await vi.waitFor(() => expect(f.runner.run).toHaveBeenCalledTimes(1));
+    await f.service.setTracking(false); await f.service.setTracking(true);
+    finish(result(f.workers)); await f.service.settled();
+    const view = await f.service.snapshot();
+    expect(view.workers[0]!.summary).toBeNull(); expect(view.error).toBeNull();
+    expect(view.usage).toMatchObject({ calls: 1, totalTokens: 30, unknownUsageCalls: 0, runningCalls: 0 });
+    const text = await fs.readFile(path.join(f.directory, 'usage-2026-10-12.jsonl'), 'utf8');
+    expect(text).toContain('"status":"cancelled"');
+    f.advance(); vi.mocked(f.runner.run).mockImplementation(async (ws) => result(ws));
+    await f.service.refresh(1); await f.service.settled(); expect(f.runner.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves tracking unchanged when persistence fails', async () => {
+    const f = await fixture();
+    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), true, Date.now,
+      () => { throw new Error('Read-only config'); });
+    await expect(service.setTracking(false)).rejects.toThrow('Read-only config');
+    expect((await service.snapshot()).trackingEnabled).toBe(true); expect(f.runner.cancel).not.toHaveBeenCalled();
+  });
   it('does not run summaries for idle workers, even when their task is described as active', async () => {
     const f = await fixture(); f.workers[0]!.working = false;
     expect((await f.service.refresh(1)).workingCount).toBe(0);
@@ -103,6 +168,19 @@ describe('worker summary controller', () => {
   it('prevents new calls after shutdown', async () => {
     const f = await fixture(); await f.service.stop(); await f.service.refresh(1);
     expect(f.runner.run).not.toHaveBeenCalled(); expect(f.runner.stop).toHaveBeenCalled();
+  });
+
+  it('cancels the native runner without permanently disabling subsequent runs', async () => {
+    const f = await fixture();
+    const runtime = new SharedSummaryRuntime([process.execPath, '-e',
+      'process.on("SIGTERM",()=>{process.stdout.write(JSON.stringify({ok:false}));process.exit(0)});setTimeout(()=>process.stdout.write(JSON.stringify({ok:false})),250)', '--'], path.join(f.directory, 'runs'));
+    const pending = runtime.run([worker('one')], '00000000-0000-0000-0000-000000000010');
+    // Wait for the signal handler to be installed, rather than racing native startup.
+    await vi.waitFor(() => expect((runtime as unknown as { child?: { pid?: number } }).child?.pid).toBeTruthy());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    runtime.cancel(); await expect(pending).resolves.toEqual({ summaries: null, usage: null });
+    await expect(runtime.run([worker('one')], '00000000-0000-0000-0000-000000000011')).resolves.toEqual({ summaries: null, usage: null });
+    expect(await fs.readdir(path.join(f.directory, 'runs'))).toEqual([]);
   });
 
   it('keeps the selected cadence with collection delay and small timer jitter', async () => {

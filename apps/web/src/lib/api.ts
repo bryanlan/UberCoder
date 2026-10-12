@@ -104,6 +104,8 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 
 export const api = {
   workers: () => request<WorkerPanelSnapshot>('/api/workers'),
+  setWorkerTracking: (enabled: boolean) => request<WorkerPanelSnapshot>('/api/workers/tracking',
+    { method: 'POST', body: JSON.stringify({ enabled }) }),
   refreshWorkers: (intervalMinutes: number) => request<WorkerPanelSnapshot>('/api/workers/refresh',
     { method: 'POST', body: JSON.stringify({ intervalMinutes }) }),
   uploadImage: async (sessionId: string, file: Blob, csrfToken?: string): Promise<ImageAttachment> => {

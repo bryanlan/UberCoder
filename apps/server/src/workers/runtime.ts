@@ -10,9 +10,12 @@ export interface SummaryResult {
   summaries: Array<WorkerSummary & { id: string }> | null;
   usage: WorkerTokenUsage | null;
 }
+export const ZERO_WORKER_USAGE: WorkerTokenUsage = { inputTokens: 0, cachedInputTokens: 0,
+  cacheWriteTokens: 0, outputTokens: 0, totalTokens: 0 };
 export interface SummaryRunner {
   run(workers: WorkerEvidence[], requestId: string): Promise<SummaryResult>;
   stop(): void;
+  cancel(): void;
 }
 const line = z.string().trim().min(1).max(180).refine((s) => !/[\r\n]/.test(s));
 const responseSchema = z.object({ workers: z.array(z.object({ id: z.string(), task: line,
@@ -42,6 +45,7 @@ export function parseRuntimeResult(raw: unknown, workers: WorkerEvidence[]): Sum
 export class SharedSummaryRuntime implements SummaryRunner {
   private child?: ChildProcess;
   private stopped = false;
+  private cancellation = 0;
   constructor(private readonly command: string[], private readonly directory: string) {}
 
   private async prepare() {
@@ -64,6 +68,7 @@ export class SharedSummaryRuntime implements SummaryRunner {
 
   async run(workers: WorkerEvidence[], requestId: string): Promise<SummaryResult> {
     if (this.stopped || !/^[a-f0-9-]{36}$/i.test(requestId)) throw new Error('Summary runtime is stopped or request identity is invalid.');
+    const cancellation = this.cancellation;
     await this.prepare();
     const runPath = path.join(this.directory, requestId);
     await fs.mkdir(runPath, { mode: 0o700 });
@@ -87,8 +92,8 @@ export class SharedSummaryRuntime implements SummaryRunner {
       await fs.writeFile(requestFile, JSON.stringify({ agent: 'codex', model: 'gpt-6-luna', effort: 'low', output_schema_path: schemaFile,
         auth: 'account_oauth', access: 'data_only', cwd: runPath, artifacts_dir: path.join(runPath, 'artifacts'),
         prompt, hard_timeout_sec: 90, idle_warning_sec: 60 }), { mode: 0o600 });
+      if (this.stopped || cancellation !== this.cancellation) return { summaries: null, usage: { ...ZERO_WORKER_USAGE } };
       const result = await new Promise<string>((resolve, reject) => {
-        if (this.stopped) { reject(new Error('Summary runtime is stopped.')); return; }
         const child = spawn(this.command[0]!, [...this.command.slice(1), '--application', '--spec-file', requestFile],
           { stdio: ['ignore', 'pipe', 'pipe'] });
         this.child = child;
@@ -114,5 +119,6 @@ export class SharedSummaryRuntime implements SummaryRunner {
     }
   }
 
-  stop(): void { this.stopped = true; this.child?.kill('SIGTERM'); }
+  cancel(): void { this.cancellation++; this.child?.kill('SIGTERM'); }
+  stop(): void { this.stopped = true; this.cancel(); }
 }

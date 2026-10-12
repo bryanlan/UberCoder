@@ -42,6 +42,7 @@ export interface WorkerPanelSnapshot {
   workingCount: number;
   generating: boolean;
   enabled: boolean;
+  trackingEnabled: boolean;
   error: string | null;
   usage: WorkerUsageToday;
 }
