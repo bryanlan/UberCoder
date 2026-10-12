@@ -512,6 +512,8 @@ describe('assignment coordination', () => {
       expect(body.hookSpecificOutput.additionalContext).toContain('When documentation edits are allowed');
       expect(body.hookSpecificOutput.additionalContext).toContain('Unattended means permission to continue the existing human-authorized assignment');
       expect(body.hookSpecificOutput.additionalContext).toContain('Assignments start waiting_for_input');
+      expect(body.hookSpecificOutput.additionalContext).toContain('If a cached MCP tool lacks these update fields');
+      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs update with the same JSON on stdin');
       expect(body.hookSpecificOutput.additionalContext).not.toContain('token');
       expect(service.snapshot().messages.find((m) => m.id === messageId)?.acknowledgedAt).toBeNull();
       const ack = await run(['ack'], { messageIds: [messageId] }); expect(ack.code, ack.stderr).toBe(0);
