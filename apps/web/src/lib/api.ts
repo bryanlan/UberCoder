@@ -21,6 +21,7 @@ import type {
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
   UpdateUiPreferencesRequest,
+  WorkerPanelSnapshot,
   WikiHistoryResponse,
   WikiListResponse,
   WikiPage,
@@ -102,6 +103,9 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 }
 
 export const api = {
+  workers: () => request<WorkerPanelSnapshot>('/api/workers'),
+  refreshWorkers: (intervalMinutes: number) => request<WorkerPanelSnapshot>('/api/workers/refresh',
+    { method: 'POST', body: JSON.stringify({ intervalMinutes }) }),
   uploadImage: async (sessionId: string, file: Blob, csrfToken?: string): Promise<ImageAttachment> => {
     const response = await request<{ image: ImageAttachment }>(`/api/sessions/${encodeURIComponent(sessionId)}/images`, {
       method: 'POST', body: file, headers: { 'content-type': file.type },

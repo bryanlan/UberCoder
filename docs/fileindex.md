@@ -237,6 +237,11 @@ Test and verification anchors:
 
 ## Assignment coordination
 
+- `apps/server/src/workers/` — loaded-worker roster/evidence, shared-runtime summaries, private usage accounting and authenticated routes.
+- `apps/web/src/components/WorkerPanel.tsx` — global right panel, exact conversation links, three summary rows and visibility/cadence controls.
+- `packages/shared/src/workers.ts` — worker-panel and native usage contracts.
+- `docs/worker-panel.md` — operating and verification contract.
+
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
 - `apps/server/src/coordination/wake.ts` — fixed peer-response notice, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.

@@ -8,6 +8,10 @@
   "projectsRoot": "/srv/projects",
   "runtimeDir": "~/.local/share/agent-console/runtime",
   "databasePath": "~/.local/share/agent-console/agent-console.sqlite",
+  "workerSummaries": {
+    "enabled": true,
+    "runtimeCommand": ["~/.local/bin/agent-consult"]
+  },
   "coordination": {
     "enabled": false,
     "pilotPaths": []

@@ -32,6 +32,11 @@ import { registerCoordinationRoutes, startCoordinationSocket } from './coordinat
 import { WikiService } from './wiki/service.js';
 import { registerWikiRoutes } from './wiki/routes.js';
 import { recordCoordinationTelemetry, startCoordinationTelemetry } from './coordination/telemetry.js';
+import { WorkerEvidenceSource } from './workers/evidence.js';
+import { SharedSummaryRuntime } from './workers/runtime.js';
+import { WorkerSummaryAudit } from './workers/audit.js';
+import { WorkerPanelService } from './workers/service.js';
+import { registerWorkerRoutes } from './workers/routes.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -68,6 +73,10 @@ export async function buildApp(options: AppOptions = {}) {
   const wakePeers = () => { void sessions.wakePendingPeerMessages().catch((error: unknown) => app.log.warn({ err: error }, 'Peer-message wake failed.')); };
   const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakePeers : undefined);
   const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
+  const workerDirectory = path.join(config.runtimeDir, 'workers');
+  const workers = new WorkerPanelService(new WorkerEvidenceSource(db, projectService, liveOutputReader),
+    new SharedSummaryRuntime(config.workerSummaries.runtimeCommand, path.join(workerDirectory, 'runs')),
+    new WorkerSummaryAudit(workerDirectory), config.workerSummaries.enabled);
   await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
   const restartService = new RestartService(() => app.close());
 
@@ -114,6 +123,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
   await registerCoordinationRoutes(app, authService, coordination);
+  registerWorkerRoutes(app, authService, workers);
   registerWikiRoutes(app, authService, wiki, projectService);
   new LocalhostProxyService(projectService, authService).register(app);
 
@@ -162,6 +172,7 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   app.addHook('onClose', async () => {
+    await workers.stop();
     stopTelemetry?.();
     if (coordinationTimer) clearInterval(coordinationTimer);
     clearInterval(wikiBackupTimer);

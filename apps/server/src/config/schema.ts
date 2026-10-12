@@ -69,6 +69,10 @@ export const appConfigSchema = z.object({
   runtimeDir: z.string().default('~/.local/share/agent-console/runtime'),
   databasePath: z.string().default('~/.local/share/agent-console/agent-console.sqlite'),
   sessions: sessionsConfigSchema,
+  workerSummaries: z.object({
+    enabled: z.boolean().default(true),
+    runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),
+  }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
   coordination: z.object({
     enabled: z.boolean().default(false),
     pilotPaths: z.array(z.string().min(1)).default([]),

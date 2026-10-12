@@ -366,6 +366,13 @@ Use `docs/agent_docs/running_tests.md` for safe verification commands. Do not in
 
 ## Assignment coordination
 
+The global right-hand worker panel joins loaded Console sessions to assignment activity and
+peer receipts. Working state remains backend-owned; an isolated shared-runtime Luna/low call
+produces only three short descriptions. Refreshes share one server batch and durable private
+token accounting, skip idle/unchanged workers and never wake a provider conversation.
+See [the worker panel contract](worker-panel.md) for evidence bounds, refresh/visibility gates,
+configuration, failures and accounting.
+
 Peer-wake audit is an owner-owned, read-only CLI over durable SQLite attempts and native
 provider turn usage. Waltium owns periodic warning checks, daily rollups and deduplicated
 operator visibility. Audit thresholds do not affect message delivery or session lifecycle.

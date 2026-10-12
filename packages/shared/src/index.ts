@@ -1,4 +1,5 @@
 export * from './coordination.js';
+export * from './workers.js';
 export const PROVIDERS = ['codex', 'claude'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
