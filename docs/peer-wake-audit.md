@@ -93,7 +93,7 @@ records without this measurement report unknown; no historical reconstruction is
 
 ## Native usage and evidence
 
-Usage is attributed only to an exact native coordination-control prompt within a unique
+Native recognition includes the current unattended continuation notice and the historical peer-inbox notice. Message-pair attribution still requires a recorded message submission interval; a silent-idle or worker-result continuation without a message is not attributed to a message pair. Usage is attributed only to an exact native coordination-control prompt within a unique
 submission interval. Codex requires native `token_usage_record.turn_token_usage` snapshots
 and a matching lifecycle turn ID; session totals and duplicated `token_count` records are
 not used. Claude deduplicates streamed assistant usage by native message ID, excludes

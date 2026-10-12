@@ -61,6 +61,10 @@ describe('Claude work readiness', () => {
       conversationRef: 'c1', title: 'Ready', kind: 'history',
     });
     await expect.poll(() => db.boundSessions.getById(session.id)?.isWorking).toBe(true);
+    db.boundSessions.setRunFailure(session.id, {
+      turnId: 'original-failure', failedAt: started, code: 'server_overloaded', message: 'API Error: 529 Overloaded',
+      attempts: 1, maxAttempts: 3, status: 'retrying', retrySubmittedAt: started,
+    });
 
     const firstEnd = new Date().toISOString();
     await fs.appendFile(transcript, record('assistant', firstEnd, 'end_turn'));
@@ -68,6 +72,7 @@ describe('Claude work readiness', () => {
       .runRecovery.getRunState(session.id)?.status).toBe('completed');
     expect(db.boundSessions.getById(session.id)?.isWorking).toBe(true);
     expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBeUndefined();
+    expect(db.boundSessions.getById(session.id)?.runFailure).toMatchObject({ status: 'retrying', attempts: 1 });
 
     tmux.paneText = [
       'Claude Code',
@@ -79,10 +84,12 @@ describe('Claude work readiness', () => {
     await manager.getSessionScreen(session.id);
     expect(db.boundSessions.getById(session.id)?.isWorking).toBe(true);
     expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBeUndefined();
+    expect(db.boundSessions.getById(session.id)?.runFailure?.attempts).toBe(1);
 
     tmux.paneText = readyScreen;
     await manager.getSessionScreen(session.id);
     expect(db.boundSessions.getById(session.id)).toMatchObject({ isWorking: false, lastResponseAt: firstEnd });
+    expect(db.boundSessions.getById(session.id)?.runFailure).toBeUndefined();
 
     tmux.paneText = 'Claude Code\n✶ Thinking... (esc to interrupt)';
     await fs.appendFile(transcript, record('assistant', new Date(Date.now() + 1).toISOString(), 'tool_use'));

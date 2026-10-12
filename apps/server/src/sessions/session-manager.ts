@@ -32,6 +32,7 @@ import {
   hashScreen,
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenInputChanged,
+  screenInputMatchesText,
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
   screenShowsClaudeResumeSessionChoice,
@@ -54,7 +55,8 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexPeerWake, type PeerWakeAttempt } from '../coordination/wake.js';
+import { UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexNotice, type PeerWakeAttempt } from '../coordination/wake.js';
+import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -102,13 +104,14 @@ interface SessionRecoveryDependencies {
 }
 
 interface SessionManagerOptions {
+  coordinationEnabled?: boolean;
   readLastUserInput?: typeof readLastUserInput;
   eagerRestoreWindowMs?: number;
   restoreGraceMs?: number;
   pressureSuspendAvailableBytes?: number;
   pressureSuspendIdleMs?: number;
   readMemInfo?: () => string;
-  queueCodexNotice?: typeof queueCodexPeerWake;
+  queueCodexNotice?: typeof queueCodexNotice;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -269,11 +272,13 @@ export class SessionManager {
   private readonly pressureSuspendIdleMs: number;
   private readonly readMemInfo: () => string;
   private readonly readLastUserInput: typeof readLastUserInput;
-  private readonly queueCodexNotice: typeof queueCodexPeerWake;
+  private readonly queueCodexNotice: typeof queueCodexNotice;
   private consecutiveLowMemorySamples = 0;
   private autoTrackActiveLaunches = 0;
   private reconciliationRun?: Promise<void>;
-  private peerWakeRun?: Promise<void>;
+  private assignmentWakeRun?: Promise<void>;
+  private wakeRequested = false;
+  private readonly coordinationEnabled: boolean;
   private stopped = false;
 
   constructor(
@@ -285,13 +290,14 @@ export class SessionManager {
     private readonly logger?: SessionManagerLogger,
     options: SessionManagerOptions = {},
   ) {
+    this.coordinationEnabled = options.coordinationEnabled ?? false;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
     this.pressureSuspendIdleMs = options.pressureSuspendIdleMs ?? 60 * 60 * 1000;
     this.readMemInfo = options.readMemInfo ?? (() => fs.readFileSync('/proc/meminfo', 'utf8'));
     this.readLastUserInput = options.readLastUserInput ?? readLastUserInput;
-    this.queueCodexNotice = options.queueCodexNotice ?? queueCodexPeerWake;
+    this.queueCodexNotice = options.queueCodexNotice ?? queueCodexNotice;
     fs.mkdirSync(this.runtimeDir, { recursive: true });
     this.runtimes = new SessionRuntimeRegistry({
       onSlowCommand: ({ sessionId, label, elapsedMs }) => {
@@ -304,28 +310,79 @@ export class SessionManager {
     this.runRecovery = new RunRecovery({
       db: this.db,
       runExclusive: (id, fn) => this.runtimes.run(id, 'runRecovery', fn),
+      mayRecover: (session) => this.unattendedAssignment(session) !== undefined,
       canRetry: async (session) => {
         if (this.stopped || this.getCurrentRestorableSession(session)?.id !== session.id || session.status !== 'bound') return 'This session no longer owns the conversation.';
+        if (!this.unattendedAssignment(session)) return 'Unattended continuation is disabled for this assignment.';
+        const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
+          .get(session.provider, session.conversationRef) as { status: string } | undefined;
+        if (assignment?.status === 'finished') return 'This assignment is finished.';
+        if (session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest) return 'This session is paused or has a pending model change.';
+        const available = this.availableMemoryBytes();
+        if (this.pressureSuspendAvailableBytes !== undefined
+          && (available === undefined || available < this.pressureSuspendAvailableBytes)) return 'Recovery is stopped while available memory is below the configured threshold.';
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(session.projectSlug);
         if (!project || !this.recoveryDependencies?.projectService.getMergedProviderSettings(project, session.provider).enabled) return 'This provider or project is no longer enabled.';
         if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive') return 'The provider session is unavailable. Resume it manually.';
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) return 'Session ownership could not be verified.';
         const screen = await this.captureSessionScreen(session);
-        if (screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen) || screen.contextPercent === undefined) return 'The provider is busy, has an unsent draft, or needs your input.';
+        if (!screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
+          || (session.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return 'The provider is busy, has an unsent draft, or needs your input.';
         return undefined;
       },
-      submit: async (session, text) => {
-        if (this.getCurrentRestorableSession(session)?.id !== session.id) throw new Error('Conversation ownership changed before recovery submission.');
+      submit: async (session, text, isCurrent) => {
+        const ownsRecovery = () => {
+          const current = this.db.boundSessions.getById(session.id);
+          const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
+            .get(session.provider, session.conversationRef) as { status: string } | undefined;
+          const available = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
+          return isCurrent() && !this.stopped && this.getCurrentRestorableSession(session)?.id === session.id
+            && this.unattendedAssignment(session) !== undefined
+            && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.modelProfileRequest
+            && assignment?.status !== 'finished'
+            && (this.pressureSuspendAvailableBytes === undefined || (available !== undefined && available >= this.pressureSuspendAvailableBytes));
+        };
+        if (!ownsRecovery()) throw new Error('Recovery was cancelled or conversation ownership changed before submission.');
+        if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Session ownership changed before recovery submission.');
         this.runtimeState(session.id).submittedTurnAt = nowIso();
-        await this.runInputTmuxAction(session, () => this.submitTextToSession(session.tmuxSessionName, text));
+        try {
+          await this.runInputTmuxAction(session, async () => {
+            if (shouldUseBracketedPasteTransport(text)) await this.tmuxClient.pasteText(session.tmuxSessionName, text);
+            else await this.sendLiteralTextToSession(session.tmuxSessionName, text);
+            // Stop runs outside the runtime queue. Never send Enter after it has
+            // cancelled recovery during text entry; leave the text unsent.
+            if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Recovery cancelled during text entry; recovery text remains unsent.');
+            await this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']);
+          });
+        } catch (error) {
+          this.runtimeState(session.id).submittedTurnAt = undefined;
+          throw error;
+        }
         const timestamp = nowIso();
         const updated = this.updateBoundSessionFields(session.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
         this.appendEvent(updated, { type: 'status', text: 'Submitted automatic recovery for the interrupted turn.', timestamp });
         this.eventBus.emit({ type: 'session.updated', session: updated });
       },
-      publish: (session) => this.eventBus.emit({ type: 'session.updated', session }),
+      publish: (session) => {
+        if (session.runFailure) {
+          const failure = session.runFailure;
+          this.appendEvent(session, { type: 'status', timestamp: nowIso(), text:
+            `Provider recovery ${failure.status} (${failure.attempts}/${failure.maxAttempts}): ${failure.stoppedReason ?? failure.message}` });
+        }
+        this.eventBus.emit({ type: 'session.updated', session });
+      },
       onRunState: (id, run) => {
         const session = this.db.boundSessions.getById(id);
+        if (session && run.status === 'cancelled') {
+          const assignment = this.unattendedAssignment(session);
+          if (assignment && run.timestamp >= (continuationControl(this.db, assignment.id).enabledAt ?? '')) this.pauseUnattended(id);
+        }
+        if (session && run.status === 'failed') {
+          const assignment = this.assignmentForSession(session);
+          const supervisor = assignment && continuationControl(this.db, assignment.id).supervisorId;
+          if (supervisor) signalContinuation(this.db, supervisor, { key: `worker-failed:${assignment!.id}:${run.turnId}:${run.timestamp}`,
+            source: assignment!.id, timestamp: run.timestamp, reason: `Supervised worker ${assignment!.id} stopped on a provider failure.` });
+        }
         if (session?.shouldRestore && session.status === 'bound') {
           if (run.status === 'completed' && session.provider === 'codex') {
             this.recordProviderResponse(session, run);
@@ -338,6 +395,15 @@ export class SessionManager {
           }
         }
         this.scheduleModelProfileDrain(id);
+        this.requestAssignmentWake();
+      },
+      onChildActivity: (id, events) => {
+        const session = this.db.boundSessions.getById(id);
+        const assignment = session && this.unattendedAssignment(session);
+        if (!assignment) return;
+        for (const event of events) signalContinuation(this.db, assignment.id, { key: `native-child:${event.id}`, source: event.childId,
+          timestamp: event.timestamp, reason: `Native child ${event.childId} ${event.kind}; reconcile its result before continuing.` });
+        this.requestAssignmentWake();
       },
       onError: (error) => this.logger?.warn({ err: error }, 'Run recovery failed.'),
     });
@@ -352,28 +418,53 @@ export class SessionManager {
     return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
-  /** One initial response and one guarded receipt follow-up; ambiguous input is never replayed. */
-  wakePendingPeerMessages(): Promise<void> {
-    if (this.stopped) return Promise.resolve();
-    if (this.peerWakeRun) return this.peerWakeRun;
-    this.peerWakeRun = this.drainPeerMessages().finally(() => { this.peerWakeRun = undefined; });
-    return this.peerWakeRun;
+  private assignmentForSession(session: BoundSession): { id: string; status: string } | undefined {
+    return this.db.sqlite.prepare('select id,status from coordination_assignments where provider=? and native_session_id=?')
+      .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string; status: string } | undefined;
   }
 
-  private async drainPeerMessages(): Promise<void> {
+  private unattendedAssignment(session: BoundSession): { id: string; status: string } | undefined {
+    const assignment = this.coordinationEnabled && this.assignmentForSession(session);
+    return assignment && assignment.status !== 'finished' && continuationControl(this.db, assignment.id).continuation === 'unattended' ? assignment : undefined;
+  }
+
+  private pauseUnattended(sessionId: string): void {
+    const session = this.db.boundSessions.getById(sessionId);
+    const assignment = session && this.unattendedAssignment(session);
+    if (assignment) setContinuation(this.db, assignment.id, 'waiting_for_input');
+  }
+
+  private requestAssignmentWake(): void {
+    queueMicrotask(() => { void this.wakePendingAssignments().catch((error: unknown) =>
+      this.logger?.warn({ err: error }, 'Assignment wake deferred.')); });
+  }
+
+  /** Bounded unattended work and inbox delivery; ambiguous input is never replayed. */
+  wakePendingAssignments(): Promise<void> {
+    if (this.stopped || !this.coordinationEnabled) return Promise.resolve();
+    this.wakeRequested = true;
+    if (this.assignmentWakeRun) return this.assignmentWakeRun;
+    this.assignmentWakeRun = (async () => {
+      do { this.wakeRequested = false; await this.drainAssignments(); }
+      while (this.wakeRequested && !this.stopped);
+    })().finally(() => { this.assignmentWakeRun = undefined; });
+    return this.assignmentWakeRun;
+  }
+
+  private async drainAssignments(): Promise<void> {
     const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
       a.pid, a.process_start as processStart from coordination_assignments a
-      join coordination_messages m on m.recipient_id=a.id
-      where a.status!='finished' and m.acknowledged_at is null`).all() as Array<{
+      where a.status!='finished'`).all() as Array<{
         id: string; provider: string; nativeSessionId: string; pid: number; processStart: string;
       }>;
     for (const recipient of recipients) {
       if (this.stopped) return;
+      if (continuationControl(this.db, recipient.id).continuation !== 'unattended') continue;
       const sessions = this.listRestorableSessions().filter((session) => session.provider === recipient.provider
         && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
       if (sessions.length !== 1) continue;
       const session = sessions[0]!;
-      await this.runtimes.run(session.id, 'peerMessageWake', async () => {
+      await this.runtimes.run(session.id, 'assignmentWake', async () => {
         const pending = () => {
           const state = this.db.boundSessions.getById(session.id);
           const messages = this.db.sqlite.prepare(`select id, supplied_at as suppliedAt from coordination_messages
@@ -393,11 +484,42 @@ export class SessionManager {
             return [{ id: message.id, key }];
           });
         };
-        if (!pending().length || this.stopped) return;
         let current = this.db.boundSessions.getById(session.id);
+        let priorControl = continuationControl(this.db, recipient.id);
+        if (current && priorControl.recovery?.status === 'submitted'
+          && Date.now() - Date.parse(priorControl.recovery.startedAt) >= 30_000) {
+          const submittedRevision = priorControl.revision;
+          const submittedAt = priorControl.recovery.startedAt;
+          await this.runRecovery.refresh(current.id);
+          current = this.db.boundSessions.getById(session.id);
+          const run = this.runRecovery.getRunState(session.id);
+          if (!run || run.timestamp < submittedAt) {
+            priorControl = continuationControl(this.db, recipient.id);
+            if (priorControl.revision === submittedRevision && priorControl.recovery?.status === 'submitted' && priorControl.recovery.startedAt === submittedAt) {
+              priorControl.recovery = { ...priorControl.recovery, status: 'blocked', reason: 'The provider did not acknowledge continuation. Review the conversation before enabling unattended work again.' };
+              saveContinuation(this.db, recipient.id, priorControl);
+              this.runtimeState(session.id).submittedTurnAt = undefined;
+            }
+          }
+        }
         if (!current || this.getCurrentRestorableSession(current)?.id !== current.id
           || current.isWorking || current.modelProfileRequest || current.manualSuspendedAt
           || current.conversationRef.startsWith('pending:')) return;
+        if (current.runFailure) return; // Typed provider failures use the single RunRecovery budget.
+        let control = prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
+        if (control.recovery?.status === 'stalled' && control.supervisorId) {
+          const signalled = signalContinuation(this.db, control.supervisorId, {
+            key: `worker-stalled:${recipient.id}:${control.revision}:${control.recovery.startedAt}`,
+            source: recipient.id, timestamp: nowIso(), reason: `Supervised worker ${recipient.id} exhausted its continuation budget; inspect its unfinished work.`,
+          });
+          if (signalled) this.requestAssignmentWake();
+        }
+        if (control.continuation !== 'unattended' || control.recovery?.status === 'blocked' || control.recovery?.status === 'stalled'
+          || (!pending().length && !pendingContinuation(control)) || this.stopped) return;
+        if (control.recovery && control.recovery.attempts > 0 && !pendingContinuation(control)) return;
+        const revision = control.revision;
+        const allowed = () => !this.stopped && continuationControl(this.db, recipient.id).continuation === 'unattended'
+          && continuationControl(this.db, recipient.id).revision === revision;
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
         if (!project) return;
         const providerSettings = this.recoveryDependencies!.projectService.getMergedProviderSettings(project, current.provider);
@@ -410,17 +532,23 @@ export class SessionManager {
         if (liveness === 'dead') {
           // A surviving provider outside this tmux binding must never get a second writer.
           if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
+          if (!allowed()) return;
           const restored = await this.restoreSession(current);
           if (!restored) {
-            for (const message of pending()) this.db.meta.set(message.key, JSON.stringify({
-              status: 'failed', sessionId: current.id, timestamp: nowIso(), reason: 'The original conversation could not be restored. Resume it explicitly before retrying delivery.',
-            } satisfies PeerWakeAttempt));
+            const reason = 'The original conversation could not be restored.';
+            control = continuationControl(this.db, recipient.id);
+            if (control.revision === revision && control.continuation === 'unattended') {
+              const attempts = (control.recovery?.attempts ?? 0) + 1;
+              control.recovery = { attempts, status: attempts >= 3 ? 'stalled' : 'scheduled', reason,
+                startedAt: control.recovery?.startedAt ?? nowIso(), nextAttemptAt: new Date(Date.now() + CONTINUATION_DELAYS_MS[Math.min(attempts, 2)]!).toISOString() };
+              saveContinuation(this.db, recipient.id, control);
+            }
             return;
           }
           current = restored;
           this.db.meta.set(peerWakeRestoreKey(current.id), JSON.stringify({ pid: current.pid, restoredAt: nowIso() }));
         }
-        if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id) return;
+        if (!allowed() || await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id) return;
         await this.runRecovery.refresh(current.id);
         let screen = await this.captureSessionScreen(current, false);
         if (this.stopped) return;
@@ -440,15 +568,25 @@ export class SessionManager {
         }
         current = this.db.boundSessions.getById(current.id);
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
-        if (this.stopped || !current || this.getCurrentRestorableSession(current)?.id !== current.id
+        if (!allowed() || !current || this.getCurrentRestorableSession(current)?.id !== current.id
           || !assignment || assignment.status === 'finished' || current.status !== 'bound'
           || current.isWorking || this.providerTurnIsWorking(current.id) === true
           || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
-          || !screen.inputActive || (current.provider === 'claude' && screen.inputText.trim()) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+          || !screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
           || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
           || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
+        const maySubmit = () => {
+          const latest = this.db.boundSessions.getById(session.id);
+          const availableNow = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
+          return allowed() && latest?.status === 'bound' && this.getCurrentRestorableSession(latest)?.id === latest.id
+            && !latest.manualSuspendedAt && !latest.pressureSuspendedAt && !latest.modelProfileRequest
+            && (this.pressureSuspendAvailableBytes === undefined || (availableNow !== undefined && availableNow >= this.pressureSuspendAvailableBytes));
+        };
         const messages = pending();
-        if (!messages.length) return;
+        control = continuationControl(this.db, recipient.id);
+        const automatic = pendingContinuation(control);
+        if (!messages.length && !automatic) return;
+        if (!messages.length && !control.signals.length && screenShowsBackgroundWork(screen)) return;
         const timestamp = nowIso();
         const restoreRecord = this.db.meta.get(peerWakeRestoreKey(current.id));
         const restore = restoreRecord ? JSON.parse(restoreRecord) as { pid: number; restoredAt: string } : undefined;
@@ -461,25 +599,51 @@ export class SessionManager {
             JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');
+        const attempts = (control.recovery?.attempts ?? 0) + 1;
+        const consumedSignals = new Set(control.signals.map(signal => signal.key));
+        control.recovery = { status: 'submitting', attempts,
+          reason: control.signals.slice(-3).map(signal => signal.reason).join(' ') || control.recovery?.reason || 'Pending peer messages require an unattended continuation.',
+          startedAt: timestamp,
+          nextAttemptAt: new Date(Date.now() + CONTINUATION_DELAYS_MS[Math.min(attempts, 2)]!).toISOString() };
+        saveContinuation(this.db, recipient.id, control);
         const runtime = this.runtimeState(current.id);
         const previousSubmittedTurnAt = runtime.submittedTurnAt;
         runtime.submittedTurnAt = timestamp;
         try {
-          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path);
-          else await this.runInputTmuxAction(current, () => this.submitTextToSession(current!.tmuxSessionName, PEER_WAKE_PROMPT));
+          if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id || !maySubmit()) throw new Error('Unattended continuation paused or ownership changed before submission.');
+          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, UNATTENDED_CONTINUATION_PROMPT);
+          else await this.runInputTmuxAction(current, async () => {
+            await this.tmuxClient.pasteText(current!.tmuxSessionName, UNATTENDED_CONTINUATION_PROMPT);
+            const entered = await this.waitForInputTextChange(current!, hashScreen(screen), screen, combinedTextKeySettleWaitMs(UNATTENDED_CONTINUATION_PROMPT));
+            if (!entered || !screenInputMatchesText(entered, UNATTENDED_CONTINUATION_PROMPT) || !entered.inputActive || sessionScreenShowsWorking(entered)
+              || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered)) throw new Error('The provider did not confirm a ready continuation composer; text remains unsent.');
+            if (await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id') !== current!.id || !maySubmit()) throw new Error('Continuation paused or ownership changed before Enter.');
+            await this.tmuxClient.sendKeys(current!.tmuxSessionName, ['Enter']);
+          });
           saveAttempt('submitted');
+          if (allowed()) {
+            control = continuationControl(this.db, recipient.id);
+            control.recovery = { ...control.recovery!, status: 'submitted' };
+            control.signals = control.signals.filter(signal => !consumedSignals.has(signal.key));
+            saveContinuation(this.db, recipient.id, control);
+          }
           if (restoreRecord) this.db.meta.set(peerWakeRestoreKey(current.id), '');
           const updated = this.updateBoundSessionFields(current.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
-          this.appendEvent(updated, { type: 'status', text: 'Started a coordination response turn for pending peer messages.', timestamp });
+          this.appendEvent(updated, { type: 'status', text: 'Started unattended continuation of the existing authorized assignment.', timestamp });
           this.eventBus.emit({ type: 'session.updated', session: updated });
         } catch (error) {
           // The durable attempt still prevents replay. A transport rejection
           // must not make the previous completed provider turn look running.
           if (runtime.submittedTurnAt === timestamp) runtime.submittedTurnAt = previousSubmittedTurnAt;
           saveAttempt('failed', error instanceof Error ? error.message : 'Provider input failed.');
-          this.logger?.warn({ err: error, sessionId: current.id }, 'Peer-message wake failed; ambiguous input will not be replayed.');
+          if (allowed()) {
+            control = continuationControl(this.db, recipient.id);
+            control.recovery = { ...control.recovery!, status: 'blocked', reason: 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
+            saveContinuation(this.db, recipient.id, control);
+          }
+          this.logger?.warn({ err: error, sessionId: current.id }, 'Assignment continuation failed; ambiguous input will not be replayed.');
         }
-      }).catch((error: unknown) => this.logger?.warn({ err: error, sessionId: session.id }, 'Peer-message wake deferred.'));
+      }).catch((error: unknown) => this.logger?.warn({ err: error, sessionId: session.id }, 'Assignment continuation deferred.'));
     }
   }
 
@@ -490,7 +654,7 @@ export class SessionManager {
     const sessionsToDetach = this.listRestorableSessions()
       .filter((session) => session.rawLogPath && (session.status === 'starting' || session.status === 'bound'));
     this.stopped = true;
-    await this.peerWakeRun;
+    await this.assignmentWakeRun;
     this.scheduledModelProfileDrains.clear();
     this.requestedModelProfileRedrains.clear();
     this.runRecovery.stop();
@@ -577,6 +741,9 @@ export class SessionManager {
     // A previous completion cannot acknowledge a newly submitted turn.
     if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
     const session = this.db.boundSessions.getById(sessionId);
+    const restoreText = this.db.meta.get(peerWakeRestoreKey(sessionId));
+    const restore = restoreText ? JSON.parse(restoreText) as { pid: number; restoredAt: string } : undefined;
+    if (restore && restore.pid === session?.pid && run.timestamp < restore.restoredAt) return undefined;
     // Claude can emit end_turn before another Stop hook continues the turn.
     // A completed record only clears working after the input prompt is visible.
     if (session?.provider === 'claude' && run.status === 'completed'
@@ -595,11 +762,13 @@ export class SessionManager {
     const updated: BoundSession = (!Number.isFinite(priorResponseMs) || completedMs > priorResponseMs)
       ? { ...session, lastResponseAt: run.timestamp, updatedAt: nowIso() }
       : session;
-    if (updated === session && !session.isWorking) return;
     if (updated !== session) this.db.boundSessions.upsert(updated);
+    this.runRecovery.confirmCompletion(session.id, run);
+    if (updated === session && !session.isWorking) return;
     this.syncSessionWorkingState(updated, { screenShowsWorking: false, capturedAt: nowIso() });
     if (!session.isWorking && updated !== session) this.eventBus.emit({ type: 'session.updated', session: updated });
     if (session.provider === 'claude') this.scheduleModelProfileDrain(session.id);
+    this.requestAssignmentWake();
   }
 
   private confirmClaudeResponseFromScreen(session: BoundSession, screen: SessionScreen): void {
@@ -1560,6 +1729,7 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
+    this.pauseUnattended(sessionId);
     this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
   }
@@ -1611,6 +1781,7 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+    if (payload.text || payload.keys?.length) this.pauseUnattended(sessionId);
     if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
@@ -2304,6 +2475,7 @@ export class SessionManager {
   }
 
   async releaseSession(sessionId: string): Promise<void> {
+    this.pauseUnattended(sessionId);
     this.runRecovery.cancel(sessionId);
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
@@ -2347,6 +2519,7 @@ export class SessionManager {
   }
 
   async suspendSession(sessionId: string): Promise<BoundSession> {
+    this.pauseUnattended(sessionId);
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;

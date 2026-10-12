@@ -1,19 +1,22 @@
 import type { BoundSession, RunFailure } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
-import type { ProviderRunMonitor, ProviderRunState } from '../providers/types.js';
+import type { ProviderChildActivity, ProviderRunMonitor, ProviderRunState } from '../providers/types.js';
 
 export const RUN_RETRY_DELAYS_MS = [15_000, 45_000, 120_000] as const;
 const RECOVERY_MAX_AGE_MS = 10 * 60_000;
-export const RECOVERY_PROMPT = 'Automatic recovery after a transient provider capacity failure. Continue the existing user-authorized task in this same conversation. First inspect the latest conversation and current repository/external state to determine what completed before the interruption. Do not replay completed commands or repeat external side effects. Preserve all existing constraints and approvals; this recovery grants no additional authority.';
+export const RECOVERY_PROMPT = 'Automatic recovery after a transient provider failure. Continue the existing user-authorized task in this same conversation. First inspect the latest conversation and current repository/external state to determine what completed before the interruption. Do not replay completed commands or repeat external side effects. Preserve all existing constraints and approvals; this recovery grants no additional authority.';
+const cancellationKey = (id: string) => `run-recovery-cancelled:${id}`;
 
 interface RecoveryOptions {
   db: AppDatabase;
   runExclusive: (id: string, fn: () => Promise<void>) => Promise<void>;
   canRetry: (session: BoundSession) => Promise<string | undefined>;
-  submit: (session: BoundSession, text: string) => Promise<void>;
+  mayRecover: (session: BoundSession) => boolean;
+  submit: (session: BoundSession, text: string, isCurrent: () => boolean) => Promise<void>;
   publish: (session: BoundSession) => void;
   onError: (error: unknown) => void;
   onRunState?: (sessionId: string, run: ProviderRunState) => void;
+  onChildActivity?: (sessionId: string, events: ProviderChildActivity[]) => void;
   delaysMs?: readonly number[];
   now?: () => number;
 }
@@ -24,7 +27,6 @@ interface Observation {
   seen?: string;
   timer?: ReturnType<typeof setTimeout>;
   generation: number;
-  cancelledAt?: number;
   lastTurnId?: string;
   lastStatus?: string;
   run?: ProviderRunState;
@@ -56,13 +58,27 @@ export class RunRecovery {
     return this.observations.get(sessionId)?.run;
   }
 
+  /** Completion must belong to the current run and be confirmed by the session lifecycle. */
+  confirmCompletion(id: string, run: ProviderRunState): void {
+    const observation = this.observations.get(id);
+    const session = this.options.db.boundSessions.getById(id);
+    if (run.status !== 'completed' || observation?.run?.turnId !== run.turnId || observation.run.timestamp !== run.timestamp
+      || !session?.shouldRestore || session.status !== 'bound' || !session.lastResponseAt || session.lastResponseAt < run.timestamp) return;
+    this.clearTimer(observation);
+    if (session.runFailure) this.save(id, undefined);
+  }
+
   cancel(sessionId: string): void {
     const observation = this.observations.get(sessionId);
     if (observation) {
       observation.generation += 1;
-      observation.cancelledAt = this.now();
       this.clearTimer(observation);
     }
+    // Cancellation is a turn boundary, not an ephemeral backend timestamp.
+    // Persist it even before the monitor has caught up with a submitted prompt.
+    this.options.db.meta.set(cancellationKey(sessionId), JSON.stringify({
+      turnId: observation?.run?.turnId, at: this.now(),
+    }));
     const failure = this.options.db.boundSessions.getById(sessionId)?.runFailure;
     if (failure && failure.status !== 'stopped') this.save(sessionId, {
       ...failure, status: 'stopped', nextRetryAt: undefined,
@@ -99,7 +115,10 @@ export class RunRecovery {
     if (!observation) return;
     const generation = observation.generation;
     const run = await observation.monitor.read(observation.path);
-    if (this.observations.get(id) !== observation || observation.generation !== generation || !run) return;
+    if (this.observations.get(id) !== observation || observation.generation !== generation) return;
+    const children = observation.monitor.takeChildActivity?.();
+    if (children?.length) this.options.onChildActivity?.(id, children);
+    if (!run) return;
     const key = `${run.turnId}:${run.status}:${run.timestamp}`;
     if (key === observation.seen) return;
     const initial = observation.seen === undefined;
@@ -114,6 +133,10 @@ export class RunRecovery {
     this.clearTimer(observation);
     if (run.status !== 'failed') {
       if (run.status === 'running' && prior?.status === 'retrying' && run.turnId !== prior.turnId) return;
+      // Claude's end_turn can precede a Stop-hook continuation. Keep the budget
+      // until the existing ready-prompt lifecycle confirms a completed response.
+      if (session.provider === 'claude' && run.status === 'completed'
+        && (!session.lastResponseAt || session.lastResponseAt < run.timestamp)) return;
       if (prior) this.save(id, undefined);
       return;
     }
@@ -128,17 +151,21 @@ export class RunRecovery {
     const fresh = Date.parse(run.timestamp) >= observation.attachedAt
       || (prior?.status === 'retrying' && Date.parse(run.timestamp) >= Date.parse(prior.retrySubmittedAt ?? '')
         && this.now() - Date.parse(run.timestamp) < RECOVERY_MAX_AGE_MS);
-    const cancelled = observation.cancelledAt !== undefined
-      && Date.parse(run.startedAt ?? run.timestamp) <= observation.cancelledAt;
-    const retryable = run.error?.code === 'server_overloaded';
-    const allowed = fresh && !cancelled && retryable && attempts < this.delays.length;
+    const cancellation = this.options.db.meta.get(cancellationKey(id));
+    const cancelledTurn = cancellation ? JSON.parse(cancellation) as { turnId?: string; at: number } : undefined;
+    const cancelled = cancelledTurn !== undefined && (cancelledTurn.turnId === run.turnId
+      || Date.parse(run.startedAt ?? run.timestamp) <= cancelledTurn.at);
+    const retryable = run.error?.code === 'server_overloaded' || run.error?.code === 'server_unavailable';
+    const enabled = this.options.mayRecover(session);
+    const allowed = enabled && fresh && !cancelled && retryable && attempts < this.delays.length;
     const failure: RunFailure = {
       turnId: run.turnId, failedAt: run.timestamp,
       code: run.error?.code ?? 'unknown', message: run.error?.message ?? 'The provider stopped.',
       attempts, maxAttempts: this.delays.length,
       status: allowed ? 'scheduled' : 'stopped',
       nextRetryAt: allowed ? new Date(this.now() + this.delays[attempts]!).toISOString() : undefined,
-      stoppedReason: cancelled ? 'Automatic recovery was cancelled for this turn.' : !fresh ? 'This run ended before recovery monitoring began. Continue manually when ready.'
+      stoppedReason: !enabled ? 'Unattended recovery is disabled for this session.'
+        : cancelled ? 'Automatic recovery was cancelled for this turn.' : !fresh ? 'This run ended before recovery monitoring began. Continue manually when ready.'
         : !retryable ? 'This error requires your attention; it will not be retried automatically.'
           : !allowed ? 'The automatic retry limit was reached.' : undefined,
     };
@@ -184,7 +211,10 @@ export class RunRecovery {
     // Persist the attempt BEFORE transport. Ambiguous delivery is never automatically replayed.
     this.save(id, { ...failure, attempts: failure.attempts + 1, status: 'retrying', nextRetryAt: undefined, retrySubmittedAt: new Date(this.now()).toISOString() });
     try {
-      await this.options.submit(session, `${RECOVERY_PROMPT} Recovery attempt ${failure.attempts + 1} of ${this.delays.length}.`);
+      const isCurrent = () => this.observations.get(id) === observation && observation.generation === generation
+        && this.options.db.boundSessions.getById(id)?.runFailure?.status === 'retrying';
+      await this.options.submit(session, `${RECOVERY_PROMPT} Recovery attempt ${failure.attempts + 1} of ${this.delays.length}.`, isCurrent);
+      if (!isCurrent()) return;
       observation.timer = setTimeout(() => {
         observation.timer = undefined;
         void this.options.runExclusive(id, async () => {
@@ -199,7 +229,7 @@ export class RunRecovery {
       observation.timer.unref?.();
     } catch (error) {
       const current = this.options.db.boundSessions.getById(id)?.runFailure;
-      if (current) this.save(id, { ...current, status: 'stopped', stoppedReason: 'Retry submission failed or its outcome is uncertain. Review the conversation before continuing.' });
+      if (current && current.status !== 'stopped') this.save(id, { ...current, status: 'stopped', stoppedReason: 'Retry submission failed or its outcome is uncertain. Review the conversation before continuing.' });
       this.options.onError(error);
     }
   }

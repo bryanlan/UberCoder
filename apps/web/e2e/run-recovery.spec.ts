@@ -19,24 +19,24 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
       session.runFailure = { ...session.runFailure!, status: 'stopped', stoppedReason: 'Automatic recovery cancelled by user input or Stop.' };
       await route.fulfill({ json: { session } });
     });
+    if (viewport.name === 'mobile') await page.addInitScript(() => localStorage.setItem('agent-console:nav-open:v2', 'false'));
     await page.goto('/projects/demo/codex/c1');
     if (viewport.name === 'mobile') {
-      await page.locator('aside').getByRole('link', { name: /Interrupted deployment/ }).click();
       await expect.poll(() => page.locator('aside').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
     }
     await expect(page.getByText('Run stopped: Selected model is at capacity.', { exact: true })).toBeVisible();
     await expect(page.getByText('Waiting for session output…', { exact: true })).toHaveCount(0);
-    const notice = page.getByRole('alert');
+    const notice = page.getByRole('status').filter({ hasText: 'Retry 2 of 3' });
     await expect(notice).toContainText('Run stopped');
     await expect(notice).toContainText('Retry 2 of 3');
     await expect(page.getByRole('button', { name: 'Stop automatic recovery' })).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath(`${viewport.name}-scheduled.png`) });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Stop automatic recovery' }).click();
-    await expect(notice).toContainText('cancelled');
+    await expect(page.getByRole('status').filter({ hasText: 'Automatic recovery cancelled' })).toContainText('cancelled');
     expect(stopCalls).toBe(1);
     await page.screenshot({ path: testInfo.outputPath(`${viewport.name}-stopped.png`) });
     await page.reload();
-    await expect(page.getByRole('alert')).toContainText('cancelled');
+    await expect(page.getByRole('status').filter({ hasText: 'Automatic recovery cancelled' })).toContainText('cancelled');
   });
 }

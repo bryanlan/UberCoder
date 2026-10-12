@@ -12,7 +12,8 @@ import {
   loadJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
-import { isPeerWakePrompt } from '../../coordination/wake.js';
+import { isCoordinationWakePrompt, UNATTENDED_CONTINUATION_PROMPT } from '../../coordination/wake.js';
+import { claudeRunError } from './claude-run-state.js';
 
 function extractClaudeText(container: Record<string, unknown>, role: NormalizedMessage['role']): string {
   const allowedTypes = ['text'];
@@ -32,7 +33,7 @@ function extractClaudeText(container: Record<string, unknown>, role: NormalizedM
 }
 
 function shouldHideClaudeDisplayMessage(message: NormalizedMessage): boolean {
-  if (message.role === 'status' && message.statusKind === 'compaction') {
+  if (message.role === 'status' && (message.statusKind === 'compaction' || message.statusKind === 'run-failure')) {
     return false;
   }
   if (message.role !== 'user' && message.role !== 'assistant') {
@@ -160,20 +161,22 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
     const isSummary = record.isCompactSummary === true;
-    const peerWake = extracted.role === 'user' && isPeerWakePrompt(extracted.text);
+    const peerWake = extracted.role === 'user' && isCoordinationWakePrompt(extracted.text);
+    const runError = claudeRunError(record);
     const compactionTrigger = recordUuid !== undefined && compactionTriggers.has(recordUuid)
       ? compactionTriggers.get(recordUuid)
       : typeof record.parentUuid === 'string' ? compactionTriggers.get(record.parentUuid) : undefined;
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: isSummary || peerWake ? 'status' : extracted.role,
+      role: isSummary || peerWake || runError ? 'status' : extracted.role,
       lifecycle: 'durable',
       text: isSummary
         ? compactionTrigger === 'auto' ? '[Claude auto summarized]' : '[Claude summarized]'
-        : peerWake ? 'Agent responding to peer messages.' : extracted.text,
+        : peerWake ? extracted.text.trim() === UNATTENDED_CONTINUATION_PROMPT ? 'Agent continuing the unattended assignment.' : 'Agent responding to peer messages.' : runError ? `Run stopped: ${runError.message}` : extracted.text,
       ...(isSummary ? { statusKind: 'compaction' as const } : {}),
       ...(peerWake ? { statusKind: 'coordination' as const } : {}),
+      ...(runError ? { statusKind: 'run-failure' as const } : {}),
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

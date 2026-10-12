@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import type { ProviderRunMonitor, ProviderRunState } from '../types.js';
+import type { ProviderChildActivity, ProviderRunMonitor, ProviderRunState } from '../types.js';
 
 export function codexRunState(record: Record<string, unknown>): ProviderRunState | undefined {
   if (record.type !== 'event_msg') return undefined;
@@ -26,6 +26,8 @@ export class CodexRunMonitor implements ProviderRunMonitor {
   private pending = Buffer.alloc(0);
   private skipLine = false;
   private latest?: ProviderRunState;
+  private children: ProviderChildActivity[] = [];
+  takeChildActivity(): ProviderChildActivity[] { return this.children.splice(0); }
 
   async read(filePath: string): Promise<ProviderRunState | undefined> {
     const stat = await fs.promises.stat(filePath);
@@ -36,6 +38,7 @@ export class CodexRunMonitor implements ProviderRunMonitor {
       this.pending = Buffer.alloc(0);
       this.skipLine = false;
       this.latest = undefined;
+      this.children = [];
     }
     if (stat.size === this.offset) return this.latest;
     const stream = fs.createReadStream(filePath, { start: this.offset, end: stat.size - 1 });
@@ -47,9 +50,22 @@ export class CodexRunMonitor implements ProviderRunMonitor {
         if (!this.skipLine) {
           const line = Buffer.concat([this.pending, data.subarray(start, end)]);
           try {
-            const run = codexRunState(JSON.parse(line.toString('utf8')) as Record<string, unknown>);
+            const record = JSON.parse(line.toString('utf8')) as Record<string, unknown>;
+            const payload = record.payload as Record<string, unknown> | undefined;
+            const item = payload?.item as Record<string, unknown> | undefined;
+            if (record.type === 'event_msg' && payload?.type === 'item_completed' && item?.type === 'SubAgentActivity'
+              && (item.kind === 'completed' || item.kind === 'failed') && typeof item.id === 'string'
+              && typeof item.agent_thread_id === 'string' && typeof record.timestamp === 'string') {
+              this.children.push({ id: item.id, childId: item.agent_thread_id, kind: item.kind, timestamp: record.timestamp });
+              if (this.children.length > 128) this.children.shift();
+            }
+            const run = codexRunState(record);
             if (run && (run.status === 'running' || !this.latest || run.turnId === this.latest.turnId)) {
-              run.startedAt ??= run.turnId === this.latest?.turnId ? this.latest.startedAt : run.status === 'running' ? run.timestamp : undefined;
+              // task_complete.started_at has only whole seconds. Keep the precise
+              // task_started timestamp so a newly submitted turn is not mistaken
+              // for the preceding turn cancelled milliseconds before it began.
+              if (run.turnId === this.latest?.turnId) run.startedAt = this.latest.startedAt ?? run.startedAt;
+              else if (run.status === 'running') run.startedAt = run.timestamp;
               this.latest = run;
             }
           } catch { /* An incomplete provider record cannot establish a run outcome. */ }

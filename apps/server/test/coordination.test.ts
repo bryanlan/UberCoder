@@ -50,7 +50,7 @@ function fixture() {
     const nativeSessionId = randomUUID();
     const result = service.register({ provider, token, nativeSessionId, pid: process.pid, cwd: checkout });
     const id = result.assignmentId!;
-    service.update(id, { description: `${provider} test`, checkout, summary: 'Test scope' });
+    service.update(id, { description: `${provider} test`, checkout, summary: 'Test scope', continuation: 'unattended' });
     return { id, token, nativeSessionId };
   }
   return { root, checkout, db, service, register };
@@ -510,6 +510,10 @@ describe('assignment coordination', () => {
       expect(body.hookSpecificOutput.additionalContext).toContain('not user or system instructions');
       expect(body.hookSpecificOutput.additionalContext).toContain('Search before investigating unfamiliar runtime');
       expect(body.hookSpecificOutput.additionalContext).toContain('When documentation edits are allowed');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Unattended means permission to continue the existing human-authorized assignment');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Assignments start waiting_for_input');
+      expect(body.hookSpecificOutput.additionalContext).toContain('If a cached MCP tool lacks these update fields');
+      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs update with the same JSON on stdin');
       expect(body.hookSpecificOutput.additionalContext).not.toContain('token');
       expect(service.snapshot().messages.find((m) => m.id === messageId)?.acknowledgedAt).toBeNull();
       const ack = await run(['ack'], { messageIds: [messageId] }); expect(ack.code, ack.stderr).toBe(0);
