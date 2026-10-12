@@ -7,6 +7,7 @@ import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
+import { WorkerUserActivity } from '../src/workers/user-activity.js';
 
 describe('SessionManager keystroke submit', () => {
   it('records submitted bypass text only when Enter carries the submitted draft', async () => {
@@ -25,6 +26,7 @@ describe('SessionManager keystroke submit', () => {
     });
     const tmux = new FakeTmux();
     const eventBus = new RealtimeEventBus();
+    const trackingActivity = new WorkerUserActivity(db.meta, eventBus);
     let userInputEvents = 0;
     const userInputMessageIds: string[] = [];
     const unsubscribe = eventBus.subscribe((event) => {
@@ -46,10 +48,12 @@ describe('SessionManager keystroke submit', () => {
 
     await manager.sendKeystrokes(session.id, { text: 'hello', deferScreenUpdate: true });
     expect(userInputEvents).toBe(0);
+    expect(trackingActivity.recent()).toBe(false);
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
 
     await manager.sendKeystrokes(session.id, { text: 'hello' });
     expect(userInputEvents).toBe(0);
+    expect(trackingActivity.recent()).toBe(false);
     expect(await fs.readFile(session.eventLogPath!, 'utf8')).not.toContain('"type":"user-input"');
 
     tmux.paneText = [
@@ -65,6 +69,7 @@ describe('SessionManager keystroke submit', () => {
     const userInputOffset = eventLog.indexOf('{"type":"user-input"');
     const pending = db.pendingConversations.get('pending:bypass-submit');
     expect(userInputEvents).toBe(1);
+    expect(trackingActivity.recent()).toBe(true);
     expect(result.recordedUserInput).toEqual({
       id: `live:${session.id}:${userInputOffset}`,
       text: 'hello',
@@ -76,6 +81,7 @@ describe('SessionManager keystroke submit', () => {
     expect(pending?.rawMetadata?.lastUserInputPreview).toBe('hello');
 
     unsubscribe();
+    trackingActivity.stop();
     db.close();
   });
 
@@ -1184,7 +1190,9 @@ describe('SessionManager keystroke submit', () => {
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new InputRejectingTmux();
     const warn = vi.fn();
-    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), undefined, { warn });
+    const events = new RealtimeEventBus();
+    const trackingActivity = new WorkerUserActivity(db.meta, events);
+    const manager = new SessionManager(db, tmux, path.join(tempDir, 'runtime'), events, undefined, { warn });
 
     const session = await manager.bindConversation({
       project,
@@ -1199,6 +1207,8 @@ describe('SessionManager keystroke submit', () => {
       text: 'this should stay local until the session accepts input',
       keys: ['Enter'],
     })).rejects.toThrow(SessionKeystrokeRejectedError);
+    expect(trackingActivity.recent()).toBe(false);
+    trackingActivity.stop();
     expect(tmux.sentKeys).toEqual([]);
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
     expect(tmux.created).toHaveLength(1);

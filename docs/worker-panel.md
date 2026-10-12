@@ -8,6 +8,11 @@ Suspended, unbound and internal `codex exec` conversations are excluded. Idle ca
 last summary; they never cause model calls. Native child agents without their own Console
 binding are not separate cards.
 
+On desktop the panel defaults to960px (three times its original320px), fits beside navigation
+while reserving320px for the conversation, and has a draggable left edge. Arrow keys resize
+the focused edge; double-click resets to960px. The chosen320–1600px width is remembered in
+this browser. Smaller screens retain the320px drawer within90% of the viewport.
+
 The three lines describe the overall task, latest observed action and recent peer coordination.
 The default summary interval is two minutes; the selector accepts one through five minutes
 and is stored in this browser. Live roster reads run every five seconds while the panel is visible.
@@ -25,6 +30,13 @@ not stop agents or their ordinary coordination. Tokens already consumed by a can
 remain counted when the runtime reports them; missing cancellation usage stays explicitly unknown.
 Cancellation before process launch records known zero usage.
 Switching On allows the next eligible refresh; it cannot revive a cancelled batch.
+Tracking also pauses automatically after10minutes without an accepted human message anywhere
+in Console, and resumes on the next accepted message when the manual switch is enabled.
+Agent output, peer wake notices, polling and draft typing do not renew the window. Explicit On
+starts a fresh10-minute watch window; manual Off stays Off through further messages. The last
+window timestamp persists in existing Console metadata, so restart does not renew it. Only the
+timestamp is stored, never the message body. An in-flight summary is cancelled at the deadline;
+saved information remains visible. The panel distinguishes automatic inactivity from manual Off.
 
 The server shares one in-flight batch across tabs, with the requesting browser's selected
 interval measured from request admission and a one-second allowance for timer/network jitter.

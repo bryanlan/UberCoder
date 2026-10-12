@@ -5,6 +5,7 @@ import type { SummaryRunner } from './runtime.js';
 import { ZERO_WORKER_USAGE } from './runtime.js';
 import { WorkerSummaryAudit, type SummaryAuditRecord } from './audit.js';
 import { WorkerSnapshotStore, type CachedWorkerSummary, type SavedWorkerSnapshot } from './snapshot-store.js';
+import { WorkerUserActivity } from './user-activity.js';
 
 interface EvidenceSource {
   roster(): Promise<WorkerEvidence[]>;
@@ -24,10 +25,22 @@ export class WorkerPanelService {
   private auditFailed = false;
   private stopped = false;
   private generation = 0;
+  private active: boolean;
   constructor(private readonly source: EvidenceSource, private readonly runner: SummaryRunner,
-    private readonly audit: WorkerSummaryAudit, private readonly store: WorkerSnapshotStore, private enabled = true,
+    private readonly audit: WorkerSummaryAudit, private readonly store: WorkerSnapshotStore,
+    private readonly activity: WorkerUserActivity, private enabled = true,
     private readonly clock: () => number = Date.now,
-    private readonly persistEnabled: (enabled: boolean) => void = () => {}) {}
+    private readonly persistEnabled: (enabled: boolean) => void = () => {}) {
+    this.active = enabled && activity.recent();
+    activity.onChange(() => this.syncActivity());
+  }
+
+  private syncActivity(): void {
+    const active = !this.stopped && this.enabled && this.activity.recent();
+    if (active === this.active) return;
+    this.active = active; this.generation++;
+    if (!active) this.runner.cancel();
+  }
 
   private date() { return new Date(this.clock()).toISOString().slice(0, 10); }
   private async loadSnapshot() {
@@ -70,27 +83,28 @@ export class WorkerPanelService {
   async snapshot(): Promise<WorkerPanelSnapshot> {
     await this.loadSnapshot();
     await this.loadAudit();
+    this.syncActivity();
     const generation = this.generation;
-    const roster = this.enabled ? await this.source.roster() : [];
-    if (this.enabled && generation === this.generation) await this.saveSnapshot(roster.map((w) => {
+    const roster = this.active ? await this.source.roster() : [];
+    this.syncActivity();
+    if (this.active && generation === this.generation) await this.saveSnapshot(roster.map((w) => {
       const cached = this.summaries.get(w.id);
       return { id: w.id, projectSlug: w.projectSlug, projectName: w.projectName, provider: w.provider,
         conversationRef: w.conversationRef, title: w.title, working: w.working, task: w.task,
         summary: cached?.summary ?? null, summaryAt: cached?.updatedAt ?? null, stale: Boolean(cached && (cached.stale || cached.sourceTask !== w.task)) };
     }));
     return { workers: this.saved?.workers ?? [], snapshotAt: this.saved?.updatedAt ?? null,
-      workingCount: this.enabled ? (this.saved?.workers.filter((w) => w.working).length ?? 0) : 0, generating: Boolean(this.job),
-      enabled: this.enabled && !this.auditFailed, trackingEnabled: this.enabled,
-      error: this.snapshotError ?? this.error, usage: this.audit.snapshot(this.date()) };
+      workingCount: this.active ? (this.saved?.workers.filter((w) => w.working).length ?? 0) : 0, generating: Boolean(this.job),
+      enabled: this.active && !this.auditFailed, trackingEnabled: this.active,
+      pauseReason: this.active ? null : this.enabled ? 'inactivity' : 'manual',
+      error: this.snapshotError ?? this.activity.error ?? this.error, usage: this.audit.snapshot(this.date()) };
   }
 
   async setTracking(enabled: boolean): Promise<WorkerPanelSnapshot> {
     this.persistEnabled(enabled);
-    if (this.enabled !== enabled) {
-      this.enabled = enabled;
-      this.generation++;
-      if (!enabled) this.runner.cancel();
-    }
+    this.enabled = enabled;
+    if (enabled) this.activity.renew();
+    this.syncActivity();
     if (!enabled) {
       await this.loadSnapshot();
       await this.saveSnapshot();
@@ -103,7 +117,8 @@ export class WorkerPanelService {
     const admittedAt = this.clock();
     await this.loadAudit();
     await this.loadSnapshot();
-    if (!this.stopped && this.enabled && !this.auditFailed && !this.job
+    this.syncActivity();
+    if (!this.stopped && this.active && !this.auditFailed && !this.job
       && admittedAt - this.audit.lastAttemptAt >= Math.max(1, intervalMinutes) * 60_000 - 1_000) {
       // Reserve before asynchronous evidence collection: all tabs share one in-flight batch.
       const job = this.generate(admittedAt).catch(() => { this.error = 'Worker summaries are unavailable.'; });
@@ -115,7 +130,7 @@ export class WorkerPanelService {
 
   private async generate(admittedAt: number): Promise<void> {
     const generation = this.generation;
-    const cancelled = () => this.stopped || !this.enabled || generation !== this.generation;
+    const cancelled = () => { this.syncActivity(); return this.stopped || !this.active || generation !== this.generation; };
     const roster = (await this.source.roster()).filter((w) => w.working).sort((a, b) =>
       (Date.parse(this.summaries.get(a.id)?.updatedAt ?? '') || 0) - (Date.parse(this.summaries.get(b.id)?.updatedAt ?? '') || 0));
     const evidence: WorkerEvidence[] = [];
@@ -166,6 +181,6 @@ export class WorkerPanelService {
     }
   }
 
-  async stop(): Promise<void> { this.stopped = true; this.runner.stop(); await this.job; await this.store.settled().catch(() => {}); }
+  async stop(): Promise<void> { this.stopped = true; this.activity.stop(); this.runner.stop(); await this.job; await this.store.settled().catch(() => {}); }
   async settled(): Promise<void> { await this.job; }
 }

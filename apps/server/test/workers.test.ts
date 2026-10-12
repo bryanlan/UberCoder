@@ -6,6 +6,8 @@ import type { WorkerEvidence } from '../src/workers/evidence.js';
 import { WorkerSummaryAudit } from '../src/workers/audit.js';
 import { WorkerPanelService } from '../src/workers/service.js';
 import { WorkerSnapshotStore } from '../src/workers/snapshot-store.js';
+import { WorkerUserActivity, WORKER_IDLE_MS } from '../src/workers/user-activity.js';
+import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SharedSummaryRuntime, parseRuntimeResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -25,12 +27,59 @@ async function fixture() {
   const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
   const audit = new WorkerSummaryAudit(directory);
   const store = new WorkerSnapshotStore(directory);
-  const service = new WorkerPanelService(source, runner, audit, store, true, () => now);
+  const values = new Map<string, string>();
+  const meta = { get: (key: string) => values.get(key), set: (key: string, value: string) => { values.set(key, value); } };
+  const events = new RealtimeEventBus();
+  const createActivity = (clock: () => number = () => now) => new WorkerUserActivity(meta, events, clock);
+  const activity = createActivity(); activity.renew();
+  const service = new WorkerPanelService(source, runner, audit, store, activity, true, () => now);
   cleanups.push(async () => { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); });
-  return { service, source, workers, runner, audit, store, directory, advance: (ms = 120_000) => { now += ms; } };
+  return { service, source, workers, runner, audit, store, directory, activity, events, values, createActivity, advance: (ms = 120_000) => { now += ms; } };
 }
 
 describe('worker summary controller', () => {
+  it('automatically pauses after ten minutes, retains saved info and ignores agent output', async () => {
+    const f = await fixture(); await f.service.refresh(1); await f.service.settled();
+    const before = await f.service.snapshot(); f.source.roster.mockClear(); f.source.collect.mockClear();
+    f.advance(WORKER_IDLE_MS);
+    f.events.emit({ type: 'session.raw-output', sessionId: 'one', projectSlug: 'demo', provider: 'codex',
+      conversationRef: 'one', chunk: 'More agent work', timestamp: new Date().toISOString() });
+    const paused = await f.service.refresh(1);
+    expect(paused).toMatchObject({ pauseReason: 'inactivity', trackingEnabled: false, workers: before.workers });
+    expect(f.source.roster).not.toHaveBeenCalled(); expect(f.source.collect).not.toHaveBeenCalled();
+    expect(f.runner.run).toHaveBeenCalledTimes(1);
+    f.events.emit({ type: 'session.user-input', sessionId: 'one', projectSlug: 'demo', provider: 'codex',
+      conversationRef: 'one', messageId: 'input-one', text: 'Continue the work', timestamp: new Date().toISOString() });
+    expect((await f.service.snapshot()).trackingEnabled).toBe(true);
+    expect([...f.values.values()].join('')).not.toContain('Continue the work');
+  });
+
+  it('preserves manual Off through new human input and lets explicit On start a watch window', async () => {
+    const f = await fixture(); await f.service.setTracking(false); f.advance(WORKER_IDLE_MS);
+    f.events.emit({ type: 'session.user-input', sessionId: 'one', projectSlug: 'demo', provider: 'codex',
+      conversationRef: 'one', messageId: 'input-two', text: 'New task', timestamp: new Date().toISOString() });
+    expect(await f.service.snapshot()).toMatchObject({ pauseReason: 'manual', trackingEnabled: false });
+    expect((await f.service.setTracking(true)).trackingEnabled).toBe(true);
+  });
+
+  it('does not reset the ten-minute window on restart', async () => {
+    const f = await fixture(); await f.service.snapshot(); f.advance(WORKER_IDLE_MS - 60_000);
+    const activity = f.createActivity();
+    expect(activity.recent()).toBe(true); f.advance(60_000); expect(activity.recent()).toBe(false); activity.stop();
+  });
+
+  it('cancels an in-flight summary at the deadline even without another browser request', async () => {
+    const f = await fixture(); let finish!: (r: SummaryResult) => void;
+    vi.mocked(f.runner.run).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    await f.service.refresh(1); await vi.waitFor(() => expect(f.runner.run).toHaveBeenCalledTimes(1));
+    vi.useFakeTimers();
+    try {
+      f.activity.renew(); f.advance(WORKER_IDLE_MS); await vi.advanceTimersByTimeAsync(WORKER_IDLE_MS);
+      expect(f.runner.cancel).toHaveBeenCalledTimes(1);
+      finish(result(f.workers)); await f.service.settled();
+      expect((await f.service.snapshot()).workers[0]!.summary).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
   it('freezes the latest cards and summaries while Off even if the agents change or disappear', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled();
     const before = await f.service.snapshot(); const runs = vi.mocked(f.runner.run).mock.calls.length;
@@ -47,7 +96,7 @@ describe('worker summary controller', () => {
     const before = await f.service.setTracking(false);
     const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect };
     const runner = { run: vi.fn(f.runner.run), stop: vi.fn(), cancel: vi.fn() };
-    const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), false);
+    const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(), false);
     try {
       const view = await restarted.refresh(1);
       expect(view.workers).toEqual(before.workers); expect(view.snapshotAt).toBe(before.snapshotAt);
@@ -58,10 +107,10 @@ describe('worker summary controller', () => {
   it('restores fingerprints so unchanged evidence does not spend tokens after restart', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled(); await f.service.snapshot();
     vi.mocked(f.runner.run).mockClear();
-    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true,
+    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(() => Date.parse('2026-10-12T14:00:00Z')), true,
       () => Date.parse('2026-10-12T14:00:00Z'));
     try {
-      await restarted.refresh(1); await restarted.settled(); expect(f.runner.run).not.toHaveBeenCalled();
+      await restarted.setTracking(true); await restarted.refresh(1); await restarted.settled(); expect(f.runner.run).not.toHaveBeenCalled();
       expect((await restarted.snapshot()).workers[0]!.summary?.latest).toBe('Checking runtime revision');
     } finally { await restarted.stop(); }
   });
@@ -146,8 +195,10 @@ describe('worker summary controller', () => {
 
   it('leaves tracking unchanged when persistence fails', async () => {
     const f = await fixture();
-    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true, Date.now,
+    const activity = f.createActivity(Date.now); activity.renew();
+    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), activity, true, Date.now,
       () => { throw new Error('Read-only config'); });
+    cleanups.push(() => service.stop());
     await expect(service.setTracking(false)).rejects.toThrow('Read-only config');
     expect((await service.snapshot()).trackingEnabled).toBe(true); expect(f.runner.cancel).not.toHaveBeenCalled();
   });
@@ -210,7 +261,9 @@ describe('worker summary controller', () => {
     const f = await fixture(); vi.mocked(f.runner.run).mockResolvedValue({ summaries: null, usage: null });
     await f.service.refresh(2); await f.service.settled();
     expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, failedCalls: 1, unknownUsageCalls: 1 });
-    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true, () => Date.parse('2026-10-13T12:00:00Z'));
+    const otherActivity = f.createActivity(() => Date.parse('2026-10-13T12:00:00Z')); otherActivity.renew();
+    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), otherActivity, true, () => Date.parse('2026-10-13T12:00:00Z'));
+    cleanups.push(() => other.stop());
     await fs.writeFile(path.join(f.directory, 'usage-2026-10-13.jsonl'), 'malformed audit\n');
     expect((await other.refresh(2)).enabled).toBe(false); await other.settled(); expect(f.runner.run).toHaveBeenCalledTimes(1);
   });
@@ -259,7 +312,7 @@ describe('worker summary controller', () => {
   });
 
   it('attributes a call crossing midnight to its UTC admission day', async () => {
-    const f = await fixture(); f.advance(12 * 60 * 60_000 - 15_000);
+    const f = await fixture(); f.advance(12 * 60 * 60_000 - 15_000); f.activity.renew();
     let finish!: (r: SummaryResult) => void;
     vi.mocked(f.runner.run).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
     await f.service.refresh(1); await vi.waitFor(() => expect(f.runner.run).toHaveBeenCalledTimes(1));

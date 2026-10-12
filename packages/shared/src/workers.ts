@@ -43,6 +43,7 @@ export interface WorkerPanelSnapshot {
   generating: boolean;
   enabled: boolean;
   trackingEnabled: boolean;
+  pauseReason: 'manual' | 'inactivity' | null;
   snapshotAt: string | null;
   error: string | null;
   usage: WorkerUsageToday;

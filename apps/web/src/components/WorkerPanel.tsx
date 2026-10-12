@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { X } from 'lucide-react';
 import { api } from '../lib/api';
+import { useWorkerPanelWidth } from './useWorkerPanelWidth';
 
 const queryKey = ['workers'];
 function useVisible() {
@@ -16,6 +17,7 @@ function useVisible() {
 }
 
 export function WorkerPanel({ onClose }: { onClose: () => void }) {
+  const { panelRef, width, resizing, separatorProps } = useWorkerPanelWidth();
   const visible = useVisible();
   const client = useQueryClient();
   const [minutes, setMinutes] = useState(() => {
@@ -44,7 +46,10 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
     <>
       <button type="button" aria-label="Dismiss worker overlay" onClick={onClose}
         className="fixed inset-0 z-40 bg-black/50 xl:hidden" />
-      <aside aria-label="Active workers" className="fixed inset-y-0 right-0 z-50 flex w-80 max-w-[90vw] flex-col border-l border-slate-700 bg-slate-950 shadow-panel xl:static xl:z-auto xl:shrink-0 xl:shadow-none">
+      <aside ref={panelRef} style={{ '--worker-panel-width': `${width}px` } as CSSProperties}
+        aria-label="Active workers" className="fixed inset-y-0 right-0 z-50 flex w-80 max-w-[90vw] flex-col border-l border-slate-700 bg-slate-950 shadow-panel xl:relative xl:z-auto xl:w-[var(--worker-panel-width)] xl:max-w-none xl:shrink-0 xl:shadow-none">
+        <div {...separatorProps} title="Drag to resize; double-click to reset"
+          className={`absolute inset-y-0 left-0 z-40 hidden w-2 cursor-col-resize touch-none select-none border-l-2 transition-colors hover:border-sky-400 focus-visible:border-sky-400 focus-visible:outline-none xl:block ${resizing ? 'border-sky-400' : 'border-slate-700'}`} />
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
           <h2 className="font-medium text-slate-100">Workers <span className="text-xs text-slate-400">· {data && !data.trackingEnabled ? 'paused' : `${data?.workingCount ?? 0} working`}</span></h2>
           <button type="button" aria-label="Close worker panel" onClick={onClose} className="rounded p-1 text-slate-400 hover:text-slate-100"><X size={18} /></button>
@@ -69,7 +74,9 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
           {tracking.error && <p role="alert" className="text-xs text-amber-300">Unable to save worker tracking. Check the switch before leaving.</p>}
           {data?.error && <p role="status" className="text-xs text-amber-300">{data.error}</p>}
           {data?.generating && <p role="status" className="text-xs text-sky-300">{data.trackingEnabled ? 'Updating summaries…' : 'Stopping summary…'}</p>}
-          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">Worker tracking is off across all tabs. Evidence collection and new summaries are paused.</p>}
+          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">{data.pauseReason === 'inactivity'
+            ? 'Worker tracking automatically paused after 10 minutes without a user message. It resumes when you submit a message.'
+            : 'Worker tracking is off across all tabs. Evidence collection and new summaries are paused.'}</p>}
           {data && !data.trackingEnabled && <p className="text-xs text-slate-400">{data.snapshotAt
             ? `Showing saved information from ${new Date(data.snapshotAt).toLocaleString()}.`
             : 'No worker information has been saved yet.'}</p>}

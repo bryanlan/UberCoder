@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { WorkerPanelSnapshot } from '@agent-console/shared';
 
 const snapshot: WorkerPanelSnapshot = {
-  enabled: true, trackingEnabled: true, snapshotAt: '2026-10-12T12:00:00Z', generating: false, error: null, workingCount: 2,
+  enabled: true, trackingEnabled: true, pauseReason: null, snapshotAt: '2026-10-12T12:00:00Z', generating: false, error: null, workingCount: 2,
   workers: [
     { id: 'one', projectSlug: 'demo', projectName: 'PlaidBasic', provider: 'codex', conversationRef: 'worker-one',
       title: 'Prepare the reminder schema publication', working: true, task: 'Publish the schema',
@@ -32,7 +32,7 @@ async function openConsole(page: Page, data = snapshot) {
   await page.route('**/api/workers/refresh', (route) => { refreshes.push(route.request().postDataJSON().intervalMinutes); return route.fulfill({ json: data }); });
   await page.route('**/api/workers/tracking', (route) => {
     const enabled = route.request().postDataJSON().enabled;
-    data = { ...data, enabled, trackingEnabled: enabled, workingCount: enabled ? 2 : 0 };
+    data = { ...data, enabled, trackingEnabled: enabled, pauseReason: enabled ? null : 'manual', workingCount: enabled ? 2 : 0 };
     return route.fulfill({ json: data });
   });
   await page.goto('/');
@@ -70,6 +70,25 @@ test('mobile opens a readable drawer and closes it without horizontal overflow',
   await page.screenshot({ path: testInfo.outputPath('mobile-panel.png') });
   await page.getByRole('button', { name: 'Close worker panel' }).click();
   await expect(page.getByRole('complementary', { name: 'Active workers' })).toHaveCount(0);
+});
+
+test('worker panel defaults to960px, drags, remembers width and fits beside navigation', async ({ page }) => {
+  await page.setViewportSize({ width: 2200, height: 1000 });
+  await openConsole(page);
+  const panel = page.getByRole('complementary', { name: 'Active workers' });
+  const resize = page.getByRole('separator', { name: 'Resize worker panel width' });
+  await expect(panel).toHaveCSS('width', '960px');
+  const box = (await resize.boundingBox())!;
+  await page.mouse.move(box.x + 4, box.y + 100); await page.mouse.down();
+  await page.mouse.move(box.x - 156, box.y + 100); await page.mouse.up();
+  await expect(panel).toHaveCSS('width', '1120px');
+  await page.reload(); await expect(panel).toHaveCSS('width', '1120px');
+  await resize.focus(); await page.keyboard.press('ArrowRight'); await expect(panel).toHaveCSS('width', '1104px');
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await expect(panel).toHaveCSS('width', '608px');
+  expect(await page.locator('main').evaluate(el => el.getBoundingClientRect().width)).toBeGreaterThanOrEqual(320);
+  await page.setViewportSize({ width: 2200, height: 1000 }); await expect(panel).toHaveCSS('width', '1104px');
+  await resize.dblclick(); await expect(panel).toHaveCSS('width', '960px');
 });
 
 test('an idle fleet shows paused summaries and never requests generation', async ({ page }) => {

@@ -2,14 +2,15 @@ import { render, screen, within, waitFor, cleanup } from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { WorkerPanelSnapshot } from '@agent-console/shared';
 import { api } from '../lib/api';
 import { WorkerPanel } from './WorkerPanel';
 
 vi.mock('../lib/api', () => ({ api: { workers: vi.fn(), refreshWorkers: vi.fn(), setWorkerTracking: vi.fn() } }));
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); localStorage.clear(); });
-const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: false, enabled: true, trackingEnabled: true, snapshotAt: '2026-10-12T12:00:00Z', error: null,
+beforeEach(() => { vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} }); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); });
+const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: false, enabled: true, trackingEnabled: true, pauseReason: null, snapshotAt: '2026-10-12T12:00:00Z', error: null,
   workers: [{ id: 'one', projectSlug: 'alpha', projectName: 'Alpha', provider: 'codex', conversationRef: 'native/one',
     title: 'A very long conversation name that appears in the left sidebar', working: true, task: 'Task', summaryAt: '2026-10-12T12:00:00Z',
     summary: { task: 'Fix schema', latest: 'Checking source readbacks', coordination: 'Asked the Web agent for requirements' }, stale: false }],
@@ -58,7 +59,7 @@ it('does not fetch or generate while the document is hidden', async () => {
 });
 it('switches Off globally and keeps the server setting after remount', async () => {
   setup(); await screen.findByText('Fix schema');
-  const off = { ...snapshot(), enabled: false, trackingEnabled: false, workingCount: 0 };
+  const off = { ...snapshot(), enabled: false, trackingEnabled: false, pauseReason: 'manual' as const, workingCount: 0 };
   vi.mocked(api.setWorkerTracking).mockImplementation(async () => { vi.mocked(api.workers).mockResolvedValue(off); return off; });
   await userEvent.click(screen.getByRole('switch', { name: 'Worker tracking' }));
   await screen.findByText(/Worker tracking is off across all tabs/);
@@ -72,4 +73,10 @@ it('switches Off globally and keeps the server setting after remount', async () 
   expect(screen.getByRole('switch', { name: 'Worker tracking' })).toHaveAttribute('aria-checked', 'false');
   expect(api.refreshWorkers).not.toHaveBeenCalled();
   expect(screen.getByText('Checking source readbacks')).toBeInTheDocument();
+});
+it('explains automatic inactivity pause while keeping saved information visible', async () => {
+  setup({ ...snapshot(), enabled: false, trackingEnabled: false, pauseReason: 'inactivity', workingCount: 0 });
+  await screen.findByText(/automatically paused after 10 minutes/);
+  expect(screen.getByText('Checking source readbacks')).toBeInTheDocument();
+  expect(api.refreshWorkers).not.toHaveBeenCalled();
 });
