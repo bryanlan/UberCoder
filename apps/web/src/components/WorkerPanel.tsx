@@ -51,10 +51,10 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
         <div {...separatorProps} title="Drag to resize; double-click to reset"
           className={`absolute inset-y-0 left-0 z-40 hidden w-2 cursor-col-resize touch-none select-none border-l-2 transition-colors hover:border-sky-400 focus-visible:border-sky-400 focus-visible:outline-none xl:block ${resizing ? 'border-sky-400' : 'border-slate-700'}`} />
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-          <h2 className="font-medium text-slate-100">Workers <span className="text-xs text-slate-400">· {data && !data.trackingEnabled ? 'paused' : `${data?.workingCount ?? 0} working`}</span></h2>
-          <button type="button" aria-label="Close worker panel" onClick={onClose} className="rounded p-1 text-slate-400 hover:text-slate-100"><X size={18} /></button>
+          <h2 className="text-2xl font-medium text-slate-100">Workers <span className="text-lg text-slate-400">· {data && !data.trackingEnabled ? 'paused' : `${data?.workingCount ?? 0} working`}</span></h2>
+          <button type="button" aria-label="Close worker panel" onClick={onClose} className="rounded p-1 text-slate-400 hover:text-slate-100"><X size={27} /></button>
         </div>
-        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-xs text-slate-300">
+        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-lg text-slate-300">
           <span>Worker tracking</span>
           <button type="button" role="switch" aria-label="Worker tracking" aria-checked={Boolean(data?.trackingEnabled)}
             disabled={!data || tracking.isPending} onClick={() => tracking.mutate(!data?.trackingEnabled)}
@@ -62,54 +62,56 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
             {data?.trackingEnabled ? 'On' : 'Off'}
           </button>
         </div>
-        <div className="flex items-center gap-2 border-b border-slate-800 px-4 py-3 text-xs text-slate-300">
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 px-4 py-3 text-lg text-slate-300">
           <label htmlFor="worker-refresh">Summaries every</label>
           <select id="worker-refresh" value={minutes} disabled={!data?.trackingEnabled || tracking.isPending} onChange={(event) => setMinutes(Number(event.target.value))}
             className="rounded border border-slate-700 bg-slate-900 px-2 py-1">
             {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} minute{n === 1 ? '' : 's'}</option>)}
           </select>
         </div>
-        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-          {(query.error || refresh.error) && <p role="status" className="text-xs text-amber-300">Worker updates are unavailable. Last known summaries may be out of date.</p>}
-          {tracking.error && <p role="alert" className="text-xs text-amber-300">Unable to save worker tracking. Check the switch before leaving.</p>}
-          {data?.error && <p role="status" className="text-xs text-amber-300">{data.error}</p>}
-          {data?.generating && <p role="status" className="text-xs text-sky-300">{data.trackingEnabled ? 'Updating summaries…' : 'Stopping summary…'}</p>}
-          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">{data.pauseReason === 'inactivity'
+        <div className="min-h-0 flex-1 overflow-y-auto xl:flex xl:flex-col xl:overflow-hidden">
+        <div className="min-h-0 flex-1 space-y-3 p-3 xl:overflow-y-auto">
+          {(query.error || refresh.error) && <p role="status" className="text-lg text-amber-300">Worker updates are unavailable. Last known summaries may be out of date.</p>}
+          {tracking.error && <p role="alert" className="text-lg text-amber-300">Unable to save worker tracking. Check the switch before leaving.</p>}
+          {data?.error && <p role="status" className="text-lg text-amber-300">{data.error}</p>}
+          {data?.generating && <p role="status" className="text-lg text-sky-300">{data.trackingEnabled ? 'Updating summaries…' : 'Stopping summary…'}</p>}
+          {data && !data.trackingEnabled && <p className="text-lg text-slate-400">{data.pauseReason === 'inactivity'
             ? 'Worker tracking automatically paused after 10 minutes without a user message. It resumes when you submit a message.'
             : 'Worker tracking is off across all tabs. Evidence collection and new summaries are paused.'}</p>}
-          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">{data.snapshotAt
+          {data && !data.trackingEnabled && <p className="text-lg text-slate-400">{data.snapshotAt
             ? `Showing saved information from ${new Date(data.snapshotAt).toLocaleString()}.`
             : 'No worker information has been saved yet.'}</p>}
-          {data?.trackingEnabled && !data.workingCount && <p className="text-xs text-slate-400">No workers are running. Summaries are paused.</p>}
-          {query.isLoading && <p className="text-xs text-slate-400">Loading workers…</p>}
+          {data?.trackingEnabled && !data.workingCount && <p className="text-lg text-slate-400">No workers are running. Summaries are paused.</p>}
+          {query.isLoading && <p className="text-lg text-slate-400">Loading workers…</p>}
           {data?.workers.map((worker) => (
             <article key={worker.id} className="rounded-xl border border-slate-800 bg-slate-900/50 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+              <div className="mb-2 flex items-center justify-between gap-2 text-lg">
                 <span className="truncate font-medium text-slate-100" title={worker.projectName}>{worker.projectName}</span>
-                <span className={data.trackingEnabled && worker.working ? 'text-emerald-400' : 'text-slate-400'}>{data.trackingEnabled
+                <span className={`shrink-0 whitespace-nowrap ${data.trackingEnabled && worker.working ? 'text-emerald-400' : 'text-slate-400'}`}>{data.trackingEnabled
                   ? (worker.working ? 'Working' : 'Idle') : (worker.working ? 'Was working' : 'Was idle')}</span>
               </div>
               <Link to={`/projects/${encodeURIComponent(worker.projectSlug)}/${worker.provider}/${encodeURIComponent(worker.conversationRef)}`}
                 title={`${worker.provider.toUpperCase()}: ${worker.title}`} onClick={() => { if (window.innerWidth < 1280) onClose(); }}
-                className="mb-3 block truncate text-xs text-sky-300 hover:text-sky-100">
+                className="mb-3 block truncate text-lg text-sky-300 hover:text-sky-100">
                 {worker.provider.toUpperCase()}: {worker.title.length > 30 ? `${worker.title.slice(0, 30)}…` : worker.title}
               </Link>
               {[['Task', worker.summary?.task ?? worker.task], ['Latest', worker.summary?.latest ?? 'Latest action has not been summarized.'],
                 ['Peers', worker.summary?.coordination ?? 'Coordination has not been summarized.']].map(([label, text]) => (
-                <p key={label} title={text} className="truncate text-xs leading-6 text-slate-300"><span className="text-slate-500">{label}: </span>{text}</p>
+                <p key={label} title={text} className="break-words text-lg leading-9 text-slate-300 xl:truncate"><span className="text-slate-500">{label}: </span>{text}</p>
               ))}
-              <p className={`mt-2 text-[10px] ${worker.stale ? 'text-amber-300' : 'text-slate-500'}`}>
+              <p className={`mt-2 text-[15px] ${worker.stale ? 'text-amber-300' : 'text-slate-500'}`}>
                 {worker.summaryAt ? `Summary ${new Date(worker.summaryAt).toLocaleTimeString()}` : 'Awaiting summary'}{worker.stale ? ' · out of date' : ''}
               </p>
             </article>
           ))}
         </div>
-        {data && <div className="border-t border-slate-800 p-3 text-[10px] leading-5 text-slate-400">
+        {data && <div className="shrink-0 border-t border-slate-800 p-3 text-[15px] leading-[30px] text-slate-400">
           <p>Today (UTC) · {data.usage.calls} summary requests · {data.usage.failedCalls} failed</p>
           <p>{data.usage.totalTokens.toLocaleString()} known tokens · {data.usage.outputTokens.toLocaleString()} output</p>
           <p>{data.usage.inputTokens.toLocaleString()} uncached input · {(data.usage.cachedInputTokens + data.usage.cacheWriteTokens).toLocaleString()} cache</p>
           {data.usage.unknownUsageCalls > 0 && <p className="text-amber-300">Usage unavailable or pending for {data.usage.unknownUsageCalls} request{data.usage.unknownUsageCalls === 1 ? '' : 's'}.</p>}
         </div>}
+        </div>
       </aside>
     </>
   );
