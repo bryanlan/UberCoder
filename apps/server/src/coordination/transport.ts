@@ -16,6 +16,8 @@ const inputSchema = z.object({
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
+  continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
+  notifySupervisor: z.boolean().optional(),
   offset: z.number().int().nonnegative().default(0),
   recipientId: z.string().uuid().optional(), messageId: z.string().uuid().optional(),
   text: text.max(2000).optional(), messageIds: z.array(z.string().uuid()).max(100).optional(),

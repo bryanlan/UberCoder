@@ -291,7 +291,7 @@ user's actual prompt.
 - Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 216 hours. This gives a completed response seven full days in purple. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 216 hours (nine days) without user or agent activity, removing them from Work mode. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. The one-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
 - Manual Suspend keeps an established conversation bound and visible in Work while stopping its tmux session. The server stores the suspension marker in SQLite, skips that session during reconciliation and automatic Work release, and resumes it only through the authenticated resume action when the conversation is selected. Peer-message wake preserves manual pauses. The suspend action verifies tmux ownership and a ready provider prompt, and rejects working sessions, drafts, interactive prompts, queued model changes, and active coordination assignments. Waiting coordination assignments can be suspended once the provider is idle; this also applies to memory-pressure suspension, and the assignment records remain available for resume. Suspension preserves the normal response-age dot color; the separate Suspended badge and tooltip identify sessions that need resuming. Release still ends the Work binding.
 - Under low available memory, reconciliation can suspend one finished session idle for at least 60 minutes per pass, oldest first. The default trigger is less than 3072 MiB `MemAvailable` in two consecutive 30-second passes; both the threshold and idle window are configurable under `sessions`. A finished session whose tmux process is already gone is not relaunched after the first low reading; it is marked suspended after the second. Live-session pressure suspension uses the same assignment, tmux ownership, provider-ready, draft, and queued-input checks as Manual Suspend, then rechecks available memory immediately before stopping tmux. Its separate SQLite marker keeps the session stopped when memory recovers or the backend restarts; selecting the conversation or a pending direct message restores it when sufficient memory is available. A restored session gets at least another pressure idle window because eligibility also checks its latest state update. Pressure-suspended sessions remain eligible for the nine-day Work release. The ordinary idle suspension and restore grace both default to one hour. If `/proc/meminfo` cannot be read, pressure suspension does nothing.
-- Ordinary hour-based sleep uses native readiness and run state rather than the coordination assignment's active label: SessionStart can leave that label active without starting a turn. All suspension paths preserve visible native background terminals, running-shell/task counters and child-agent rosters, as well as drafts and approval prompts. The exact native Claude summary/full-session resume menu is sleepable; a pending peer message selects the full original session using ownership/PID checks and a durable confirmation attempt. Pre-input shutdown/read failures only defer delivery. Retained live sessions still attach their output monitoring after restart; append-only pipe reattachment leaves an existing pipe connected and opens a new one only when needed. The hour sleep resumes once work indicators clear and the existing activity window has elapsed. A failed peer-wake transport restores the previous provisional submitted-turn marker while retaining its durable message-attempt record, so later messages and idle sleep remain available without replaying ambiguous input.
+- Ordinary hour-based sleep uses native readiness and run state rather than the coordination assignment's active label: SessionStart can leave that label active without starting a turn. All suspension paths preserve visible native background terminals, running-shell/task counters and child-agent rosters, as well as drafts and approval prompts. The exact native Claude summary/full-session resume menu is sleepable; a pending peer message selects the full original session using ownership/PID checks and a durable confirmation attempt. Pre-input shutdown/read failures only defer delivery. Retained live sessions still attach their output monitoring after restart; append-only pipe reattachment leaves an existing pipe connected and opens a new one only when needed. The hour sleep resumes once work indicators clear and the existing activity window has elapsed. A failed peer-wake transport restores the previous provisional submitted-turn marker while retaining its durable message-attempt record, so idle sleep remains available without replaying ambiguous input. Further automatic continuation remains blocked until the conversation is reviewed and unattended permission renewed.
 - Claude transcripts can contain multiple parent-linked branches when the same provider session is
   resumed concurrently. The transcript adapter follows the last message leaf back through
   `parentUuid` and exposes that active branch instead of flattening sibling turns together.
@@ -378,7 +378,7 @@ provider turn usage. Waltium owns periodic warning checks, daily rollups and ded
 operator visibility. Audit thresholds do not affect message delivery or session lifecycle.
 See [the audit contract](peer-wake-audit.md).
 
-`apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver peer data separately from human input. Direct messages request a guarded backend response turn using a fixed coordination notice; transcript adapters classify that notice separately. Durable per-message attempts prevent repeated or ambiguous submission across restart. Automatically sleeping conversations can resume when memory allows; manual pauses stay paused. Idle suspension and restore grace default to one hour, with native prompt, draft and ownership checks before suspension. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
+`apps/server/src/coordination/` owns assignment activity, per-checkout scope summaries, peer inboxes and a private Unix socket. The authenticated `/api/assignment-activity` route supplies `CoordinationPanel.tsx`. Lifecycle/post-tool hooks and MCP deliver peer data separately from human input. Explicit unattended permission allows guarded assignment continuation after idle periods, worker results or peer messages; transcript adapters classify that notice separately. Durable per-message attempts prevent repeated or ambiguous submission across restart. Automatically sleeping conversations can resume when memory allows; manual pauses stay paused. Idle suspension and restore grace default to one hour, with native prompt, draft and ownership checks before suspension. `coordination.pilotPaths` selects repository views. Coordination is advisory: no editing claims, Git mutations or maintenance locks exist. Migration 7 preserves old ownership records as historical events. See [the operating contract](agent-coordination.md).
 
 ## Agent wiki
 
@@ -435,8 +435,9 @@ break proves that text was rejected. Submitted prompts followed by assistant out
 and interactive choices still remain outside the composer. A draft already visible
 in the input box is submitted without pasting it a second time.
 
-Codex `task_complete.error` records are authoritative failed-turn outcomes. The
-provider adapter preserves their messages as durable status rows, and its
+Codex `task_complete.error` records and Claude main-session assistant records marked
+`isApiErrorMessage` are authoritative failed-turn outcomes. The
+provider adapters preserve their messages as durable status rows, and each
 incremental lifecycle monitor observes append-only transcript updates independently
 of the large-conversation display cache. SessionManager attaches this monitor to
 managed transcript bindings even when no conversation page is open.
@@ -444,28 +445,40 @@ managed transcript bindings even when no conversation page is open.
 The backend persists failure and retry state in `bound_sessions.run_failure_json`
 (schema version 8). Ordinary screen/status writes cannot overwrite that state.
 The conversation notice and sidebar badge distinguish stopped, retry scheduled and
-retrying. Failed turns do not remain working because of terminal-output cooldown.
+retrying. Recovery progress uses a passive status notice; exhausting the three-attempt budget raises an alert. Failed turns do not remain working because of terminal-output cooldown.
 
-Only the typed Codex `server_overloaded` error automatically continues the same
-conversation: at most three attempts, delayed 15, 45 and 120 seconds. Permission,
+The typed Codex `server_overloaded` error and Claude native HTTP 500, 502, 503, 504
+and 529 server-error envelopes automatically continue the same
+unattended conversation: at most three attempts, delayed 15, 45 and 120 seconds. A Claude
+`server_error` label alone is insufficient because OAuth failures use it too. Permission,
 policy, authentication, quota and unknown failures stay stopped. Each attempt
 rechecks the latest provider turn, canonical binding, live tmux ownership, enabled
-project/provider and idle composer. It never launches a second writer. The
+project/provider, available memory and idle composer. Manual and memory-pressure
+pauses, a queued model change, drafts and interactive prompts stop recovery.
+Readiness requires a real input prompt; context-percentage metadata is not a
+readiness signal, and Claude does not require a Codex footer. It never launches a second writer. The
 continuation tells the agent to reconcile existing work and external effects before
 continuing under the original authorization. It does not resend the original user
 command or grant additional authority.
 
-User input, keystrokes and release cancel pending recovery. The budget survives
+User input, keystrokes and release cancel pending recovery. Cancellation records
+the observed turn identity and timestamp in SQLite metadata and survives a backend
+restart. The Codex monitor retains the precise turn-start timestamp rather than
+the whole-second start time on a completion envelope. The budget survives
 server restart; historical failures without an existing recovery record remain
 visible but are not automatically resumed. A scheduled attempt older than ten
 minutes stops, with age checked again after asynchronous readiness checks before
 starting submission. The attempt is persisted before submission: uncertain transport or
 restart outcomes are stopped for manual inspection, and lack of provider
 acknowledgment within 30 seconds also stops recovery. Successful completion clears
-the active notice while preserving the failure in transcript history.
+the active notice while preserving the failure in transcript history. Recovery
+budgets for Claude survive provisional `end_turn` records and Stop-hook
+continuations, including backend restart. Only a completed response confirmed
+by the native ready prompt clears that budget; stale completion callbacks do not.
+Recovery state transitions and their stop reasons are also appended to the session event
+log, so clearing the active notice does not erase the decision evidence.
 
-Known cancellation limitations: Stop received during automatic text entry can still
-be followed by Enter before Escape is delivered. Cancellation of a running turn
-can also be forgotten across a server restart because its turn identity is not
-persisted. These two cases remain unresolved; the retry-expiry guard does not
-change their behavior.
+Automatic text entry checks cancellation and tmux ownership again before Enter.
+A Stop received while entering text leaves that text unsent and retains the
+cancellation reason. An Enter already handed to tmux cannot be recalled. These
+guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status and continuation permission remain independent. Worker facts never grant permission or reset a spent continuation budget.

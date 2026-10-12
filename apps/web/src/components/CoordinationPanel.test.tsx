@@ -45,3 +45,17 @@ it('keeps adjacent draft input mounted when an activity request fails during an 
   expect(screen.getByRole('textbox', { name: 'Draft message' })).toBe(draft);
   expect(draft).toHaveValue('Keep this unsent message');
 });
+
+
+it('defines unattended permission and alerts only after repeated continuation failure', async () => {
+  const assignment = { id: 'a', provider: 'codex', description: 'Unfinished authorized work', status: 'disconnected',
+    continuation: 'unattended', supervisorId: null,
+    recovery: { status: 'stalled', attempts: 3, reason: 'Three automatic continuations ended without progress.', nextAttemptAt: '2026-10-12T20:00:00Z' } };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    enabled: true, pendingMessageCount: 0, assignments: [assignment], scopes: [], events: [], messages: [],
+  }) }));
+  render(<QueryClientProvider client={new QueryClient()}><CoordinationPanel checkout="/repo" /></QueryClientProvider>);
+  expect(await screen.findByText(/Unattended continuation enabled/)).toBeInTheDocument();
+  expect(screen.getByText(/It grants no new permissions/)).toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent('3/3 continuations');
+});

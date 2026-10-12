@@ -243,7 +243,8 @@ Test and verification anchors:
 - `docs/worker-panel.md` — operating and verification contract.
 
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
-- `apps/server/src/coordination/wake.ts` — fixed peer-response notice, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
+- `apps/server/src/coordination/continuation.ts` — explicit continuation permission, supervisor links, durable result signals and bounded idle recovery in SQLite metadata.
+- `apps/server/src/coordination/wake.ts` — current unattended notice, historical peer-notice classification, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.
 - `apps/server/src/coordination/telemetry.ts` and `scripts/coordination-telemetry.{mjs,d.mts}` — bounded private measurements, backend-independent failure recording and read-only audit summaries.
 - `apps/server/src/db/repos/search-index.ts` and migration 15 in `db/schema.ts` — atomic FTS row ownership and indexed identity updates.
@@ -267,15 +268,17 @@ Test and verification anchors:
 - `docs/agent-wiki.md` — page semantics, storage and pilot review.
 
 
-Run recovery ownership:
+Run recovery ownership (requires explicit unattended permission):
 - `apps/server/src/providers/transcripts/codex-run-state.ts` — typed Codex lifecycle
   decoding and incremental bounded-memory observation.
-- `apps/server/src/sessions/run-recovery.ts` — persisted retry budget, delays,
-  cancellation, reconciliation and uncertain-delivery stop rules.
+- `apps/server/src/providers/transcripts/claude-run-state.ts` — Claude main-turn
+  lifecycle and native API failure classification, shared with transcript display.
+- `apps/server/src/sessions/run-recovery.ts` — persisted retry budget, turn cancellation, delays,
+  reconciliation and uncertain-delivery stop rules.
 - `apps/server/src/db/repos/bound-sessions.ts` and `db/schema.ts` — separately owned
   recovery state and schema version 8.
 - `apps/web/src/components/RunFailureNotice.tsx`, `Sidebar.tsx` — visible stopped and
   recovery states, with an explicit Stop action.
-- `apps/server/test/codex-run-state.test.ts`, `run-recovery.test.ts`, and
+- `apps/server/test/codex-run-state.test.ts`, `claude-run-state.test.ts`, `run-recovery.test.ts`, and
   `apps/web/e2e/run-recovery.spec.ts` — provider/transport/controller and desktop/mobile
   consumer regressions; browser fixtures never submit to a real provider.

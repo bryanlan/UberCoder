@@ -15,7 +15,8 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
   if (query.error) return <div role="status" className="mx-4 my-1 text-xs text-amber-200">{query.error.message}</div>;
   const data = query.data;
   if (!data?.enabled) return null;
-  const activeAssignments = data.assignments.filter((assignment) => assignment.status === 'active' || assignment.status === 'waiting');
+  const activeAssignments = data.assignments.filter((assignment) => assignment.status === 'active' || assignment.status === 'waiting'
+    || (assignment.status === 'disconnected' && assignment.recovery));
   const label = (id: string) => {
     const assignment = data.assignments.find((item) => item.id === id);
     return assignment ? `${assignment.provider}: ${assignment.description}` : id.slice(0, 8);
@@ -25,11 +26,17 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
       <summary className="cursor-pointer px-3 py-2">Work in this repository · {activeAssignments.length} assignments · {data.pendingMessageCount} messages awaiting acknowledgement</summary>
       <div className="max-h-72 space-y-4 overflow-auto border-t border-slate-700 p-3">
         <p className="text-xs text-slate-400">Activity and messages only. Agents coordinate overlaps directly; files and Git operations are not locked.</p>
+        <p className="text-xs text-slate-400">Unattended permits continuing existing authorized work without another prompt. It grants no new permissions. Waiting for input disables automatic wake; Stop and new human input pause unattended work.</p>
         {activeAssignments.length === 0 && <p>No registered assignments currently affect this repository.</p>}
         <ul className="space-y-2" aria-label="Active assignments">
           {activeAssignments.map((assignment) => (
             <li key={assignment.id}>
               <div><strong>{assignment.description}</strong> <span className="text-slate-400">· {assignment.provider} · {assignment.status}</span></div>
+              <div className="text-xs text-slate-400">{assignment.continuation === 'unattended' ? 'Unattended continuation enabled' : 'Waiting for human input'}
+                {assignment.supervisorId && <> · Supervisor: {label(assignment.supervisorId)}</>}</div>
+              {assignment.recovery && <p role={assignment.recovery.status === 'stalled' ? 'alert' : 'status'} className="text-xs text-amber-200">
+                {assignment.recovery.reason} · {assignment.recovery.attempts}/3 continuations
+              </p>}
               {data.scopes.filter((scope) => scope.assignmentId === assignment.id).map((scope) => <div key={scope.checkout} className="break-all text-xs text-slate-400">{scope.checkout}: {scope.summary}</div>)}
             </li>
           ))}

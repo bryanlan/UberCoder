@@ -1,4 +1,11 @@
 export type AssignmentStatus = 'active' | 'waiting' | 'finished' | 'disconnected';
+export type AssignmentContinuation = 'unattended' | 'waiting_for_input';
+export interface AssignmentRecovery {
+  status: 'scheduled' | 'submitting' | 'submitted' | 'blocked' | 'stalled';
+  attempts: number;
+  reason: string;
+  nextAttemptAt: string;
+}
 
 export interface CoordinationAssignment {
   id: string;
@@ -8,6 +15,9 @@ export interface CoordinationAssignment {
   status: AssignmentStatus;
   startedAt: string;
   lastSeenAt: string;
+  continuation: AssignmentContinuation;
+  supervisorId: string | null;
+  recovery: AssignmentRecovery | null;
 }
 
 export interface CoordinationScope {

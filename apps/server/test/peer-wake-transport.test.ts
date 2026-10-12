@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, expect, it, vi } from 'vitest';
-import { PEER_WAKE_PROMPT, queueCodexPeerWake } from '../src/coordination/wake.js';
+import { PEER_WAKE_PROMPT, queueCodexNotice } from '../src/coordination/wake.js';
 import { providerSettings } from './helpers/session-fixtures.js';
 
 const roots: string[] = [];
@@ -25,7 +25,7 @@ it('queues using the configured Codex executable, working directory and merged e
   const settings = { ...providerSettings, commands: { ...providerSettings.commands,
     resumeCommand: [executable, 'resume', '{{conversationId}}'],
     env: { CODEX_HOME: path.join(root, 'project-home'), FIXTURE_LOG_PATH: log } } };
-  await queueCodexPeerWake(native, settings, root);
+  await queueCodexNotice(native, settings, root, PEER_WAKE_PROMPT);
   expect(JSON.parse(fs.readFileSync(log, 'utf8'))).toEqual({
     argv: ['queue', '--thread', native, '--message', PEER_WAKE_PROMPT], cwd: root,
     home: path.join(root, 'project-home'), inherited: 'inherited-value',

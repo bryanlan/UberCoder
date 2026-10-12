@@ -9,18 +9,18 @@ import { RunRecovery } from '../src/sessions/run-recovery.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { cleanups.splice(0).forEach(fn => fn()); vi.useRealTimers(); });
-function fixture() {
+function fixture(provider: BoundSession['provider'] = 'codex') {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-14T15:00:00Z'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'console-recovery-'));
   const db = new AppDatabase(path.join(dir, 'test.sqlite'));
-  const session: BoundSession = { id: 's1', provider: 'codex', projectSlug: 'demo', conversationRef: 'c1', tmuxSessionName: 'ac-s1', status: 'bound', shouldRestore: true, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isWorking: true };
+  const session: BoundSession = { id: 's1', provider, projectSlug: 'demo', conversationRef: 'c1', tmuxSessionName: 'ac-s1', status: 'bound', shouldRestore: true, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isWorking: true };
   db.boundSessions.upsert(session);
   let run: ProviderRunState | undefined;
   let queue = Promise.resolve();
-  const submit = vi.fn(async (_session: BoundSession, _text: string) => {});
+  const submit = vi.fn(async (_session: BoundSession, _text: string, _isCurrent: () => boolean) => {});
   const canRetry = vi.fn(async (): Promise<string | undefined> => undefined);
-  const publish = vi.fn(); const onError = vi.fn();
-  const options = { db, submit, canRetry, publish, onError, delaysMs: [10, 20, 30], runExclusive: (_id: string, fn: () => Promise<void>) => { queue = queue.then(fn); return queue; } };
+  const publish = vi.fn(); const onError = vi.fn(); const mayRecover = vi.fn(() => true);
+  const options = { db, submit, canRetry, mayRecover, publish, onError, delaysMs: [10, 20, 30], runExclusive: (_id: string, fn: () => Promise<void>) => { queue = queue.then(fn); return queue; } };
   let recovery = new RunRecovery(options);
   const watch = () => recovery.watch(session.id, 'transcript', () => ({ read: async () => run }));
   watch();
@@ -32,7 +32,12 @@ function fixture() {
   const advance = async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); await settle(); };
   const failure = () => db.boundSessions.getById(session.id)?.runFailure;
   cleanups.push(() => { recovery.stop(); db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
-  return { db, session, submit, canRetry, publish, onError, failure, setRun, advance, settle,
+  return { db, session, submit, canRetry, mayRecover, publish, onError, failure, setRun, advance, settle,
+    getRun: () => run!,
+    confirmReady: (completed = run!) => {
+      db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, lastResponseAt: completed.timestamp });
+      recovery.confirmCompletion(session.id, completed);
+    },
     cancel: () => recovery.cancel(session.id),
     restart: async () => { recovery.stop(); recovery = new RunRecovery(options); watch(); await settle(); },
     setUnreadRun: (value: ProviderRunState) => { run = value; },
@@ -56,6 +61,12 @@ describe('Bounded provider failure recovery', () => {
     expect(f.failure()?.status).toBe('stopped'); expect(f.submit).not.toHaveBeenCalled();
   });
 
+  it.each(['codex', 'claude'] as const)('never retries %s without explicit unattended permission', async provider => {
+    const f = fixture(provider); f.mayRecover.mockReturnValue(false); await f.setRun('failed'); await f.advance(60_000);
+    expect(f.failure()).toMatchObject({ status: 'stopped', attempts: 0, stoppedReason: 'Unattended recovery is disabled for this session.' });
+    expect(f.submit).not.toHaveBeenCalled();
+  });
+
   it('keeps historical failures visible without resuming old work', async () => {
     const f = fixture(); await f.setRun('failed', 'old', 'server_overloaded', '2026-09-14T14:00:00Z'); await f.advance(60_000);
     expect(f.failure()?.status).toBe('stopped'); expect(f.submit).not.toHaveBeenCalled();
@@ -71,6 +82,48 @@ describe('Bounded provider failure recovery', () => {
     expect(f.submit).toHaveBeenCalledTimes(3);
     expect(f.failure()).toMatchObject({ status: 'stopped', attempts: 3 });
     await f.advance(60_000); expect(f.submit).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the Claude retry ceiling through provisional end_turn and Stop-hook continuation, including restart', async () => {
+    const f = fixture('claude'); await f.setRun('failed');
+    for (let i = 0; i < 3; i++) {
+      await f.advance([10, 20, 30][i]!);
+      const turn = `retry${i}`;
+      await f.setRun('running', turn);
+      await f.advance(1); await f.setRun('completed', turn);
+      expect(f.failure()).toMatchObject({ status: 'retrying', attempts: i + 1 });
+      if (i === 0) {
+        await f.restart();
+        expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
+      }
+      await f.advance(1); await f.setRun('running', turn);
+      await f.advance(1); await f.setRun('failed', turn);
+    }
+    await f.advance(60_000);
+    expect(f.submit).toHaveBeenCalledTimes(3);
+    expect(f.failure()).toMatchObject({ status: 'stopped', attempts: 3 });
+    expect(f.submit.mock.calls.map(call => call[1].match(/Recovery attempt (\d)/)?.[1])).toEqual(['1', '2', '3']);
+  });
+
+  it('clears the Claude budget only after confirmed completion', async () => {
+    const f = fixture('claude'); await f.setRun('failed'); await f.advance(10);
+    await f.setRun('running', 'retry1'); await f.advance(1); await f.setRun('completed', 'retry1');
+    expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
+    f.confirmReady(); expect(f.failure()).toBeUndefined();
+    await f.advance(1); await f.setRun('failed', 'next-task');
+    expect(f.failure()).toMatchObject({ status: 'scheduled', attempts: 0 });
+  });
+
+  it('rejects stale completion confirmation after a Stop-hook continuation fails', async () => {
+    const f = fixture('claude'); await f.setRun('failed'); await f.advance(10);
+    await f.setRun('running', 'retry1'); await f.advance(1); await f.setRun('completed', 'retry1');
+    const provisional = f.getRun();
+    await f.advance(1); await f.setRun('running', 'retry1');
+    await f.advance(1); await f.setRun('failed', 'retry1');
+    f.confirmReady(provisional);
+    expect(f.failure()).toMatchObject({ status: 'scheduled', attempts: 1 });
+    await f.advance(20); expect(f.submit).toHaveBeenCalledTimes(2);
+    expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 2 });
   });
 
   it('preserves a scheduled retry budget across a server restart', async () => {
@@ -96,6 +149,19 @@ describe('Bounded provider failure recovery', () => {
     const f = fixture(); await f.setRun('failed');
     f.canRetry.mockImplementationOnce(async () => { f.cancel(); return undefined; });
     await f.advance(10); expect(f.submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps cancellation of the running turn across backend restart', async () => {
+    const f = fixture(); await f.setRun('running'); f.cancel(); await f.advance(100);
+    await f.restart(); await f.setRun('failed'); await f.advance(60_000);
+    expect(f.submit).not.toHaveBeenCalled();
+    expect(f.failure()?.stoppedReason).toBe('Automatic recovery was cancelled for this turn.');
+  });
+
+  it('admits the native transient server error and respects the same retry ceiling', async () => {
+    const f = fixture(); await f.setRun('failed', 'turn1', 'server_unavailable'); await f.advance(10);
+    expect(f.submit).toHaveBeenCalledOnce();
+    expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
   });
 
   it('rechecks provider state before retrying if a manual turn started', async () => {
@@ -139,6 +205,17 @@ describe('Bounded provider failure recovery', () => {
   it('does not replay an ambiguous transport failure', async () => {
     const f = fixture(); f.submit.mockRejectedValueOnce(new Error('transport closed')); await f.setRun('failed'); await f.advance(60_000);
     expect(f.submit).toHaveBeenCalledOnce(); expect(f.failure()?.status).toBe('stopped'); expect(f.onError).toHaveBeenCalledOnce();
+  });
+
+  it('keeps cancellation authoritative while transport is in progress', async () => {
+    const f = fixture();
+    f.submit.mockImplementationOnce(async (_session, _text, isCurrent) => {
+      expect(isCurrent()).toBe(true); f.cancel(); expect(isCurrent()).toBe(false);
+      throw new Error('Cancelled during text entry');
+    });
+    await f.setRun('failed'); await f.advance(60_000);
+    expect(f.submit).toHaveBeenCalledOnce();
+    expect(f.failure()?.stoppedReason).toBe('Automatic recovery cancelled by user input or Stop.');
   });
 
   it('stops when the provider never acknowledges the continuation', async () => {

@@ -5,6 +5,8 @@ import type { ProviderAdapter } from '../../src/providers/types.js';
 import type { ActiveProject } from '../../src/projects/project-service.js';
 import type { MergedProviderSettings } from '../../src/config/service.js';
 import { AppDatabase } from '../../src/db/database.js';
+import { CoordinationService } from '../../src/coordination/service.js';
+import { randomUUID } from 'node:crypto';
 
 export class FakeTmux implements TmuxClient {
   created: string[] = [];
@@ -144,5 +146,11 @@ export function createRecoveryManager(
     providerRegistry: {
       get: () => recoveryProvider,
     },
-  }, undefined, options);
+  }, undefined, { coordinationEnabled: true, ...options });
+}
+
+export function enableUnattendedRecovery(db: AppDatabase, providerId: 'codex' | 'claude', nativeSessionId: string): string {
+  const service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
+  const id = service.register({ provider: providerId, nativeSessionId, token: randomUUID(), pid: process.pid, cwd: '/tmp' }).assignmentId!;
+  service.update(id, { continuation: 'unattended' }); return id;
 }

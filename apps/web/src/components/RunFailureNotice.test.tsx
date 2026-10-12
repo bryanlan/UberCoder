@@ -8,9 +8,15 @@ const failure: RunFailure = { turnId: 't1', failedAt: '2026-09-14T15:04:01Z', co
 describe('Run failure notice', () => {
   it('shows the actual failure, bounded retry and an explicit stop action', () => {
     const stop = vi.fn(); render(<RunFailureNotice failure={failure} onStop={stop} />);
-    expect(screen.getByRole('alert').textContent).toContain('Selected model is at capacity.');
-    expect(screen.getByRole('alert').textContent).toContain('Retry 1 of 3');
+    expect(screen.getByRole('status').textContent).toContain('Selected model is at capacity.');
+    expect(screen.getByRole('status').textContent).toContain('Retry 1 of 3');
+    expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Stop automatic recovery' })); expect(stop).toHaveBeenCalledOnce();
+  });
+  it('reports a first uncertain outcome without raising the repeated-failure alert', () => {
+    render(<RunFailureNotice failure={{ ...failure, status: 'stopped', attempts: 1, stoppedReason: 'Retry delivery is uncertain.' }} onStop={vi.fn()} />);
+    expect(screen.getByRole('status')).toHaveTextContent('uncertain');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
   it('explains exhausted or cancelled recovery without offering an automatic retry', () => {
     render(<RunFailureNotice failure={{ ...failure, status: 'stopped', attempts: 3, stoppedReason: 'The automatic retry limit was reached.' }} onStop={vi.fn()} />);

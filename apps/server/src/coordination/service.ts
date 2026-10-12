@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
+import type { AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, type PeerWakeAttempt } from './wake.js';
+import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -36,7 +37,8 @@ export class CoordinationService {
   private assignment(id: string): CoordinationAssignment {
     const row = this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments where id=?`).get(id) as CoordinationAssignment | undefined;
     if (!row) throw new Error('Unknown assignment.');
-    return row;
+    const control = continuationControl(this.db, id);
+    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, recovery: control.recovery };
   }
 
   private pilotCache: { key: string; repositories: Set<string> } | null = null;
@@ -117,15 +119,36 @@ export class CoordinationService {
         if (processStart(row.pid) === row.process_start) continue;
         this.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(row.id);
         this.event(row.id, null, 'disconnected', 'Process ended. Activity history remains available; inspect unfinished files before continuing work.');
+        if (continuationControl(this.db, row.id).continuation === 'unattended') this.notifySupervisor(row.id, 'An unattended supervised worker disconnected.');
       }
     })();
   }
 
-  update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting' }) {
+  update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
+    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean }) {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       if (current.status === 'finished' || current.status === 'disconnected') throw new Error('Resume this assignment before updating it.');
+      if (input.notifySupervisor && !(input.supervisorId === undefined ? current.supervisorId : input.supervisorId)) throw new Error('Declare a supervisor before notifying it.');
+      if (input.supervisorId) {
+        const visited = new Set([id]); let next: string | null = input.supervisorId;
+        while (next) {
+          if (visited.has(next)) throw new Error('Supervisor relationships cannot contain a cycle.');
+          visited.add(next); const parent = this.assignment(next);
+          if (parent.status === 'finished') throw new Error('A finished assignment cannot supervise work.');
+          next = parent.supervisorId;
+        }
+      }
+      if (input.continuation !== undefined || input.supervisorId !== undefined) {
+        if (input.continuation !== undefined) setContinuation(this.db, id, input.continuation, input.supervisorId);
+        else {
+          const control = continuationControl(this.db, id);
+          control.supervisorId = input.supervisorId!; control.revision++;
+          saveContinuation(this.db, id, control);
+        }
+        this.event(id, null, 'continuation', `Continuation: ${input.continuation ?? current.continuation}; supervisor: ${input.supervisorId === undefined ? current.supervisorId ?? 'none' : input.supervisorId ?? 'none'}.`);
+      }
       this.db.sqlite.prepare('update coordination_assignments set description=?, status=?, last_seen_at=? where id=?')
         .run(input.description ?? current.description, input.status ?? current.status, new Date().toISOString(), id);
       if (identity) this.db.sqlite.prepare(`insert into coordination_scopes values(?,?,?,?) on conflict(assignment_id,checkout) do update set summary=excluded.summary`)
@@ -134,6 +157,8 @@ export class CoordinationService {
       if (identity || input.summary !== undefined || input.description !== undefined) {
         this.event(id, identity?.checkout ?? null, 'update', input.summary ?? input.description ?? 'Scope added');
       }
+      if (input.notifySupervisor) this.notifySupervisor(id, 'A supervised worker has a result ready for review.');
+      this.requestWake?.();
       return { assignment: this.assignment(id) };
     }).immediate();
   }
@@ -145,7 +170,8 @@ export class CoordinationService {
     this.reconcileProcesses();
     const current = this.assignment(id);
     const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
-    const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160) };
+    const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160),
+      continuation: current.continuation, supervisorId: current.supervisorId, recovery: current.recovery };
     // A checkout outside the pilot has no activity view, but the assignment and direct messages
     // still work. Say so explicitly; an empty "disabled" reply reads as "messaging is unavailable".
     if (directory && !this.eligible(directory)) {
@@ -191,6 +217,8 @@ export class CoordinationService {
     const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
+    if (assignment.continuation === 'waiting_for_input' && status !== 'working') return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+      note: 'Queued, not received. This assignment is waiting for human input; automatic wake is disabled.' };
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
     const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
     if (attemptText) {
@@ -279,7 +307,7 @@ export class CoordinationService {
         ? `${latest.updateCount} activity updates from ${latest.peerCount} ${latest.peerCount === 1 ? 'assignment' : 'assignments'} summarized; showing ${events.length} latest. Use status for current scopes or history with checkout and offset for full activity.`
         : null;
       if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
-      return { assignment: current, activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
+      return { assignment: current, continuationPolicy: CONTINUATION_POLICY, activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
     }).immediate();
   }
 
@@ -298,6 +326,8 @@ export class CoordinationService {
 
   finish(id: string, summary: string) {
     return this.db.sqlite.transaction(() => {
+      this.notifySupervisor(id, 'A supervised worker completed its assignment.');
+      setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.event(id, null, 'finished', summary);
       return { finished: true };
@@ -308,6 +338,7 @@ export class CoordinationService {
     if (this.assignment(id).status !== 'finished') {
       this.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(id);
       this.event(id, null, 'disconnected', 'Session ended; activity history retained.');
+      if (continuationControl(this.db, id).continuation === 'unattended') this.notifySupervisor(id, 'An unattended supervised worker disconnected.');
     }
     return { disconnected: true };
   }
@@ -318,6 +349,7 @@ export class CoordinationService {
     const repository = directory ? checkoutIdentity(directory).repository : undefined;
     const scopes = this.db.sqlite.prepare(`select ${scopeColumns} from coordination_scopes`).all() as CoordinationScope[];
     const assignments = (this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments order by started_at desc`).all() as CoordinationAssignment[])
+      .map((assignment) => this.assignment(assignment.id))
       .filter((assignment) => !repository || scopes.some((scope) => scope.assignmentId === assignment.id && scope.repository === repository));
     const ids = new Set(assignments.map((a) => a.id));
     const repositoryFilter = repository ?? null;
@@ -335,5 +367,15 @@ export class CoordinationService {
         order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[],
       pendingMessageCount: pending.count,
     };
+  }
+
+  private notifySupervisor(id: string, reason: string): void {
+    const control = continuationControl(this.db, id);
+    if (!control.supervisorId) return;
+    const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')
+      .get(id) as { seq: number };
+    signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id,
+      timestamp: new Date().toISOString(), reason: `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}` });
+    this.requestWake?.();
   }
 }

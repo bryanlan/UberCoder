@@ -1,6 +1,6 @@
 import type { ProviderId } from '@agent-console/shared';
 import { iterateJsonlRecords } from './base.js';
-import { isPeerWakePrompt } from '../../coordination/wake.js';
+import { isCoordinationWakePrompt } from '../../coordination/wake.js';
 
 export interface WakeTokens {
   inputTokens: number;
@@ -67,7 +67,7 @@ export async function readNativeWakeTurns(provider: ProviderId, filePath: string
       } else if (r.type === 'turn_context') {
         model = typeof p.model === 'string' ? p.model : null;
         if (current && p.turn_id === current.turnId) current.model = model;
-      } else if (r.type === 'response_item' && p.role === 'user' && codexId && isPeerWakePrompt(text(p.content))) {
+      } else if (r.type === 'response_item' && p.role === 'user' && codexId && isCoordinationWakePrompt(text(p.content))) {
         if (!current) {
           current = { turnId: codexId, promptAt: timestamp, completedAt: null, outcome: 'running', model, usage: null };
           turns.push(current);
@@ -85,7 +85,7 @@ export async function readNativeWakeTurns(provider: ProviderId, filePath: string
       if (r.type === 'user' && r.isMeta !== true && r.isCompactSummary !== true && prompt.trim()) {
         finalizeClaude();
         current = undefined;
-        if (isPeerWakePrompt(prompt) && typeof r.uuid === 'string') {
+        if (isCoordinationWakePrompt(prompt) && typeof r.uuid === 'string') {
           current = { turnId: r.uuid, promptAt: timestamp, completedAt: null, outcome: 'running', model: null, usage: null };
           turns.push(current);
         }
