@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { dispatchWiki, startCoordinationSocket } from '../src/coordination/transport.js';
-import { WikiConflictError, WikiService } from '../src/wiki/service.js';
+import { searchWikiPages, WikiConflictError, WikiService } from '../src/wiki/service.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup(); });
@@ -74,11 +74,83 @@ describe('repository wiki', () => {
     expect(wiki.search(checkout, 'missing subject', actor)).toEqual({ pageCount: 0, results: [] });
     for (let i = 0; i < 12; i++) wiki.write(checkout, { title: `Runtime ${i}`, body: 'worker deployment diagnostics', baseRevision: null }, actor);
     wiki.write(checkout, { title: 'Sparse match', body: 'worker alone', baseRevision: null }, actor);
-    expect(wiki.search(checkout, 'worker deployment unknown unavailable', actor).results).toEqual([]);
+    const partial = wiki.search(checkout, 'worker deployment unknown unavailable', actor).results;
+    expect(partial).toHaveLength(3);
+    expect(partial.every((result) => result.matchedTerms.join(' ') === 'worker deployment')).toBe(true);
+    expect(partial.some((result) => result.title === 'Sparse match')).toBe(false);
     expect(wiki.search(checkout, 'worker deployment', actor).results).toHaveLength(8);
     expect(wiki.search(checkout, 'worker deployment', actor).results.some((r) => r.title === 'Sparse match')).toBe(false);
     expect(wiki.search(checkout, 'how the', actor)).toEqual({ pageCount: 13, results: [] });
     expect(wiki.search(checkout, 'missing subject', actor)).toEqual({ pageCount: 13, results: [] });
+  });
+
+  it('recovers a page about named components when an extra query term is absent', () => {
+    const { checkout, wiki, actor } = fixture();
+    wiki.write(checkout, { title: 'Reminder schema publication',
+      body: 'customer_personal_facts and install_client_reminders passed the schema release checks.', baseRevision: null }, actor);
+    const result = wiki.search(checkout, 'customer_personal_facts install_client_reminders ownership', actor);
+    expect(result.results).toMatchObject([{ title: 'Reminder schema publication',
+      matchedTerms: ['customer_personal_facts', 'install_client_reminders'] }]);
+    expect(result.results[0]?.snippet).toContain('install_client_reminders');
+    expect(wiki.sqlite.prepare("select query, result_count from wiki_access where action='search'").get())
+      .toEqual({ query: 'customer_personal_facts install_client_reminders ownership', result_count: 1 });
+  });
+
+  it('keeps complete results and ranking unchanged even with strong partial titles', () => {
+    const page = (title: string, body: string, updatedAt = '2026-10-01') => ({ title, body, updatedAt, revision: 1 });
+    const complete = [page('Worker deployment verification', 'Procedure'),
+      page('Deployment notes', 'worker deployment verification'), page('Older body', 'worker deployment verification', '2026-09-01')];
+    const query = 'worker deployment verification';
+    expect(searchWikiPages([...complete, page('Worker deployment', 'partial')], query).results)
+      .toEqual(searchWikiPages(complete, query).results);
+  });
+
+  it('requires half the words together in a title or body and leaves short queries strict', () => {
+    const page = (title: string, body: string) => ({ title, body, updatedAt: '2026-10-01', revision: 1 });
+    const pages = [page('Worker', 'deployment'), page('Scattered', `worker ${'background '.repeat(70)}deployment`),
+      page('One word', 'worker')];
+    expect(searchWikiPages(pages, 'worker deployment unknown unavailable').results).toEqual([]);
+    expect(searchWikiPages(pages, 'worker unavailable').results).toEqual([]);
+    expect(searchWikiPages([page('Focused', 'worker deployment')], 'worker deployment unknown unavailable missing').results).toEqual([]);
+    expect(searchWikiPages(pages, 'missing').results).toEqual([]);
+  });
+
+  it('ranks and excerpts focused partial evidence using local rather than scattered coverage', () => {
+    const page = (title: string, body: string) => ({ title, body, updatedAt: '2026-10-01', revision: 1 });
+    const pages = [page('Broad retrospective', `worker ${'background '.repeat(3)}deployment ${'background '.repeat(3)}cache ${'background '.repeat(100)}benchmark`),
+      page('Focused investigation', `${'Introduction. '.repeat(100)}worker deployment cache measured here.${' Background.'.repeat(30)}`),
+      page('Scattered investigation', `worker ${'background '.repeat(70)}deployment ${'background '.repeat(70)}cache`)];
+    const results = searchWikiPages(pages, 'worker deployment cache benchmark missing').results;
+    expect(results.map((result) => result.title)).toEqual(['Focused investigation', 'Broad retrospective']);
+    expect(results[0]?.snippet).toContain('worker deployment cache measured here');
+    expect(results[0]?.matchedTerms).toEqual(['worker', 'deployment', 'cache']);
+    expect(results[1]?.matchedTerms).toEqual(['worker', 'deployment', 'cache', 'benchmark']);
+  });
+
+  it('qualifies title-only partial evidence and limits partial results to three', () => {
+    const pages = Array.from({ length: 12 }, (_, i) => ({ title: `Worker deployment ${i}`, body: 'Operational procedure.',
+      revision: i + 1, updatedAt: '2026-10-01' }));
+    expect(searchWikiPages(pages, 'worker deployment unknown unavailable').results).toHaveLength(3);
+    expect(searchWikiPages(pages, 'worker deployment').results).toHaveLength(8);
+  });
+
+  it('omits weaker partial matches when a page has stronger focused coverage', () => {
+    const page = (title: string, body: string) => ({ title, body, updatedAt: '2026-10-01', revision: 1 });
+    const pages = [page('Strong evidence', 'worker deployment cache benchmark'),
+      page('Weaker evidence', 'worker deployment cache')];
+    expect(searchWikiPages(pages, 'worker deployment cache benchmark missing').results.map((result) => result.title))
+      .toEqual(['Strong evidence']);
+  });
+
+  it('handles repeated and overlapping path terms at the passage boundary', () => {
+    const page = (body: string) => ({ title: 'Notes', body, updatedAt: '2026-10-01', revision: 1 });
+    const query = 'config deploy deployment missing';
+    expect(searchWikiPages([page(`config ${'x'.repeat(590)} deployment`)], query).results[0]?.matchedTerms)
+      .toEqual(['config', 'deploy', 'deployment']);
+    // The second term starts within 600 characters but ends beyond the limit.
+    expect(searchWikiPages([page(`config ${'x'.repeat(580)} apps/server/dist`)], 'config apps/server/dist unknown missing').results).toEqual([]);
+    expect(searchWikiPages([page(`worker ${'background '.repeat(100)}worker deployment`)], 'worker deployment unknown missing').results)
+      .toHaveLength(1);
   });
 
   it('records the exact page revision a different agent read and the demand behind searches and misses', () => {

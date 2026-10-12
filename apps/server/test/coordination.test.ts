@@ -648,6 +648,7 @@ describe('assignment coordination', () => {
         { action: 'write', checkout, title, body: `Lasting knowledge from ${provider}`, baseRevision: null },
         { action: 'list', checkout },
         { action: 'search', checkout, query: title },
+        { action: 'search', checkout, query: `${title} absent unavailable` },
         { action: 'read', checkout, title },
         { action: 'history', checkout, title },
       ];
@@ -660,7 +661,10 @@ describe('assignment coordination', () => {
         expect(result.isError, result.content[0].text).toBe(false);
         const content = JSON.parse(result.content[0].text);
         if (args.action === 'read') expect(content.page.body).toBe(`Lasting knowledge from ${provider}`);
-        if (args.action === 'search') expect(content.results[0].title).toBe(title);
+        if (args.action === 'search') {
+          expect(content.results[0].title).toBe(title);
+          expect(content.results[0].matchedTerms).toEqual(['mcp', provider]);
+        }
         if (args.action === 'history') expect(content.revisions).toHaveLength(1);
       }
     }

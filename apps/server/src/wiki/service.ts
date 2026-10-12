@@ -15,9 +15,42 @@ type RevisionRow = {
 };
 
 type SearchPage = { title: string; revision: number; updatedAt: string; body: string };
+type SearchHit = { start: number; end: number; term: number };
 const searchStopwords = new Set('an and are as at be by for from how in is it of on or that the this to was were what when where which with'.split(' '));
 const searchText = (text: string) => text.normalize('NFKC').replace(/\s+/g, ' ').trim();
 const searchPattern = (text: string) => new RegExp('(^|[^\\p{L}\\p{N}_])' + text.replace(/[.*+?^{}()|[\]\\$]/g, '\\$&'), 'gu');
+
+/** Most distinct terms in one short passage; ties prefer the tightest window. */
+function focusedWindow(hits: SearchHit[], maxWidth: number) {
+  const counts = new Map<number, number>();
+  // Overlapping path/prefix matches can end out of order. Track the furthest
+  // end so the complete matched terms fit inside the character limit.
+  const ends: number[] = [];
+  let firstEnd = 0;
+  let left = 0;
+  let best = { coverage: 0, span: Infinity, start: 0 };
+  const removeLeft = () => {
+    const term = hits[left++]!.term;
+    const count = counts.get(term)! - 1;
+    if (count) counts.set(term, count); else counts.delete(term);
+    if (ends[firstEnd]! < left) firstEnd++;
+  };
+  for (let right = 0; right < hits.length; right++) {
+    const hit = hits[right]!;
+    while (ends.length > firstEnd && hits[ends.at(-1)!]!.end <= hit.end) ends.pop();
+    ends.push(right);
+    counts.set(hit.term, (counts.get(hit.term) ?? 0) + 1);
+    while (left <= right && hits[ends[firstEnd]!]!.end - hits[left]!.start > maxWidth) removeLeft();
+    // Discard repeated leading terms without losing any distinct matches.
+    while (left <= right && counts.get(hits[left]!.term)! > 1) removeLeft();
+    if (left > right) continue;
+    const span = hits[ends[firstEnd]!]!.end - hits[left]!.start;
+    if (counts.size > best.coverage || (counts.size === best.coverage && span < best.span)) {
+      best = { coverage: counts.size, span, start: hits[left]!.start };
+    }
+  }
+  return best;
+}
 
 /** Small repository wikis need ranked word matches, not another stored index. */
 export function searchWikiPages(pages: SearchPage[], queryInput: string): WikiSearchResponse {
@@ -32,18 +65,23 @@ export function searchWikiPages(pages: SearchPage[], queryInput: string): WikiSe
     const lowerBody = body.toLowerCase();
     const text = `${title} ${lowerBody}`;
     const hits = patterns.flatMap((pattern, term) => [...text.matchAll(pattern)].map((match) => ({
-      start: match.index! + match[1]!.length, term,
+      start: match.index! + match[1]!.length, end: match.index! + match[0].length, term,
     }))).sort((a, b) => a.start - b.start || a.term - b.term);
     const matched = new Set(hits.map((hit) => hit.term));
     const titlePhrase = Number(searchPattern(query).test(title));
     const phrase = searchPattern(query).exec(lowerBody);
     const bodyPhraseAt = phrase ? phrase.index + phrase[1]!.length : -1;
-    if (matched.size !== terms.length) return [];
+    const fullMatch = matched.size === terms.length;
+    const minimumPartial = Math.max(2, Math.ceil(terms.length / 2));
+    if (!fullMatch && (terms.length < 3 || matched.size < minimumPartial)) return [];
+    const titleHits = hits.filter((hit) => hit.start < title.length);
+    const bodyHits = hits.filter((hit) => hit.start > title.length);
+    const titleTerms = new Set(titleHits.map((hit) => hit.term)).size;
     // Smallest window covering every matched term prevents long catch-all pages
     // with widely scattered words from outranking a focused investigation.
     const counts = new Map<number, number>();
     let left = 0; let windowStart = hits[0]?.start ?? 0; let span = Infinity;
-    for (let right = 0; right < hits.length; right++) {
+    for (let right = 0; fullMatch && right < hits.length; right++) {
       const hit = hits[right]!;
       counts.set(hit.term, (counts.get(hit.term) ?? 0) + 1);
       while (counts.size === matched.size && left <= right) {
@@ -54,19 +92,32 @@ export function searchWikiPages(pages: SearchPage[], queryInput: string): WikiSe
         if (count) counts.set(first.term, count); else counts.delete(first.term);
       }
     }
-    const bodyHits = hits.filter((hit) => hit.start > title.length);
+    let coverage = matched.size;
+    if (!fullMatch) {
+      // Title and body are separate evidence: distant words cannot jointly
+      // qualify a partial page. Rank coverage in the qualifying passage,
+      // rather than all the scattered words a long page happens to contain.
+      const titleWindow = focusedWindow(titleHits, title.length);
+      const bodyWindow = focusedWindow(bodyHits, 600);
+      const best = bodyWindow.coverage >= titleWindow.coverage ? bodyWindow : titleWindow;
+      if (best.coverage < minimumPartial) return [];
+      coverage = best.coverage; span = best.span; windowStart = best.start;
+    }
     const focus = bodyPhraseAt >= 0 ? bodyPhraseAt
       : Math.max(0, windowStart > title.length ? windowStart - title.length - 1 : (bodyHits[0]?.start ?? title.length + 1) - title.length - 1);
     const start = Math.max(0, Math.min(focus - 60, body.length - 220));
     const snippet = `${start ? '…' : ''}${body.slice(start, start + 220)}${start + 220 < body.length ? '…' : ''}`;
     return [{ result: { title: page.title, revision: page.revision, updatedAt: page.updatedAt, snippet,
-      matchedTerms: terms.filter((_, i) => matched.has(i)) }, titlePhrase, coverage: matched.size,
-      bodyPhrase: Number(bodyPhraseAt >= 0), titleTerms: new Set(hits.filter((hit) => hit.start < title.length).map((hit) => hit.term)).size, span }];
+      matchedTerms: terms.filter((_, i) => matched.has(i)) }, fullMatch, titlePhrase, coverage,
+      bodyPhrase: Number(bodyPhraseAt >= 0), titleTerms, span }];
   });
-  ranked.sort((a, b) => b.titlePhrase - a.titlePhrase || b.coverage - a.coverage || b.bodyPhrase - a.bodyPhrase
+  const complete = ranked.filter((page) => page.fullMatch);
+  const bestPartialCoverage = ranked.reduce((best, page) => Math.max(best, page.coverage), 0);
+  const selected = complete.length ? complete : ranked.filter((page) => page.coverage === bestPartialCoverage);
+  selected.sort((a, b) => b.titlePhrase - a.titlePhrase || b.coverage - a.coverage || b.bodyPhrase - a.bodyPhrase
     || b.titleTerms - a.titleTerms || a.span - b.span || b.result.updatedAt.localeCompare(a.result.updatedAt)
     || a.result.title.localeCompare(b.result.title));
-  return { pageCount: pages.length, results: ranked.slice(0, 8).map((page) => page.result) };
+  return { pageCount: pages.length, results: selected.slice(0, complete.length ? 8 : 3).map((page) => page.result) };
 }
 
 function titleParts(input: string): { title: string; key: string } {
