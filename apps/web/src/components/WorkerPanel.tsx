@@ -46,7 +46,7 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
         className="fixed inset-0 z-40 bg-black/50 xl:hidden" />
       <aside aria-label="Active workers" className="fixed inset-y-0 right-0 z-50 flex w-80 max-w-[90vw] flex-col border-l border-slate-700 bg-slate-950 shadow-panel xl:static xl:z-auto xl:shrink-0 xl:shadow-none">
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-          <h2 className="font-medium text-slate-100">Workers <span className="text-xs text-slate-400">· {data?.workingCount ?? 0} working</span></h2>
+          <h2 className="font-medium text-slate-100">Workers <span className="text-xs text-slate-400">· {data && !data.trackingEnabled ? 'paused' : `${data?.workingCount ?? 0} working`}</span></h2>
           <button type="button" aria-label="Close worker panel" onClick={onClose} className="rounded p-1 text-slate-400 hover:text-slate-100"><X size={18} /></button>
         </div>
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 text-xs text-slate-300">
@@ -70,13 +70,17 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
           {data?.error && <p role="status" className="text-xs text-amber-300">{data.error}</p>}
           {data?.generating && <p role="status" className="text-xs text-sky-300">{data.trackingEnabled ? 'Updating summaries…' : 'Stopping summary…'}</p>}
           {data && !data.trackingEnabled && <p className="text-xs text-slate-400">Worker tracking is off across all tabs. Evidence collection and new summaries are paused.</p>}
+          {data && !data.trackingEnabled && <p className="text-xs text-slate-400">{data.snapshotAt
+            ? `Showing saved information from ${new Date(data.snapshotAt).toLocaleString()}.`
+            : 'No worker information has been saved yet.'}</p>}
           {data?.trackingEnabled && !data.workingCount && <p className="text-xs text-slate-400">No workers are running. Summaries are paused.</p>}
           {query.isLoading && <p className="text-xs text-slate-400">Loading workers…</p>}
           {data?.workers.map((worker) => (
             <article key={worker.id} className="rounded-xl border border-slate-800 bg-slate-900/50 p-3">
               <div className="mb-2 flex items-center justify-between gap-2 text-xs">
                 <span className="truncate font-medium text-slate-100" title={worker.projectName}>{worker.projectName}</span>
-                <span className={worker.working ? 'text-emerald-400' : 'text-slate-400'}>{worker.working ? 'Working' : 'Idle'}</span>
+                <span className={data.trackingEnabled && worker.working ? 'text-emerald-400' : 'text-slate-400'}>{data.trackingEnabled
+                  ? (worker.working ? 'Working' : 'Idle') : (worker.working ? 'Was working' : 'Was idle')}</span>
               </div>
               <Link to={`/projects/${encodeURIComponent(worker.projectSlug)}/${worker.provider}/${encodeURIComponent(worker.conversationRef)}`}
                 title={`${worker.provider.toUpperCase()}: ${worker.title}`} onClick={() => { if (window.innerWidth < 1280) onClose(); }}

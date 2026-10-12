@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { WorkerPanelSnapshot } from '@agent-console/shared';
 
 const snapshot: WorkerPanelSnapshot = {
-  enabled: true, trackingEnabled: true, generating: false, error: null, workingCount: 2,
+  enabled: true, trackingEnabled: true, snapshotAt: '2026-10-12T12:00:00Z', generating: false, error: null, workingCount: 2,
   workers: [
     { id: 'one', projectSlug: 'demo', projectName: 'PlaidBasic', provider: 'codex', conversationRef: 'worker-one',
       title: 'Prepare the reminder schema publication', working: true, task: 'Publish the schema',
@@ -32,7 +32,7 @@ async function openConsole(page: Page, data = snapshot) {
   await page.route('**/api/workers/refresh', (route) => { refreshes.push(route.request().postDataJSON().intervalMinutes); return route.fulfill({ json: data }); });
   await page.route('**/api/workers/tracking', (route) => {
     const enabled = route.request().postDataJSON().enabled;
-    data = { ...data, enabled, trackingEnabled: enabled, workers: enabled ? snapshot.workers : [], workingCount: enabled ? 2 : 0 };
+    data = { ...data, enabled, trackingEnabled: enabled, workingCount: enabled ? 2 : 0 };
     return route.fulfill({ json: data });
   });
   await page.goto('/');
@@ -88,6 +88,9 @@ test('Off survives page reload and stops further summary requests', async ({ pag
   await page.reload();
   await expect(toggle).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByText(/Worker tracking is off across all tabs/)).toBeVisible();
+  await expect(page.getByText('Latest: Checking empty-table readbacks.', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Showing saved information from/)).toBeVisible();
+  await expect(page.getByText('Was working', { exact: true })).toHaveCount(2);
   expect(calls).toHaveLength(count);
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-checked', 'true');

@@ -36,6 +36,7 @@ import { WorkerEvidenceSource } from './workers/evidence.js';
 import { SharedSummaryRuntime } from './workers/runtime.js';
 import { WorkerSummaryAudit } from './workers/audit.js';
 import { WorkerPanelService } from './workers/service.js';
+import { WorkerSnapshotStore } from './workers/snapshot-store.js';
 import { registerWorkerRoutes } from './workers/routes.js';
 
 export interface AppOptions {
@@ -76,7 +77,7 @@ export async function buildApp(options: AppOptions = {}) {
   const workerDirectory = path.join(config.runtimeDir, 'workers');
   const workers = new WorkerPanelService(new WorkerEvidenceSource(db, projectService, liveOutputReader),
     new SharedSummaryRuntime(config.workerSummaries.runtimeCommand, path.join(workerDirectory, 'runs')),
-    new WorkerSummaryAudit(workerDirectory), config.workerSummaries.enabled, Date.now,
+    new WorkerSummaryAudit(workerDirectory), new WorkerSnapshotStore(workerDirectory), config.workerSummaries.enabled, Date.now,
     (enabled) => configService.setWorkerTracking(enabled));
   await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
   const restartService = new RestartService(() => app.close());

@@ -17,6 +17,9 @@ new requests; a batch already started can finish. No background scheduler job is
 The On/Off switch at the top is server-owned and persists in the Console config. Off applies
 across all tabs and survives browser/backend restarts. It stops roster/evidence collection for
 this panel, blocks summary requests, and requests cancellation of an in-flight model batch.
+The latest worker cards and summaries remain visible as a saved snapshot, including its timestamp.
+Their labels read Was working/Was idle while paused; they do not claim the workers are still in that state.
+The snapshot survives browser reloads and backend restarts. Turning On resumes current roster reads.
 The cheap state/usage endpoint remains available so other tabs see the setting. The switch does
 not stop agents or their ordinary coordination. Tokens already consumed by a cancelled call
 remain counted when the runtime reports them; missing cancellation usage stays explicitly unknown.
@@ -27,8 +30,11 @@ The server shares one in-flight batch across tabs, with the requesting browser's
 interval measured from request admission and a one-second allowance for timer/network jitter.
 A batch contains at most 16 changed working agents. Workers never summarized or summarized
 longest ago go first. Unchanged successful evidence is skipped; failed attempts may retry at a later eligible
-refresh. Summaries are held
-in memory (at most 128 entries), so restarting the backend regenerates them on demand. The
+refresh. The latest snapshot and summary fingerprints (at most 128 cached summaries) are saved
+atomically under `runtimeDir/workers/latest.json`, with 0700 directory/0600 file permissions.
+Only displayed worker information and cache metadata are stored; raw evidence and prompts are excluded.
+The file is bounded to 2 MiB and retains one latest snapshot. Unchanged snapshots do not rewrite it.
+Restarting while Off restores this snapshot without reading agents or starting a model. The
 persisted audit retains the latest invocation time to prevent an immediate same-day retry.
 
 Frequent roster reads query loaded sessions and individual conversation metadata, never the

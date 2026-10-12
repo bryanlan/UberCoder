@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerEvidence } from '../src/workers/evidence.js';
 import { WorkerSummaryAudit } from '../src/workers/audit.js';
 import { WorkerPanelService } from '../src/workers/service.js';
+import { WorkerSnapshotStore } from '../src/workers/snapshot-store.js';
 import { SharedSummaryRuntime, parseRuntimeResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -23,12 +24,68 @@ async function fixture() {
   const source = { roster: vi.fn(async () => workers), collect: vi.fn(async (w: WorkerEvidence) => w) };
   const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
   const audit = new WorkerSummaryAudit(directory);
-  const service = new WorkerPanelService(source, runner, audit, true, () => now);
+  const store = new WorkerSnapshotStore(directory);
+  const service = new WorkerPanelService(source, runner, audit, store, true, () => now);
   cleanups.push(async () => { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); });
-  return { service, source, workers, runner, audit, directory, advance: (ms = 120_000) => { now += ms; } };
+  return { service, source, workers, runner, audit, store, directory, advance: (ms = 120_000) => { now += ms; } };
 }
 
 describe('worker summary controller', () => {
+  it('freezes the latest cards and summaries while Off even if the agents change or disappear', async () => {
+    const f = await fixture(); await f.service.refresh(1); await f.service.settled();
+    const before = await f.service.snapshot(); const runs = vi.mocked(f.runner.run).mock.calls.length;
+    await f.service.setTracking(false); f.workers.splice(0); f.source.roster.mockClear();
+    const off = await f.service.refresh(1);
+    expect(off).toMatchObject({ trackingEnabled: false, workingCount: 0, workers: before.workers, snapshotAt: before.snapshotAt });
+    expect(off.workers[0]!.summary?.latest).toBe('Checking runtime revision');
+    expect(f.source.roster).not.toHaveBeenCalled(); expect(f.runner.run).toHaveBeenCalledTimes(runs);
+    expect((await fs.stat(path.join(f.directory, 'latest.json'))).mode & 0o777).toBe(0o600);
+  });
+
+  it('restores saved information after restart while Off without reading agents or running the model', async () => {
+    const f = await fixture(); await f.service.refresh(1); await f.service.settled();
+    const before = await f.service.setTracking(false);
+    const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect };
+    const runner = { run: vi.fn(f.runner.run), stop: vi.fn(), cancel: vi.fn() };
+    const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), false);
+    try {
+      const view = await restarted.refresh(1);
+      expect(view.workers).toEqual(before.workers); expect(view.snapshotAt).toBe(before.snapshotAt);
+      expect(source.roster).not.toHaveBeenCalled(); expect(runner.run).not.toHaveBeenCalled();
+    } finally { await restarted.stop(); }
+  });
+
+  it('restores fingerprints so unchanged evidence does not spend tokens after restart', async () => {
+    const f = await fixture(); await f.service.refresh(1); await f.service.settled(); await f.service.snapshot();
+    vi.mocked(f.runner.run).mockClear();
+    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true,
+      () => Date.parse('2026-10-12T14:00:00Z'));
+    try {
+      await restarted.refresh(1); await restarted.settled(); expect(f.runner.run).not.toHaveBeenCalled();
+      expect((await restarted.snapshot()).workers[0]!.summary?.latest).toBe('Checking runtime revision');
+    } finally { await restarted.stop(); }
+  });
+
+  it('does not rewrite unchanged information and ignores a roster response arriving after Off', async () => {
+    const f = await fixture(); const before = await f.service.snapshot();
+    const file = path.join(f.directory, 'latest.json'); const text = await fs.readFile(file, 'utf8');
+    f.advance(); await f.service.snapshot(); expect(await fs.readFile(file, 'utf8')).toBe(text);
+    let finish!: (rows: WorkerEvidence[]) => void;
+    f.source.roster.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const late = f.service.snapshot(); await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await f.service.setTracking(false); finish([worker('new')]);
+    expect((await late).workers).toEqual(before.workers);
+    expect(await fs.readFile(file, 'utf8')).toBe(text);
+  });
+
+  it('keeps Off usable and reports when latest information cannot be saved', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    vi.spyOn(f.store, 'save').mockRejectedValue(new Error('Storage full'));
+    f.workers[0]!.title = 'New title'; await f.service.snapshot();
+    const off = await f.service.setTracking(false);
+    expect(off.trackingEnabled).toBe(false); expect(off.workers[0]!.title).toBe('New title');
+    expect(off.error).toMatch(/could not be saved/);
+  });
   it('records known zero usage when Off arrives during the start-audit write', async () => {
     const f = await fixture(); let release!: () => void;
     const record = f.audit.record.bind(f.audit);
@@ -89,7 +146,7 @@ describe('worker summary controller', () => {
 
   it('leaves tracking unchanged when persistence fails', async () => {
     const f = await fixture();
-    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), true, Date.now,
+    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true, Date.now,
       () => { throw new Error('Read-only config'); });
     await expect(service.setTracking(false)).rejects.toThrow('Read-only config');
     expect((await service.snapshot()).trackingEnabled).toBe(true); expect(f.runner.cancel).not.toHaveBeenCalled();
@@ -153,7 +210,7 @@ describe('worker summary controller', () => {
     const f = await fixture(); vi.mocked(f.runner.run).mockResolvedValue({ summaries: null, usage: null });
     await f.service.refresh(2); await f.service.settled();
     expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, failedCalls: 1, unknownUsageCalls: 1 });
-    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), true, () => Date.parse('2026-10-13T12:00:00Z'));
+    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), true, () => Date.parse('2026-10-13T12:00:00Z'));
     await fs.writeFile(path.join(f.directory, 'usage-2026-10-13.jsonl'), 'malformed audit\n');
     expect((await other.refresh(2)).enabled).toBe(false); await other.settled(); expect(f.runner.run).toHaveBeenCalledTimes(1);
   });
