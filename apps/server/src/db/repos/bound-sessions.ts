@@ -110,8 +110,10 @@ export class BoundSessionsRepo {
 
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   setRunFailure(id: string, failure: BoundSession['runFailure']): void {
-    this.sqlite.prepare('update bound_sessions set run_failure_json = ? where id = ?')
-      .run(failure ? JSON.stringify(failure) : null, id);
+    const current = this.getById(id);
+    if (!current) return;
+    this.sqlite.prepare('update bound_sessions set run_failure_json = ?, updated_at = ? where id = ?')
+      .run(failure ? JSON.stringify(failure) : null, nextUpdatedAt(current.updatedAt, new Date().toISOString()), id);
   }
 
   // Suspension is independently owned: status and screen refreshes must not clear it.

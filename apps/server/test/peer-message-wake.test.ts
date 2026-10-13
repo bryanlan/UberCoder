@@ -224,7 +224,7 @@ describe('Peer message wake and one-hour sleep', () => {
   it('retains cold-restore measurement across provider startup deferral and consumes it after the first wake', async () => {
     const f = await fixture('claude');
     f.db.boundSessions.upsert({ ...f.session, startedAt: new Date(Date.now() - 120 * 60_000).toISOString(),
-      lastResponseAt: new Date(Date.now() - 60 * 60_000).toISOString() });
+      lastResponseAt: new Date(Date.now() - 60 * 60_000).toISOString(), pid: undefined });
     f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
     f.tmux.alive.clear(); f.tmux.paneText = 'Starting Claude';
     const first = f.send();
@@ -242,6 +242,7 @@ describe('Peer message wake and one-hour sleep', () => {
 
   it('records a warm wake if the restored process completed another response during startup deferral', async () => {
     const f = await fixture('claude');
+    f.db.boundSessions.upsert({ ...f.session, pid: undefined });
     f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
     f.tmux.alive.clear(); f.tmux.paneText = 'Starting Claude';
     const message = f.send();
@@ -261,6 +262,19 @@ describe('Peer message wake and one-hour sleep', () => {
     await f.manager.wakePendingAssignments();
     expect(f.tmux.created).toHaveLength(1);
     expect(f.tmux.sent).toEqual([]);
+  });
+
+  it('routes an unexpected process exit through durable backoff even with a queued peer message', async () => {
+    const f = await fixture();
+    f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
+    f.tmux.alive.clear(); const message = f.send();
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.created).toHaveLength(1);
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.db.boundSessions.getById(f.session.id)?.runFailure).toMatchObject({ code: 'process_exited', status: 'scheduled', attempts: 0 });
+    expect(f.db.meta.get(peerWakeAttemptKey(message.id))).toBeUndefined();
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.created).toHaveLength(1);
   });
 
   it('does not replay an ambiguous submission after a backend restart', async () => {

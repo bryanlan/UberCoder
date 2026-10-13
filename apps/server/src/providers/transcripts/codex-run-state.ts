@@ -64,9 +64,16 @@ export class CodexRunMonitor implements ProviderRunMonitor {
               // task_complete.started_at has only whole seconds. Keep the precise
               // task_started timestamp so a newly submitted turn is not mistaken
               // for the preceding turn cancelled milliseconds before it began.
-              if (run.turnId === this.latest?.turnId) run.startedAt = this.latest.startedAt ?? run.startedAt;
+              if (run.turnId === this.latest?.turnId) {
+                run.startedAt = this.latest.startedAt ?? run.startedAt;
+                run.progressAt = this.latest.progressAt;
+              }
               else if (run.status === 'running') run.startedAt = run.timestamp;
               this.latest = run;
+            } else if (this.latest?.status === 'running' && typeof record.timestamp === 'string'
+              && record.type === 'response_item' && payload
+              && (payload.role === 'assistant' || ['function_call', 'custom_tool_call'].includes(String(payload.type)))) {
+              this.latest = { ...this.latest, progressAt: record.timestamp };
             }
           } catch { /* An incomplete provider record cannot establish a run outcome. */ }
         }

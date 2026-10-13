@@ -82,10 +82,14 @@ export class ClaudeRunMonitor implements ProviderRunMonitor {
             } else if (timestamp && record.type === 'assistant' && record.isSidechain !== true && this.turnId) {
               const message = record.message as Record<string, unknown> | undefined;
               const error = claudeRunError(record);
+              const substantive = !error && (typeof message?.content === 'string' ? message.content.trim().length > 0
+                : Array.isArray(message?.content) && message.content.some((part: Record<string, unknown>) =>
+                  part.type === 'tool_use' || (part.type === 'text' && typeof part.text === 'string' && part.text.trim().length > 0)));
               this.latest = {
                 turnId: this.turnId,
                 timestamp,
                 startedAt: this.latest?.startedAt,
+                progressAt: substantive ? timestamp : this.latest?.progressAt,
                 status: error ? 'failed' : message?.stop_reason === 'end_turn' ? 'completed' : 'running',
                 ...(error ? { error } : {}),
               };

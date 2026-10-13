@@ -312,7 +312,8 @@ export class SessionManager {
       runExclusive: (id, fn) => this.runtimes.run(id, 'runRecovery', fn),
       mayRecover: (session) => this.unattendedAssignment(session) !== undefined,
       canRetry: async (session) => {
-        if (this.stopped || this.getCurrentRestorableSession(session)?.id !== session.id || session.status !== 'bound') return 'This session no longer owns the conversation.';
+        if (this.stopped || this.getCurrentRestorableSession(session)?.id !== session.id
+          || (session.status !== 'bound' && !(session.status === 'error' && session.runFailure?.code === 'process_exited'))) return 'This session no longer owns the conversation.';
         if (!this.unattendedAssignment(session)) return 'Unattended continuation is disabled for this assignment.';
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
           .get(session.provider, session.conversationRef) as { status: string } | undefined;
@@ -323,9 +324,21 @@ export class SessionManager {
           && (available === undefined || available < this.pressureSuspendAvailableBytes)) return 'Recovery is stopped while available memory is below the configured threshold.';
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(session.projectSlug);
         if (!project || !this.recoveryDependencies?.projectService.getMergedProviderSettings(project, session.provider).enabled) return 'This provider or project is no longer enabled.';
-        if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive') return 'The provider session is unavailable. Resume it manually.';
+        const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+        if (liveness === 'unknown') return 'Provider liveness could not be confirmed.';
+        if (liveness === 'dead') {
+          const owner = this.db.sqlite.prepare('select pid,process_start as processStart from coordination_assignments where provider=? and native_session_id=?')
+            .get(session.provider, session.conversationRef) as { pid: number; processStart: string } | undefined;
+          if (owner && processStart(owner.pid) === owner.processStart) return 'The original provider still has a live owner outside this binding.';
+          if (!await this.restoreSession(session)) return 'The original provider conversation could not be restored.';
+        }
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) return 'Session ownership could not be verified.';
-        const screen = await this.captureSessionScreen(session);
+        let screen = await this.captureSessionScreen(this.mustGetSession(session.id), false);
+        if (liveness === 'dead') {
+          if (session.provider === 'claude' && claudeFullSessionResumeSelection(screen) !== undefined) screen = await this.resumeFullClaudeSessionForPeerWake(session, screen);
+          if (!screen.inputActive || screenIsStartingUp(screen)) screen = await this.waitForScreenMatch(session, hashScreen(screen), CLAUDE_RESUME_READY_WAIT_MS,
+            candidate => candidate.inputActive && !screenIsStartingUp(candidate)) ?? screen;
+        }
         if (!screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
           || (session.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return 'The provider is busy, has an unsent draft, or needs your input.';
         return undefined;
@@ -346,9 +359,18 @@ export class SessionManager {
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Session ownership changed before recovery submission.');
         this.runtimeState(session.id).submittedTurnAt = nowIso();
         try {
-          await this.runInputTmuxAction(session, async () => {
-            if (shouldUseBracketedPasteTransport(text)) await this.tmuxClient.pasteText(session.tmuxSessionName, text);
-            else await this.sendLiteralTextToSession(session.tmuxSessionName, text);
+          if (session.provider === 'codex') {
+            const project = await this.recoveryDependencies!.projectService.getProjectBySlug(session.projectSlug);
+            if (!project || !ownsRecovery()) throw new Error('Recovery was cancelled before native submission.');
+            await this.queueCodexNotice(session.conversationRef,
+              this.recoveryDependencies!.projectService.getMergedProviderSettings(project, 'codex'), project.path, text);
+          } else await this.runInputTmuxAction(session, async () => {
+            const before = await this.captureSessionScreen(session, false);
+            await this.sendLiteralTextToSession(session.tmuxSessionName, text);
+            const entered = await this.waitForInputTextChange(session, hashScreen(before), before, combinedTextKeySettleWaitMs(text));
+            if (!entered || !entered.inputActive || !screenInputMatchesText(entered, text)
+              || sessionScreenShowsWorking(entered) || screenShowsInteractiveSelectionHint(entered)
+              || screenShowsQueuedMessageHint(entered)) throw new Error('The provider did not confirm the recovery composer; text remains unsent.');
             // Stop runs outside the runtime queue. Never send Enter after it has
             // cancelled recovery during text entry; leave the text unsent.
             if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Recovery cancelled during text entry; recovery text remains unsent.');
@@ -533,6 +555,10 @@ export class SessionManager {
           // A surviving provider outside this tmux binding must never get a second writer.
           if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
           if (!allowed()) return;
+          if (current.pid !== undefined) {
+            await this.runRecovery.processExited(current.id);
+            return;
+          }
           const restored = await this.restoreSession(current);
           if (!restored) {
             const reason = 'The original conversation could not be restored.';
@@ -2756,6 +2782,14 @@ export class SessionManager {
       return session;
     }
     if (liveness === 'dead') {
+      if (restoreMissing && session.shouldRestore && this.unattendedAssignment(session)
+        && (session.pid !== undefined || session.runFailure?.code === 'process_exited')
+        && !this.suspendedSessionIds.has(session.id) && session.status !== 'releasing') {
+        // Unfinished unattended sessions use the durable backed-off controller.
+        // Reconciliation and browser polling cannot launch them in a hot loop.
+        await this.runRecovery.processExited(session.id);
+        return undefined;
+      }
       this.stopWatching(session.id);
       this.runtimes.clearEphemeral(session.id);
       if (!restoreMissing && session.conversationRef.startsWith('pending:')) {

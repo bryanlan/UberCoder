@@ -442,14 +442,14 @@ incremental lifecycle monitor observes append-only transcript updates independen
 of the large-conversation display cache. SessionManager attaches this monitor to
 managed transcript bindings even when no conversation page is open.
 
-The backend persists failure and retry state in `bound_sessions.run_failure_json`
-(schema version 8). Ordinary screen/status writes cannot overwrite that state.
+The backend persists the visible failure in `bound_sessions.run_failure_json`
+(schema version 8) and the consecutive-failure budget in SQLite metadata. Ordinary screen/status writes cannot overwrite that state.
 The conversation notice and sidebar badge distinguish stopped, retry scheduled and
 retrying. Recovery progress uses a passive status notice; exhausting the three-attempt budget raises an alert. Failed turns do not remain working because of terminal-output cooldown.
 
 The typed Codex `server_overloaded` error and Claude native HTTP 500, 502, 503, 504
 and 529 server-error envelopes automatically continue the same
-unattended conversation: at most three attempts, delayed 15, 45 and 120 seconds. A Claude
+unattended conversation: at most three consecutive attempts without useful provider output, delayed 15, 45 and 120 seconds. A Claude
 `server_error` label alone is insufficient because OAuth failures use it too. Permission,
 policy, authentication, quota and unknown failures stay stopped. Each attempt
 rechecks the latest provider turn, canonical binding, live tmux ownership, enabled
@@ -470,15 +470,28 @@ visible but are not automatically resumed. A scheduled attempt older than ten
 minutes stops, with age checked again after asynchronous readiness checks before
 starting submission. The attempt is persisted before submission: uncertain transport or
 restart outcomes are stopped for manual inspection, and lack of provider
-acknowledgment within 30 seconds also stops recovery. Successful completion clears
-the active notice while preserving the failure in transcript history. Recovery
-budgets for Claude survive provisional `end_turn` records and Stop-hook
-continuations, including backend restart. Only a completed response confirmed
-by the native ready prompt clears that budget; stale completion callbacks do not.
+acknowledgment within 30 seconds also stops recovery. A new running turn clears
+the active retry notice immediately; the separate budget survives acknowledgment
+and backend restart. Actual assistant output or a tool call renews the budget,
+so hours of productive work do not consume a lifetime three-retry allowance.
+Confirmed completion also clears it. Claude provisional `end_turn` records without
+useful output retain the budget; stale completion callbacks do not clear newer failures.
 Recovery state transitions and their stop reasons are also appended to the session event
 log, so clearing the active notice does not erase the decision evidence.
 
-Automatic text entry checks cancellation and tmux ownership again before Enter.
+Codex recovery uses its native queue, preserving the composer and avoiding lost
+text-plus-Enter submissions. Claude recovery verifies the exact entered composer
+before sending Enter. Automatic text entry checks cancellation and tmux ownership again before Enter.
 A Stop received while entering text leaves that text unsent and retains the
 cancellation reason. An Enter already handed to tmux cannot be recalled. These
 guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status and continuation permission remain independent. Worker facts never grant permission or reset a spent continuation budget.
+
+
+An unexpected provider exit with unattended work remaining uses this same durable
+backoff. Reconciliation and queued peer messages cannot bypass it. The backend
+resumes the original conversation, preserves its assignment and inbox, and submits
+the recovery notice after native readiness. Three failed relaunches stop recovery.
+Intentional automatic sleep has a cleared PID and retains the existing wake path;
+manual suspension, finished assignments and resource limits stay respected.
+Failure transitions advance the session revision timestamp so browser polls and
+events accept the cleared status; they do not advance conversation recency.

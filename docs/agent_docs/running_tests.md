@@ -72,3 +72,16 @@ Run `NODE_ENV=test npm run test -w @agent-console/server -- coordination`, `NODE
 
 
 Unattended continuation: run `NODE_ENV=test npm run test -w @agent-console/server -- assignment-continuation peer-message-wake codex-run-state claude-run-state run-recovery claude-ready-lifecycle coordination` and the web `CoordinationPanel` tests. These cover permission defaults, waiting-for-human stops, supervisor graphs and handoffs, native child envelopes, silent lead recovery, bounded backoff across new facts and restart, lost-wake redrain, cancellation during text entry and exact native composer verification. Native task notifications must not become new human prompts or replace the parent turn. Provider-failure tests retain Claude retry counts through provisional completion and confirm genuine completion separately. All SQLite fixtures are disposable; no live provider is contacted. Real activation remains a separate authorized workflow and requires native behavior readback.
+
+
+Real recovery proof (opt-in): after `npm run build`, run
+`node scripts/prove-session-recovery.mjs --run`. It launches disposable real Codex
+and Claude conversations through a private Console runtime, with its own SQLite
+file, project and tmux server. Each provider receives a simulated native capacity
+failure envelope and a real SIGKILL in separate conversations. The normal backend
+must recover without another human input, deliver and acknowledge a queued peer
+message, and clear the retry notice. The script faults only its own transcripts
+and process identities, releases its sessions, and retains `proof.json` under its
+printed temporary evidence directory. `PROOF_PROVIDERS=codex` or `claude` narrows
+the run. Native hooks and MCP must point to that private runtime. Do not use a
+running production database or provider session as a fixture.

@@ -49,6 +49,8 @@ export interface ProviderRunState {
   turnId: string;
   timestamp: string;
   startedAt?: string;
+  /** Actual assistant output/tool activity, independent of turn-start and terminal repaint. */
+  progressAt?: string;
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   error?: { code: string; message: string };
 }

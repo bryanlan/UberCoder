@@ -61,6 +61,8 @@ describe('Claude authoritative failed turns', () => {
   it('automatically continues an owned Claude session after the bounded capacity delay', async () => {
     const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
     const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
+    const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
+    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
     const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
     const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings);
     db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
@@ -78,6 +80,8 @@ describe('Claude authoritative failed turns', () => {
   it('never sends Enter when Stop arrives during automatic text entry', async () => {
     const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
     const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
+    const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
+    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
     const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
     const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings);
     db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
@@ -104,7 +108,9 @@ describe('Claude authoritative failed turns', () => {
     const checks = await Promise.allSettled(['manual_pause', 'pressure_pause', 'low_memory', 'draft', 'approval', 'ownership'].map(async (guard) => {
       const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
       const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
-      const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
+      const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
+    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
+    const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
       const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings,
         guard === 'low_memory' ? { pressureSuspendAvailableBytes: 1024 * 1024, readMemInfo: () => 'MemAvailable: 100 kB' } : {});
       db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);

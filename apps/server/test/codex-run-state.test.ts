@@ -64,6 +64,18 @@ describe('Codex authoritative run state', () => {
     expect(await m.read(p)).toMatchObject({ status: 'failed', startedAt: timestamp });
   });
 
+  it('tracks real assistant/tool progress independently of turn-start, quotes and terminal noise', async () => {
+    const p = await file(); const m = new CodexRunMonitor();
+    await fs.writeFile(p, record('task_started'));
+    const at = new Date().toISOString();
+    await fs.appendFile(p, JSON.stringify({ type: 'response_item', timestamp: at, payload: { type: 'function_call', name: 'exec_command' } }) + '\n');
+    expect(await m.read(p)).toMatchObject({ status: 'running', progressAt: at });
+    await fs.appendFile(p, record('task_complete', 'turn1', capacity));
+    expect(await m.read(p)).toMatchObject({ status: 'failed', progressAt: at });
+    await fs.appendFile(p, record('task_started', 'turn2'));
+    expect((await m.read(p))?.progressAt).toBeUndefined();
+  });
+
   it('observes a managed transcript failure without a conversation-page poll and cancels through the real input path', async () => {
     const p = await file(); await fs.writeFile(p, record('task_started'));
     const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
@@ -89,7 +101,8 @@ describe('Codex authoritative run state', () => {
     const tmux = new FakeTmux();
     tmux.paneText = 'OpenAI Codex\nSelected model is at capacity.\n› Ask Codex to do anything\ngpt-5.4 medium · 98% left · ~/demo';
     const adapter = { ...provider, createRunMonitor: () => new CodexProvider().createRunMonitor() };
-    const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter);
+    const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, providerSettings,
+      { queueCodexNotice: async (_ref, _settings, _cwd, text) => { tmux.sent.push(text); } });
     db.conversationIndex.replace('demo', 'codex', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'codex', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
     try {
       enableUnattendedRecovery(db, adapter.id, 'c1');
@@ -98,7 +111,7 @@ describe('Codex authoritative run state', () => {
       const deadline = Date.now() + 20_000;
       while (!tmux.sent.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
       expect(tmux.sent.join('')).toContain('Automatic recovery after a transient provider failure');
-      expect(tmux.sentKeys.filter(keys => keys.includes('Enter'))).toHaveLength(1);
+      expect(tmux.sentKeys).toEqual([]);
       expect(db.boundSessions.getById(session.id)?.runFailure).toMatchObject({ attempts: 1, status: 'retrying' });
       await fs.appendFile(p, record('task_started', 'retry1') + record('task_complete', 'retry1'));
       const completionDeadline = Date.now() + 3000;

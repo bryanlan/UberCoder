@@ -33,12 +33,14 @@ function fixture(provider: BoundSession['provider'] = 'codex') {
   const failure = () => db.boundSessions.getById(session.id)?.runFailure;
   cleanups.push(() => { recovery.stop(); db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   return { db, session, submit, canRetry, mayRecover, publish, onError, failure, setRun, advance, settle,
+    budget: () => JSON.parse(db.meta.get("run-recovery-budget:s1") || "null"),
     getRun: () => run!,
     confirmReady: (completed = run!) => {
       db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, lastResponseAt: completed.timestamp });
       recovery.confirmCompletion(session.id, completed);
     },
     cancel: () => recovery.cancel(session.id),
+    processExited: async () => { await recovery.processExited(session.id); await settle(); },
     restart: async () => { recovery.stop(); recovery = new RunRecovery(options); watch(); await settle(); },
     setUnreadRun: (value: ProviderRunState) => { run = value; },
   };
@@ -91,10 +93,12 @@ describe('Bounded provider failure recovery', () => {
       const turn = `retry${i}`;
       await f.setRun('running', turn);
       await f.advance(1); await f.setRun('completed', turn);
-      expect(f.failure()).toMatchObject({ status: 'retrying', attempts: i + 1 });
+      expect(f.failure()).toBeUndefined();
+      expect(f.budget()).toMatchObject({ status: 'retrying', attempts: i + 1 });
       if (i === 0) {
         await f.restart();
-        expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
+        expect(f.failure()).toBeUndefined();
+        expect(f.budget()).toMatchObject({ status: 'retrying', attempts: 1 });
       }
       await f.advance(1); await f.setRun('running', turn);
       await f.advance(1); await f.setRun('failed', turn);
@@ -108,7 +112,8 @@ describe('Bounded provider failure recovery', () => {
   it('clears the Claude budget only after confirmed completion', async () => {
     const f = fixture('claude'); await f.setRun('failed'); await f.advance(10);
     await f.setRun('running', 'retry1'); await f.advance(1); await f.setRun('completed', 'retry1');
-    expect(f.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
+    expect(f.failure()).toBeUndefined();
+    expect(f.budget()).toMatchObject({ status: 'retrying', attempts: 1 });
     f.confirmReady(); expect(f.failure()).toBeUndefined();
     await f.advance(1); await f.setRun('failed', 'next-task');
     expect(f.failure()).toMatchObject({ status: 'scheduled', attempts: 0 });
@@ -228,8 +233,47 @@ describe('Bounded provider failure recovery', () => {
     expect(f.failure()).toBeUndefined();
   });
 
+
+  it('clears retrying on acknowledgment and retains the budget through restart until actual progress', async () => {
+    const f = fixture(); await f.setRun('failed'); await f.advance(10);
+    await f.setRun('running', 'retry1');
+    expect(f.failure()).toBeUndefined(); expect(f.budget()?.attempts).toBe(1);
+    await f.restart(); expect(f.failure()).toBeUndefined(); expect(f.budget()?.attempts).toBe(1);
+    await f.advance(1);
+    f.setUnreadRun({ ...f.getRun(), progressAt: new Date().toISOString() });
+    await f.advance(1); await f.restart();
+    expect(f.budget()).toBeNull();
+    await f.setRun('failed', 'retry1'); expect(f.failure()?.attempts).toBe(0);
+  });
+
   it('ordinary session status writes cannot erase the persisted recovery budget', async () => {
     const f = fixture(); await f.setRun('failed'); await f.advance(10); f.db.boundSessions.upsert(f.session);
     expect(f.failure()?.attempts).toBe(1);
+  });
+
+  it('backs off process-exit recovery across repeated reconciliation and backend restart', async () => {
+    const f = fixture(); await f.setRun('running'); await f.advance(1);
+    await f.processExited();
+    expect(f.failure()).toMatchObject({ code: 'process_exited', status: 'scheduled', attempts: 0 });
+    const due = f.failure()?.nextRetryAt;
+    await f.processExited(); expect(f.failure()?.nextRetryAt).toBe(due);
+    await f.restart(); await f.advance(9); expect(f.submit).not.toHaveBeenCalled();
+    await f.advance(1); expect(f.submit).toHaveBeenCalledOnce();
+    await f.setRun('running', 'resumed'); expect(f.failure()).toBeUndefined();
+  });
+
+  it('cannot renew a stopped process-exit budget by repeated reconciliation', async () => {
+    const f = fixture(); await f.setRun('running'); await f.advance(1); await f.processExited(); f.cancel();
+    await f.processExited(); await f.processExited(); await f.advance(60_000);
+    expect(f.failure()?.status).toBe('stopped'); expect(f.submit).not.toHaveBeenCalled();
+  });
+
+  it('bounds failed process relaunches with the same persistent backoff', async () => {
+    const f = fixture(); await f.setRun('running'); await f.advance(1); await f.processExited();
+    f.canRetry.mockResolvedValue('The original provider conversation could not be restored.');
+    await f.advance(10); expect(f.failure()).toMatchObject({ status: 'scheduled', attempts: 1 });
+    await f.restart(); await f.advance(20); expect(f.failure()).toMatchObject({ status: 'scheduled', attempts: 2 });
+    await f.advance(30); expect(f.failure()).toMatchObject({ status: 'stopped', attempts: 3 });
+    expect(f.submit).not.toHaveBeenCalled();
   });
 });
