@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { WorkerCard, WorkerPanelSnapshot } from '@agent-console/shared';
 import type { WorkerEvidence } from './evidence.js';
 import type { SummaryRunner } from './runtime.js';
-import { ZERO_WORKER_USAGE } from './runtime.js';
+import { WORKER_SUMMARY_POLICY, ZERO_WORKER_USAGE } from './runtime.js';
 import { WorkerSummaryAudit, type SummaryAuditRecord } from './audit.js';
 import { WorkerSnapshotStore, type CachedWorkerSummary, type SavedWorkerSnapshot } from './snapshot-store.js';
 import { WorkerUserActivity } from './user-activity.js';
@@ -11,7 +11,7 @@ interface EvidenceSource {
   roster(): Promise<WorkerEvidence[]>;
   collect(worker: WorkerEvidence): Promise<WorkerEvidence>;
 }
-const fingerprint = (w: WorkerEvidence) => createHash('sha256').update(JSON.stringify({ task: w.task,
+const fingerprint = (w: WorkerEvidence) => createHash('sha256').update(JSON.stringify({ policy: WORKER_SUMMARY_POLICY, task: w.task,
   actions: w.actions.map((a) => a.text), peers: w.peers })).digest('hex');
 
 export class WorkerPanelService {

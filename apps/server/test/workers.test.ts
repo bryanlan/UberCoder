@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkerEvidence } from '../src/workers/evidence.js';
 import { WorkerSummaryAudit } from '../src/workers/audit.js';
@@ -112,6 +113,22 @@ describe('worker summary controller', () => {
     try {
       await restarted.setTracking(true); await restarted.refresh(1); await restarted.settled(); expect(f.runner.run).not.toHaveBeenCalled();
       expect((await restarted.snapshot()).workers[0]!.summary?.latest).toBe('Checking runtime revision');
+    } finally { await restarted.stop(); }
+  });
+
+  it('replaces summaries from the previous writing policy at the next eligible refresh', async () => {
+    const f = await fixture(); await f.service.refresh(1); await f.service.settled(); await f.service.snapshot();
+    const saved = (await f.store.read())!;
+    const w = f.workers[0]!;
+    saved.cached[0]!.fingerprint = createHash('sha256').update(JSON.stringify({ task: w.task,
+      actions: w.actions.map((a) => a.text), peers: w.peers })).digest('hex');
+    await f.store.save(saved); await f.store.settled();
+    vi.mocked(f.runner.run).mockClear();
+    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory),
+      f.createActivity(), true, () => Date.parse('2026-10-12T14:00:00Z'));
+    try {
+      await restarted.setTracking(true); await restarted.refresh(1); await restarted.settled();
+      expect(f.runner.run).toHaveBeenCalledTimes(1);
     } finally { await restarted.stop(); }
   });
 
@@ -348,12 +365,13 @@ describe('worker summary controller', () => {
 describe('shared-runtime result boundary', () => {
   const nativeUsage = { available: true, input_tokens: 20, cache_read_tokens: 5, cache_creation_tokens: 2, output_tokens: 3, total_tokens: 30 };
   const envelope = (rows: unknown) => ({ ok: true, response_text: JSON.stringify({ workers: rows }), llm_usage: nativeUsage });
-  const row = { id: 'one', task: 'Task', latest: 'Latest', coordination: 'Invented peer collaboration' };
+  const row = { id: 'one', task: 'Verify the deployment.', latest: 'The agent is checking readbacks.', coordination: 'Invented peer collaboration.' };
   it('uses native accounting and prevents invented coordination when there are no peer records', () => {
     expect(parseRuntimeResult(envelope([row]), [worker('one')])).toMatchObject({ usage,
       summaries: [{ coordination: 'No recent coordination observed.' }] });
   });
-  it.each([[{ ...row, id: 'unknown' }], [row, row], [{ ...row, latest: 'x'.repeat(181) }], [{ ...row, latest: 'two\nlines' }]].map((rows) => [rows]))(
+  it.each([[{ ...row, id: 'unknown' }], [row, row], [{ ...row, latest: `${'x'.repeat(90)}.` }],
+    [{ ...row, latest: 'two\nlines.' }], [{ ...row, latest: 'Checking source readbacks' }]].map((rows) => [rows]))(
     'rejects unknown/duplicate workers or unbounded text while retaining known usage', (bad) => {
       expect(parseRuntimeResult(envelope(bad), [worker('one')])).toEqual({ summaries: null, usage });
     });
@@ -361,4 +379,8 @@ describe('shared-runtime result boundary', () => {
     expect(parseRuntimeResult({ ok: false, llm_usage: nativeUsage }, [worker('one')])).toEqual({ summaries: null, usage });
     expect(parseRuntimeResult({ ok: false, llm_usage: { available: false } }, [worker('one')])).toEqual({ summaries: null, usage: null });
   });
+  it.each(['Sent the U.S. Bank export to PlaidBasic.', 'The agent is checking the new worker panel layout on a phone in landscape mode.'])(
+    'accepts bounded prose without rejecting proper names or counting model words: %s', (latest) => {
+      expect(parseRuntimeResult(envelope([{ ...row, latest }]), [worker('one')]).summaries?.[0]?.latest).toBe(latest);
+    });
 });

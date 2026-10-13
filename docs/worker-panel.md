@@ -13,7 +13,12 @@ while reserving320px for the conversation, and has a draggable left edge. Arrow 
 the focused edge; double-click resets to960px. The chosen320–1600px width is remembered in
 this browser. Smaller screens retain the320px drawer within90% of the viewport.
 
-The three lines describe the overall task, latest observed action and recent peer coordination.
+The three overview rows describe the overall task, latest observed action and recent peer coordination.
+They show complete short sentences and wrap to use the panel width, without ellipses. Clicking
+a card fills the panel's content area with that worker's full stored text, full conversation
+title and assigned work in larger, wrapped type. Click the expanded card again or press Escape
+to return to all workers. Open conversation remains a separate link. Expanding does not collect
+evidence or call a model. Saved summaries remain readable while tracking is Off.
 The default summary interval is two minutes; the selector accepts one through five minutes
 and is stored in this browser. Live roster reads run every five seconds while the panel is visible.
 Opening the panel requests the first eligible summary. Closing it or hiding the browser stops
@@ -67,8 +72,12 @@ authentication, model/effort validation, data-only isolation, deadlines and canc
 The panel requests exactly `gpt-6-luna`, low effort, account OAuth and `data_only` access.
 The summarizer gets supplied evidence only; it cannot inspect repos, invoke tools, communicate
 with agents or change runtime state. It does not create a Console binding and cannot trigger
-itself. The parent validates exact worker IDs and three single-line strings of at most 180
-characters. Native output also receives a closed JSON schema. No alternate provider or model
+itself. The prompt asks for one complete short sentence of at most14words per field. The parent
+validates exact worker IDs and three single-line strings of at most90characters ending with
+punctuation, matching the closed JSON schema. Word counts and sentence segmentation remain
+writing guidance so ordinary abbreviations cannot discard a batch. Existing saved
+summaries stay readable; a policy fingerprint refreshes working workers at the next eligible
+generation without requiring their evidence to change. No alternate provider or model
 is selected after a failure.
 
 Install the shared runtime from its owning checkout as documented in

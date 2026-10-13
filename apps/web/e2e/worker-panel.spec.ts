@@ -115,3 +115,36 @@ test('Off survives page reload and stops further summary requests', async ({ pag
   await expect(toggle).toHaveAttribute('aria-checked', 'true');
   await expect.poll(() => calls.length).toBeGreaterThan(count);
 });
+
+test('complete sentences wrap and a card expands across the panel without another refresh', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 2200, height: 1000 });
+  const data = { ...snapshot, enabled: false, trackingEnabled: false, pauseReason: 'manual' as const, workingCount: 0,
+    workers: snapshot.workers.map(worker => ({ ...worker, summary: { ...worker.summary!,
+      latest: 'The agent verified the complete production readbacks and is awaiting the independent review before publishing the corrected worker panel.' } })) };
+  const calls = await openConsole(page, data);
+  const panel = page.getByRole('complementary', { name: 'Active workers' });
+  const latest = panel.getByText(`Latest: ${data.workers[0]!.summary.latest}`, { exact: true }).first();
+  const overview = await latest.evaluate(el => ({ overflow: getComputedStyle(el).textOverflow,
+    whiteSpace: getComputedStyle(el).whiteSpace, height: el.getBoundingClientRect().height }));
+  expect(overview.overflow).not.toBe('ellipsis'); expect(overview.whiteSpace).not.toBe('nowrap'); expect(overview.height).toBeGreaterThan(36);
+  await panel.getByRole('button', { name: /Expand worker details: PlaidBasic/ }).click();
+  await expect(panel.locator('article')).toHaveCount(1);
+  await expect(panel.getByText('CODEX: Prepare the reminder schema publication', { exact: true })).toBeVisible();
+  await expect(panel.getByText('Latest: ' + data.workers[0]!.summary.latest, { exact: true })).toHaveCSS('font-size', '24px');
+  expect((await panel.locator('article').boundingBox())!.width).toBeGreaterThan(900);
+  const sentenceBox = (await panel.getByText('Latest: ' + data.workers[0]!.summary.latest, { exact: true }).boundingBox())!;
+  await page.mouse.move(sentenceBox.x + 100, sentenceBox.y + 18); await page.mouse.down();
+  await page.mouse.move(sentenceBox.x + 500, sentenceBox.y + 18, { steps: 10 }); await page.mouse.up();
+  expect(await page.evaluate(() => window.getSelection()?.toString().length)).toBeGreaterThan(0);
+  await expect(panel.locator('article')).toHaveCount(1);
+  await page.evaluate(() => window.getSelection()?.removeAllRanges());
+  await page.screenshot({ path: testInfo.outputPath('expanded-worker.png') });
+  await panel.getByRole('button', { name: /Collapse worker details/ }).click();
+  await expect(panel.locator('article')).toHaveCount(2);
+  await panel.getByRole('button', { name: /Expand worker details: PlaidBasic/ }).click();
+  await page.keyboard.press('Escape'); await expect(panel.locator('article')).toHaveCount(2);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await panel.getByRole('button', { name: /Expand worker details: PlaidBasic/ }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  expect(calls).toHaveLength(0);
+});

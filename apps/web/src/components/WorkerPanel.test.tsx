@@ -80,3 +80,23 @@ it('explains automatic inactivity pause while keeping saved information visible'
   expect(screen.getByText('Checking source readbacks')).toBeInTheDocument();
   expect(api.refreshWorkers).not.toHaveBeenCalled();
 });
+
+it('expands one saved worker across the panel and collapses without a model request', async () => {
+  const data = snapshot(); data.trackingEnabled = false; data.enabled = false; data.pauseReason = 'manual'; data.workingCount = 0;
+  data.workers.push({ ...data.workers[0]!, id: 'two', projectName: 'Beta', title: 'Another worker' });
+  setup(data);
+  const expand = await screen.findByRole('button', { name: /Expand worker details: Alpha/ });
+  await userEvent.click(expand);
+  const collapse = screen.getByRole('button', { name: /Collapse worker details: Alpha/ });
+  expect(collapse).toHaveAttribute('aria-expanded', 'true');
+  expect(screen.queryByRole('button', { name: /Expand worker details: Beta/ })).not.toBeInTheDocument();
+  expect(screen.getByText('CODEX: A very long conversation name that appears in the left sidebar')).toBeInTheDocument();
+  expect(screen.getByText('Assigned work:')).toBeInTheDocument();
+  await userEvent.click(collapse);
+  await waitFor(() => expect(screen.getByRole('button', { name: /Expand worker details: Alpha/ })).toHaveFocus());
+  expect(screen.getByRole('button', { name: /Expand worker details: Beta/ })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: /Expand worker details: Alpha/ }));
+  await userEvent.keyboard('{Escape}');
+  await waitFor(() => expect(screen.getByRole('button', { name: /Expand worker details: Alpha/ })).toHaveFocus());
+  expect(api.refreshWorkers).not.toHaveBeenCalled();
+});
