@@ -27,7 +27,7 @@ function WorkerDetails({ worker, trackingEnabled, expanded, onToggle, onClose }:
           </span>
         </span>
         <span className={`mb-3 block break-words text-sky-300 ${expanded ? 'text-2xl leading-9' : 'text-lg'}`} title={identity}>
-          {worker.provider.toUpperCase()}: {expanded || worker.title.length <= 30 ? worker.title : `${worker.title.slice(0, 30)}…`}
+          {identity}
         </span>
         {expanded && worker.summary && worker.task !== worker.summary.task && <span className="mb-5 block break-words text-2xl leading-9 text-slate-300">
           <span className="text-slate-400">Assigned work: </span>{worker.task}

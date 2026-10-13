@@ -48,6 +48,7 @@ test('desktop panel shows all projects, exact identity, cadence and separately r
   await expect(panel.getByText('PlaidBasic', { exact: true })).toBeVisible();
   await expect(panel.getByText('WaltiumWeb', { exact: true })).toBeVisible();
   await expect(panel.getByRole('link', { name: /CODEX:/ })).toHaveAttribute('href', '/projects/demo/codex/worker-one');
+  await expect(panel.getByText('CODEX: Prepare the reminder schema publication', { exact: true })).toBeVisible();
   await expect(panel.getByText('Latest: Checking empty-table readbacks.', { exact: true })).toBeVisible();
   await expect(panel.getByText(/2,180 known tokens/)).toBeVisible();
   await expect.poll(() => calls).toContain(2);

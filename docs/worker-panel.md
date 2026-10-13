@@ -1,8 +1,8 @@
 # Worker panel
 
 The collapsible right panel shows loaded, visible Console workers across configured projects.
-It uses the same project and conversation labels as the left sidebar; the title is shortened
-to 30 characters, with the full label on hover and a link to the exact conversation.
+It uses the same project and conversation labels as the left sidebar. The full conversation
+label wraps across the card without a character cutoff, with a link to the exact conversation.
 Working/idle state comes from bound sessions, independently of an assignment's active label.
 Suspended, unbound and internal `codex exec` conversations are excluded. Idle cards retain their
 last summary; they never cause model calls. Native child agents without their own Console

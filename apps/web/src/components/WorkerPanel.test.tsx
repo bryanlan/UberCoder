@@ -29,6 +29,7 @@ it('shows the same conversation identity, three summary rows, full-title hover a
   const link = await within(panel).findByRole('link', { name: /CODEX: A very long conversation name/ });
   expect(link).toHaveAttribute('href', '/projects/alpha/codex/native%2Fone');
   expect(link).toHaveAttribute('title', 'CODEX: A very long conversation name that appears in the left sidebar');
+  expect(within(panel).getByText('CODEX: A very long conversation name that appears in the left sidebar', { exact: true })).toBeInTheDocument();
   expect(within(panel).getByText('Checking source readbacks')).toBeInTheDocument();
   expect(within(panel).getByText('Asked the Web agent for requirements')).toBeInTheDocument();
   expect(within(panel).getByText(/18 known tokens/)).toBeInTheDocument();
