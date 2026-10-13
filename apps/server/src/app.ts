@@ -80,6 +80,7 @@ export async function buildApp(options: AppOptions = {}) {
         .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string } | undefined;
       return !!assignment && grants.grantsFor(assignment.id).length > 0;
     },
+    launchAuthorityContext: context => grants.authorityContext(context),
   });
   const authService = new AuthService(config, db);
   const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));

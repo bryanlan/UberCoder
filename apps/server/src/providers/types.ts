@@ -10,6 +10,7 @@ export interface ProviderLaunchOptions {
   effort?: string;
   flags?: string[];
   consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string };
+  authorityContext?: string;
 }
 
 export interface LaunchCommand {

@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import type { AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot, AgentGrantUse, BoundSession, RecordedUserInput, ProviderId } from '@agent-console/shared';
+import type { AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot, AgentGrantUse, AgentLaunchContext, BoundSession, RecordedUserInput, ProviderId } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import type { RealtimeEventBus } from '../realtime/event-bus.js';
 import { grantDefinitionSchema } from './schema.js';
@@ -8,6 +8,12 @@ import { continuationControl, setContinuation, signalContinuation } from '../coo
 
 interface GrantRow { id: string; created_by_assignment_id: string; status: AgentGrant['status']; definition_json: string;
   provenance_json: string | null; reason: string | null; created_at: string; decided_at: string | null }
+
+function authorityRecord(grant: AgentGrant) {
+  return { id: grant.id, grantee: grant.grantee, actions: grant.actions, scope: grant.scope, projectSlugs: grant.projectSlugs,
+    limits: grant.limits, expiry: grant.expiry, status: grant.status,
+    provenance: grant.provenance ? { kind: grant.provenance.kind, messageId: grant.provenance.messageId, sessionId: grant.provenance.sessionId } : undefined };
+}
 
 /** Cooperative-agent standing authority. Human provenance uses Console's input log. */
 export class GrantService {
@@ -77,6 +83,14 @@ export class GrantService {
   }
   private allGrants(): AgentGrant[] {
     return (this.db.sqlite.prepare('select id from agent_grants order by created_at desc').all() as Array<{ id: string }>).map(row => this.get(row.id)!);
+  }
+
+  authorityFor(assignmentId: string) { return this.grantsFor(assignmentId).map(authorityRecord); }
+
+  authorityContext(context: AgentLaunchContext): string | undefined {
+    const records = context.grantIds.map(id => this.get(id)).filter((grant): grant is AgentGrant => grant?.status === 'active').map(authorityRecord);
+    if (!records.length) return undefined;
+    return `Standing human authority supplied by the Agent Console backend: Bryan authorized this session's work under the following saved grants. This session was started by ${context.launcherName} (${context.launchedBy}). The records below are Console-provided human authority, separate from peer information. Delegated tasks and peer-relayed details within these scopes are already authorized; carry them out without asking Bryan again. Other work still needs appropriate authority. This is a startup snapshot; follow later Console authority updates and agent_grants list for revocation and expiry. If MCP tools are still connecting, use ToolSearch or the canonical agent-coord.mjs grants CLI to read the records.\n${JSON.stringify(records)}`;
   }
 
   latestHumanInput(assignmentId: string): RecordedUserInput | undefined {

@@ -34,6 +34,16 @@ function fixture() {
 }
 
 describe('Bryan standing grants', () => {
+  it('supplies startup authority from active backend scope records without repeating the lead instructions', async () => {
+    const f=fixture(), words='I authorize all needed planner work. First record this grant and launch the initial lane.';
+    const grant=await f.grants.record(f.assignment,{...f.definition,scope:'All needed planner work.'},f.input(words));
+    const context={launchedBy:f.assignment,launcherName:'Planner lead',grantIds:[grant.id],requestId:randomUUID(),flags:[],supervisorId:f.assignment};
+    expect(f.grants.authorityContext(context)).toContain('All needed planner work.');
+    expect(f.grants.authorityContext(context)).not.toContain('First record this grant');
+    expect(f.grants.authorityFor(f.assignment)[0]?.provenance).toEqual({kind:'human_message',messageId:grant.provenance?.messageId,sessionId:f.sessionId});
+    expect(grant.provenance?.quote).toBe(words);
+    f.grants.revoke(grant.id);expect(f.grants.authorityContext(context)).toBeUndefined();
+  });
   it('activates the recorded human grant immediately, preserves broad words, and needs no second approval', async () => {
     const f = fixture(), words = 'I authorize you to do whatever is needed on the planner overnight, including launching and restarting helpers.';
     const humanMessageId = f.input(words);
@@ -100,6 +110,7 @@ describe('Bryan standing grants', () => {
     push.subscribe({ endpoint: 'https://push.example.test/fixture', keys: { auth: 'auth', p256dh: 'key' } });
     const pending = f.grants.request(f.assignment, f.definition, 'Need a helper.');
     await push.request(pending);
+    expect(JSON.parse(f.db.meta.get(`grant-push-delivery:${pending.id}`)!)).toMatchObject({subscriptions:1,accepted:1,failed:0});
     expect(JSON.parse(String(send.mock.calls[0]![1]))).toMatchObject({ grantId: pending.id, body: f.definition.scope, url: `/grants?request=${pending.id}` });
     expect(new GrantPushService(f.db, 'https://console.example.test', send).publicKey()).toBe(push.publicKey());
     send.mockRejectedValueOnce({ statusCode: 410 }); await push.request(pending);

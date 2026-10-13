@@ -317,7 +317,7 @@ export class CoordinationService {
       if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
       return { assignment: current, continuationPolicy: CONTINUATION_POLICY,
         grantPolicy: this.grants ? GRANT_POLICY : undefined,
-        authority: this.grants?.grantsFor(id), latestHumanInput: this.grants?.latestHumanInput(id),
+        authority: this.grants?.authorityFor(id), latestHumanInput: this.grants?.latestHumanInput(id),
         activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
     }).immediate();
   }

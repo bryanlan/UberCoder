@@ -84,7 +84,10 @@ try {
     await api('POST',`/api/sessions/${id}/release`,{});
   }
 } finally {
-  for (const id of sessions) if (db.prepare('select should_restore from bound_sessions where id=?').get(id)?.should_restore) await api('POST',`/api/sessions/${id}/release`,{}).catch(()=>{});
   await context.close(); browser._connection.close();
+  for (const id of sessions) if (db.prepare('select should_restore from bound_sessions where id=?').get(id)?.should_restore) await api('POST',`/api/sessions/${id}/release`,{}).catch(()=>{});
   await app.close(); db.close(); try {execFileSync('tmux',['-L',socket,'kill-server'],{stdio:'ignore'});} catch {}
 }
+// End this client's remaining CDP transport after all proof cleanup. This
+// closes the client's socket without issuing Browser.close to shared Chrome.
+process.exit(0);

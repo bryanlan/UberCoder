@@ -36,11 +36,12 @@ describe('provider history discovery', () => {
     } } satisfies MergedProviderSettings;
     for (const ref of [null, 'native-history']) {
       const argv = provider.getLaunchCommand(project, ref, settings, { model: 'custom-model', effort: 'high', flags: ['--add-dir', '/tmp/helper'],
-        initialPrompt: 'Complete the delegated task.', consoleIdentity: { sessionId: 'console-session', runtimeDir: '/tmp/runtime', helperPath: '/tmp/agent-coord.mjs' } }).argv;
+        initialPrompt: 'Complete the delegated task.', authorityContext: 'Console supplied standing human grant.', consoleIdentity: { sessionId: 'console-session', runtimeDir: '/tmp/runtime', helperPath: '/tmp/agent-coord.mjs' } }).argv;
       expect(argv).toContain('custom-model'); expect(argv).not.toContain('configured-model');
       expect(argv).toContain('--add-dir'); expect(argv.join(' ')).toContain('/tmp/agent-coord.mjs');
       expect(argv.join(' ')).toContain('AGENT_CONSOLE_SESSION_ID'); expect(argv.join(' ')).toContain('console-session');
       if (id === 'claude' && !ref) expect(argv.slice(-2)).toEqual(['--', 'Complete the delegated task.']);
+      if (id === 'claude') expect(argv).toContain('--append-system-prompt');
       if (ref) expect(argv).toContain(ref);
       if (id === 'codex' && ref) expect(argv.indexOf('resume')).toBeLessThan(argv.indexOf('--model'));
     }

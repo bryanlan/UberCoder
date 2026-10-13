@@ -21,15 +21,20 @@ export class GrantPushService {
     const payload = JSON.stringify({ title: 'Agent permission request', body: grant.scope.slice(0, 1200),
       grantId: grant.id, url: `/grants?request=${encodeURIComponent(grant.id)}` });
     const rows = this.db.sqlite.prepare('select endpoint,subscription_json from agent_push_subscriptions').all() as Array<{ endpoint: string; subscription_json: string }>;
+    let accepted = 0, failed = 0;
+    this.db.meta.set(`grant-push-delivery:${grant.id}`, JSON.stringify({ timestamp: new Date().toISOString(), subscriptions: rows.length, status: 'sending' }));
     await Promise.allSettled(rows.map(async row => {
       try {
         await this.send(JSON.parse(row.subscription_json) as PushSubscription, payload, {
           vapidDetails: { subject: this.publicBaseUrl, ...this.keys }, TTL: 86400, timeout: 10_000,
         });
+        accepted += 1;
       } catch (error) {
+        failed += 1;
         if ([404, 410].includes(Number((error as { statusCode?: number }).statusCode))) this.unsubscribe(row.endpoint);
         else this.db.meta.set(`grant-push-error:${grant.id}`, JSON.stringify({ timestamp: new Date().toISOString(), message: 'Push delivery failed; the request remains on the grants page.' }));
       }
     }));
+    this.db.meta.set(`grant-push-delivery:${grant.id}`, JSON.stringify({ timestamp: new Date().toISOString(), subscriptions: rows.length, accepted, failed }));
   }
 }

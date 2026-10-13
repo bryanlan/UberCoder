@@ -199,6 +199,7 @@ export class ClaudeProvider implements ProviderAdapter {
       argv: [
         ...baseArgv,
         ...(options?.flags ?? []),
+        ...(options?.authorityContext ? ['--append-system-prompt', options.authorityContext] : []),
         ...(options?.consoleIdentity ? ['--mcp-config', JSON.stringify({ mcpServers: {
           agent_console_coordination: { command: 'node', args: [options.consoleIdentity.helperPath, 'mcp'],
             env: { AGENT_COORD_RUNTIME: options.consoleIdentity.runtimeDir, AGENT_CONSOLE_SESSION_ID: options.consoleIdentity.sessionId } },

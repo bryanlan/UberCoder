@@ -114,6 +114,7 @@ interface SessionManagerOptions {
   readMemInfo?: () => string;
   queueCodexNotice?: typeof queueCodexNotice;
   hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
+  launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -282,6 +283,7 @@ export class SessionManager {
   private wakeRequested = false;
   private readonly coordinationEnabled: boolean;
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
+  private readonly launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
   private stopped = false;
 
   constructor(
@@ -295,6 +297,7 @@ export class SessionManager {
   ) {
     this.coordinationEnabled = options.coordinationEnabled ?? false;
     this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
+    this.launchAuthorityContext = options.launchAuthorityContext;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -1304,6 +1307,7 @@ export class SessionManager {
         effort: activeModelProfile(session) ? undefined : session.launchContext?.effort,
         flags: session.launchContext?.flags,
         consoleIdentity: this.consoleIdentity(session.id),
+        authorityContext: session.launchContext && this.launchAuthorityContext?.(session.launchContext),
       });
     }
     return undefined;
@@ -1735,7 +1739,7 @@ export class SessionManager {
       input.providerSettings,
       { initialPrompt: input.initialPrompt, codexProfile: input.codexProfile, claudeProfile: input.claudeProfile,
         model: input.launchContext?.model, effort: input.launchContext?.effort, flags: input.launchContext?.flags,
-        consoleIdentity: this.consoleIdentity(sessionId) },
+        consoleIdentity: this.consoleIdentity(sessionId), authorityContext: input.launchContext && this.launchAuthorityContext?.(input.launchContext) },
     );
     const now = nowIso();
     const initialPrompt = input.initialPrompt?.trim();
@@ -2494,7 +2498,7 @@ export class SessionManager {
       await this.tmuxClient.killSession(starting.tmuxSessionName);
       originalStopped = true;
       const resumeRef = request.resumeConversationRef.startsWith('pending:') ? null : request.resumeConversationRef;
-      const launch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, request.profile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id) });
+      const launch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, request.profile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id), authorityContext: starting.launchContext && this.launchAuthorityContext?.(starting.launchContext) });
       launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: starting.id };
       await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
@@ -2534,7 +2538,7 @@ export class SessionManager {
         let rollbackCreated = false;
         try {
           const resumeRef = request.resumeConversationRef.startsWith('pending:') ? null : request.resumeConversationRef;
-          const rollbackLaunch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, previousProfile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id) });
+          const rollbackLaunch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, previousProfile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id), authorityContext: starting.launchContext && this.launchAuthorityContext?.(starting.launchContext) });
           rollbackLaunch.env = { ...rollbackLaunch.env, AGENT_CONSOLE_SESSION_ID: starting.id };
           await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, rollbackLaunch.cwd, commandToShell(rollbackLaunch.argv, rollbackLaunch.env));
           rollbackCreated = true;

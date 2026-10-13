@@ -87,6 +87,8 @@ It waits for memory or the grant's concurrent-session slot, then continues witho
 
 The backend creates the opening authority stamp from the stored grant, launcher and opening task.
 Native context supplies the current grants separately from peer-message JSON.
+Claude also receives the backend's scope records through its native `--append-system-prompt` on launch and resume.
+That authority arrives before MCP connects. Native records omit the lead's separate procedural instructions from the full provenance message.
 Children inherit the launcher's active grant IDs and start with unattended continuation and the declared supervisor.
 Their provider MCP configuration carries the Console session ID explicitly, so registration works before a browser opens the session.
 Native lifecycle hooks must use the installed canonical `scripts/agent-coord.mjs` from this release.
