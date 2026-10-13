@@ -5,6 +5,11 @@ export interface WorkerOpeningMessage {
   error: string | null;
 }
 
+export interface WorkerProjectOverview {
+  text: string | null;
+  state: 'missing' | 'pending' | 'ready' | 'failed';
+}
+
 export interface WorkerSummary {
   task: string;
   latest: string;

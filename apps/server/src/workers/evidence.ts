@@ -27,11 +27,21 @@ export class WorkerEvidenceSource {
 
   async opening(worker: WorkerCard): Promise<WorkerOpeningMessage> {
     if (!await this.projects.getProjectBySlug(worker.projectSlug)) return { text: null, error: 'The project is unavailable.' };
-    const pending = worker.conversationRef.startsWith('pending:') ? this.db.pendingConversations.get(worker.conversationRef) : undefined;
-    const adopted = pending?.rawMetadata?.adoptedConversationRef;
-    const ref = typeof adopted === 'string' ? adopted : worker.conversationRef;
+    const ref = this.conversationRef(worker);
     const summary = this.db.conversationIndex.get(worker.projectSlug, worker.provider, ref);
     return summary ? this.openings.read(summary) : { text: null, error: 'The opening message is not available yet.' };
+  }
+
+  private conversationRef(worker: WorkerCard): string {
+    const pending = worker.conversationRef.startsWith('pending:') ? this.db.pendingConversations.get(worker.conversationRef) : undefined;
+    const adopted = pending?.rawMetadata?.adoptedConversationRef;
+    return typeof adopted === 'string' ? adopted : worker.conversationRef;
+  }
+
+  conversationKey(worker: WorkerCard): string {
+    const ref = this.conversationRef(worker);
+    const indexed = this.db.conversationIndex.get(worker.projectSlug, worker.provider, ref);
+    return JSON.stringify([worker.provider, indexed?.providerConversationId ?? ref]);
   }
 
   async roster(): Promise<WorkerEvidence[]> {

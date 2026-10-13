@@ -62,3 +62,14 @@ it('collects bounded per-worker actions and cross-repo delivery evidence without
   f.db.sqlite.prepare('update coordination_messages set acknowledged_at=?').run(time);
   expect((await f.source.collect((await f.source.roster())[0]!)).peers).toEqual([]);
 });
+
+
+it('identifies the same conversation through pending adoption, changed binding and indexed native ID', async () => {
+  const f = await fixture();
+  const row = f.db.conversationIndex.get('demo', 'codex', 'native-one')!;
+  f.db.conversationIndex.upsert({ ...row, providerConversationId: 'canonical-native-id' });
+  const card = { ...((await f.source.roster())[0]!), summary: null, summaryAt: null, stale: false };
+  f.db.pendingConversations.put({ ...row, ref: 'pending:initial', kind: 'pending', rawMetadata: { adoptedConversationRef: row.ref } });
+  expect(f.source.conversationKey(card)).toBe(JSON.stringify(['codex', 'canonical-native-id']));
+  expect(f.source.conversationKey({ ...card, id: 'replacement-worker', conversationRef: 'pending:initial' })).toBe(f.source.conversationKey(card));
+});

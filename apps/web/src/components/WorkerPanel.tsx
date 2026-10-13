@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { X } from 'lucide-react';
@@ -7,14 +7,55 @@ import { useWorkerPanelWidth } from './useWorkerPanelWidth';
 import type { WorkerCard } from '@agent-console/shared';
 
 const queryKey = ['workers'];
-function WorkerDetails({ worker, trackingEnabled, expanded, onToggle, onClose }: {
-  worker: WorkerCard; trackingEnabled: boolean; expanded: boolean; onToggle: () => void; onClose: () => void;
+function WorkerDetails({ worker, trackingEnabled, summaryEnabled, expanded, onToggle, onClose }: {
+  worker: WorkerCard; trackingEnabled: boolean; summaryEnabled: boolean; expanded: boolean; onToggle: () => void; onClose: () => void;
 }) {
   const identity = `${worker.provider.toUpperCase()}: ${worker.title}`;
   const visible = useVisible();
+  const client = useQueryClient();
+  const openingRef = useRef<HTMLSpanElement>(null);
+  const [tooLong, setTooLong] = useState(false);
+  const requestedAt = useRef(0);
   const opening = useQuery({ queryKey: ['worker-opening-message', worker.id, worker.conversationRef, worker.title],
     queryFn: () => api.workerOpeningMessage(worker.id), enabled: visible,
     staleTime: query => query.state.data?.text === null ? 0 : Infinity, retry: false });
+  const fullOpening = opening.data?.text?.replace(/\s+/g, ' ').trim();
+  useLayoutEffect(() => {
+    const element = openingRef.current;
+    if (!element || expanded || !fullOpening) return;
+    const measure = () => {
+      if (!element.clientWidth) return;
+      const copy = element.cloneNode(false) as HTMLSpanElement;
+      copy.textContent = `${worker.provider.toUpperCase()}: ${fullOpening}`;
+      Object.assign(copy.style, { position: 'fixed', visibility: 'hidden', pointerEvents: 'none',
+        width: `${element.clientWidth}px`, display: 'block', webkitLineClamp: 'unset', maxHeight: 'none' });
+      document.body.append(copy);
+      setTooLong(copy.getBoundingClientRect().height > parseFloat(getComputedStyle(copy).lineHeight) * 2 + 1);
+      copy.remove();
+    };
+    measure();
+    const observer = new ResizeObserver(measure); observer.observe(element);
+    return () => observer.disconnect();
+  }, [fullOpening, expanded, worker.provider]);
+  const overviewKey = ['worker-project-overview', worker.projectSlug, worker.provider, worker.conversationRef];
+  const overview = useQuery({ queryKey: overviewKey, queryFn: () => api.workerProjectOverview(worker.id),
+    enabled: visible && !expanded, retry: false,
+    staleTime: query => ['ready', 'failed'].includes(query.state.data?.state ?? '') ? Infinity : 0,
+    refetchInterval: query => visible && summaryEnabled && tooLong && ['missing', 'pending'].includes(query.state.data?.state ?? '') ? 5000 : false });
+  const summarize = useMutation({ mutationFn: () => api.summarizeWorkerProject(worker.id),
+    onSuccess: result => {
+      if (result.state !== 'missing') client.setQueryData(overviewKey, result);
+      void client.invalidateQueries({ queryKey });
+    } });
+  useEffect(() => {
+    if (!tooLong || !visible || !summaryEnabled || expanded || overview.data?.state !== 'missing'
+      || summarize.isPending || summarize.isError || Date.now() - requestedAt.current < 4500) return;
+    requestedAt.current = Date.now(); summarize.mutate();
+  }, [tooLong, visible, summaryEnabled, expanded, overview.data?.state, overview.dataUpdatedAt,
+    summarize.isPending, summarize.isError, summarize.mutate]);
+  const compactOpening = !tooLong ? fullOpening : overview.data?.state === 'ready' ? overview.data.text
+    : overview.data?.state === 'failed' || overview.isError || summarize.isError ? 'Project summary unavailable.'
+      : summaryEnabled ? 'Summarizing project…' : 'Project summary paused.';
   return (
     <article className={`rounded-xl border border-slate-800 bg-slate-900/50 ${expanded ? 'flex min-h-full flex-col' : ''}`}>
       <button type="button" data-worker-id={worker.id} autoFocus={expanded} aria-expanded={expanded}
@@ -30,9 +71,9 @@ function WorkerDetails({ worker, trackingEnabled, expanded, onToggle, onClose }:
             {trackingEnabled ? (worker.working ? 'Working' : 'Idle') : (worker.working ? 'Was working' : 'Was idle')}
           </span>
         </span>
-        <span className={`mb-3 block whitespace-pre-wrap break-words text-sky-300 ${expanded ? 'text-2xl leading-9' : 'text-lg'}`} title={identity}>
+        <span ref={openingRef} data-worker-opening className={`mb-3 whitespace-pre-wrap break-words text-sky-300 ${expanded ? 'block text-2xl leading-9' : 'line-clamp-2 text-lg leading-7'}`} title={identity}>
           {worker.provider.toUpperCase()}: {opening.isPending ? 'Loading opening message…'
-            : opening.data?.text !== null && opening.data?.text !== undefined ? opening.data.text
+            : opening.data?.text !== null && opening.data?.text !== undefined ? expanded ? opening.data.text : compactOpening
               : opening.data?.error ?? 'The complete opening message is unavailable.'}
         </span>
         {expanded && worker.summary && worker.task !== worker.summary.task && <span className="mb-5 block break-words text-2xl leading-9 text-slate-300">
@@ -146,8 +187,8 @@ export function WorkerPanel({ onClose }: { onClose: () => void }) {
             : 'No worker information has been saved yet.'}</p>}
           {data?.trackingEnabled && !data.workingCount && <p className="text-lg text-slate-400">No workers are running. Summaries are paused.</p>}
           {query.isLoading && <p className="text-lg text-slate-400">Loading workers…</p>}
-          {selected && data ? <WorkerDetails worker={selected} trackingEnabled={data.trackingEnabled} expanded onToggle={collapse} onClose={onClose} />
-            : data?.workers.map((worker) => <WorkerDetails key={worker.id} worker={worker} trackingEnabled={data.trackingEnabled}
+          {selected && data ? <WorkerDetails worker={selected} trackingEnabled={data.trackingEnabled} summaryEnabled={data.enabled && data.workingCount > 0} expanded onToggle={collapse} onClose={onClose} />
+            : data?.workers.map((worker) => <WorkerDetails key={worker.id} worker={worker} trackingEnabled={data.trackingEnabled} summaryEnabled={data.enabled && data.workingCount > 0}
               expanded={false} onToggle={() => setSelectedId(worker.id)} onClose={onClose} />)}
         </div>
         {data && <div className="shrink-0 border-t border-slate-800 p-3 text-[15px] leading-[30px] text-slate-400">

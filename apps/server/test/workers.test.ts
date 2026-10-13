@@ -9,7 +9,7 @@ import { WorkerPanelService } from '../src/workers/service.js';
 import { WorkerSnapshotStore } from '../src/workers/snapshot-store.js';
 import { WorkerUserActivity, WORKER_IDLE_MS } from '../src/workers/user-activity.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
-import { SharedSummaryRuntime, parseRuntimeResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
+import { SharedSummaryRuntime, parseRuntimeResult, parseProjectResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -25,8 +25,9 @@ async function fixture() {
   let now = Date.parse('2026-10-12T12:00:00Z');
   const workers = [worker('one')];
   const source = { roster: vi.fn(async () => workers), collect: vi.fn(async (w: WorkerEvidence) => w),
+    conversationKey: (w: Pick<WorkerEvidence, 'projectSlug' | 'provider' | 'conversationRef'>) => JSON.stringify([w.projectSlug, w.provider, w.conversationRef]),
     opening: vi.fn(async () => ({ text: 'Complete opening message.', error: null })) };
-  const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
+  const runner: SummaryRunner = { project: vi.fn(async () => ({ text: 'Verify the deployment.', usage })), run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
   const audit = new WorkerSummaryAudit(directory);
   const store = new WorkerSnapshotStore(directory);
   const values = new Map<string, string>();
@@ -34,10 +35,76 @@ async function fixture() {
   const events = new RealtimeEventBus();
   const createActivity = (clock: () => number = () => now) => new WorkerUserActivity(meta, events, clock);
   const activity = createActivity(); activity.renew();
-  const service = new WorkerPanelService(source, runner, audit, store, activity, true, () => now);
+  const service = new WorkerPanelService(source, runner, audit, store, activity, meta, true, () => now);
   cleanups.push(async () => { await service.stop(); await fs.rm(directory, { recursive: true, force: true }); });
-  return { service, source, workers, runner, audit, store, directory, activity, events, values, createActivity, advance: (ms = 120_000) => { now += ms; } };
+  return { service, source, workers, runner, audit, store, directory, activity, events, values, meta, createActivity, advance: (ms = 120_000) => { now += ms; } };
 }
+
+describe('one project overview per conversation', () => {
+  it('deduplicates concurrent tabs, persists across restart and worker replacement, and includes native usage', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    let finish!: (result: { text: string; usage: typeof usage }) => void;
+    vi.mocked(f.runner.project).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    await Promise.all([f.service.projectOverview('one', true), f.service.projectOverview('one', true)]);
+    await vi.waitFor(() => expect(f.runner.project).toHaveBeenCalledTimes(1));
+    expect(await f.service.projectOverview('one')).toEqual({ text: null, state: 'pending' });
+    await f.service.refresh(1); expect(f.runner.run).not.toHaveBeenCalled();
+    finish({ text: 'Verify the deployment.', usage }); await f.service.settled();
+    expect(await f.service.projectOverview('one')).toEqual({ text: 'Verify the deployment.', state: 'ready' });
+    expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, totalTokens: 30 });
+    f.workers[0]!.id = 'new-binding'; await f.service.snapshot();
+    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory),
+      new WorkerSnapshotStore(f.directory), f.createActivity(), f.meta, false);
+    try {
+      expect(await restarted.projectOverview('new-binding', true)).toEqual({ text: 'Verify the deployment.', state: 'ready' });
+      expect(f.runner.project).toHaveBeenCalledTimes(1);
+    } finally { await restarted.stop(); }
+  });
+  it('never launches while Off, automatically paused, or when nobody is working', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    expect(await f.service.projectOverview('unknown', true)).toBeNull();
+    await f.service.setTracking(false); await f.service.projectOverview('one', true);
+    await f.service.setTracking(true); f.advance(WORKER_IDLE_MS); await f.service.projectOverview('one', true);
+    await f.service.setTracking(true); f.workers[0]!.working = false;
+    await f.service.projectOverview('one', true); await f.service.settled();
+    expect(f.runner.project).not.toHaveBeenCalled(); expect(f.values.size).toBe(1);
+  });
+  it('cancels a late result, logs consumed tokens and does not automatically retry', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    let finish!: (result: { text: string; usage: typeof usage }) => void;
+    vi.mocked(f.runner.project).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    await f.service.projectOverview('one', true); await vi.waitFor(() => expect(f.runner.project).toHaveBeenCalledTimes(1));
+    await f.service.setTracking(false); await f.service.setTracking(true);
+    finish({ text: 'A cancelled description.', usage }); await f.service.settled();
+    expect(await f.service.projectOverview('one', true)).toEqual({ text: null, state: 'failed' });
+    expect(f.runner.project).toHaveBeenCalledTimes(1);
+    expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, totalTokens: 30, runningCalls: 0 });
+  });
+  it('does not spend again after an interrupted reservation or malformed cached data', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    const key = 'worker-project-overview:' + createHash('sha256').update(f.source.conversationKey(f.workers[0]!)).digest('hex');
+    for (const value of [JSON.stringify({ text: null, state: 'pending' }), 'invalid']) {
+      f.values.set(key, value);
+      expect(await f.service.projectOverview('one', true)).toEqual({ text: null, state: 'failed' });
+    }
+    expect(f.runner.project).not.toHaveBeenCalled();
+  });
+  it('does not launch when the durable usage audit is unavailable', async () => {
+    const f = await fixture(); await f.service.snapshot();
+    vi.spyOn(f.audit, 'record').mockRejectedValue(new Error('Disk full'));
+    await f.service.projectOverview('one', true); await f.service.settled();
+    expect(f.runner.project).not.toHaveBeenCalled();
+    expect(await f.service.projectOverview('one')).toEqual({ text: null, state: 'failed' });
+  });
+  it('validates a complete compact project sentence without hiding usage on invalid output', () => {
+    const envelope = (text: string) => ({ ok: true, response_text: JSON.stringify({ text }), llm_usage: {
+      available: true, input_tokens: 20, cache_read_tokens: 5, cache_creation_tokens: 2, output_tokens: 3, total_tokens: 30 } });
+    expect(parseProjectResult(envelope('Improve agent communication.'))).toEqual({ text: 'Improve agent communication.', usage });
+    for (const text of ['An unfinished thought', 'A multi-line\nproject.', 'An excessively lengthy description of the whole project.']) {
+      expect(parseProjectResult(envelope(text))).toEqual({ text: null, usage });
+    }
+  });
+});
 
 describe('worker summary controller', () => {
   it('reads a saved worker opening while Off without activity collection or a model call', async () => {
@@ -104,9 +171,9 @@ describe('worker summary controller', () => {
   it('restores saved information after restart while Off without reading agents or running the model', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled();
     const before = await f.service.setTracking(false);
-    const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect, opening: f.source.opening };
-    const runner = { run: vi.fn(f.runner.run), stop: vi.fn(), cancel: vi.fn() };
-    const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(), false);
+    const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect, opening: f.source.opening, conversationKey: f.source.conversationKey };
+    const runner = { project: f.runner.project, run: vi.fn(f.runner.run), stop: vi.fn(), cancel: vi.fn() };
+    const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(), f.meta, false);
     try {
       const view = await restarted.refresh(1);
       expect(view.workers).toEqual(before.workers); expect(view.snapshotAt).toBe(before.snapshotAt);
@@ -117,7 +184,7 @@ describe('worker summary controller', () => {
   it('restores fingerprints so unchanged evidence does not spend tokens after restart', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled(); await f.service.snapshot();
     vi.mocked(f.runner.run).mockClear();
-    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(() => Date.parse('2026-10-12T14:00:00Z')), true,
+    const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(() => Date.parse('2026-10-12T14:00:00Z')), f.meta, true,
       () => Date.parse('2026-10-12T14:00:00Z'));
     try {
       await restarted.setTracking(true); await restarted.refresh(1); await restarted.settled(); expect(f.runner.run).not.toHaveBeenCalled();
@@ -134,7 +201,7 @@ describe('worker summary controller', () => {
     await f.store.save(saved); await f.store.settled();
     vi.mocked(f.runner.run).mockClear();
     const restarted = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory),
-      f.createActivity(), true, () => Date.parse('2026-10-12T14:00:00Z'));
+      f.createActivity(), f.meta, true, () => Date.parse('2026-10-12T14:00:00Z'));
     try {
       await restarted.setTracking(true); await restarted.refresh(1); await restarted.settled();
       expect(f.runner.run).toHaveBeenCalledTimes(1);
@@ -222,7 +289,7 @@ describe('worker summary controller', () => {
   it('leaves tracking unchanged when persistence fails', async () => {
     const f = await fixture();
     const activity = f.createActivity(Date.now); activity.renew();
-    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), activity, true, Date.now,
+    const service = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), activity, f.meta, true, Date.now,
       () => { throw new Error('Read-only config'); });
     cleanups.push(() => service.stop());
     await expect(service.setTracking(false)).rejects.toThrow('Read-only config');
@@ -288,7 +355,7 @@ describe('worker summary controller', () => {
     await f.service.refresh(2); await f.service.settled();
     expect((await f.service.snapshot()).usage).toMatchObject({ calls: 1, failedCalls: 1, unknownUsageCalls: 1 });
     const otherActivity = f.createActivity(() => Date.parse('2026-10-13T12:00:00Z')); otherActivity.renew();
-    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), otherActivity, true, () => Date.parse('2026-10-13T12:00:00Z'));
+    const other = new WorkerPanelService(f.source, f.runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), otherActivity, f.meta, true, () => Date.parse('2026-10-13T12:00:00Z'));
     cleanups.push(() => other.stop());
     await fs.writeFile(path.join(f.directory, 'usage-2026-10-13.jsonl'), 'malformed audit\n');
     expect((await other.refresh(2)).enabled).toBe(false); await other.settled(); expect(f.runner.run).toHaveBeenCalledTimes(1);

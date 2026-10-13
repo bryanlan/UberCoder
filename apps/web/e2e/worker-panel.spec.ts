@@ -19,6 +19,13 @@ const snapshot: WorkerPanelSnapshot = {
 
 async function openConsole(page: Page, data = snapshot, openingTexts: Record<string, string> = {}) {
   const refreshes: number[] = [];
+  const overviews = new Map<string, string>();
+  await page.route('**/api/workers/*/project-overview', route => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3]!);
+    if (route.request().method() === 'POST') overviews.set(id, 'Prepare reminder schema publication.');
+    const text = overviews.get(id) ?? null;
+    return route.fulfill({ json: { text, state: text ? 'ready' : 'missing' } });
+  });
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture' } }));
   await page.route('**/api/projects/tree', (route) => route.fulfill({ json: { projects: data.workers.map((worker) => ({
     slug: worker.projectSlug, directoryName: worker.projectSlug, displayName: worker.projectName, path: `/tmp/${worker.projectSlug}`,
@@ -160,6 +167,73 @@ test('opening message includes all text beyond the native288character title', as
   const data = { ...snapshot, workers: [{ ...snapshot.workers[0]!, title: `${text.slice(0, 285)}…` }] };
   await openConsole(page, data, { one: text });
   const full = page.getByRole('complementary', { name: 'Active workers' }).getByText(`CODEX: ${text}`, { exact: true });
+  await expect(page.locator('[data-worker-opening]')).toHaveText('CODEX: Prepare reminder schema publication.');
+  await page.getByRole('button', { name: /Expand worker details:/ }).click();
   await expect(full).toBeVisible();
   expect(await full.evaluate(el => el.scrollWidth <= el.clientWidth && getComputedStyle(el).whiteSpace !== 'nowrap')).toBe(true);
+});
+
+
+test('a long opening is summarized once, stays within two rows after resize/reload, and expands in full', async ({ page }) => {
+  await page.setViewportSize({ width: 2200, height: 1000 });
+  let summaries = 0;
+  page.on('request', request => { if (request.url().endsWith('/project-overview') && request.method() === 'POST') summaries++; });
+  const text = 'Build a dependable cross-repository agent communication system. '.repeat(20);
+  const data = { ...snapshot, workers: [snapshot.workers[0]!] };
+  await openConsole(page, data, { one: text });
+  const row = page.locator('[data-worker-opening]');
+  await expect(row).toHaveText('CODEX: Prepare reminder schema publication.');
+  expect(summaries).toBe(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const geometry = await row.evaluate(el => ({ height: el.getBoundingClientRect().height,
+    lineHeight: parseFloat(getComputedStyle(el).lineHeight), scrollHeight: el.scrollHeight }));
+  expect(geometry.height).toBeLessThanOrEqual(geometry.lineHeight * 2 + 1);
+  expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.lineHeight * 2 + 1);
+  await page.reload(); await expect(row).toHaveText('CODEX: Prepare reminder schema publication.');
+  expect(summaries).toBe(1);
+  await page.getByRole('button', { name: /Expand worker details:/ }).click();
+  await expect(row).toHaveText(`CODEX: ${text}`);
+  await expect(row).toHaveCSS('font-size', '24px');
+  expect(summaries).toBe(1);
+});
+
+test('long openings stay within two rows while Off, without a project model request', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const requests: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/project-overview') && request.method() === 'POST') requests.push(request.url()); });
+  const text = 'The original project introduction contains several detailed requirements. '.repeat(20);
+  await openConsole(page, { ...snapshot, enabled: false, trackingEnabled: false, pauseReason: 'manual', workingCount: 0,
+    workers: [snapshot.workers[0]!] }, { one: text });
+  await expect(page.locator('[data-worker-opening]')).toHaveText('CODEX: Project summary paused.');
+  expect(await page.locator('[data-worker-opening]').evaluate(el => el.getBoundingClientRect().height)).toBeLessThanOrEqual(56);
+  await page.getByRole('button', { name: /Expand worker details:/ }).click();
+  await expect(page.locator('[data-worker-opening]')).toHaveText(`CODEX: ${text}`);
+  expect(requests).toHaveLength(0);
+});
+
+
+test('a saved description is reused on narrow cards while a fitting opening stays complete on desktop', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let summaries = 0;
+  page.on('request', request => { if (request.url().endsWith('/project-overview') && request.method() === 'POST') summaries++; });
+  const text = 'Fix the flaky login test in the settings suite and publish the correction.';
+  await openConsole(page, { ...snapshot, workers: [snapshot.workers[0]!] }, { one: text });
+  const row = page.locator('[data-worker-opening]');
+  await expect(row).toHaveText('CODEX: Prepare reminder schema publication.');
+  await page.setViewportSize({ width: 2200, height: 1000 });
+  await expect(row).toHaveText(`CODEX: ${text}`);
+  expect(await row.evaluate(el => el.scrollHeight)).toBeLessThanOrEqual(56);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(row).toHaveText('CODEX: Prepare reminder schema publication.');
+  expect(summaries).toBe(1);
+});
+
+for (const state of ['idle', 'audit-paused'] as const) test(`${state} long openings say paused without a project model request`, async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const calls: string[] = [];
+  page.on('request', request => { if (request.url().endsWith('/project-overview') && request.method() === 'POST') calls.push(request.url()); });
+  await openConsole(page, { ...snapshot, enabled: state === 'idle', workingCount: state === 'idle' ? 0 : 1,
+    workers: [snapshot.workers[0]!] }, { one: 'Build dependable coordination for agents working across multiple repositories. '.repeat(10) });
+  await expect(page.locator('[data-worker-opening]')).toHaveText('CODEX: Project summary paused.');
+  expect(calls).toHaveLength(0);
 });

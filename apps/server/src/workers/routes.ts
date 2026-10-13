@@ -4,6 +4,17 @@ import type { AuthService } from '../security/auth-service.js';
 import type { WorkerPanelService } from './service.js';
 
 export function registerWorkerRoutes(app: FastifyInstance, auth: AuthService, service: WorkerPanelService) {
+  for (const method of ['GET', 'POST'] as const) app.route({ method, url: '/api/workers/:workerId/project-overview',
+    handler: async (request, reply) => {
+      try { await auth.ensureAuthenticated(request, reply, method === 'POST'); } catch { return; }
+      const params = z.object({ workerId: z.string().min(1).max(200) }).safeParse(request.params);
+      if (!params.success || (method === 'POST' && !z.object({}).strict().safeParse(request.body).success)) {
+        return reply.code(400).send({ error: 'Invalid project description request.' });
+      }
+      reply.header('Cache-Control', 'no-store');
+      return await service.projectOverview(params.data.workerId, method === 'POST')
+        ?? reply.code(404).send({ error: 'Worker information is unavailable.' });
+    } });
   app.get('/api/workers/:workerId/opening-message', async (request, reply) => {
     try { await auth.ensureAuthenticated(request, reply, false); } catch { return; }
     const parsed = z.object({ workerId: z.string().min(1).max(200) }).safeParse(request.params);

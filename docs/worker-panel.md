@@ -2,11 +2,13 @@
 
 The collapsible right panel shows loaded, visible Console workers across configured projects.
 It uses the same project and conversation identities as the left sidebar, with a link to the
-exact conversation. The blue row shows the complete original opening message, rather than
-the shortened conversation name, and wraps without a character cutoff.
+exact conversation. The blue project introduction occupies at most two lines. The browser measures the original
+opening against the actual card width. If it is longer, Luna writes one complete project
+sentence of at most40characters. That description is reused whenever the opening exceeds two lines; an opening that fits
+remains complete. The full original also remains available in the expanded card.
 Working/idle state comes from bound sessions, independently of an assignment's active label.
 Suspended, unbound and internal `codex exec` conversations are excluded. Idle cards retain their
-last summary; they never cause model calls. Native child agents without their own Console
+last activity summary. Project descriptions are only generated while at least one worker is running. Native child agents without their own Console
 binding are not separate cards.
 
 On desktop the panel defaults to960px (three times its original320px), fits beside navigation
@@ -43,6 +45,20 @@ starts a fresh10-minute watch window; manual Off stays Off through further messa
 window timestamp persists in existing Console metadata, so restart does not renew it. Only the
 timestamp is stored, never the message body. An in-flight summary is cancelled at the deadline;
 saved information remains visible. The panel distinguishes automatic inactivity from manual Off.
+
+Project descriptions use the same Luna/low data-only runtime and token audit as activity summaries,
+and share its one in-flight call across all tabs. An authenticated, CSRF-protected POST to
+`/api/workers/:workerId/project-overview` starts generation only if tracking is enabled, human
+activity is recent and at least one worker is running. GET reads saved descriptions without
+model work, including while Off. Pending requests poll every5seconds while eligible.
+The cache key uses the provider and canonical native conversation ID, including adoption from
+a pending conversation; it is independent of worker binding, title, browser width and restart.
+A durable reservation in existing Console metadata is written before model launch. Each
+conversation gets at most one automatic attempt: interrupted/failed attempts show an unavailable
+message instead of spending again on refresh. A completed description persists without expiry.
+Off and inactivity cancel the call and block late results. Long openings waiting for their first
+description use a short status line; expanding still shows the full original. Model input is
+bounded to the first16000characters of the opening. No SQLite schema change is required.
 
 Opening text is a separate static context read, available while tracking is Off. The authenticated
 opening-message endpoint accepts only a worker already present in the saved panel snapshot.
@@ -117,7 +133,7 @@ audit remains append-only. Shutdown requests cancellation through the shared run
 
 All worker API routes require authentication. `POST /api/workers/refresh` and
 `POST /api/workers/tracking` also require CSRF and strictly validated interval/boolean bodies;
-`GET /api/workers` never starts model work. HTTP responses do not wait for
+`GET /api/workers` never starts model work. The project-overview POST also requires CSRF and an empty strict JSON object. HTTP responses do not wait for
 the provider. A failed generation preserves the previous summary and visibly reports its age/error.
 
 ## Verification

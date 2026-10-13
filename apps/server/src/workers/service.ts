@@ -1,8 +1,10 @@
+import { z } from 'zod';
+import type { MetaRepo } from '../db/repos/meta.js';
 import { createHash, randomUUID } from 'node:crypto';
-import type { WorkerCard, WorkerPanelSnapshot, WorkerOpeningMessage } from '@agent-console/shared';
+import type { WorkerCard, WorkerPanelSnapshot, WorkerOpeningMessage, WorkerProjectOverview } from '@agent-console/shared';
 import type { WorkerEvidence } from './evidence.js';
 import type { SummaryRunner } from './runtime.js';
-import { WORKER_SUMMARY_POLICY, ZERO_WORKER_USAGE } from './runtime.js';
+import { WORKER_SUMMARY_POLICY, ZERO_WORKER_USAGE, PROJECT_OVERVIEW_MAX_CHARACTERS } from './runtime.js';
 import { WorkerSummaryAudit, type SummaryAuditRecord } from './audit.js';
 import { WorkerSnapshotStore, type CachedWorkerSummary, type SavedWorkerSnapshot } from './snapshot-store.js';
 import { WorkerUserActivity } from './user-activity.js';
@@ -10,10 +12,15 @@ import { WorkerUserActivity } from './user-activity.js';
 interface EvidenceSource {
   roster(): Promise<WorkerEvidence[]>;
   collect(worker: WorkerEvidence): Promise<WorkerEvidence>;
+  conversationKey(worker: WorkerCard): string;
   opening(worker: WorkerCard): Promise<WorkerOpeningMessage>;
 }
 const fingerprint = (w: WorkerEvidence) => createHash('sha256').update(JSON.stringify({ policy: WORKER_SUMMARY_POLICY, task: w.task,
   actions: w.actions.map((a) => a.text), peers: w.peers })).digest('hex');
+
+const overviewSchema = z.object({ state: z.enum(['pending', 'ready', 'failed']),
+  text: z.string().min(2).max(PROJECT_OVERVIEW_MAX_CHARACTERS).nullable() }).strict();
+const missingOverview: WorkerProjectOverview = { text: null, state: 'missing' };
 
 export class WorkerPanelService {
   private readonly summaries = new Map<string, CachedWorkerSummary>();
@@ -22,6 +29,7 @@ export class WorkerPanelService {
   private savedContent = '';
   private snapshotError: string | null = null;
   private job?: Promise<void>;
+  private overviewKeyInFlight?: string;
   private error: string | null = null;
   private auditFailed = false;
   private stopped = false;
@@ -29,7 +37,7 @@ export class WorkerPanelService {
   private active: boolean;
   constructor(private readonly source: EvidenceSource, private readonly runner: SummaryRunner,
     private readonly audit: WorkerSummaryAudit, private readonly store: WorkerSnapshotStore,
-    private readonly activity: WorkerUserActivity, private enabled = true,
+    private readonly activity: WorkerUserActivity, private readonly meta: Pick<MetaRepo, 'get' | 'set'>, private enabled = true,
     private readonly clock: () => number = Date.now,
     private readonly persistEnabled: (enabled: boolean) => void = () => {}) {
     this.active = enabled && activity.recent();
@@ -118,6 +126,63 @@ export class WorkerPanelService {
     await this.loadSnapshot();
     const worker = this.saved?.workers.find(worker => worker.id === id);
     return worker ? this.source.opening(worker) : null;
+  }
+
+  async projectOverview(id: string, generate = false): Promise<WorkerProjectOverview | null> {
+    await this.loadSnapshot();
+    const worker = this.saved?.workers.find(worker => worker.id === id);
+    if (!worker) return null;
+    const key = 'worker-project-overview:' + createHash('sha256').update(this.source.conversationKey(worker)).digest('hex');
+    try {
+      const stored = this.meta.get(key);
+      if (stored) {
+        const cached = overviewSchema.parse(JSON.parse(stored));
+        // A reserved call interrupted by a restart is never launched a second time.
+        return cached.state === 'pending' && this.overviewKeyInFlight !== key ? { text: null, state: 'failed' } : cached;
+      }
+    } catch { return { text: null, state: 'failed' }; }
+    if (!generate) return missingOverview;
+    await this.loadAudit(); this.syncActivity();
+    if (!this.active || this.auditFailed || this.job) return missingOverview;
+    this.overviewKeyInFlight = key;
+    const job = this.generateProjectOverview(worker, key).catch(() => { this.error = 'Project description is unavailable.'; });
+    this.job = job;
+    void job.finally(() => { if (this.job === job) { this.job = undefined; this.overviewKeyInFlight = undefined; } });
+    return { text: null, state: 'pending' };
+  }
+
+  private async generateProjectOverview(worker: WorkerCard, key: string): Promise<void> {
+    const generation = this.generation;
+    const cancelled = () => { this.syncActivity(); return !this.active || generation !== this.generation; };
+    const opening = await this.source.opening(worker);
+    if (!opening.text || cancelled()) return;
+    if (!(await this.source.roster()).some(worker => worker.working) || cancelled()) return;
+    const started = this.clock();
+    const record: SummaryAuditRecord = { id: randomUUID(), startedAt: new Date(started).toISOString(), finishedAt: null,
+      status: 'started', model: 'gpt-6-luna', effort: 'low', workerIds: [worker.id], durationMs: null, usage: null };
+    // Reserve durably before launch. A failed/interrupted attempt does not cause paid automatic retries.
+    this.meta.set(key, JSON.stringify({ text: null, state: 'pending' }));
+    try { await this.audit.record(record); }
+    catch { this.auditFailed = true; this.error = 'Summary usage audit is unavailable; new summaries are paused.';
+      this.meta.set(key, JSON.stringify({ text: null, state: 'failed' })); return; }
+    try {
+      if (cancelled()) { record.status = 'cancelled'; record.usage = { ...ZERO_WORKER_USAGE }; return; }
+      const result = await this.runner.project(opening.text, record.id);
+      record.usage = result.usage;
+      if (cancelled()) { record.status = 'cancelled'; return; }
+      if (!result.text) throw new Error('Invalid project description.');
+      this.meta.set(key, JSON.stringify({ text: result.text, state: 'ready' }));
+      record.status = 'completed'; this.error = null;
+    } catch { record.status = cancelled() ? 'cancelled' : 'failed'; }
+    finally {
+      if (record.status !== 'completed') {
+        try { this.meta.set(key, JSON.stringify({ text: null, state: 'failed' })); }
+        catch { this.error = 'Project description could not be saved.'; }
+      }
+      record.finishedAt = new Date(this.clock()).toISOString(); record.durationMs = Math.max(0, this.clock() - started);
+      try { await this.audit.record(record); }
+      catch { this.auditFailed = true; this.error = 'Summary usage audit is unavailable; new summaries are paused.'; }
+    }
   }
 
   async refresh(intervalMinutes: number): Promise<WorkerPanelSnapshot> {
