@@ -26,7 +26,8 @@ Then use `record` with a definition and that pointer. The grant becomes active i
 
 Console reads the original input record in the same conversation. It retains Bryan's complete message as provenance.
 The definition's scope describes the authorization and its constraints. Separate instructions to the lead remain in the original message.
-Repeated recording for the same human message and grantee returns the existing active grant.
+Repeated recording for the same human message and grantee returns the existing grant, including its revocation or expiry.
+Renewed authority needs a new human message or an approved request.
 
 ```json
 {

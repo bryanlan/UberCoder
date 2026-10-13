@@ -34,6 +34,14 @@ function fixture() {
 }
 
 describe('Bryan standing grants', () => {
+  it('keeps revocation when an in-flight agent repeats the original human message', async () => {
+    const f=fixture(),source=f.input('I authorize all needed planner work.');
+    const grant=await f.grants.record(f.assignment,f.definition,source);f.grants.revoke(grant.id);
+    const repeated=await f.grants.record(f.assignment,f.definition,source);
+    expect(repeated).toMatchObject({id:grant.id,status:'revoked'});expect(f.grants.snapshot().grants).toHaveLength(1);
+    const renewed=await f.grants.record(f.assignment,f.definition,f.input('I authorize the planner work again.'));
+    expect(renewed.status).toBe('active');expect(renewed.id).not.toBe(grant.id);
+  });
   it('supplies startup authority from active backend scope records without repeating the lead instructions', async () => {
     const f=fixture(), words='I authorize all needed planner work. First record this grant and launch the initial lane.';
     const grant=await f.grants.record(f.assignment,{...f.definition,scope:'All needed planner work.'},f.input(words));

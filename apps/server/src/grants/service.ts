@@ -144,7 +144,7 @@ export class GrantService {
     if (event.type !== 'user-input' || typeof event.text !== 'string') throw new Error('This record is not Console human input.');
     // The cooperative agent records the authorized scope; the complete human
     // message stays as provenance, including any separate instructions to the lead.
-    const existing = (this.db.sqlite.prepare('select id,definition_json,provenance_json from agent_grants where created_by_assignment_id=? and status=\'active\'')
+    const existing = (this.db.sqlite.prepare('select id,definition_json,provenance_json from agent_grants where created_by_assignment_id=? and provenance_json is not null')
       .all(assignmentId) as Array<{ id: string; definition_json: string; provenance_json: string }>).find(row => JSON.stringify((JSON.parse(row.definition_json) as AgentGrantDefinition).grantee) === JSON.stringify(definition.grantee)
         && JSON.parse(row.provenance_json).messageId === humanMessageId);
     if (existing) return this.get(existing.id)!;
