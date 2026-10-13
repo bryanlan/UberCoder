@@ -37,6 +37,8 @@ export interface CoordinationEvent {
 }
 
 export interface CoordinationMessage {
+  /** Shared active Bryan grants at delivery; peer text does not create authority. */
+  grantIds?: string[];
   id: string;
   senderId: string;
   recipientId: string;

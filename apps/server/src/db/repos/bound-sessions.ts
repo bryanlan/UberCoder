@@ -109,6 +109,11 @@ export class BoundSessionsRepo {
   }
 
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
+  setLaunchContext(id: string, context: BoundSession['launchContext']): void {
+    this.sqlite.prepare('update bound_sessions set launch_context_json=? where id=?').run(context ? JSON.stringify(context) : null, id);
+  }
+
+  // Independently owned state: ordinary screen/status upserts must not overwrite it.
   setRunFailure(id: string, failure: BoundSession['runFailure']): void {
     const current = this.getById(id);
     if (!current) return;
@@ -285,5 +290,6 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     pid: numberOrUndefined(row.pid),
     rawLogPath: optionalString(row.raw_log_path),
     eventLogPath: optionalString(row.event_log_path),
+    launchContext: typeof row.launch_context_json === 'string' ? JSON.parse(row.launch_context_json) as BoundSession['launchContext'] : undefined,
   };
 }

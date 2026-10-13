@@ -7,7 +7,7 @@ import { renderTemplateTokens } from '../lib/shell.js';
 import { toPosixPath } from '../lib/path-utils.js';
 import { listFilesRecursive, pathExists, statFileSafe } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache } from './types.js';
+import type { LaunchCommand, ProviderAdapter, ProviderConversation, ProviderLaunchOptions, TranscriptParseCache } from './types.js';
 import { conversationBelongsToProject, deriveConversationRef, loadCachedTranscriptParse } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
 import { ClaudeRunMonitor } from './transcripts/claude-run-state.js';
@@ -20,15 +20,15 @@ function hasConfiguredClaudeModel(argv: string[]): boolean {
   return argv.some((arg) => arg === '--model' || arg.startsWith('--model='));
 }
 
-function withoutConfiguredClaudeProfile(argv: string[]): string[] {
+function withoutConfiguredClaudeProfile(argv: string[], removeModel = true, removeEffort = true): string[] {
   const result: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (arg === '--model' || arg === '--effort') {
+    if ((removeModel && arg === '--model') || (removeEffort && arg === '--effort')) {
       index += 1;
       continue;
     }
-    if (arg.startsWith('--model=') || arg.startsWith('--effort=')) continue;
+    if ((removeModel && arg.startsWith('--model=')) || (removeEffort && arg.startsWith('--effort='))) continue;
     result.push(arg);
   }
   return result;
@@ -165,7 +165,7 @@ export class ClaudeProvider implements ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string; claudeProfile?: ClaudeCostProfileKey },
+    options?: ProviderLaunchOptions,
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
     const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
@@ -178,7 +178,7 @@ export class ClaudeProvider implements ProviderAdapter {
       '--dangerously-skip-permissions',
     );
     const profileKey = options?.claudeProfile
-      ?? (!conversationRef && !hasConfiguredClaudeModel(baseArgv) ? 'medium' : undefined);
+      ?? (!conversationRef && !options?.model && !hasConfiguredClaudeModel(baseArgv) ? 'medium' : undefined);
     if (profileKey) {
       const profile = CLAUDE_COST_PROFILES[profileKey];
       const withoutProfileArgs = withoutConfiguredClaudeProfile(baseArgv);
@@ -189,11 +189,23 @@ export class ClaudeProvider implements ProviderAdapter {
         ...withoutProfileArgs.slice(1),
       ];
     }
+    if (options?.model || options?.effort) {
+      const cleaned = withoutConfiguredClaudeProfile(baseArgv, !!options.model, !!options.effort);
+      baseArgv = [cleaned[0]!, ...(options.model ? ['--model', options.model] : []),
+        ...(options.effort ? ['--effort', options.effort] : []), ...cleaned.slice(1)];
+    }
     return {
       cwd: project.path,
       argv: [
         ...baseArgv,
-        ...(initialPrompt ? [initialPrompt] : []),
+        ...(options?.flags ?? []),
+        ...(options?.consoleIdentity ? ['--mcp-config', JSON.stringify({ mcpServers: {
+          agent_console_coordination: { command: 'node', args: [options.consoleIdentity.helperPath, 'mcp'],
+            env: { AGENT_COORD_RUNTIME: options.consoleIdentity.runtimeDir, AGENT_CONSOLE_SESSION_ID: options.consoleIdentity.sessionId } },
+        } })] : []),
+        // --mcp-config accepts multiple values. End option parsing so the
+        // opening task is not consumed as another MCP configuration path.
+        ...(initialPrompt ? ['--', initialPrompt] : []),
       ],
       env: settings.commands.env,
     };

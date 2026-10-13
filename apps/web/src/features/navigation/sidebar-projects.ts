@@ -13,6 +13,7 @@ export interface SidebarConversation {
   pressureSuspendedAt?: string;
   autoTrackedAt?: string;
   runFailure?: BoundSessionItem['runFailure'];
+  launchContext?: BoundSessionItem['launchContext'];
 }
 
 export type SidebarProject = ProjectSummary & {
@@ -65,6 +66,7 @@ export function deriveSidebarProjects({
             pressureSuspendedAt: session?.pressureSuspendedAt,
             autoTrackedAt: session?.autoTrackedAt,
             runFailure: session?.runFailure,
+            launchContext: session?.launchContext,
           };
         }))
         .filter(({ conversation }) => !workMode || conversation.isBound);

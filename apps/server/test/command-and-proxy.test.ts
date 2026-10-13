@@ -68,8 +68,8 @@ describe('command construction and proxy allowlisting', () => {
       codexProfile: 'high',
     });
     expect(command.argv).toEqual([
-      'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
-      '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+      'codex', '--dangerously-bypass-approvals-and-sandbox', 'resume',
+      '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"', 'session-123',
       '-c', 'check_for_update_on_startup=false',
     ]);
   });
@@ -109,8 +109,8 @@ describe('command construction and proxy allowlisting', () => {
     });
 
     expect(command.argv).toEqual([
-      'codex', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"',
-      '--dangerously-bypass-approvals-and-sandbox', 'resume', 'session-123',
+      'codex', '--dangerously-bypass-approvals-and-sandbox', 'resume',
+      '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort="xhigh"', 'session-123',
       '-c', 'check_for_update_on_startup=false',
     ]);
   });

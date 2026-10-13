@@ -44,6 +44,7 @@ import {
 import { LoginPage } from './pages/LoginPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { WikiPage } from './pages/WikiPage';
+import { GrantsPage } from './pages/GrantsPage';
 
 function useLocalStorageBoolean(key: string, fallback: boolean) {
   const [value, setValue] = useState<boolean>(() => {
@@ -159,7 +160,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   }, [navigate, selectedConversationRef, selectedProjectSlug, selectedProvider, timeline?.conversation.ref]);
 
   useEffect(() => {
-    if (routeSelection.isConsoleRoute && routeSelection.kind !== 'wiki') {
+    if (routeSelection.isConsoleRoute && routeSelection.kind !== 'wiki' && routeSelection.kind !== 'grants') {
       setLastConsolePath(location.pathname);
     }
   }, [location.pathname, routeSelection.isConsoleRoute, setLastConsolePath]);
@@ -909,6 +910,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <Link to="/grants" className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">Grants</Link>
               {project && !routeSelection.inSettings && <Link
                 to={routeSelection.kind === 'wiki' ? lastConsolePath : `/projects/${encodeURIComponent(project.slug)}/wiki`}
                 className="inline-flex items-center rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
@@ -947,6 +949,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <Link to="/grants" className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800">Grants</Link>
               <Link
                 to={routeSelection.inSettings ? lastConsolePath : '/settings'}
                 className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
@@ -986,6 +989,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               csrfToken={authQuery.data?.csrfToken}
               backHref={lastConsolePath}
             />
+          ) : routeSelection.kind === 'grants' ? (
+            <GrantsPage csrfToken={authQuery.data?.csrfToken} backHref={lastConsolePath} />
           ) : routeSelection.kind === 'not-found' || (routeSelection.kind === 'wiki' && !project) ? (
             <NotFoundPane />
           ) : routeSelection.kind === 'wiki' && project ? (
@@ -1050,6 +1055,7 @@ export function ConsoleRoutes({ Shell = RoutedAppShell }: { Shell?: ComponentTyp
       <Route path="/" element={<Shell kind="home" />} />
       <Route path="/login" element={<Shell kind="login" />} />
       <Route path="/settings" element={<Shell kind="settings" />} />
+      <Route path="/grants" element={<Shell kind="grants" />} />
       <Route path="/projects/:projectSlug" element={<Shell kind="project" />} />
       <Route path="/projects/:projectSlug/wiki" element={<Shell kind="wiki" />} />
       <Route path="/projects/:projectSlug/:provider" element={<Shell kind="provider" />} />

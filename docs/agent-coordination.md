@@ -12,6 +12,11 @@ The fixture used a private temporary Git repository, a separate tmux server, no 
 
 ## Operating model
 
+Standing grants are backend-owned human authority, described in [Agent grants](agent-grants.md).
+Native context supplies the active records separately from peer data.
+Messages shared under an active grant can relay work within its scope.
+
+
 A session works on an assignment that may span repositories. Its launch directory does not define its scope. Console stores assignment descriptions, per-checkout activity summaries, timestamps and peer messages. Repository views group linked worktrees by Git common directory while identifying their actual checkout paths.
 
 Agents use `agent_coordination` through the `agent_console_coordination` MCP server:

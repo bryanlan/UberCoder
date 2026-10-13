@@ -2,6 +2,16 @@ import type { ClaudeCostProfileKey, CodexCostProfileKey, ConversationSummary, No
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 
+export interface ProviderLaunchOptions {
+  initialPrompt?: string;
+  codexProfile?: CodexCostProfileKey;
+  claudeProfile?: ClaudeCostProfileKey;
+  model?: string;
+  effort?: string;
+  flags?: string[];
+  consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string };
+}
+
 export interface LaunchCommand {
   cwd: string;
   argv: string[];
@@ -20,7 +30,7 @@ export interface ProviderConversation {
  * message filtering that affects titles/excerpts) so stale cached artifacts
  * from older parser code are re-derived instead of served forever.
  */
-export const TRANSCRIPT_PARSER_VERSION = 11;
+export const TRANSCRIPT_PARSER_VERSION = 12;
 
 /**
  * Persisted per-file parse artifacts keyed by (path, size, mtimeMs, parser
@@ -77,6 +87,6 @@ export interface ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string; codexProfile?: CodexCostProfileKey; claudeProfile?: ClaudeCostProfileKey },
+    options?: ProviderLaunchOptions,
   ): LaunchCommand;
 }

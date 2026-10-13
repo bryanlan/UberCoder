@@ -1,5 +1,8 @@
 # Architecture
 ## System Overview
+Standing grants let agents launch and restart real Console sessions under Bryan's recorded authority.
+See [Agent grants](agent-grants.md) for creation, inheritance, the durable launch queue and native context.
+
 `agent-console` is a local, server-first Codex/Claude Agent Console. The backend owns project configuration, provider transcript discovery, hidden tmux session binding, auth, proxying, SQLite state, and event-log normalization. The React PWA is a thin client that renders backend-owned project/conversation/session state; it must not become a raw terminal controller.
 
 First-class runtime surfaces:

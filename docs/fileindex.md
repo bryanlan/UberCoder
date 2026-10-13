@@ -28,6 +28,15 @@
 - `test-results/` - ignored/generated Playwright failure artifacts, not source architecture.
 
 ## Key Files
+
+- `apps/server/src/grants/` — standing grants, human-message provenance, browser push,
+  authenticated transport and the durable launch/restart queue.
+- `apps/web/src/pages/GrantsPage.tsx` and `apps/web/public/grant-push-sw.js` — grants,
+  decisions, uses, revoke and notification actions.
+- `docs/agent-grants.md` — approved grant behavior and operational contract.
+- `scripts/prove-agent-grants.mjs` and `scripts/prove-granted-launches.mjs` — opt-in
+  real sessions for both creation flows, launch, recovery and inherited delegation.
+
 - `README.md` - key tracked file or entrypoint for this repo.
 - `AGENTS.md` - key tracked file or entrypoint for this repo.
 - `CLAUDE.md` - key tracked file or entrypoint for this repo.

@@ -64,6 +64,7 @@ function invalidateSelectedTimeline(context: ApplySessionEventContext): void {
 }
 
 export function applySessionEvent(event: SessionEvent, context: ApplySessionEventContext): void {
+  if (event.type === 'grants.updated') { void context.queryClient.invalidateQueries({ queryKey: ['grants'] }); return; }
   if (event.type === 'heartbeat') {
     return;
   }

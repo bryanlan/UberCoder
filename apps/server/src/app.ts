@@ -24,6 +24,10 @@ import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
+import { GrantService } from './grants/service.js';
+import { GrantPushService } from './grants/push.js';
+import { registerGrantRoutes } from './grants/transport.js';
+import { AgentSessionLaunches } from './grants/session-launches.js';
 import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
@@ -61,6 +65,7 @@ export async function buildApp(options: AppOptions = {}) {
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus,
     config.coordination.enabled ? (measurement) => { recordCoordinationTelemetry(config.runtimeDir, measurement); } : undefined);
   const search = new ConversationSearchService(db, projectService, liveOutputReader);
+  let grants: GrantService;
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -70,11 +75,24 @@ export async function buildApp(options: AppOptions = {}) {
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
+    hasActiveLaunchAuthority: session => {
+      const assignment = db.sqlite.prepare('select id from coordination_assignments where provider=? and native_session_id=?')
+        .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string } | undefined;
+      return !!assignment && grants.grantsFor(assignment.id).length > 0;
+    },
   });
   const authService = new AuthService(config, db);
   const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));
   const wakeAssignments = () => { void sessions.wakePendingAssignments().catch((error: unknown) => app.log.warn({ err: error }, 'Assignment continuation failed.')); };
-  const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakeAssignments : undefined);
+  const grantPush = new GrantPushService(db, config.server.publicBaseUrl ?? `http://127.0.0.1:${config.server.port}`);
+  grants = new GrantService(db, eventBus, wakeAssignments, grant => grantPush.request(grant),
+    (sessionId, provider, nativeSessionId) => { void sessions.adoptRegisteredSession(sessionId, provider, nativeSessionId).catch(error => app.log.warn({ err: error }, 'Registered session adoption deferred.')); },
+    cwd => Object.entries(config.projects).filter(([, project]) => project.active)
+      .map(([slug, project]) => ({ slug, directory: path.resolve(project.path ?? path.join(config.projectsRoot, slug)) }))
+      .sort((a,b) => b.directory.length - a.directory.length).find(project => cwd === project.directory || cwd.startsWith(project.directory + path.sep))?.slug);
+  const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakeAssignments : undefined, grants);
+  const agentLaunches = new AgentSessionLaunches(db, grants, sessions, projectService, providerRegistry, eventBus,
+    config.sessions.pressureSuspendAvailableMiB * 1024 * 1024);
   const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
   const workerDirectory = path.join(config.runtimeDir, 'workers');
   const workers = new WorkerPanelService(new WorkerEvidenceSource(db, projectService, liveOutputReader),
@@ -127,6 +145,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
   await registerCoordinationRoutes(app, authService, coordination);
+  registerGrantRoutes(app, authService, grants, grantPush);
   registerWorkerRoutes(app, authService, workers);
   registerWikiRoutes(app, authService, wiki, projectService);
   new LocalhostProxyService(projectService, authService).register(app);
@@ -140,6 +159,7 @@ export async function buildApp(options: AppOptions = {}) {
         if (
           fileName === 'index.html'
           || fileName === 'sw.js'
+          || fileName === 'grant-push-sw.js'
           || fileName === 'manifest.webmanifest'
           || fileName.startsWith('workbox-')
         ) {
@@ -156,7 +176,8 @@ export async function buildApp(options: AppOptions = {}) {
     });
   }
 
-  const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki) : undefined;
+  const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki, grants, agentLaunches) : undefined;
+  if (config.coordination.enabled) agentLaunches.start();
   const stopTelemetry = config.coordination.enabled ? startCoordinationTelemetry(config.runtimeDir) : undefined;
   const coordinationTimer = config.coordination.enabled ? setInterval(() => { coordination.reconcileProcesses(); wakeAssignments(); }, 15_000) : undefined;
   coordinationTimer?.unref();
@@ -176,6 +197,7 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   app.addHook('onClose', async () => {
+    await agentLaunches.stop();
     await workers.stop();
     stopTelemetry?.();
     if (coordinationTimer) clearInterval(coordinationTimer);

@@ -27,6 +27,25 @@ function encodeClaudeProjectDir(projectPath: string): string {
 }
 
 describe('provider history discovery', () => {
+  it.each(['codex', 'claude'] as const)('preserves custom %s model, effort, flags and Console identity on launch and resume', (id) => {
+    const provider = id === 'codex' ? new CodexProvider() : new ClaudeProvider();
+    const settings = { id, enabled: true, discoveryRoot: '/tmp/provider', commands: {
+      newCommand: [id, '--model', 'configured-model'],
+      resumeCommand: id === 'codex' ? [id, 'resume', '{{conversationId}}', '--model', 'configured-model'] : [id, '--resume', '{{conversationId}}', '--model', 'configured-model'],
+      continueCommand: [id], env: {},
+    } } satisfies MergedProviderSettings;
+    for (const ref of [null, 'native-history']) {
+      const argv = provider.getLaunchCommand(project, ref, settings, { model: 'custom-model', effort: 'high', flags: ['--add-dir', '/tmp/helper'],
+        initialPrompt: 'Complete the delegated task.', consoleIdentity: { sessionId: 'console-session', runtimeDir: '/tmp/runtime', helperPath: '/tmp/agent-coord.mjs' } }).argv;
+      expect(argv).toContain('custom-model'); expect(argv).not.toContain('configured-model');
+      expect(argv).toContain('--add-dir'); expect(argv.join(' ')).toContain('/tmp/agent-coord.mjs');
+      expect(argv.join(' ')).toContain('AGENT_CONSOLE_SESSION_ID'); expect(argv.join(' ')).toContain('console-session');
+      if (id === 'claude' && !ref) expect(argv.slice(-2)).toEqual(['--', 'Complete the delegated task.']);
+      if (ref) expect(argv).toContain(ref);
+      if (id === 'codex' && ref) expect(argv.indexOf('resume')).toBeLessThan(argv.indexOf('--model'));
+    }
+  });
+
   it.each([null, 'history-ref'])('disables startup update prompts for Codex launch %s', (conversationRef) => {
     const provider = new CodexProvider();
     const settings = {

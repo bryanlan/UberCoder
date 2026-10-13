@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 15;
+export const CURRENT_SCHEMA_VERSION = 17;
 
 interface Migration {
   version: number;
@@ -272,6 +272,32 @@ const MIGRATIONS: Migration[] = [
       insert into conversation_search_rows
         select rowid, project_slug, provider, conversation_ref from conversation_search_fts;
     `);
+  } },
+  { version: 16, name: 'standing-agent-grants', up(sqlite) {
+    sqlite.exec(`
+      create table agent_grants (
+        id text primary key, created_by_assignment_id text not null,
+        status text not null, definition_json text not null, provenance_json text,
+        reason text, created_at text not null, decided_at text
+      );
+      create table agent_grant_uses (
+        id text primary key, grant_id text not null references agent_grants(id),
+        assignment_id text not null, action text not null, session_id text,
+        timestamp text not null, detail_json text not null
+      );
+      create index agent_grant_uses_grant on agent_grant_uses(grant_id,timestamp);
+      create table agent_push_subscriptions (
+        endpoint text primary key, subscription_json text not null, created_at text not null
+      );
+    `);
+  } },
+  { version: 17, name: 'granted-console-session-launches', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'launch_context_json', 'launch_context_json text');
+    sqlite.exec(`create table agent_session_requests (
+      id text primary key, assignment_id text not null, grant_id text not null references agent_grants(id),
+      action text not null, status text not null, session_id text not null,
+      input_json text not null, reason text, created_at text not null, updated_at text not null
+    ); create index agent_session_requests_status on agent_session_requests(status,created_at);`);
   } },
 ];
 

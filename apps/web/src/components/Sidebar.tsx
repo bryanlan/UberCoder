@@ -212,6 +212,7 @@ function ConversationLink({
   pressureSuspendedAt,
   runFailure,
   autoTrackedAt,
+  launchContext,
 }: {
   project: ProjectSummary;
   provider: ProviderId;
@@ -232,6 +233,7 @@ function ConversationLink({
   pressureSuspendedAt?: string;
   runFailure?: RunFailure;
   autoTrackedAt?: string;
+  launchContext?: import('@agent-console/shared').AgentLaunchContext;
 }) {
   const location = useLocation();
   const nowMs = useNowMs();
@@ -333,6 +335,7 @@ function ConversationLink({
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
         <TitleTooltip text={title} className="line-clamp-1 min-w-0" />
+        {launchContext && <span className="shrink-0 text-[10px] text-sky-300" title={`Launched by ${launchContext.launcherName} under Bryan's standing grants`}>Launched by {launchContext.launcherName.slice(0, 24)}</span>}
         {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
@@ -658,7 +661,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, autoTrackedAt, runFailure }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, autoTrackedAt, runFailure, launchContext }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -680,6 +683,7 @@ function ProjectSection({
                 pressureSuspendedAt={pressureSuspendedAt}
                 runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
+                launchContext={launchContext}
               />
             ))}
             {hasHiddenConversations ? (

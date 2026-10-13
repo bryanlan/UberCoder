@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -112,9 +113,10 @@ interface SessionManagerOptions {
   pressureSuspendIdleMs?: number;
   readMemInfo?: () => string;
   queueCodexNotice?: typeof queueCodexNotice;
+  hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
 }
 
-type SessionEventLogEntry = { type: 'user-input' | 'raw-output' | 'status'; text: string; timestamp: string };
+type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
 
 interface AppendedSessionEvent {
   event: SessionEventLogEntry;
@@ -279,6 +281,7 @@ export class SessionManager {
   private assignmentWakeRun?: Promise<void>;
   private wakeRequested = false;
   private readonly coordinationEnabled: boolean;
+  private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private stopped = false;
 
   constructor(
@@ -291,6 +294,7 @@ export class SessionManager {
     options: SessionManagerOptions = {},
   ) {
     this.coordinationEnabled = options.coordinationEnabled ?? false;
+    this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -446,6 +450,7 @@ export class SessionManager {
   }
 
   private unattendedAssignment(session: BoundSession): { id: string; status: string } | undefined {
+    if (session.launchContext && this.hasActiveLaunchAuthority && !this.hasActiveLaunchAuthority(session)) return undefined;
     const assignment = this.coordinationEnabled && this.assignmentForSession(session);
     return assignment && assignment.status !== 'finished' && continuationControl(this.db, assignment.id).continuation === 'unattended' ? assignment : undefined;
   }
@@ -1295,9 +1300,18 @@ export class SessionManager {
       return provider.getLaunchCommand(project, resumeConversationRef, providerSettings, {
         codexProfile: session.provider === 'codex' ? session.codexProfile : undefined,
         claudeProfile: session.provider === 'claude' ? session.claudeProfile : undefined,
+        model: activeModelProfile(session) ? undefined : session.launchContext?.model,
+        effort: activeModelProfile(session) ? undefined : session.launchContext?.effort,
+        flags: session.launchContext?.flags,
+        consoleIdentity: this.consoleIdentity(session.id),
       });
     }
     return undefined;
+  }
+
+  private consoleIdentity(sessionId: string) {
+    return this.coordinationEnabled ? { sessionId, runtimeDir: this.runtimeDir,
+      helperPath: fileURLToPath(new URL('../../../../scripts/agent-coord.mjs', import.meta.url)) } : undefined;
   }
 
   private async tryResolvePendingResumeSession(
@@ -1421,6 +1435,7 @@ export class SessionManager {
       return undefined;
     }
 
+    launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: session.id };
     const prepared = this.ensureSessionLogPaths(session);
     const shouldEmitRestoreAttempt = prepared.status !== 'error';
     const restoring = {
@@ -1490,6 +1505,9 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    initialPromptIsHuman?: boolean;
+    launchContext?: AgentLaunchContext;
+    sessionId?: string;
     codexProfile?: CodexCostProfileKey;
     claudeProfile?: ClaudeCostProfileKey;
     autoTrackedAt?: string;
@@ -1502,7 +1520,7 @@ export class SessionManager {
 
     const run = (async () => {
       const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
-      const sessionId = existing?.id ?? randomUUID();
+      const sessionId = existing?.id ?? input.sessionId ?? randomUUID();
       const result = await this.runtimes.run(sessionId, 'bind', () => this.bindConversationInternal(input, sessionId));
       return result.session;
     })();
@@ -1514,6 +1532,59 @@ export class SessionManager {
         this.conversationBindRuns.delete(bindKey);
       }
     }
+  }
+
+  /** Native registration supplies the real identity before any browser opens the conversation. */
+  async adoptRegisteredSession(sessionId: string, providerId: ProviderId, nativeSessionId: string): Promise<void> {
+    await this.runtimes.run(sessionId, 'adoptRegisteredSession', async () => {
+      const session = this.db.boundSessions.getById(sessionId);
+      if (!session?.shouldRestore || session.provider !== providerId || !this.recoveryDependencies) return;
+      if (!session.conversationRef.startsWith('pending:') && session.conversationRef !== nativeSessionId) return;
+      const project = await this.recoveryDependencies.projectService.getProjectBySlug(session.projectSlug);
+      if (!project) return;
+      const provider = this.recoveryDependencies.providerRegistry.get(providerId);
+      const settings = this.recoveryDependencies.projectService.getMergedProviderSettings(project, providerId);
+      const conversation = await provider.getConversation(project, nativeSessionId, settings);
+      if (!conversation) return;
+      this.db.conversationIndex.upsert({ ...conversation.summary, title: session.title ?? conversation.summary.title });
+      if (session.launchContext && session.title) this.db.titleOverrides.set(project.slug, providerId, nativeSessionId, session.title, nowIso());
+      const pending = this.db.pendingConversations.get(session.conversationRef);
+      if (pending) {
+        const adoption = adoptPendingConversation({ db: this.db, projectSlug: project.slug, providerId,
+          pendingRef: pending.ref, matchedConversation: { ...conversation.summary, title: session.title ?? conversation.summary.title } });
+        if (adoption.reboundSession) this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
+      } else if (session.conversationRef.startsWith('pending:')) {
+        const adopted = { ...session, conversationRef: nativeSessionId, resumeConversationRef: nativeSessionId, updatedAt: nowIso() };
+        this.db.boundSessions.upsert(adopted); this.eventBus.emit({ type: 'session.updated', session: adopted });
+      }
+      this.watchSessionOutput(this.mustGetSession(sessionId));
+    });
+  }
+
+  /** Grant actions use the existing session queue and recovery transport. */
+  async restartGrantedSession(sessionId: string): Promise<BoundSession> {
+    return this.runtimes.run(sessionId, 'restartGrantedSession', async () => {
+      const session = this.mustGetSession(sessionId);
+      if (!session.shouldRestore || session.status === 'ended' || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest)
+        throw new Error('This session is finished or paused.');
+      if (!this.unattendedAssignment(session)) throw new SessionInputRejectedError('This session is waiting for human input or has been stopped.');
+      const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+      if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
+      if (liveness === 'alive') {
+        const screen = await this.captureSessionScreen(session, false);
+        if (session.isWorking || this.providerTurnIsWorking(sessionId) === true || !screen.inputActive || screen.inputText.trim()
+          || sessionScreenShowsWorking(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
+          throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
+        if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) throw new Error('Session ownership changed.');
+        await this.tmuxClient.killSession(session.tmuxSessionName);
+      }
+      this.db.boundSessions.setRunFailure(sessionId, undefined);
+      this.db.meta.set(`run-recovery-budget:${sessionId}`, '');
+      await this.runRecovery.processExited(sessionId);
+      const restored = await this.restoreSession(session);
+      if (!restored) throw new Error('The original conversation could not be restored.');
+      return restored;
+    });
   }
 
   private applyAutoTrackProvenance(session: BoundSession, autoTrackedAt?: string): BoundSession {
@@ -1634,6 +1705,9 @@ export class SessionManager {
     title: string;
     kind: ConversationSummary['kind'];
     initialPrompt?: string;
+    initialPromptIsHuman?: boolean;
+    launchContext?: AgentLaunchContext;
+    sessionId?: string;
     codexProfile?: CodexCostProfileKey;
     claudeProfile?: ClaudeCostProfileKey;
     autoTrackedAt?: string;
@@ -1659,18 +1733,21 @@ export class SessionManager {
       input.project,
       input.kind === 'pending' ? null : input.conversationRef,
       input.providerSettings,
-      { initialPrompt: input.initialPrompt, codexProfile: input.codexProfile, claudeProfile: input.claudeProfile },
+      { initialPrompt: input.initialPrompt, codexProfile: input.codexProfile, claudeProfile: input.claudeProfile,
+        model: input.launchContext?.model, effort: input.launchContext?.effort, flags: input.launchContext?.flags,
+        consoleIdentity: this.consoleIdentity(sessionId) },
     );
     const now = nowIso();
     const initialPrompt = input.initialPrompt?.trim();
     const session: BoundSession = {
+      launchContext: input.launchContext,
       id: sessionId,
       provider: input.provider.id,
       codexProfile: input.provider.id === 'codex'
-        ? input.codexProfile ?? (input.kind === 'pending' ? 'medium' : undefined)
+        ? input.codexProfile ?? (input.kind === 'pending' && !input.launchContext?.model && !input.launchContext?.effort ? 'medium' : undefined)
         : undefined,
       claudeProfile: input.provider.id === 'claude'
-        ? input.claudeProfile ?? (input.kind === 'pending' && !input.providerSettings.commands.newCommand.some((arg) =>
+        ? input.claudeProfile ?? (input.kind === 'pending' && !input.launchContext?.model && !input.launchContext?.effort && !input.providerSettings.commands.newCommand.some((arg) =>
           arg === '--model' || arg.startsWith('--model=')) ? 'medium' : undefined)
         : undefined,
       projectSlug: input.project.slug,
@@ -1691,6 +1768,8 @@ export class SessionManager {
       eventLogPath,
     };
     this.db.boundSessions.upsert(session);
+    if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
+    launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: sessionId };
 
     let tmuxCreated = false;
     try {
@@ -1724,7 +1803,7 @@ export class SessionManager {
           inputAt,
         });
         recordedInitialUserInput = recordedUserInputFromEvent(
-          this.appendEvent(boundSession, { type: 'user-input', text: initialPrompt, timestamp: inputAt }),
+          this.appendEvent(boundSession, { type: input.initialPromptIsHuman === false ? 'agent-input' : 'user-input', text: initialPrompt, timestamp: inputAt }),
         );
       }
       this.appendEvent(boundSession, { type: 'status', text: `Bound ${input.provider.id} session in ${input.project.displayName}.`, timestamp: nowIso() });
@@ -2415,7 +2494,8 @@ export class SessionManager {
       await this.tmuxClient.killSession(starting.tmuxSessionName);
       originalStopped = true;
       const resumeRef = request.resumeConversationRef.startsWith('pending:') ? null : request.resumeConversationRef;
-      const launch = provider.getLaunchCommand(project, resumeRef, providerSettings, launchModelProfile(starting.provider, request.profile));
+      const launch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, request.profile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id) });
+      launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: starting.id };
       await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
       await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
@@ -2454,7 +2534,8 @@ export class SessionManager {
         let rollbackCreated = false;
         try {
           const resumeRef = request.resumeConversationRef.startsWith('pending:') ? null : request.resumeConversationRef;
-          const rollbackLaunch = provider.getLaunchCommand(project, resumeRef, providerSettings, launchModelProfile(starting.provider, previousProfile));
+          const rollbackLaunch = provider.getLaunchCommand(project, resumeRef, providerSettings, { ...launchModelProfile(starting.provider, previousProfile), flags: starting.launchContext?.flags, consoleIdentity: this.consoleIdentity(starting.id) });
+          rollbackLaunch.env = { ...rollbackLaunch.env, AGENT_CONSOLE_SESSION_ID: starting.id };
           await this.tmuxClient.newDetachedSession(starting.tmuxSessionName, rollbackLaunch.cwd, commandToShell(rollbackLaunch.argv, rollbackLaunch.env));
           rollbackCreated = true;
           await this.tmuxClient.pipePaneToFile(starting.tmuxSessionName, starting.rawLogPath!);
@@ -2864,6 +2945,7 @@ export class SessionManager {
     const messageId = liveMessageId(session.id, offset);
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
     if (event.type === 'user-input') {
+      this.db.meta.set(`human-input:${session.id}`, JSON.stringify({ id: messageId, text: event.text, timestamp: event.timestamp }));
       (this.runtimeState(session.id).lastUserInput ??= new LastUserInputCache(this.readLastUserInput)).record(session.eventLogPath, event.text);
       this.eventBus.emit({
         type: 'session.user-input',

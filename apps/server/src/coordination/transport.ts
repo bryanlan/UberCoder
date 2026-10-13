@@ -7,6 +7,9 @@ import type { AuthService } from '../security/auth-service.js';
 import { CoordinationService } from './service.js';
 import { WikiService } from '../wiki/service.js';
 import { recordCoordinationTelemetry } from './telemetry.js';
+import type { GrantService } from '../grants/service.js';
+import { dispatchGrants } from '../grants/transport.js';
+import type { AgentSessionLaunches } from '../grants/session-launches.js';
 
 const text = z.string().trim().min(1);
 const inputSchema = z.object({
@@ -14,6 +17,7 @@ const inputSchema = z.object({
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(['codex', 'claude']).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
+  consoleSessionId: z.string().uuid().optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
@@ -38,7 +42,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     if (value === undefined) throw new Error(`${name} is required.`);
     return value;
   };
-  if (input.action === 'register') return service.register({ provider: need(input.provider, 'provider'), nativeSessionId: need(input.nativeSessionId, 'nativeSessionId'), token: need(input.token, 'token'), pid: need(input.pid, 'pid'), cwd: need(input.cwd, 'cwd') });
+  if (input.action === 'register') return service.register({ provider: need(input.provider, 'provider'), nativeSessionId: need(input.nativeSessionId, 'nativeSessionId'), token: need(input.token, 'token'), pid: need(input.pid, 'pid'), cwd: need(input.cwd, 'cwd'), consoleSessionId: input.consoleSessionId });
   const id = need(input.assignmentId, 'assignmentId');
   service.authenticate(id, need(input.token, 'token'));
   switch (input.action) {
@@ -74,7 +78,7 @@ export function dispatchWiki(coordination: CoordinationService, wiki: WikiServic
   }
 }
 
-export async function startCoordinationSocket(service: CoordinationService, runtimeDir: string, wiki?: WikiService) {
+export async function startCoordinationSocket(service: CoordinationService, runtimeDir: string, wiki?: WikiService, grants?: GrantService, launches?: AgentSessionLaunches) {
   const directory = path.join(runtimeDir, 'coordination');
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   if ((await fs.lstat(directory)).isSymbolicLink()) throw new Error('Coordination runtime directory must not be a symlink.');
@@ -138,6 +142,10 @@ export async function startCoordinationSocket(service: CoordinationService, runt
     try { return dispatchWiki(service, wiki, request.body); }
     catch (error) { return reply.code(error instanceof Error && 'statusCode' in error ? Number(error.statusCode) : 400)
       .send({ error: error instanceof Error ? error.message : 'Wiki request failed.' }); }
+  });
+  if (grants) ipc.post('/grants', { bodyLimit: 256 * 1024 }, async (request, reply) => {
+    try { return await dispatchGrants(service, grants, request.body, launches); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Grant action failed.' }); }
   });
   await ipc.listen({ path: socketPath });
   await fs.chmod(socketPath, 0o600);

@@ -6,7 +6,7 @@ import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
 import { listFilesRecursive, pathExists, readTextHead, statFileSafe, type FileFingerprint } from './file-utils.js';
 import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
+import type { LaunchCommand, ProviderAdapter, ProviderConversation, ProviderLaunchOptions, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
 import {
   conversationBelongsToProject,
   deriveConversationRef,
@@ -38,25 +38,33 @@ function hasConfiguredModelProfile(argv: string[]): boolean {
   return false;
 }
 
-function withoutConfiguredModelProfile(argv: string[]): string[] {
+function withoutConfiguredModelProfile(argv: string[], removeModel = true, removeEffort = true): string[] {
   const result: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
-    if (arg === '--model' || arg === '-m') {
+    if (removeModel && (arg === '--model' || arg === '-m')) {
       index += 1;
       continue;
     }
-    if (arg.startsWith('--model=') || arg.startsWith('-m=')) continue;
-    if ((arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
+    if (removeModel && (arg.startsWith('--model=') || arg.startsWith('-m='))) continue;
+    if (removeEffort && (arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
       index += 1;
       continue;
     }
-    if ((arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
+    if (removeEffort && (arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
       continue;
     }
     result.push(arg);
   }
   return result;
+}
+
+function withModelOptions(argv: string[], options: string[]): string[] {
+  // Resume parses its own model configuration. Put overrides on that command,
+  // otherwise the resumed turn can silently use the host's default effort.
+  const resume = argv.indexOf('resume');
+  const position = resume >= 0 ? resume + 1 : 1;
+  return [...argv.slice(0, position), ...options, ...argv.slice(position)];
 }
 
 interface PendingUserHashMatchMemoEntry {
@@ -311,7 +319,7 @@ export class CodexProvider implements ProviderAdapter {
     project: ActiveProject,
     conversationRef: string | null,
     settings: MergedProviderSettings,
-    options?: { initialPrompt?: string; codexProfile?: CodexCostProfileKey },
+    options?: ProviderLaunchOptions,
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
     const initialPrompt = options?.initialPrompt?.trim();
@@ -324,7 +332,7 @@ export class CodexProvider implements ProviderAdapter {
       '--dangerously-bypass-approvals-and-sandbox',
     );
     const profileKey = options?.codexProfile
-      ?? (!conversationRef && !hasConfiguredModelProfile(baseArgv) ? 'medium' : undefined);
+      ?? (!conversationRef && !options?.model && !hasConfiguredModelProfile(baseArgv) ? 'medium' : undefined);
     if (profileKey) {
       const profile = CODEX_COST_PROFILES[profileKey];
       const withoutProfileArgs = withoutConfiguredModelProfile(baseArgv);
@@ -332,19 +340,29 @@ export class CodexProvider implements ProviderAdapter {
       if (!executable) {
         throw new Error('Codex launch command is empty.');
       }
-      baseArgv = [
-        executable,
+      baseArgv = withModelOptions(withoutProfileArgs, [
         '--model',
         profile.model,
         '-c',
         `model_reasoning_effort="${profile.reasoningEffort}"`,
-        ...withoutProfileArgs.slice(1),
-      ];
+      ]);
+    }
+    if (options?.model || options?.effort) {
+      const cleaned = withoutConfiguredModelProfile(baseArgv, !!options.model, !!options.effort);
+      baseArgv = withModelOptions(cleaned, [...(options.model ? ['--model', options.model] : []),
+        ...(options.effort ? ['-c', `model_reasoning_effort="${options.effort}"`] : [])]);
     }
     return {
       cwd: project.path,
       argv: [
         ...baseArgv,
+        ...(options?.flags ?? []),
+        ...(options?.consoleIdentity ? [
+          '-c', 'mcp_servers.agent_console_coordination.command="node"',
+          '-c', `mcp_servers.agent_console_coordination.args=${JSON.stringify([options.consoleIdentity.helperPath, 'mcp'])}`,
+          '-c', `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(options.consoleIdentity.runtimeDir)}`,
+          '-c', `mcp_servers.agent_console_coordination.env.AGENT_CONSOLE_SESSION_ID=${JSON.stringify(options.consoleIdentity.sessionId)}`,
+        ] : []),
         // Console launches must reach the composer. Host CLI updates are
         // managed outside restored conversations, never through chat input.
         '-c',

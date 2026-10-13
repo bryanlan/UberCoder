@@ -5,6 +5,8 @@ import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, type PeerWakeAttempt } from './wake.js';
 import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
+import type { GrantService } from '../grants/service.js';
+import { GRANT_POLICY } from '../grants/schema.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -27,7 +29,7 @@ export const OUTSIDE_PILOT_NOTE = 'This repository is outside the coordination p
 
 export class CoordinationService {
   constructor(private readonly db: AppDatabase, readonly settings: CoordinationSettings,
-    private readonly requestWake?: () => void) {}
+    private readonly requestWake?: () => void, private readonly grants?: GrantService) {}
 
   private event(id: string, checkout: string | null, kind: string, text: string): void {
     this.db.sqlite.prepare('insert into coordination_events(assignment_id, checkout, kind, text, timestamp) values(?,?,?,?,?)')
@@ -69,7 +71,7 @@ export class CoordinationService {
     try { this.identity(directory); return true; } catch { return false; }
   }
 
-  register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string }): { enabled: boolean; assignmentId?: string } {
+  register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string }): { enabled: boolean; assignmentId?: string } {
     // Assignment identity is independent of its launch directory. Announced scope
     // determines the repository activity views; it never grants editing permission.
     if (!this.settings.enabled) return { enabled: false };
@@ -96,6 +98,7 @@ export class CoordinationService {
         this.db.sqlite.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')
           .run(id, input.provider, input.nativeSessionId, tokenHash, 'Assignment not yet described', 'active', input.pid, start, now, now);
       }
+      this.grants?.bindAssignment(id, input.consoleSessionId, input.cwd);
       this.event(id, null, existing ? 'resumed' : 'started', existing ? 'Resumed; refresh current scope and unfinished changes.' : 'Session registered; awaiting assignment scope.');
       return { enabled: true, assignmentId: id };
     }).immediate();
@@ -294,8 +297,13 @@ export class CoordinationService {
         order by e.seq desc limit 3`).all(after, maximum.seq, id, id) as Array<CoordinationEvent & {
           assignmentStatus: string; peerCount: number; updateCount: number;
         }>;
-      const messages = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
+      const queuedMessages = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
         and (supplied_at is null or supplied_at<?) order by created_at limit 3`).all(id, new Date(Date.now() - 60_000).toISOString()) as CoordinationMessage[];
+      const ownGrants = this.grants?.grantsFor(id).map(grant => grant.id);
+      const messages = ownGrants ? queuedMessages.map(message => {
+        const senderGrants = this.grants!.grantsFor(message.senderId).map(grant => grant.id);
+        return { ...message, grantIds: ownGrants.filter(grantId => senderGrants.includes(grantId)) };
+      }) : queuedMessages;
       const events: CoordinationEvent[] = candidates.map(({ assignmentStatus, peerCount, updateCount, ...event }) => ({
         ...event,
         // Never turn an abbreviated checkout into a path an agent might use.
@@ -307,7 +315,10 @@ export class CoordinationService {
         ? `${latest.updateCount} activity updates from ${latest.peerCount} ${latest.peerCount === 1 ? 'assignment' : 'assignments'} summarized; showing ${events.length} latest. Use status for current scopes or history with checkout and offset for full activity.`
         : null;
       if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
-      return { assignment: current, continuationPolicy: CONTINUATION_POLICY, activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
+      return { assignment: current, continuationPolicy: CONTINUATION_POLICY,
+        grantPolicy: this.grants ? GRANT_POLICY : undefined,
+        authority: this.grants?.grantsFor(id), latestHumanInput: this.grants?.latestHumanInput(id),
+        activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
     }).immediate();
   }
 
@@ -329,6 +340,7 @@ export class CoordinationService {
       this.notifySupervisor(id, 'A supervised worker completed its assignment.');
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
+      this.grants?.expireForAssignment(id);
       this.event(id, null, 'finished', summary);
       return { finished: true };
     }).immediate();

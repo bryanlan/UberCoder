@@ -110,7 +110,7 @@ describe('Codex authoritative run state', () => {
       await fs.appendFile(p, record('task_complete', 'turn1', capacity));
       const deadline = Date.now() + 20_000;
       while (!tmux.sent.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
-      expect(tmux.sent.join('')).toContain('Automatic recovery after a transient provider failure');
+      expect(tmux.sent.join(''), JSON.stringify(db.boundSessions.getById(session.id)?.runFailure)).toContain('Automatic recovery after a transient provider failure');
       expect(tmux.sentKeys).toEqual([]);
       expect(db.boundSessions.getById(session.id)?.runFailure).toMatchObject({ attempts: 1, status: 'retrying' });
       await fs.appendFile(p, record('task_started', 'retry1') + record('task_complete', 'retry1'));

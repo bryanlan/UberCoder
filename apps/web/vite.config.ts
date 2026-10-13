@@ -11,6 +11,7 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       workbox: {
+        importScripts: ['/grant-push-sw.js'],
         navigateFallbackDenylist: [/^\/api\//, /^\/proxy\//],
       },
       manifest: {

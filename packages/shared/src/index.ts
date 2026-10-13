@@ -222,6 +222,7 @@ export interface RunFailure {
 }
 
 export interface BoundSession {
+  launchContext?: AgentLaunchContext;
   runFailure?: RunFailure;
   id: string;
   provider: ProviderId;
@@ -390,6 +391,7 @@ export interface RenameConversationRequest {
 }
 
 export type SessionEvent =
+  | { type: 'grants.updated'; grantId: string; change: 'grant' | 'use'; timestamp: string }
   | {
       type: 'session.updated';
       session: BoundSession;
@@ -504,3 +506,40 @@ export interface WikiSearchResponse {
   pageCount: number;
   results: Array<{ title: string; revision: number; updatedAt: string; snippet: string; matchedTerms: string[] }>;
 }
+
+export type AgentGrantAction = 'launch_session' | 'restart_session';
+export interface AgentGrantDefinition {
+  grantee: { kind: 'session' | 'assignment' | 'project'; id: string };
+  actions: AgentGrantAction[];
+  scope: string;
+  /** Empty means all configured projects. Free-text scope remains the work boundary. */
+  projectSlugs: string[];
+  limits: { maxConcurrentSessions: number | null; models: string[] };
+  expiry: { kind: 'until_revoked' | 'assignment_finished'; assignmentId?: string };
+}
+export interface AgentGrant extends AgentGrantDefinition {
+  id: string;
+  status: 'pending' | 'active' | 'denied' | 'revoked' | 'expired';
+  createdByAssignmentId: string;
+  requesterName: string;
+  granteeName: string;
+  reason?: string;
+  provenance?: { kind: 'human_message' | 'approval'; quote: string; sessionId?: string; messageId?: string };
+  createdAt: string;
+  decidedAt?: string;
+}
+export interface AgentGrantUse {
+  id: string; grantId: string; assignmentId: string; action: AgentGrantAction;
+  sessionId?: string; timestamp: string; detail: Record<string, unknown>;
+}
+export interface AgentLaunchContext {
+  launchedBy: string;
+  launcherName: string;
+  grantIds: string[];
+  requestId: string;
+  model?: string;
+  effort?: string;
+  flags: string[];
+  supervisorId: string;
+}
+export interface AgentGrantsSnapshot { grants: AgentGrant[]; uses: AgentGrantUse[]; nextUseOffset: number | null }

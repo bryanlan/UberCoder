@@ -1,4 +1,5 @@
 import type {
+  AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot,
   AuthState,
   ImageAttachment,
   BoundSession,
@@ -105,6 +106,12 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 }
 
 export const api = {
+  grants: (useOffset = 0) => request<AgentGrantsSnapshot>(`/api/grants?useOffset=${useOffset}`),
+  decideGrant: (id: string, decision: 'approve' | 'deny', definition?: AgentGrantDefinition, csrfToken?: string) =>
+    request<{ grant: AgentGrant }>(`/api/grants/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify({ decision, definition }) }, csrfToken),
+  revokeGrant: (id: string, csrfToken?: string) => request<{ grant: AgentGrant }>(`/api/grants/${encodeURIComponent(id)}/revoke`, { method: 'POST', body: '{}' }, csrfToken),
+  grantPushKey: () => request<{ publicKey: string }>('/api/grants/push-key'),
+  subscribeGrantPush: (subscription: PushSubscriptionJSON, csrfToken?: string) => request<{ subscribed: boolean }>('/api/grants/push-subscriptions', { method: 'POST', body: JSON.stringify(subscription) }, csrfToken),
   workers: () => request<WorkerPanelSnapshot>('/api/workers'),
   workerOpeningMessage: (id: string) => request<WorkerOpeningMessage>(`/api/workers/${encodeURIComponent(id)}/opening-message`),
   workerProjectOverview: (id: string) => request<WorkerProjectOverview>(`/api/workers/${encodeURIComponent(id)}/project-overview`),

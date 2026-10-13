@@ -52,6 +52,25 @@ it does not query the live Console database.
 ## Known Gaps
 - Host-level Codex and Claude live smokes still require real tmux/provider CLIs and remain opt-in.
 
+## Standing grants
+
+Run server coverage with `NODE_ENV=test npm run test -w @agent-console/server --
+agent-grants agent-grant-push agent-session-launches providers`.
+Run browser components with `NODE_ENV=test npm run test -w @agent-console/web -- GrantsPage`.
+These tests use private SQLite files and verify provenance, decisions, expiry, inheritance,
+memory queues, restart persistence, custom launch settings and notification actions.
+
+After `npm run build`, run `node scripts/prove-agent-grants.mjs --run` and
+`node scripts/prove-granted-launches.mjs --run` sequentially.
+They require real Codex/Claude authentication, tmux and an existing visible Chrome CDP endpoint on port 9222.
+Each proof uses a private project, database, runtime and tmux socket, plus its own browser context.
+The fixtures occupy port 14381 and close their own sessions and browser context afterwards.
+They preserve the shared browser. Evidence remains under `/tmp/console-grants-proof-*`
+or `/tmp/console-launch-proof-*`.
+The launch proof injects a capacity failure envelope into its disposable provider transcript,
+then verifies native recovery, granted restart, a Claude helper and relayed scope under one grant.
+Use [the separate recovery proof](../../scripts/prove-session-recovery.mjs) for actual killed-process recovery.
+
 ## Assignment coordination
 
 Audit and usage attribution: `NODE_ENV=test npm run test -w @agent-console/server -- peer-wake-audit peer-wake-usage peer-message-wake`.
