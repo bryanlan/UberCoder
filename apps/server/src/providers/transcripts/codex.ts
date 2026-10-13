@@ -163,6 +163,15 @@ function extractCodexMessage(record: Record<string, unknown>): { role: Normalize
   return directText ? { role: directRole, text: directText } : undefined;
 }
 
+/** Use the same visible-user classification as the complete transcript parser. */
+export function codexOpeningUserText(record: Record<string, unknown>): string | undefined {
+  const extracted = extractCodexMessage(record);
+  if (!extracted || extracted.role !== 'user' || isCoordinationWakePrompt(extracted.text)) return undefined;
+  const message: NormalizedMessage = { id: '', provider: 'codex', role: 'user', text: extracted.text,
+    timestamp: '', conversationRef: '', source: 'history-file', lifecycle: 'durable' };
+  return shouldHideCodexDisplayMessage(message) ? undefined : sanitizeCodexDisplayText(extracted.text, 'user') || undefined;
+}
+
 function codexJsonlLineContainsUserHash(line: string, userTextHash: string): boolean {
   if (!line.trim()) return false;
   try {

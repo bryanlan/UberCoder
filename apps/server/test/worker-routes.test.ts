@@ -19,13 +19,18 @@ it('requires login and CSRF before any summary request, validates cadence, and s
   const snapshot = vi.fn(async () => ({ workers: [], workingCount: 0 }));
   const refresh = vi.fn(async () => ({ workers: [], workingCount: 0 }));
   const setTracking = vi.fn(async () => ({ trackingEnabled: false, workers: [], workingCount: 0 }));
-  registerWorkerRoutes(app, auth, { snapshot, refresh, setTracking } as never);
+  const openingMessage = vi.fn(async (id: string) => id === 'one' ? { text: 'The complete original opening message.', error: null } : null);
+  registerWorkerRoutes(app, auth, { snapshot, refresh, setTracking, openingMessage } as never);
   try {
     expect((await app.inject('/api/workers')).statusCode).toBe(401);
+    expect((await app.inject('/api/workers/one/opening-message')).statusCode).toBe(401);
     expect((await app.inject({ method: 'POST', url: '/api/workers/tracking', payload: { enabled: false } })).statusCode).toBe(401);
     const login = await app.inject({ url: '/auth', headers: { 'tailscale-user-login': 'fixture@example.invalid' } });
     const cookie = String(login.headers['set-cookie']).split(';')[0]!;
     const headers = { cookie, 'x-csrf-token': login.json().csrfToken };
+    const opening = await app.inject({ url: '/api/workers/one/opening-message', headers: { cookie } });
+    expect(opening.statusCode).toBe(200); expect(opening.json().text).toBe('The complete original opening message.');
+    expect((await app.inject({ url: '/api/workers/unknown/opening-message', headers: { cookie } })).statusCode).toBe(404);
     expect((await app.inject({ url: '/api/workers', headers: { cookie } })).statusCode).toBe(200);
     expect(snapshot).toHaveBeenCalledTimes(1); expect(refresh).not.toHaveBeenCalled();
     expect((await app.inject({ method: 'POST', url: '/api/workers/refresh', headers: { cookie }, payload: { intervalMinutes: 1 } })).statusCode).toBe(403);

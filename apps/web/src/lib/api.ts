@@ -22,6 +22,7 @@ import type {
   UpdateProjectSettingsRequest,
   UpdateUiPreferencesRequest,
   WorkerPanelSnapshot,
+  WorkerOpeningMessage,
   WikiHistoryResponse,
   WikiListResponse,
   WikiPage,
@@ -104,6 +105,7 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 
 export const api = {
   workers: () => request<WorkerPanelSnapshot>('/api/workers'),
+  workerOpeningMessage: (id: string) => request<WorkerOpeningMessage>(`/api/workers/${encodeURIComponent(id)}/opening-message`),
   setWorkerTracking: (enabled: boolean) => request<WorkerPanelSnapshot>('/api/workers/tracking',
     { method: 'POST', body: JSON.stringify({ enabled }) }),
   refreshWorkers: (intervalMinutes: number) => request<WorkerPanelSnapshot>('/api/workers/refresh',

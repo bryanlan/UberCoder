@@ -315,11 +315,15 @@ export function filterUserVisibleMessages(messages: NormalizedMessage[]): Normal
   return messages.filter((message) => message.role === 'user' || message.role === 'assistant');
 }
 
-export async function* iterateJsonlRecords(filePath: string): AsyncGenerator<{
+export async function* iterateJsonlRecords(filePath: string, options: { maxBytes?: number } = {}): AsyncGenerator<{
   index: number;
   record: JsonRecord;
 }> {
-  const input = createReadStream(filePath, { encoding: 'utf8' });
+  if (options.maxBytes !== undefined && (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1)) {
+    throw new Error('Transcript read limit must be a positive byte count.');
+  }
+  const input = createReadStream(filePath, { encoding: 'utf8',
+    ...(options.maxBytes === undefined ? {} : { end: options.maxBytes - 1 }) });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
   let index = 0;
 

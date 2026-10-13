@@ -24,7 +24,8 @@ async function fixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'worker-panel-test-'));
   let now = Date.parse('2026-10-12T12:00:00Z');
   const workers = [worker('one')];
-  const source = { roster: vi.fn(async () => workers), collect: vi.fn(async (w: WorkerEvidence) => w) };
+  const source = { roster: vi.fn(async () => workers), collect: vi.fn(async (w: WorkerEvidence) => w),
+    opening: vi.fn(async () => ({ text: 'Complete opening message.', error: null })) };
   const runner: SummaryRunner = { run: vi.fn(async (ws) => result(ws)), stop: vi.fn(), cancel: vi.fn() };
   const audit = new WorkerSummaryAudit(directory);
   const store = new WorkerSnapshotStore(directory);
@@ -39,6 +40,14 @@ async function fixture() {
 }
 
 describe('worker summary controller', () => {
+  it('reads a saved worker opening while Off without activity collection or a model call', async () => {
+    const f = await fixture(); await f.service.snapshot(); await f.service.setTracking(false);
+    f.source.roster.mockClear(); f.source.collect.mockClear(); vi.mocked(f.runner.run).mockClear();
+    expect(await f.service.openingMessage('one')).toEqual({ text: 'Complete opening message.', error: null });
+    expect(await f.service.openingMessage('unknown')).toBeNull();
+    expect(f.source.opening).toHaveBeenCalledTimes(1);
+    expect(f.source.roster).not.toHaveBeenCalled(); expect(f.source.collect).not.toHaveBeenCalled(); expect(f.runner.run).not.toHaveBeenCalled();
+  });
   it('automatically pauses after ten minutes, retains saved info and ignores agent output', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled();
     const before = await f.service.snapshot(); f.source.roster.mockClear(); f.source.collect.mockClear();
@@ -95,7 +104,7 @@ describe('worker summary controller', () => {
   it('restores saved information after restart while Off without reading agents or running the model', async () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled();
     const before = await f.service.setTracking(false);
-    const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect };
+    const source = { roster: vi.fn(async () => { throw new Error('Must not read agents while Off'); }), collect: f.source.collect, opening: f.source.opening };
     const runner = { run: vi.fn(f.runner.run), stop: vi.fn(), cancel: vi.fn() };
     const restarted = new WorkerPanelService(source, runner, new WorkerSummaryAudit(f.directory), new WorkerSnapshotStore(f.directory), f.createActivity(), false);
     try {

@@ -75,6 +75,16 @@ function extractClaudeMessage(record: Record<string, unknown>): { role: Normaliz
   return undefined;
 }
 
+/** Match the authoritative opening-user hash, including native paste normalization. */
+export function claudeOpeningUserText(record: Record<string, unknown>): string | undefined {
+  const extracted = extractClaudeMessage(record);
+  if (!extracted || extracted.role !== 'user' || record.isCompactSummary === true
+    || isCoordinationWakePrompt(extracted.text) || claudeRunError(record)) return undefined;
+  const message: NormalizedMessage = { id: '', provider: 'claude', role: 'user', text: extracted.text,
+    timestamp: '', conversationRef: '', source: 'history-file', lifecycle: 'durable' };
+  return shouldHideClaudeDisplayMessage(message) ? undefined : extracted.text;
+}
+
 function activeClaudeBranchRecordUuids(records: Array<{ record: Record<string, unknown> }>): Set<string> | undefined {
   const recordsByUuid = new Map<string, Record<string, unknown>>();
   let leafUuid: string | undefined;

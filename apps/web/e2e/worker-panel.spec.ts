@@ -17,7 +17,7 @@ const snapshot: WorkerPanelSnapshot = {
     inputTokens: 1400, cachedInputTokens: 600, cacheWriteTokens: 0, outputTokens: 180, totalTokens: 2180 },
 };
 
-async function openConsole(page: Page, data = snapshot) {
+async function openConsole(page: Page, data = snapshot, openingTexts: Record<string, string> = {}) {
   const refreshes: number[] = [];
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture' } }));
   await page.route('**/api/projects/tree', (route) => route.fulfill({ json: { projects: data.workers.map((worker) => ({
@@ -29,6 +29,10 @@ async function openConsole(page: Page, data = snapshot) {
   await page.route('**/api/settings/ui-preferences', (route) => route.fulfill({ json: { recentActivitySortEnabled: false, manualProjectOrder: [] } }));
   await page.route('**/api/settings/network', (route) => route.fulfill({ json: {} }));
   await page.route('**/api/workers', (route) => route.fulfill({ json: data }));
+  await page.route('**/api/workers/*/opening-message', route => {
+    const id = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3]!);
+    return route.fulfill({ json: { text: openingTexts[id] ?? data.workers.find(worker => worker.id === id)!.title, error: null } });
+  });
   await page.route('**/api/workers/refresh', (route) => { refreshes.push(route.request().postDataJSON().intervalMinutes); return route.fulfill({ json: data }); });
   await page.route('**/api/workers/tracking', (route) => {
     const enabled = route.request().postDataJSON().enabled;
@@ -148,4 +152,14 @@ test('complete sentences wrap and a card expands across the panel without anothe
   await panel.getByRole('button', { name: /Expand worker details: PlaidBasic/ }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   expect(calls).toHaveLength(0);
+});
+
+test('opening message includes all text beyond the native288character title', async ({ page }) => {
+  await page.setViewportSize({ width: 2200, height: 1000 });
+  const text = 'The complete original opening message '.repeat(16) + 'ends with these readable final words.';
+  const data = { ...snapshot, workers: [{ ...snapshot.workers[0]!, title: `${text.slice(0, 285)}…` }] };
+  await openConsole(page, data, { one: text });
+  const full = page.getByRole('complementary', { name: 'Active workers' }).getByText(`CODEX: ${text}`, { exact: true });
+  await expect(full).toBeVisible();
+  expect(await full.evaluate(el => el.scrollWidth <= el.clientWidth && getComputedStyle(el).whiteSpace !== 'nowrap')).toBe(true);
 });

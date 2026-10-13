@@ -1,8 +1,9 @@
 # Worker panel
 
 The collapsible right panel shows loaded, visible Console workers across configured projects.
-It uses the same project and conversation labels as the left sidebar. The full conversation
-label wraps across the card without a character cutoff, with a link to the exact conversation.
+It uses the same project and conversation identities as the left sidebar, with a link to the
+exact conversation. The blue row shows the complete original opening message, rather than
+the shortened conversation name, and wraps without a character cutoff.
 Working/idle state comes from bound sessions, independently of an assignment's active label.
 Suspended, unbound and internal `codex exec` conversations are excluded. Idle cards retain their
 last summary; they never cause model calls. Native child agents without their own Console
@@ -42,6 +43,17 @@ starts a fresh10-minute watch window; manual Off stays Off through further messa
 window timestamp persists in existing Console metadata, so restart does not renew it. Only the
 timestamp is stored, never the message body. An in-flight summary is cancelled at the deadline;
 saved information remains visible. The panel distinguishes automatic inactivity from manual Off.
+
+Opening text is a separate static context read, available while tracking is Off. The authenticated
+opening-message endpoint accepts only a worker already present in the saved panel snapshot.
+It matches the indexed first-user-text hash through the existing provider classification and
+reads at most8MiB from the transcript head, stopping as soon as that message is found. It excludes
+injected instructions, peer wake notices, compaction summaries and image transport. It never
+parses the full conversation, observes current agent activity or starts a model. Immutable
+results share an in-flight request and a process cache bounded to128entries/8MiB; browser queries
+do not poll. If the complete opening cannot be recovered, the panel says so instead of showing
+a shortened name as if it were complete. Compact names, transcript indexing and snapshot formats
+remain unchanged.
 
 The server shares one in-flight batch across tabs, with the requesting browser's selected
 interval measured from request admission and a one-second allowance for timer/network jitter.

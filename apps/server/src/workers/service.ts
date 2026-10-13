@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { WorkerCard, WorkerPanelSnapshot } from '@agent-console/shared';
+import type { WorkerCard, WorkerPanelSnapshot, WorkerOpeningMessage } from '@agent-console/shared';
 import type { WorkerEvidence } from './evidence.js';
 import type { SummaryRunner } from './runtime.js';
 import { WORKER_SUMMARY_POLICY, ZERO_WORKER_USAGE } from './runtime.js';
@@ -10,6 +10,7 @@ import { WorkerUserActivity } from './user-activity.js';
 interface EvidenceSource {
   roster(): Promise<WorkerEvidence[]>;
   collect(worker: WorkerEvidence): Promise<WorkerEvidence>;
+  opening(worker: WorkerCard): Promise<WorkerOpeningMessage>;
 }
 const fingerprint = (w: WorkerEvidence) => createHash('sha256').update(JSON.stringify({ policy: WORKER_SUMMARY_POLICY, task: w.task,
   actions: w.actions.map((a) => a.text), peers: w.peers })).digest('hex');
@@ -111,6 +112,12 @@ export class WorkerPanelService {
       await this.store.settled().catch(() => {}); // Off still takes effect if storage fails; snapshot reports the failure.
     }
     return this.snapshot();
+  }
+
+  async openingMessage(id: string): Promise<WorkerOpeningMessage | null> {
+    await this.loadSnapshot();
+    const worker = this.saved?.workers.find(worker => worker.id === id);
+    return worker ? this.source.opening(worker) : null;
   }
 
   async refresh(intervalMinutes: number): Promise<WorkerPanelSnapshot> {

@@ -11,6 +11,10 @@ function WorkerDetails({ worker, trackingEnabled, expanded, onToggle, onClose }:
   worker: WorkerCard; trackingEnabled: boolean; expanded: boolean; onToggle: () => void; onClose: () => void;
 }) {
   const identity = `${worker.provider.toUpperCase()}: ${worker.title}`;
+  const visible = useVisible();
+  const opening = useQuery({ queryKey: ['worker-opening-message', worker.id, worker.conversationRef, worker.title],
+    queryFn: () => api.workerOpeningMessage(worker.id), enabled: visible,
+    staleTime: query => query.state.data?.text === null ? 0 : Infinity, retry: false });
   return (
     <article className={`rounded-xl border border-slate-800 bg-slate-900/50 ${expanded ? 'flex min-h-full flex-col' : ''}`}>
       <button type="button" data-worker-id={worker.id} autoFocus={expanded} aria-expanded={expanded}
@@ -26,8 +30,10 @@ function WorkerDetails({ worker, trackingEnabled, expanded, onToggle, onClose }:
             {trackingEnabled ? (worker.working ? 'Working' : 'Idle') : (worker.working ? 'Was working' : 'Was idle')}
           </span>
         </span>
-        <span className={`mb-3 block break-words text-sky-300 ${expanded ? 'text-2xl leading-9' : 'text-lg'}`} title={identity}>
-          {identity}
+        <span className={`mb-3 block whitespace-pre-wrap break-words text-sky-300 ${expanded ? 'text-2xl leading-9' : 'text-lg'}`} title={identity}>
+          {worker.provider.toUpperCase()}: {opening.isPending ? 'Loading opening message…'
+            : opening.data?.text !== null && opening.data?.text !== undefined ? opening.data.text
+              : opening.data?.error ?? 'The complete opening message is unavailable.'}
         </span>
         {expanded && worker.summary && worker.task !== worker.summary.task && <span className="mb-5 block break-words text-2xl leading-9 text-slate-300">
           <span className="text-slate-400">Assigned work: </span>{worker.task}

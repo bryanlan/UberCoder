@@ -7,7 +7,7 @@ import type { WorkerPanelSnapshot } from '@agent-console/shared';
 import { api } from '../lib/api';
 import { WorkerPanel } from './WorkerPanel';
 
-vi.mock('../lib/api', () => ({ api: { workers: vi.fn(), refreshWorkers: vi.fn(), setWorkerTracking: vi.fn() } }));
+vi.mock('../lib/api', () => ({ api: { workers: vi.fn(), workerOpeningMessage: vi.fn(), refreshWorkers: vi.fn(), setWorkerTracking: vi.fn() } }));
 beforeEach(() => { vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} }); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); vi.unstubAllGlobals(); localStorage.clear(); });
 const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: false, enabled: true, trackingEnabled: true, pauseReason: null, snapshotAt: '2026-10-12T12:00:00Z', error: null,
@@ -16,8 +16,9 @@ const snapshot = (): WorkerPanelSnapshot => ({ workingCount: 1, generating: fals
     summary: { task: 'Fix schema', latest: 'Checking source readbacks', coordination: 'Asked the Web agent for requirements' }, stale: false }],
   usage: { date: '2026-10-12', calls: 2, failedCalls: 1, unknownUsageCalls: 1, runningCalls: 0,
     inputTokens: 10, cachedInputTokens: 5, cacheWriteTokens: 0, outputTokens: 3, totalTokens: 18 } });
-function setup(data = snapshot()) {
+function setup(data = snapshot(), openingTexts: Record<string, string> = {}) {
   vi.mocked(api.workers).mockResolvedValue(data); vi.mocked(api.refreshWorkers).mockResolvedValue(data);
+  vi.mocked(api.workerOpeningMessage).mockImplementation(async id => ({ text: openingTexts[id] ?? data.workers.find(worker => worker.id === id)!.title, error: null }));
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } } });
   const onClose = vi.fn();
   const view = render(<QueryClientProvider client={client}><MemoryRouter><WorkerPanel onClose={onClose} /></MemoryRouter></QueryClientProvider>);
@@ -80,6 +81,14 @@ it('explains automatic inactivity pause while keeping saved information visible'
   await screen.findByText(/automatically paused after 10 minutes/);
   expect(screen.getByText('Checking source readbacks')).toBeInTheDocument();
   expect(api.refreshWorkers).not.toHaveBeenCalled();
+});
+
+it('shows the full opening message rather than the shortened conversation label', async () => {
+  const data = snapshot(); data.workers[0]!.title = 'An abbreviated opening…';
+  const text = 'The complete opening message '.repeat(20) + 'including its final words.';
+  setup(data, { one: text });
+  expect(await screen.findByText(`CODEX: ${text}`, { exact: true })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: /Open conversation: CODEX: An abbreviated opening/ })).toBeInTheDocument();
 });
 
 it('expands one saved worker across the panel and collapses without a model request', async () => {

@@ -1,4 +1,5 @@
-import type { BoundSession, ConversationSummary, NormalizedMessage } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, NormalizedMessage, WorkerCard, WorkerOpeningMessage } from '@agent-console/shared';
+import { WorkerOpeningMessages } from './opening-message.js';
 import type { AppDatabase } from '../db/database.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { LiveOutputReader } from '../sessions/live-output/reader.js';
@@ -20,8 +21,18 @@ export interface WorkerEvidence {
 
 /** Read only loaded, visible Console workers; never restore or nudge a session. */
 export class WorkerEvidenceSource {
+  private readonly openings = new WorkerOpeningMessages();
   constructor(private readonly db: AppDatabase, private readonly projects: ProjectService,
     private readonly live: LiveOutputReader) {}
+
+  async opening(worker: WorkerCard): Promise<WorkerOpeningMessage> {
+    if (!await this.projects.getProjectBySlug(worker.projectSlug)) return { text: null, error: 'The project is unavailable.' };
+    const pending = worker.conversationRef.startsWith('pending:') ? this.db.pendingConversations.get(worker.conversationRef) : undefined;
+    const adopted = pending?.rawMetadata?.adoptedConversationRef;
+    const ref = typeof adopted === 'string' ? adopted : worker.conversationRef;
+    const summary = this.db.conversationIndex.get(worker.projectSlug, worker.provider, ref);
+    return summary ? this.openings.read(summary) : { text: null, error: 'The opening message is not available yet.' };
+  }
 
   async roster(): Promise<WorkerEvidence[]> {
     const projects = new Map((await this.projects.listActiveProjects()).map((p) => [p.slug, p]));

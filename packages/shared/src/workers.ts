@@ -1,5 +1,10 @@
 import type { ProviderId } from './index.js';
 
+export interface WorkerOpeningMessage {
+  text: string | null;
+  error: string | null;
+}
+
 export interface WorkerSummary {
   task: string;
   latest: string;
