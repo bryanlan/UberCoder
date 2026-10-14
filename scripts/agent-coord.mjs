@@ -99,7 +99,12 @@ async function withSessionDelivery(provider, nativeSessionId, operation) {
     // Lock and every RPC share a 2.4s hook budget, below the shortest installed
     // provider hook limit (3s). A contended lock must not consume that budget.
     const lockSeconds = hookDeadline ? Math.max(0.001, Math.min(1, (hookDeadline - performance.now() - 100) / 1000)) : 3;
-    execFileSync('flock', ['--exclusive', '--timeout', String(lockSeconds), '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
+    try {
+      execFileSync('flock', ['--exclusive', '--timeout', String(lockSeconds), '--conflict-exit-code', '75', '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
+    } catch (error) {
+      if (hookDeadline && error.status === 75) throw Object.assign(new Error('Another hook is handling this session delivery.'), { code: 'DELIVERY_BUSY' });
+      throw error;
+    }
     return await operation();
   } finally { fs.closeSync(fd); }
 }
@@ -169,18 +174,25 @@ async function runHook(provider, input) {
   if (!process.env.AGENT_COORD_RUNTIME && !hostConfig.coordination?.enabled) return;
   const event = input.hook_event_name;
   const processOwner = owner();
-  const registration = await registerSession(provider, input.session_id, processOwner, input.cwd, event === 'SessionStart');
-  if (!registration.enabled) return;
-  const { statePath, state } = registration;
-  const auth = { assignmentId: state.assignmentId, token: state.token };
-  if (event === 'SessionEnd') { await rpc({ ...auth, action: 'disconnect' }); return; }
-  if (event === 'Stop') {
-    // End of a turn is waiting, not completion of the assignment.
+  if (event === 'Stop' || event === 'SessionEnd') {
+    // Lifecycle calls never read/write the delivery cursor. Use the already
+    // registered owner so a slow inbox poll cannot block end-of-turn status.
+    const key = createHash('sha256').update(`${provider}:${input.session_id}`).digest('hex');
+    const state = JSON.parse(fs.readFileSync(path.join(directory, 'clients', `${key}.json`), 'utf8'));
+    if (!state.assignmentId || state.ownerPid !== processOwner.pid || state.ownerStart !== processOwner.start) {
+      throw new Error('The lifecycle hook has no current registered session owner.');
+    }
+    const auth = { assignmentId: state.assignmentId, token: state.token };
+    if (event === 'SessionEnd') { await rpc({ ...auth, action: 'disconnect' }); return; }
     try { await rpc({ ...auth, action: 'update', status: 'waiting' }); } catch (error) {
       if (!String(error.message).includes('Resume this assignment')) throw error;
     }
     return;
   }
+  const registration = await registerSession(provider, input.session_id, processOwner, input.cwd, event === 'SessionStart');
+  if (!registration.enabled) return;
+  const { statePath, state } = registration;
+  const auth = { assignmentId: state.assignmentId, token: state.token };
   if (event === 'UserPromptSubmit') {
     try { await rpc({ ...auth, action: 'update', status: 'active' }); } catch (error) {
       if (!String(error.message).includes('Resume this assignment')) throw error;
@@ -225,7 +237,8 @@ async function main() {
     if (!hookEvents.includes(input.hook_event_name)) return;
     loadConfiguration();
     if (!process.env.AGENT_COORD_RUNTIME && !hostConfig.coordination?.enabled) return;
-    await withSessionDelivery(process.argv[3], input.session_id, () => runHook(process.argv[3], input));
+    if (input.hook_event_name === 'Stop' || input.hook_event_name === 'SessionEnd') await runHook(process.argv[3], input);
+    else await withSessionDelivery(process.argv[3], input.session_id, () => runHook(process.argv[3], input));
     recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
       outcome: 'ok', durationMs: performance.now() - hookStarted });
     return;
@@ -340,6 +353,13 @@ async function serveMcp() {
 
 main().catch((error) => {
   if (process.argv[2] === 'hook') {
+    if (error.code === 'DELIVERY_BUSY') {
+      // The in-flight delivery owns the cursor. Coalesce an overlapping poll;
+      // do not report a backend outage or claim its pending inbox was delivered.
+      if (directory) recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
+        outcome: 'deferred', error: 'delivery_busy', durationMs: performance.now() - hookStarted });
+      return;
+    }
     if (directory) recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
       outcome: 'error', error: String(error.message).includes('timed out') ? 'timeout' : 'hook', durationMs: performance.now() - hookStarted });
     // Visible failure, never pretend a missing server delivered messages.

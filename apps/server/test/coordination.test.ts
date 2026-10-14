@@ -566,6 +566,54 @@ describe('assignment coordination', () => {
     }
   });
 
+  it.each(['Stop', 'SessionEnd'] as const)('lets %s record lifecycle while another hook is delivering without taking its cursor lock', async event => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID(); const sender = register();
+    const registered = await runHelper(root, checkout, ['register'], { provider: 'claude', nativeSessionId, pid: process.pid, cwd: checkout });
+    const receiver = JSON.parse(registered.stdout).assignmentId;
+    const original = service.poll.bind(service); let entered!: () => void;
+    const polling = new Promise<void>(resolve => { entered = resolve; });
+    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) => {
+      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, after)), 1800));
+    }) as never);
+    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'DELIVER_DURING_STOP' });
+    try {
+      const delivery = runHelper(root, checkout, ['hook', 'claude'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+      await polling;
+      const stop = await runHelper(root, checkout, ['hook', 'claude'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: event });
+      expect(stop.stdout).toBe(''); expect(stop.code).toBe(0);
+      expect(service.agentStatus(receiver).assignment?.status).toBe(event === 'Stop' ? 'waiting' : 'disconnected');
+      const delivered = await delivery; expect(delivered.stdout).toContain('DELIVER_DURING_STOP');
+      expect(service.agentStatus(receiver).assignment?.status).toBe(event === 'Stop' ? 'waiting' : 'disconnected');
+      expect(service.agentStatus(receiver).pendingMessageCount).toBe(1);
+    } finally { delayed.mockRestore(); }
+  });
+
+  it('coalesces a contended duplicate poll without an outage notice, duplicate delivery or acknowledgement', async () => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID(); const sender = register();
+    const registered = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const receiver = JSON.parse(registered.stdout).assignmentId;
+    const original = service.poll.bind(service); let entered!: () => void;
+    const polling = new Promise<void>(resolve => { entered = resolve; });
+    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) => {
+      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, after)), 1800));
+    }) as never);
+    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'SINGLE_CONTENDED_DELIVERY' });
+    try {
+      const delivery = runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+      await polling;
+      const duplicate = await runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+      expect(duplicate.stdout).toBe(''); expect(duplicate.code).toBe(0);
+      const delivered = await delivery; expect(delivered.stdout).toContain('SINGLE_CONTENDED_DELIVERY');
+      expect(service.agentStatus(receiver).pendingMessageCount).toBe(1);
+      const telemetry = fs.readFileSync(path.join(root, 'coordination/telemetry', new Date().toISOString().slice(0, 10) + '.jsonl'), 'utf8');
+      expect(telemetry).toContain('"outcome":"deferred","error":"delivery_busy"');
+    } finally { delayed.mockRestore(); }
+  });
+
   it('releases the session delivery lock after a hook process crashes', async () => {
     const { root, checkout, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());

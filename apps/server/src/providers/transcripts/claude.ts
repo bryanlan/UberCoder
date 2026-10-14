@@ -1,3 +1,4 @@
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import type { NormalizedMessage } from '@agent-console/shared';
 import { stableTextHash } from '../../lib/text.js';
 import {
@@ -141,7 +142,13 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
   let model: string | undefined;
   let title: string | undefined;
 
+  let lastYieldAt = performance.now();
   for (const { index, record } of records) {
+    // Large transcript metadata passes share the server thread with inbox RPCs.
+    // Bound each CPU slice so hook deadlines do not expire behind discovery.
+    if (performance.now() - lastYieldAt >= 8) {
+      await yieldEventLoop(); lastYieldAt = performance.now();
+    }
     if (typeof record.aiTitle === 'string' && record.aiTitle.trim()) {
       title = record.aiTitle.trim();
     }

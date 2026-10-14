@@ -374,7 +374,8 @@ export class SessionManager {
           } else await this.runInputTmuxAction(session, async () => {
             const before = await this.captureSessionScreen(session, false);
             await this.sendLiteralTextToSession(session.tmuxSessionName, text);
-            const entered = await this.waitForInputTextChange(session, hashScreen(before), before, combinedTextKeySettleWaitMs(text));
+            const entered = await this.waitForScreenMatch(session, hashScreen(before), combinedTextKeySettleWaitMs(text),
+              screen => screen.inputActive && screenInputMatchesText(screen, text));
             if (!entered || !entered.inputActive || !screenInputMatchesText(entered, text)
               || sessionScreenShowsWorking(entered) || screenShowsInteractiveSelectionHint(entered)
               || screenShowsQueuedMessageHint(entered)) throw new Error('The provider did not confirm the recovery composer; text remains unsent.');
@@ -684,7 +685,8 @@ export class SessionManager {
           if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
           else await this.runInputTmuxAction(current, async () => {
             await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
-            const entered = await this.waitForInputTextChange(current!, hashScreen(screen), screen, combinedTextKeySettleWaitMs(prompt));
+            const entered = await this.waitForScreenMatch(current!, hashScreen(screen), combinedTextKeySettleWaitMs(prompt),
+              candidate => candidate.inputActive && screenInputMatchesText(candidate, prompt));
             if (!entered || !screenInputMatchesText(entered, prompt) || !entered.inputActive || sessionScreenShowsWorking(entered)
               || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered)) throw new Error('The provider did not confirm a ready continuation composer; text remains unsent.');
             if (await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id') !== current!.id || !maySubmit()) throw new Error('Continuation paused or ownership changed before Enter.');

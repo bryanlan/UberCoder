@@ -9,6 +9,7 @@ import { randomUUID, randomBytes, scryptSync } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { buildApp } from '../apps/server/dist/app.js';
+import { parseClaudeConversationFile } from '../apps/server/dist/providers/transcripts/claude.js';
 
 if (!process.argv.includes('--run')) throw new Error('Use --run to opt into disposable real Codex/Claude inbox sessions. Run npm run build first.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-peer-wake-proof-'));
@@ -18,6 +19,15 @@ const senderProject = path.join(root, 'projects', 'sender'); fs.mkdirSync(sender
 execFileSync('git', ['init', '-q', project]);
 fs.writeFileSync(path.join(project, 'AGENTS.md'), 'This is a disposable Console peer-message wake fixture. Do not edit files. Follow the test prompt and preserve its marker task until it is complete.\n');
 const configPath = path.join(root, 'config.json');
+let fixtureClaudeExecutable;
+if (process.env.PROOF_CLAUDE_EXECUTABLE) {
+  // The host hook identifies its native owner by the provider process name.
+  // Preserve that identity when testing an installed versioned binary.
+  fixtureClaudeExecutable = path.join(root, 'bin', 'claude');
+  fs.mkdirSync(path.dirname(fixtureClaudeExecutable));
+  fs.copyFileSync(process.env.PROOF_CLAUDE_EXECUTABLE, fixtureClaudeExecutable); fs.chmodSync(fixtureClaudeExecutable, 0o700);
+}
+const fixtureHooks = Object.fromEntries(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'].map(event => [event, [{ hooks: [{ type: 'command', command: `node '${path.resolve('scripts/agent-coord.mjs').replaceAll("'", "'\\''")}' hook claude`, timeout: 3 }] }]]));
 const socket = `console-proof-${randomUUID().slice(0, 8)}`;
 const installed = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config/agent-console/config.json'), 'utf8'));
 const config = JSON.parse(fs.readFileSync(new URL('../config/agent-console.example.json', import.meta.url), 'utf8'));
@@ -32,8 +42,10 @@ for (const id of ['codex', 'claude']) {
   config.providers[id].commands.env = { ...config.providers[id].commands.env, AGENT_CONSOLE_CONFIG: configPath, AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_TMUX_SOCKET: socket };
 }
 for (const key of ['newCommand', 'resumeCommand', 'continueCommand']) {
+  if (fixtureClaudeExecutable) config.providers.claude.commands[key][0] = fixtureClaudeExecutable;
   config.providers.codex.commands[key].push('--dangerously-bypass-hook-trust', '-c',
     `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(config.runtimeDir)}`);
+  config.providers.claude.commands[key].push('--setting-sources', '', '--settings', JSON.stringify({ hooks: fixtureHooks }));
   config.providers.claude.commands[key].push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {
     agent_console_coordination: { command: 'node', args: [path.resolve('scripts/agent-coord.mjs'), 'mcp'], env: { AGENT_COORD_RUNTIME: config.runtimeDir } },
   } }));
@@ -68,6 +80,16 @@ const senderToken = randomBytes(32).toString('hex');
 const sender = await rpc({ action: 'register', provider: 'codex', nativeSessionId: randomUUID(), token: senderToken, pid: process.pid, cwd: senderProject });
 const senderAuth = { assignmentId: sender.assignmentId, token: senderToken };
 const ids = [], evidence = [];
+const proofStartedAt = Date.now();
+let lastBeat = performance.now(), maxEventLoopGapMs = 0, loadPasses = 0, loadError;
+const heartbeat = setInterval(() => { const now = performance.now(); maxEventLoopGapMs = Math.max(maxEventLoopGapMs, now - lastBeat); lastBeat = now; }, 20);
+let loadRun;
+const load = () => {
+  if (!process.env.PROOF_METADATA_LOAD || loadRun) return;
+  loadRun = parseClaudeConversationFile({ filePath: process.env.PROOF_METADATA_LOAD, provider: 'claude', projectSlug: 'load', conversationRef: 'read-only-load' })
+    .then(() => { loadPasses++; }, error => { loadError = error; }).finally(() => { loadRun = undefined; });
+};
+const loadTimer = setInterval(load, 2000); load();
 console.log(JSON.stringify({ evidence: root, socket }));
 try {
   for (const provider of (process.env.PROOF_PROVIDERS ?? 'codex,claude').split(',')) {
@@ -130,7 +152,17 @@ try {
     await new Promise(resolve => setTimeout(resolve, 17_000));
     assert.equal(db.prepare('select value from meta where key=?').get(`peer-wake-attempt:${pausedId}`), undefined);
     assert.equal(db.prepare('select acknowledged_at from coordination_messages where id=?').get(pausedId).acknowledged_at, null);
-    evidence.push({ provider, nativeSession: native.native_session_id, sessionId: id, messageId, acknowledged: true,
+    if (loadError) throw loadError;
+    if (process.env.PROOF_METADATA_LOAD) {
+      assert.ok(loadPasses > 0, 'Metadata load was not exercised');
+      assert.ok(maxEventLoopGapMs < 500, `Backend stalled for ${maxEventLoopGapMs}ms`);
+    }
+    const failureDir = path.join(config.runtimeDir, 'coordination/telemetry');
+    const hookFailures = fs.readdirSync(failureDir).filter(name => name.endsWith('.failures.jsonl'))
+      .flatMap(name => fs.readFileSync(path.join(failureDir, name), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)))
+      .filter(record => record.timestamp >= proofStartedAt && record.kind === 'hook' && record.outcome === 'error');
+    assert.equal(hookFailures.length, 0, 'Native hooks failed during the proof');
+    evidence.push({ metadataLoadPasses: loadPasses, maxEventLoopGapMs, hookFailureCount: hookFailures.length, provider, nativeSession: native.native_session_id, sessionId: id, messageId, acknowledged: true,
       reply: marker, elapsedMs: Date.now() - started, continuationBefore: before.continuation,
       continuationAfter: control().continuation, recovery: control().recovery, humanInputCount: 1, manualStopPreserved: true });
     fs.writeFileSync(path.join(root, 'proof.json'), JSON.stringify(evidence, null, 2));
@@ -138,6 +170,7 @@ try {
     await api('POST', `/api/sessions/${id}/release`, {});
   }
 } finally {
+  clearInterval(heartbeat); clearInterval(loadTimer); await loadRun;
   for (const id of ids) if (db.prepare('select should_restore from bound_sessions where id=?').get(id)?.should_restore)
     await api('POST', `/api/sessions/${id}/release`, {}).catch(() => {});
   await rpc({ ...senderAuth, action: 'finish', summary: 'Disposable waiting-agent inbox proof controller finished.' }).catch(() => {});

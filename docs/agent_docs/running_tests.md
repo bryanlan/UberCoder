@@ -125,3 +125,6 @@ acknowledge and reply without a second human input, keep its pending human
 decision and continuation permission, and respect a subsequent manual Stop.
 `PROOF_PROVIDERS=codex` or `claude` narrows the run. The fixtures are released and
 private `proof.json` evidence remains in the printed temporary directory.
+
+
+Coordination delivery under load: `NODE_ENV=test npm run test -w @agent-console/server -- coordination peer-message-wake transcript-responsiveness`. These cover partial composer repaints, Stop during a slow inbox poll, deferred duplicate polls without false outage/acknowledgement, mixed human/control input and CPU-heavy transcript discovery. For the private real-provider proof, `PROOF_METADATA_LOAD=/absolute/path/to/a/large/claude.jsonl` runs read-only metadata load alongside inbox traffic; the proof requires zero native hook failures. `PROOF_CLAUDE_EXECUTABLE=/absolute/path/to/installed/version` tests an older native binary using a private executable copy named claude and private hook settings, preserving production processes and configuration.

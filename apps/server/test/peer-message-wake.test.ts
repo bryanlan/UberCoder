@@ -69,6 +69,32 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
 }
 
 describe('Peer message wake and one-hour sleep', () => {
+  it('waits for the complete Claude composer after a partial repaint before Enter', async () => {
+    const f = await fixture('claude');
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    const paste = f.tmux.pasteText.bind(f.tmux);
+    f.tmux.pasteText = async (name, text) => {
+      await paste(name, text);
+      f.tmux.captureSequence = [claudeReady.replace('❯ ', '❯ ' + text.slice(0, 90)),
+        claudeReady.replace('❯ ', '❯ ' + text)];
+    };
+    const message = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ status: 'submitted' });
+  });
+
+  it.each(['codex', 'claude'] as const)('keeps human text appended to an unsent %s control notice as human conversation', async id => {
+    const f = await fixture(id);
+    const text = PEER_WAKE_PROMPT + 'did you get the message from the fable agent';
+    const record = id === 'codex'
+      ? { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }
+      : { type: 'user', message: { role: 'user', content: text } };
+    const filePath = path.join(f.root, 'mixed-control.jsonl'); fs.writeFileSync(filePath, JSON.stringify(record) + '\n');
+    const parsed = await (id === 'codex' ? parseCodexConversationFile : parseClaudeConversationFile)({ filePath,
+      provider: id, projectSlug: project.slug, conversationRef: f.session.conversationRef });
+    expect(parsed.displayMessages).toMatchObject([{ role: 'user', text }]);
+  });
+
   it.each(['codex', 'claude'] as const)('wakes waiting_for_input %s for a cross-project message without enabling work continuation', async id => {
     const f = await fixture(id);
     f.service.update(f.recipient, { continuation: 'waiting_for_input', status: 'waiting' });
