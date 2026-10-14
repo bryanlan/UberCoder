@@ -148,16 +148,22 @@ function readInput() {
   return raw.trim() ? JSON.parse(raw) : {};
 }
 
-function credential() {
-  // Codex tools can run in a PID namespace. The native thread ID survives that
-  // boundary; host process ancestry does not. Claude's local tools use the
-  // process locator written by its host-side SessionStart hook.
+function credential(nativeThreadId) {
+  // Codex may host auxiliary threads in one process. Its per-call thread ID is
+  // authoritative; a process locator can have been rewritten by another thread.
+  // The ID also survives a sandbox PID namespace where ancestry is unavailable.
   let processOwner;
   try { processOwner = owner(); } catch { /* A sandbox PID namespace may hide the host owner. */ }
-  if (!processOwner && process.env.CODEX_THREAD_ID) {
-    const key = createHash('sha256').update(`codex:${process.env.CODEX_THREAD_ID}`).digest('hex');
+  const codexThreadId = nativeThreadId ?? ((!processOwner || processOwner.name === 'codex') ? process.env.CODEX_THREAD_ID : undefined);
+  if (codexThreadId) {
+    const key = createHash('sha256').update(`codex:${codexThreadId}`).digest('hex');
     const statePath = path.join(directory, 'clients', `${key}.json`);
-    return { statePath, state: JSON.parse(fs.readFileSync(statePath, 'utf8')) };
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (state.provider !== 'codex' || state.nativeSessionId !== codexThreadId
+      || (processOwner && (state.ownerPid !== processOwner.pid || state.ownerStart !== processOwner.start))) {
+      throw new Error('The Codex call thread has no current registered session owner.');
+    }
+    return { statePath, state };
   }
   if (!processOwner) throw new Error('No provider session identity found. Start with coordination hooks enabled.');
   const locator = path.join(directory, 'owners', `${processOwner.pid}-${processOwner.start}.json`);
@@ -336,7 +342,8 @@ async function serveMcp() {
         if (!wikiCall && !grantCall && request.params?.name !== 'agent_coordination') throw new Error('Unknown agent tool.');
         const args = request.params.arguments ?? {};
         if (!(wikiCall ? wikiActions : grantCall ? grantActions : actions).includes(args.action)) throw new Error('Unsupported agent action.');
-        const { state } = credential();
+        const threadId = request.params?._meta?.threadId;
+        const { state } = credential(typeof threadId === 'string' ? threadId : undefined);
         const payload = { ...args, assignmentId: state.assignmentId, token: state.token };
         if (grantCall && process.env.AGENT_CONSOLE_SESSION_ID) payload.consoleSessionId = process.env.AGENT_CONSOLE_SESSION_ID;
         if (payload.action === 'send') payload.messageId ??= randomUUID();

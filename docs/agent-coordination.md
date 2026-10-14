@@ -124,6 +124,9 @@ outage. Real RPC failures remain visible. Large Claude transcript metadata passe
 yield between short CPU slices so coordination requests can run during discovery.
 Each wake pass reads binding history once and rechecks matched bindings under their
 session locks; disconnected assignment history does not multiply that database read.
+Codex MCP calls resolve credentials from their native per-call thread ID and verify
+the registered owner when visible; auxiliary threads in the same provider process
+cannot redirect a main conversation's acknowledgement to another assignment.
 Only complete known control notices are classified as coordination. Real human
 text appended to an interrupted notice remains human conversation content.
 

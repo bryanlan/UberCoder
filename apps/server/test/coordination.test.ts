@@ -534,6 +534,30 @@ describe('assignment coordination', () => {
     expect(fs.statSync(path.join(root, 'coordination/agent.sock')).mode & 0o777).toBe(0o600);
     await expect(startCoordinationSocket(service, root)).rejects.toThrow('Another coordination server');
   });
+  it.each([false, true])('uses the Codex MCP call thread rather than another thread registered by the same process (stale owner: %s)', async staleOwner => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const sender = register(); const nativeSessionId = randomUUID();
+    const first = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const receiver = JSON.parse(first.stdout).assignmentId;
+    await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
+    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'ACK_IN_THE_ORIGINAL_THREAD' });
+    service.poll(receiver, 0);
+    if (staleOwner) {
+      const key = createHash('sha256').update(`codex:${nativeSessionId}`).digest('hex');
+      const statePath = path.join(root, 'coordination/clients', `${key}.json`);
+      const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      fs.writeFileSync(statePath, JSON.stringify({ ...state, ownerStart: 'stale' }));
+    }
+    const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'agent_coordination', _meta: { threadId: nativeSessionId }, arguments: { action: 'ack', messageIds: [messageId] },
+    } });
+    const reply = JSON.parse(result.stdout).result;
+    expect(reply.isError).toBe(staleOwner);
+    expect(service.snapshot().messages.find(m => m.id === messageId)?.acknowledgedAt !== null).toBe(!staleOwner);
+    if (staleOwner) expect(reply.content[0].text).toContain('owner');
+  });
+
   it('serializes overlapping hooks so each provider receives activity and messages only once', async () => {
     const { root, checkout, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());

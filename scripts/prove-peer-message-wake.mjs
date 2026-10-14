@@ -158,11 +158,14 @@ try {
       assert.ok(maxEventLoopGapMs < 500, `Backend stalled for ${maxEventLoopGapMs}ms`);
     }
     const failureDir = path.join(config.runtimeDir, 'coordination/telemetry');
-    const hookFailures = fs.readdirSync(failureDir).filter(name => name.endsWith('.failures.jsonl'))
+    const failures = fs.readdirSync(failureDir).filter(name => name.endsWith('.failures.jsonl'))
       .flatMap(name => fs.readFileSync(path.join(failureDir, name), 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)))
-      .filter(record => record.timestamp >= proofStartedAt && record.kind === 'hook' && record.outcome === 'error');
+      .filter(record => record.timestamp >= proofStartedAt && record.outcome === 'error');
+    const hookFailures = failures.filter(record => record.kind === 'hook');
+    const rpcFailures = failures.filter(record => record.kind === 'rpc_client' || record.kind === 'rpc_server');
     assert.equal(hookFailures.length, 0, 'Native hooks failed during the proof');
-    evidence.push({ metadataLoadPasses: loadPasses, maxEventLoopGapMs, hookFailureCount: hookFailures.length, provider, nativeSession: native.native_session_id, sessionId: id, messageId, acknowledged: true,
+    assert.equal(rpcFailures.length, 0, 'Native coordination RPC failed during the proof');
+    evidence.push({ metadataLoadPasses: loadPasses, maxEventLoopGapMs, hookFailureCount: hookFailures.length, rpcFailureCount: rpcFailures.length, provider, nativeSession: native.native_session_id, sessionId: id, messageId, acknowledged: true,
       reply: marker, elapsedMs: Date.now() - started, continuationBefore: before.continuation,
       continuationAfter: control().continuation, recovery: control().recovery, humanInputCount: 1, manualStopPreserved: true });
     fs.writeFileSync(path.join(root, 'proof.json'), JSON.stringify(evidence, null, 2));
