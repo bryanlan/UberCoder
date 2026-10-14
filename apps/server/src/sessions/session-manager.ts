@@ -988,7 +988,7 @@ export class SessionManager {
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (liveness === 'unknown') return false;
     if (liveness === 'alive') {
-      if (await this.suspensionBlockReason(session)) return false;
+      if (await this.suspensionBlockReason(session, 'pressure')) return false;
     } else {
       // A finished session whose tmux process already exited must not be
       // relaunched by reconciliation while the host is under pressure.
@@ -1079,7 +1079,7 @@ export class SessionManager {
       return;
     }
     if (liveness === 'alive') {
-      const blocked = await this.suspensionBlockReason(session, false);
+      const blocked = await this.suspensionBlockReason(session, 'idle');
       if (blocked) {
         // Retained live sessions still need their pipe/watchers after restart.
         // Ownership and unreadable-screen failures must not attach to a pane.
@@ -2490,11 +2490,10 @@ export class SessionManager {
     return assignment?.status === 'active';
   }
 
-  private async suspensionBlockReason(session: BoundSession, protectActiveAssignment = true): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
+  private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
     // An assignment can remain active after SessionStart without a running
-    // turn. Ordinary idle sleep uses native activity; explicit and pressure
-    // suspension retain their assignment policy.
-    if (protectActiveAssignment && this.hasActiveCoordinationAssignment(session)) return 'assignment';
+    // turn. Ordinary idle sleep uses native activity. Manual suspension can
+    // also pause a turn waiting at a native selection without answering it.
     if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive'
       || await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== session.id) {
       return 'ownership';
@@ -2505,14 +2504,32 @@ export class SessionManager {
     await this.runRecovery.refresh(session.id);
     const current = this.db.boundSessions.getById(session.id);
     const idleResumeChoice = session.provider === 'claude' && claudeFullSessionResumeSelection(screen) !== undefined;
-    if (!current || !current.shouldRestore || current.status !== 'bound' || current.isWorking
+    const run = this.runRecovery.getRunState(session.id);
+    const selectionLines = screen.content.split('\n').map(line => line.trim()).filter(Boolean).slice(-8);
+    const knownClaudeSelection = session.provider === 'claude'
+      && (idleResumeChoice || claudeFolderTrustSelection(screen) !== undefined);
+    // An incomplete composer can contain menu-control text. Require actual
+    // choices before treating the missing composer as a native input wait.
+    const unparsedInput = !knownClaudeSelection
+      && selectionLines.some(line => /^[❯›>]\s*(?!\d+\.\s)\S/u.test(line));
+    const nativeSelection = knownClaudeSelection || (!unparsedInput
+      && selectionLines.filter(line => /^(?:[❯›>]\s*)?\d+\.\s/u.test(line)).length >= 2);
+    const manualInputWait = mode === 'manual' && !screen.inputActive && nativeSelection && screenShowsInteractiveSelectionHint(screen)
+      && (!run || run.timestamp <= screen.capturedAt);
+    const turnIsWorking = this.providerTurnIsWorking(session.id);
+    // A ready composer/model is required for automatic sleep, not a human
+    // pause. Native completion also permits pausing a still-repainting resume.
+    const requireReadyPrompt = mode !== 'manual'
+      || unparsedInput || (!manualInputWait && !screen.inputActive && turnIsWorking !== false);
+    if (mode !== 'idle' && !manualInputWait && this.hasActiveCoordinationAssignment(session)) return 'assignment';
+    if (!current || !current.shouldRestore || current.status !== 'bound' || (!manualInputWait && current.isWorking)
       || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
-      || current.conversationRef.startsWith('pending:') || this.providerTurnIsWorking(session.id) === true
-      || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+      || current.conversationRef.startsWith('pending:') || (!manualInputWait && turnIsWorking === true)
+      || sessionScreenShowsWorking(screen) || (requireReadyPrompt && screenIsStartingUp(screen))
       || screenShowsBackgroundWork(screen)
-      || screen.inputText.trim() || (!idleResumeChoice && (!screen.inputActive || screenShowsInteractiveSelectionHint(screen)))
+      || screen.inputText.trim() || (requireReadyPrompt && !idleResumeChoice && (!screen.inputActive || screenShowsInteractiveSelectionHint(screen)))
       || screenShowsQueuedMessageHint(screen)
-      || (session.provider === 'codex' ? !screen.model : !idleResumeChoice && !screenLooksReadyForLiteralPrompt(screen))) {
+      || (requireReadyPrompt && (session.provider === 'codex' ? !screen.model : !idleResumeChoice && !screenLooksReadyForLiteralPrompt(screen)))) {
       return 'busy';
     }
     return undefined;
@@ -2523,13 +2540,12 @@ export class SessionManager {
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;
-      if (!session.shouldRestore || session.status !== 'bound' || session.isWorking
+      if (!session.shouldRestore || session.status !== 'bound'
         || session.modelProfileRequest || session.conversationRef.startsWith('pending:')) {
         throw new SessionInputRejectedError('Only an idle, established session can be suspended.');
       }
-      const blockReason = await this.suspensionBlockReason(session);
-      // Provider readiness checks await I/O; an assignment may have resumed.
-      if (blockReason === 'assignment' || this.hasActiveCoordinationAssignment(this.mustGetSession(session.id))) {
+      const blockReason = await this.suspensionBlockReason(session, 'manual');
+      if (blockReason === 'assignment') {
         throw new SessionInputRejectedError('This session has an active coordination assignment.');
       }
       if (blockReason === 'ownership') {
@@ -2537,7 +2553,7 @@ export class SessionManager {
       }
       if (blockReason === 'screen') throw new SessionInputRejectedError('Session screen could not be verified.');
       if (blockReason === 'busy') {
-        throw new SessionInputRejectedError('The provider is busy, has a draft, or needs your input.');
+        throw new SessionInputRejectedError('The provider is busy or has an unsent draft or queued input.');
       }
       await this.tmuxClient.killSession(session.tmuxSessionName);
       if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') {

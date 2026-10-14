@@ -183,6 +183,7 @@ function renderPane(input: {
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
   onSetModelProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
   onCancelModelProfileRequest?: (sessionId: string, requestId: string) => Promise<boolean>;
+  onSuspend?: (sessionId: string) => Promise<void>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
   sessionOverrides?: Partial<BoundSession>;
 } = {}) {
@@ -215,7 +216,7 @@ function renderPane(input: {
         onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
-        onSuspend={vi.fn()}
+        onSuspend={input.onSuspend ?? vi.fn()}
         onSendKeystrokes={onSendKeystrokes}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={onCancelModelProfileRequest}
@@ -407,6 +408,16 @@ it('cancels the exact server-owned queued profile request', async () => {
 });
 
 describe('ConversationPane live input bridge', () => {
+  it('allows the server to decide suspension when the provider working label includes an input wait', () => {
+    const onSuspend = vi.fn().mockResolvedValue(undefined);
+    renderPane({ sessionOverrides: { isWorking: true }, onSuspend,
+      screenContent: 'Do you want to proceed?\n1. Yes\n2. No\nEnter to confirm · Esc to cancel' });
+    const button = screen.getByRole('button', { name: 'Suspend' });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    expect(onSuspend).toHaveBeenCalledWith('session-1');
+  });
+
   it('restores a rejected draft and keeps it when the conversation is reopened', async () => {
     const send = deferred<boolean>();
     const onSendKeystrokes = vi.fn(() => send.promise);

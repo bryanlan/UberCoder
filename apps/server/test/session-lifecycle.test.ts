@@ -7,6 +7,7 @@ import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionInputRejectedError, SessionKeystrokeRejectedError, SessionManager } from '../src/sessions/session-manager.js';
 import { TmuxError } from '../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
+import { CodexRunMonitor } from '../src/providers/transcripts/codex-run-state.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 function backdateFinishedSession(db: AppDatabase, sessionId: string, minutesAgo: number): void {
@@ -703,18 +704,134 @@ describe('SessionManager lifecycle', () => {
       await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
       expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
 
-      tmux.paneText = 'OpenAI Codex\nSelect Model and Effort\n1. GPT-6-Astra\n› 2. GPT-6-Sol (current)\nenter select · esc back\nGPT-6.1-Sol xhigh fast · ~/demo';
-      await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
-      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
-
+      tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\nGPT-6.1-Sol xhigh fast · ~/demo';
       db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, isWorking: true });
-      await expect(manager.suspendSession(session.id)).rejects.toThrow('Only an idle, established session');
+      await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
       expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
     }
     expect(db.sqlite.prepare('select status, description from coordination_assignments where id=?')
       .get('assignment-1')).toEqual({ status, description: 'Unfinished work' });
     await manager.stop();
     db.close();
+  });
+
+  it.each([provider, claudeProvider])('manually suspends a $id turn waiting for selection without answering it', async (adapter) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-manual-wait-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'Do you want to proceed?\n› 1. Yes\n  2. No\nEnter to confirm · Esc to cancel';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), adapter);
+    const session = await manager.bindConversation({
+      project, provider: adapter, providerSettings,
+      conversationRef: 'history:manual-input-wait', title: 'Waiting for input', kind: 'history',
+    });
+    addCoordinationAssignment(db, session, 'active');
+    db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, isWorking: true });
+    const historyBefore = await fs.readFile(session.eventLogPath!, 'utf8');
+
+    try {
+      const suspended = await manager.suspendSession(session.id);
+      expect(suspended).toMatchObject({ status: 'bound', shouldRestore: true, isWorking: false });
+      expect(suspended.manualSuspendedAt).toBeTruthy();
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+      expect(tmux.sent).toEqual([]);
+      expect(tmux.sentKeys).toEqual([]);
+      expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain(historyBefore);
+      expect(db.sqlite.prepare('select status from coordination_assignments where id=?').get('assignment-1'))
+        .toEqual({ status: 'active' });
+      await manager.reconcileSessions();
+      expect(tmux.created).toHaveLength(1);
+
+      tmux.paneText = adapter.id === 'codex'
+        ? 'OpenAI Codex\n› Ask Codex to do anything\nGPT-6.1-Sol xhigh · ~/demo'
+        : 'Claude Code\n❯ \nbypass permissions on';
+      const resumed = await manager.resumeSession(session.id);
+      expect(resumed.manualSuspendedAt).toBeUndefined();
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+      expect(tmux.sentKeys).toEqual([]);
+    } finally { await manager.stop(); db.close(); }
+  });
+
+  it.each(['idle', 'pressure'] as const)('keeps provider selections protected during automatic %s suspension', async (mode) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-auto-wait-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'Select Model and Effort\n1. GPT-6-Astra\n› 2. GPT-6-Sol (current)\nenter select · esc back';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), provider, providerSettings,
+      mode === 'pressure' ? { eagerRestoreWindowMs: 24 * 60 * 60_000, pressureSuspendAvailableBytes: 3 * 1024 ** 3,
+        readMemInfo: () => 'MemAvailable: 1024000 kB\n' } : {});
+    const session = await manager.bindConversation({
+      project, provider, providerSettings,
+      conversationRef: 'history:auto-input-wait', title: 'Waiting for input', kind: 'history',
+    });
+    backdateFinishedSession(db, session.id, 120);
+    try {
+      await manager.reconcileSessions();
+      await manager.reconcileSessions();
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+      expect(db.boundSessions.getById(session.id)?.pressureSuspendedAt).toBeUndefined();
+      expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
+      expect(tmux.sentKeys).toEqual([]);
+      const suspended = await manager.suspendSession(session.id);
+      expect(suspended.manualSuspendedAt).toBeTruthy();
+    } finally { await manager.stop(); db.close(); }
+  });
+
+  it.each(['completed', 'running'] as const)('checks native %s state before manually suspending a still-repainting resume', async (status) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-manual-restore-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'Completed response.\n› Ask Codex to do anything\nGPT-6.1-Sol xhigh · ~/demo';
+    const adapter = { ...provider, createRunMonitor: () => new CodexRunMonitor() };
+    const transcriptPath = path.join(tempDir, 'native.jsonl');
+    const nativeRecord = (type: string) => JSON.stringify({ type: 'event_msg', timestamp: new Date().toISOString(),
+      payload: { type, turn_id: 'turn1' } }) + '\n';
+    await fs.writeFile(transcriptPath, nativeRecord('task_started') + (status === 'completed' ? nativeRecord('task_complete') : ''));
+    db.conversationIndex.upsert({ ref: 'native-idle', kind: 'history', projectSlug: project.slug, provider: 'codex',
+      title: 'Native idle', updatedAt: new Date().toISOString(), transcriptPath, isBound: false, degraded: false });
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'), new RealtimeEventBus(), adapter);
+    const session = await manager.bindConversation({ project, provider: adapter, providerSettings,
+      conversationRef: 'native-idle', title: 'Native idle', kind: 'history' });
+    try {
+      const transcriptBefore = await fs.readFile(transcriptPath, 'utf8');
+      tmux.paneText = 'Restoring previous conversation…';
+      if (status === 'running') {
+        await expect(manager.suspendSession(session.id)).rejects.toThrow('The provider is busy');
+        expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+        tmux.paneText = 'Do you want to proceed?\n› 1. Yes\n  2. No\nEnter to confirm · Esc to cancel';
+        addCoordinationAssignment(db, session, 'active');
+      }
+      const suspended = await manager.suspendSession(session.id);
+      expect(suspended.manualSuspendedAt).toBeTruthy();
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(false);
+      expect(await fs.readFile(transcriptPath, 'utf8')).toBe(transcriptBefore);
+      expect(tmux.sentKeys).toEqual([]);
+    } finally { await manager.stop(); db.close(); }
+  });
+
+  it.each([
+    '',
+    'Starting session…',
+    'Working (2s • esc to interrupt)',
+    '1 background terminal running · /ps to view · /stop to close\n› Ask Codex to do anything',
+    'Do you want to proceed?\n› 1. Yes\n  2. No\nEnter to confirm · Esc to cancel\nbypass permissions on · 1 task · esc to interrupt',
+    '› unsent draft\nEnter to confirm · Esc to cancel',
+    '› queued input\nTab to queue message',
+  ])('rejects manual suspension on unsafe or unverifiable screen %j', async (snapshot) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-manual-guard-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const tmux = new FakeTmux();
+    tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\nGPT-6.1-Sol xhigh · ~/demo';
+    const manager = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime'));
+    const session = await manager.bindConversation({ project, provider, providerSettings,
+      conversationRef: 'history:unsafe-manual', title: 'Unsafe', kind: 'history' });
+    tmux.paneText = snapshot;
+    try {
+      await expect(manager.suspendSession(session.id)).rejects.toBeInstanceOf(SessionInputRejectedError);
+      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+      expect(db.boundSessions.getById(session.id)?.manualSuspendedAt).toBeUndefined();
+      expect(tmux.sentKeys).toEqual([]);
+    } finally { await manager.stop(); db.close(); }
   });
 
   it('rejects manual suspension when a waiting assignment becomes active during readiness checks', async () => {
