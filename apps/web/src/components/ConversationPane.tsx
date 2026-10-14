@@ -1700,7 +1700,7 @@ export function ConversationPane({
                   <button
                     type="button"
                     onClick={() => onSuspend(boundSession.id)}
-                    disabled={suspending || releasing || boundSession.isWorking || sessionSuspended}
+                    disabled={suspending || releasing || sessionSuspended}
                     title="Keep this conversation in Work and resume it when selected again"
                     className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
                   >
@@ -1759,7 +1759,7 @@ export function ConversationPane({
                     <button
                       type="button"
                       onClick={() => onSuspend(boundSession.id)}
-                      disabled={suspending || releasing || boundSession.isWorking || sessionSuspended}
+                      disabled={suspending || releasing || sessionSuspended}
                       title="Keep this conversation in Work and resume it when selected again"
                       className="inline-flex items-center gap-2 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100 transition hover:bg-amber-500/20 disabled:opacity-60"
                     >
