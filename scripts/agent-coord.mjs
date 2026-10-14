@@ -190,7 +190,7 @@ async function runHook(provider, input) {
   const result = await rpc({ ...auth, action: 'poll', after: state.cursor });
   // The running backend owns continuation policy; source integration alone does
   // not activate a newly built service. Reintroduce it when the backend exposes it.
-  const runtimeIntroductionVersion = `${introductionVersion}:${result.continuationPolicy ? 'unattended' : 'activity'}:${result.grantPolicy ? 'grants' : ''}`;
+  const runtimeIntroductionVersion = `${introductionVersion}:${result.continuationPolicy ? createHash('sha256').update(result.continuationPolicy).digest('hex').slice(0, 12) : 'activity'}:${result.grantPolicy ? 'grants' : ''}`;
   const bootstrap = state.introduced !== runtimeIntroductionVersion;
   const authorityVersion = JSON.stringify(result.authority ?? []);
   const authorityChanged = result.authority !== undefined && authorityVersion !== state.authorityVersion;

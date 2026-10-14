@@ -56,7 +56,7 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexNotice, type PeerWakeAttempt } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexNotice, type PeerWakeAttempt } from '../coordination/wake.js';
 import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
@@ -403,8 +403,7 @@ export class SessionManager {
       onRunState: (id, run) => {
         const session = this.db.boundSessions.getById(id);
         if (session && run.status === 'cancelled') {
-          const assignment = this.unattendedAssignment(session);
-          if (assignment && run.timestamp >= (continuationControl(this.db, assignment.id).enabledAt ?? '')) this.pauseUnattended(id);
+          if (run.timestamp >= (session.lastActivityAt ?? session.startedAt)) this.pauseAutomaticInput(id);
         }
         if (session && run.status === 'failed') {
           const assignment = this.assignmentForSession(session);
@@ -483,10 +482,13 @@ export class SessionManager {
     return assignment && assignment.status !== 'finished' && continuationControl(this.db, assignment.id).continuation === 'unattended' ? assignment : undefined;
   }
 
-  private pauseUnattended(sessionId: string): void {
+  private pauseAutomaticInput(sessionId: string): void {
     const session = this.db.boundSessions.getById(sessionId);
-    const assignment = session && this.unattendedAssignment(session);
-    if (assignment) setContinuation(this.db, assignment.id, 'waiting_for_input');
+    const assignment = session && this.assignmentForSession(session);
+    if (assignment && assignment.status !== 'finished') {
+      setPeerWakePaused(this.db, assignment.id, true);
+      setContinuation(this.db, assignment.id, 'waiting_for_input');
+    }
   }
 
   private requestAssignmentWake(): void {
@@ -514,7 +516,7 @@ export class SessionManager {
       }>;
     for (const recipient of recipients) {
       if (this.stopped) return;
-      if (continuationControl(this.db, recipient.id).continuation !== 'unattended') continue;
+      if (peerWakePaused(this.db, recipient.id)) continue;
       const sessions = this.listRestorableSessions().filter((session) => session.provider === recipient.provider
         && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
       if (sessions.length !== 1) continue;
@@ -569,11 +571,11 @@ export class SessionManager {
           });
           if (signalled) this.requestAssignmentWake();
         }
-        if (control.continuation !== 'unattended' || control.recovery?.status === 'blocked' || control.recovery?.status === 'stalled'
-          || (!pending().length && !pendingContinuation(control)) || this.stopped) return;
-        if (control.recovery && control.recovery.attempts > 0 && !pendingContinuation(control)) return;
+        const peerResponse = pending().length > 0;
+        if ((!peerResponse && !pendingContinuation(control)) || this.stopped) return;
         const revision = control.revision;
-        const allowed = () => !this.stopped && continuationControl(this.db, recipient.id).continuation === 'unattended'
+        const allowed = () => !this.stopped && !peerWakePaused(this.db, recipient.id)
+          && (peerResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
           && continuationControl(this.db, recipient.id).revision === revision;
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
         if (!project) return;
@@ -595,6 +597,12 @@ export class SessionManager {
           const restored = await this.restoreSession(current);
           if (!restored) {
             const reason = 'The original conversation could not be restored.';
+            if (peerResponse) {
+              for (const message of pending()) this.db.meta.set(message.key, JSON.stringify({
+                status: 'failed', sessionId: current.id, timestamp: nowIso(), reason,
+              } satisfies PeerWakeAttempt));
+              return;
+            }
             control = continuationControl(this.db, recipient.id);
             if (control.revision === revision && control.continuation === 'unattended') {
               const attempts = (control.recovery?.attempts ?? 0) + 1;
@@ -644,8 +652,9 @@ export class SessionManager {
         const messages = pending();
         control = continuationControl(this.db, recipient.id);
         const automatic = pendingContinuation(control);
-        if (!messages.length && !automatic) return;
-        if (!messages.length && !control.signals.length && screenShowsBackgroundWork(screen)) return;
+        if (peerResponse ? !messages.length : !automatic) return;
+        if (!peerResponse && !control.signals.length && screenShowsBackgroundWork(screen)) return;
+        const prompt = peerResponse ? PEER_WAKE_PROMPT : UNATTENDED_CONTINUATION_PROMPT;
         const timestamp = nowIso();
         const restoreRecord = this.db.meta.get(peerWakeRestoreKey(current.id));
         const restore = restoreRecord ? JSON.parse(restoreRecord) as { pid: number; restoredAt: string } : undefined;
@@ -658,29 +667,31 @@ export class SessionManager {
             JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');
-        const attempts = (control.recovery?.attempts ?? 0) + 1;
         const consumedSignals = new Set(control.signals.map(signal => signal.key));
-        control.recovery = { status: 'submitting', attempts,
-          reason: control.signals.slice(-3).map(signal => signal.reason).join(' ') || control.recovery?.reason || 'Pending peer messages require an unattended continuation.',
-          startedAt: timestamp,
-          nextAttemptAt: new Date(Date.now() + CONTINUATION_DELAYS_MS[Math.min(attempts, 2)]!).toISOString() };
-        saveContinuation(this.db, recipient.id, control);
+        if (!peerResponse) {
+          const attempts = (control.recovery?.attempts ?? 0) + 1;
+          control.recovery = { status: 'submitting', attempts,
+            reason: control.signals.slice(-3).map(signal => signal.reason).join(' ') || control.recovery!.reason,
+            startedAt: timestamp,
+            nextAttemptAt: new Date(Date.now() + CONTINUATION_DELAYS_MS[Math.min(attempts, 2)]!).toISOString() };
+          saveContinuation(this.db, recipient.id, control);
+        }
         const runtime = this.runtimeState(current.id);
         const previousSubmittedTurnAt = runtime.submittedTurnAt;
         runtime.submittedTurnAt = timestamp;
         try {
           if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id || !maySubmit()) throw new Error('Unattended continuation paused or ownership changed before submission.');
-          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, UNATTENDED_CONTINUATION_PROMPT);
+          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
           else await this.runInputTmuxAction(current, async () => {
-            await this.tmuxClient.pasteText(current!.tmuxSessionName, UNATTENDED_CONTINUATION_PROMPT);
-            const entered = await this.waitForInputTextChange(current!, hashScreen(screen), screen, combinedTextKeySettleWaitMs(UNATTENDED_CONTINUATION_PROMPT));
-            if (!entered || !screenInputMatchesText(entered, UNATTENDED_CONTINUATION_PROMPT) || !entered.inputActive || sessionScreenShowsWorking(entered)
+            await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
+            const entered = await this.waitForInputTextChange(current!, hashScreen(screen), screen, combinedTextKeySettleWaitMs(prompt));
+            if (!entered || !screenInputMatchesText(entered, prompt) || !entered.inputActive || sessionScreenShowsWorking(entered)
               || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered)) throw new Error('The provider did not confirm a ready continuation composer; text remains unsent.');
             if (await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id') !== current!.id || !maySubmit()) throw new Error('Continuation paused or ownership changed before Enter.');
             await this.tmuxClient.sendKeys(current!.tmuxSessionName, ['Enter']);
           });
           saveAttempt('submitted');
-          if (allowed()) {
+          if (!peerResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: 'submitted' };
             control.signals = control.signals.filter(signal => !consumedSignals.has(signal.key));
@@ -688,14 +699,14 @@ export class SessionManager {
           }
           if (restoreRecord) this.db.meta.set(peerWakeRestoreKey(current.id), '');
           const updated = this.updateBoundSessionFields(current.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
-          this.appendEvent(updated, { type: 'status', text: 'Started unattended continuation of the existing authorized assignment.', timestamp });
+          this.appendEvent(updated, { type: 'status', text: peerResponse ? 'Started peer-inbox response without changing continuation permission.' : 'Started unattended continuation of the existing authorized assignment.', timestamp });
           this.eventBus.emit({ type: 'session.updated', session: updated });
         } catch (error) {
           // The durable attempt still prevents replay. A transport rejection
           // must not make the previous completed provider turn look running.
           if (runtime.submittedTurnAt === timestamp) runtime.submittedTurnAt = previousSubmittedTurnAt;
           saveAttempt('failed', error instanceof Error ? error.message : 'Provider input failed.');
-          if (allowed()) {
+          if (!peerResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: 'blocked', reason: 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
             saveContinuation(this.db, recipient.id, control);
@@ -1663,7 +1674,7 @@ export class SessionManager {
       if (current.launchContext?.launchedBy !== launchedBy || current.projectSlug !== session.projectSlug || !authorized()) {
         throw new Error('Session ownership or close authority changed.');
       }
-      this.pauseUnattended(sessionId);
+      this.pauseAutomaticInput(sessionId);
       this.runRecovery.cancel(sessionId);
       await this.releaseSessionInternal(sessionId);
     });
@@ -1916,7 +1927,7 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
-    this.pauseUnattended(sessionId);
+    this.pauseAutomaticInput(sessionId);
     this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
   }
@@ -1968,7 +1979,7 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
-    if (payload.text || payload.keys?.length) this.pauseUnattended(sessionId);
+    if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId);
     if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
@@ -2664,7 +2675,7 @@ export class SessionManager {
   }
 
   async releaseSession(sessionId: string): Promise<void> {
-    this.pauseUnattended(sessionId);
+    this.pauseAutomaticInput(sessionId);
     this.runRecovery.cancel(sessionId);
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
@@ -2725,7 +2736,7 @@ export class SessionManager {
   }
 
   async suspendSession(sessionId: string): Promise<BoundSession> {
-    this.pauseUnattended(sessionId);
+    this.pauseAutomaticInput(sessionId);
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;
@@ -3049,6 +3060,8 @@ export class SessionManager {
     const messageId = liveMessageId(session.id, offset);
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
     if (event.type === 'user-input') {
+      const assignment = this.assignmentForSession(session);
+      if (assignment) setPeerWakePaused(this.db, assignment.id, false);
       this.db.meta.set(`human-input:${session.id}`, JSON.stringify({ id: messageId, text: event.text, timestamp: event.timestamp }));
       (this.runtimeState(session.id).lastUserInput ??= new LastUserInputCache(this.readLastUserInput)).record(session.eventLogPath, event.text);
       this.eventBus.emit({

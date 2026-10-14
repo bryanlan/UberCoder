@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
-import { peerWakeAttemptKey, peerWakeFollowupKey, type PeerWakeAttempt } from './wake.js';
+import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, type PeerWakeAttempt } from './wake.js';
 import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { GRANT_POLICY } from '../grants/schema.js';
@@ -220,8 +220,8 @@ export class CoordinationService {
     const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
-    if (assignment.continuation === 'waiting_for_input' && status !== 'working') return { id: message.id, queued: true, recipient, delivery: 'on_resume',
-      note: 'Queued, not received. This assignment is waiting for human input; automatic wake is disabled.' };
+    if (peerWakePaused(this.db, assignment.id) && status !== 'working') return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+      note: 'Queued, not received. Automatic input was paused by a human; peer wake resumes after the next accepted human turn.' };
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
     const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
     if (attemptText) {

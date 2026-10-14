@@ -26,7 +26,7 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
       <summary className="cursor-pointer px-3 py-2">Work in this repository · {activeAssignments.length} assignments · {data.pendingMessageCount} messages awaiting acknowledgement</summary>
       <div className="max-h-72 space-y-4 overflow-auto border-t border-slate-700 p-3">
         <p className="text-xs text-slate-400">Activity and messages only. Agents coordinate overlaps directly; files and Git operations are not locked.</p>
-        <p className="text-xs text-slate-400">Unattended permits continuing existing authorized work without another prompt. It grants no new permissions. Waiting for input disables automatic wake; Stop and new human input pause unattended work.</p>
+        <p className="text-xs text-slate-400">Unattended permits continuing existing authorized work without another prompt. It grants no new permissions. Agents can answer peer messages while waiting for human input. Stop pauses automatic input until the next human turn; a peer wake preserves pending decisions.</p>
         {activeAssignments.length === 0 && <p>No registered assignments currently affect this repository.</p>}
         <ul className="space-y-2" aria-label="Active assignments">
           {activeAssignments.map((assignment) => (

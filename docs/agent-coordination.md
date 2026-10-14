@@ -36,7 +36,7 @@ The shared repository wiki is a separate, lasting knowledge surface. See [Agent 
 
 ### Explicit unattended work
 
-**Unattended means permission to continue the existing human-authorized assignment without another prompt.** It never grants a new task, external action, approval or deployment permission. Every new assignment defaults to `waiting_for_input`; neither its `active` label nor a peer message enables automatic input. `status` returns the current continuation permission, supervisor and recovery outcome. The repository activity panel defines both modes and shows a stalled warning after three automatic continuations.
+**Unattended means permission to continue the existing human-authorized assignment without another prompt.** It never grants a new task, external action, approval or deployment permission. Every new assignment defaults to `waiting_for_input`; neither its `active` label nor a peer message enables unattended work. `status` returns the current continuation permission, supervisor and recovery outcome. The repository activity panel defines both modes and shows a stalled warning after three automatic continuations.
 
 Set `continuation: "unattended"` through `update` when the assignment is authorized to continue. Set `continuation: "waiting_for_input"` **before asking Bryan for a decision**, even if work remains. Console Stop, new human input, manual suspension and release pause unattended permission immediately. The ordinary native end-of-turn Stop hook only sets lifecycle status `waiting`; it preserves unattended permission because a completed turn need not mean a completed assignment. Native Codex cancellation also pauses it. Visible native drafts and approvals defer input without modifying them.
 
@@ -44,22 +44,44 @@ After actual progress, an agent may explicitly renew `unattended` for the remain
 
 Declare `supervisorId` on a separately registered worker. A worker's `finish`, native provider failure, exhausted continuation budget, unattended disconnect or explicit `notifySupervisor: true` handoff signals its parent. A native child completion in the parent's Codex `SubAgentActivity` or Claude `<task-notification>` stream also signals that parent. Only actual native envelopes count; quoted assistant prose does not. Links reject unknown, finished, self and cyclic supervisors. Signals cannot enable a waiting parent, change its authority or replenish its recovery budget. A long-running worker can hand off a reviewable result without declaring its assignment finished.
 
-The backend checks every 15 seconds. A ready unattended lead with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Fresh worker signals use that same first delay; an initial pending peer message can request an immediate continuation. Later continuations wait at least 45 and 120 seconds. Each permission generation permits three automatic continuation attempts. Active foreground turns and visible background work defer silent-idle continuation; a result signal can request reconciliation while other workers remain active. Typed transient failures use the separate bounded provider-failure controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery), never an additional generic retry budget.
+The backend checks every 15 seconds. A ready unattended lead with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Fresh worker signals use that same first delay. Pending peer messages request a separate inbox response turn immediately when ready. Later continuations wait at least 45 and 120 seconds. Each permission generation permits three automatic continuation attempts. Active foreground turns and visible background work defer silent-idle continuation; a result signal can request reconciliation while other workers remain active. Typed transient failures use the separate bounded provider-failure controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery), never an additional generic retry budget.
 
 SQLite metadata stores permission, revision, deduplicated signals and attempts. Each input attempt is recorded before transport. Missing native acknowledgement after 30 seconds, an interrupted submission or ambiguous input blocks automatic replay across restart. A human pause or permission revision during readiness or text entry prevents Enter. Incoming wake requests received while a drain runs request another pass; new signals arriving during input remain pending. The continuation notice asks the agent to read its inbox, reconcile work and results, preserve all constraints and continue the assignment.
 
 Source integration does not activate a compiled backend. Deploy the reviewed backend and browser together using the installation contract below and verify real disposable Codex and Claude examples. The helper introduces continuation policy only when the running backend returns it; existing MCP connections need reconnecting to discover the added update fields. The hook also tells agents with a cached tool schema to invoke the same canonical `update` via `node scripts/agent-coord.mjs update` with JSON on stdin; that uses the existing authenticated RPC, without restarting the provider. An older backend rejects unsupported fields explicitly.
+
+### Peer-message wake
+
+Wake on message is enabled by default, independently of work continuation. A direct
+message can start an inbox response turn in an idle `waiting_for_input` session,
+including a session waiting for Bryan or one never enabled for unattended work.
+This works across projects and can restore the original automatically sleeping
+conversation. The fixed notice says that wake grants no new authority, pending
+Bryan decisions stay pending, and the agent returns to waiting when a decision
+still blocks its assignment. Existing active grants continue to govern authorized
+work. Reading or answering an inbox neither enables continuation nor spends or
+renews its work budget. Per-message wake attempts retain their existing ceiling
+of one initial response and one delayed follow-up after a completed turn.
+
+Console Stop, native cancellation, manual suspension and release pause automatic
+input independently of `waiting_for_input`. The pause survives agent updates,
+registration and backend restart; only the next accepted human conversation turn
+clears the peer-wake pause. Draft typing also defers wake until that human turn
+is submitted. An ordinary native end-of-turn Stop hook does not pause wake.
+Active turns, drafts, approval prompts, queued model changes, insufficient memory
+and uncertain session ownership still defer input. Finished assignments reject
+new messages, and closed sessions cannot wake without a current restorable binding.
 
 ### Send receipts
 
 Send returns id, queued, recipient, delivery and a plain-English note. The recipient reports working, idle or stopped, provider, last messaging contact, and resumableInConsole. Process identity is checked by PID and start time; an unambiguous current Console binding supplies working/suspension state. A recorded resumable binding is not a guarantee that a provider restart will succeed.
 
 - next_step: queued for the next supported native hook; long tools can delay it.
-- wake_pending: an unattended continuation is requested for the original Console conversation. Claude drafts, approvals, provider startup and insufficient available memory defer it.
+- wake_pending: a peer-inbox response is requested for the original Console conversation, including while waiting for Bryan. Claude drafts, approvals, provider startup and insufficient available memory defer it.
 - wake_started: a fixed coordination control notice was submitted; receipt still requires acknowledgement.
 - wake_blocked: submission or restore failed or was interrupted. The message remains queued and ambiguous input is never automatically replayed.
 - next_turn: the live recipient has no unique managed Console binding; it waits for its next native turn.
-- on_resume: stopped, suspended or waiting for human input; queued until the original provider conversation is resumed.
+- on_resume: manually paused or without an automatically resumable binding; queued until a human resumes the conversation. Waiting for a Bryan decision alone does not block peer wake.
 - offered: already offered to the runtime, still unacknowledged.
 - acknowledged: the recipient confirmed receipt; queued is false. This does not imply agreement or completed work.
 
@@ -96,7 +118,7 @@ fetch its text. Client failures are recorded independently of the backend. See
 
 ## One-hour loaded idle window
 
-The default `sessions.eagerRestoreHours` and `sessions.restoreGraceHours` are both 1. New activity and completed replies reset the idle clock; restoration alone grants one hour of grace. Reconciliation checks every 30 seconds, so suspension occurs on the first eligible pass after the hour. Sleeping keeps the conversation, inbox, assignment and Work binding. A new direct message can restore that same conversation and continue its work when unattended permission is enabled.
+The default `sessions.eagerRestoreHours` and `sessions.restoreGraceHours` are both 1. New activity and completed replies reset the idle clock; restoration alone grants one hour of grace. Reconciliation checks every 30 seconds, so suspension occurs on the first eligible pass after the hour. Sleeping keeps the conversation, inbox, assignment and Work binding. A new direct message can restore that same conversation for an inbox response, independently of unattended work permission.
 
 Manual pauses, active provider turns, drafts, approvals, queued model changes and unverifiable tmux ownership prevent automatic actions. Memory-pressure sleep can wake for a pending message only after the configured available-memory threshold is met. A surviving registered provider outside its recorded tmux binding prevents a second writer. Finished assignments reject new messages and conversations without a unique current managed binding cannot be automatically resumed.
 

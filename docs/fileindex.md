@@ -253,7 +253,7 @@ Test and verification anchors:
 
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
 - `apps/server/src/coordination/continuation.ts` — explicit continuation permission, supervisor links, durable result signals and bounded idle recovery in SQLite metadata.
-- `apps/server/src/coordination/wake.ts` — current unattended notice, historical peer-notice classification, configured native queue transport and durable attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
+- `apps/server/src/coordination/wake.ts` — independent peer-inbox and unattended notices, stable control-envelope classification, durable human pause, configured native queue transport and message attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.
 - `apps/server/src/coordination/telemetry.ts` and `scripts/coordination-telemetry.{mjs,d.mts}` — bounded private measurements, backend-independent failure recording and read-only audit summaries.
 - `apps/server/src/db/repos/search-index.ts` and migration 15 in `db/schema.ts` — atomic FTS row ownership and indexed identity updates.

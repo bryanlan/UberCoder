@@ -116,3 +116,12 @@ must not recover them. Pending helpers retry transcript adoption using their exa
 registered native identity. Evidence remains under `/tmp/console-close-proof-*`.
 `PROOF_PROVIDERS=codex` or `claude` limits the run; provider authentication and
 tmux are required. The fixture releases only its own sessions during cleanup.
+
+Waiting-agent peer wake (#84): after `npm run build`, run
+`node scripts/prove-peer-message-wake.mjs --run`. This opt-in proof uses real Codex
+and Claude in a private project, database, runtime socket and tmux server. A sender
+in a separate project messages an idle `waiting_for_input` recipient; each must
+acknowledge and reply without a second human input, keep its pending human
+decision and continuation permission, and respect a subsequent manual Stop.
+`PROOF_PROVIDERS=codex` or `claude` narrows the run. The fixtures are released and
+private `proof.json` evidence remains in the printed temporary directory.
