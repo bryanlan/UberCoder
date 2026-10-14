@@ -71,6 +71,16 @@ describe('Finished agent-created session archive', () => {
     expect(f.tmux.created).toHaveLength(1);
   });
 
+  it('keeps a completed close ended when an in-flight screen poll finishes its liveness read', async () => {
+    const f = await fixture({ status: 'waiting' }); let reads = 0;
+    f.tmux.hasSession = async () => {
+      if (++reads === 2) await f.manager.releaseSession(f.session.id);
+      return f.tmux.alive.has(f.session.tmuxSessionName);
+    };
+    expect(await f.manager.getSessionScreen(f.session.id)).toBeUndefined();
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
+  });
+
   it('does not restore a finished helper while its native history is missing, and archives when history becomes readable', async () => {
     const f = await fixture({ history: false }); f.tmux.alive.clear();
     await f.manager.reconcileSessions();

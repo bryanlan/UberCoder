@@ -2956,7 +2956,7 @@ export class SessionManager {
     const restoreMissing = options.restoreMissing ?? true;
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     session = this.db.boundSessions.getById(staleSession.id);
-    if (!session || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
+    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
       return undefined;
     }
     if (liveness === 'unknown') {
