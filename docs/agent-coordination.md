@@ -122,6 +122,8 @@ remain serialized. A contended duplicate delivery hook coalesces behind the curr
 owner and records deferred telemetry; it does not claim receipt or report a server
 outage. Real RPC failures remain visible. Large Claude transcript metadata passes
 yield between short CPU slices so coordination requests can run during discovery.
+Each wake pass reads binding history once and rechecks matched bindings under their
+session locks; disconnected assignment history does not multiply that database read.
 Only complete known control notices are classified as coordination. Real human
 text appended to an interrupted notice remains human conversation content.
 

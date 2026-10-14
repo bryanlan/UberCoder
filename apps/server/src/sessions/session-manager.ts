@@ -510,6 +510,9 @@ export class SessionManager {
   }
 
   private async drainAssignments(): Promise<void> {
+    // Historical unfinished assignments can vastly outnumber loaded bindings.
+    // Read binding history once per pass, then revalidate each match under its lock.
+    const restorableSessions = this.listRestorableSessions();
     const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
       a.pid, a.process_start as processStart from coordination_assignments a
       where a.status!='finished'`).all() as Array<{
@@ -518,7 +521,7 @@ export class SessionManager {
     for (const recipient of recipients) {
       if (this.stopped) return;
       if (peerWakePaused(this.db, recipient.id)) continue;
-      const sessions = this.listRestorableSessions().filter((session) => session.provider === recipient.provider
+      const sessions = restorableSessions.filter((session) => session.provider === recipient.provider
         && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
       if (sessions.length !== 1) continue;
       const session = sessions[0]!;

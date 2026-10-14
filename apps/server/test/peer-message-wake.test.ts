@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakePaused, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey } from '../src/coordination/wake.js';
@@ -69,6 +69,30 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
 }
 
 describe('Peer message wake and one-hour sleep', () => {
+  it('keeps inbox timers responsive with hundreds of disconnected assignments', async () => {
+    const f = await fixture();
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    for (let i = 0; i < 600; i++) {
+      const id = f.service.register({ provider: 'codex', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
+      f.service.disconnect(id);
+    }
+    const list = f.db.boundSessions.list.bind(f.db.boundSessions);
+    const read = vi.spyOn(f.db.boundSessions, 'list').mockImplementation(() => {
+      // Approximate the measured cost of reading production's binding history.
+      const until = performance.now() + 3;
+      while (performance.now() < until) { /* Synchronous SQLite result work. */ }
+      return list();
+    });
+    let last = performance.now(), largestGap = 0;
+    const timer = setInterval(() => { const now = performance.now(); largestGap = Math.max(largestGap, now - last); last = now; }, 10);
+    try {
+      await f.manager.wakePendingAssignments();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(largestGap).toBeLessThan(200);
+      expect(f.tmux.sent).toEqual([]);
+    } finally { clearInterval(timer); read.mockRestore(); }
+  });
+
   it('waits for the complete Claude composer after a partial repaint before Enter', async () => {
     const f = await fixture('claude');
     f.service.update(f.recipient, { continuation: 'waiting_for_input' });
