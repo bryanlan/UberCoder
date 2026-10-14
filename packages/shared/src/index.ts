@@ -507,7 +507,7 @@ export interface WikiSearchResponse {
   results: Array<{ title: string; revision: number; updatedAt: string; snippet: string; matchedTerms: string[] }>;
 }
 
-export type AgentGrantAction = 'launch_session' | 'restart_session';
+export type AgentGrantAction = 'launch_session' | 'restart_session' | 'close_session';
 export interface AgentGrantDefinition {
   grantee: { kind: 'session' | 'assignment' | 'project'; id: string };
   actions: AgentGrantAction[];

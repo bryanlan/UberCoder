@@ -1,6 +1,6 @@
 # Standing grants for Console agents
 
-Bryan can authorize broad work once, then let agents launch, restart and delegate within that scope.
+Bryan can authorize broad work once, then let agents launch, restart, close their own helpers and delegate within that scope.
 The backend stores the authority in SQLite and supplies it to each session.
 Agents interpret the work scope cooperatively. Console checks the active record, action, project, model and resources before a launch.
 
@@ -35,7 +35,7 @@ Renewed authority needs a new human message or an approved request.
   "humanMessageId": "live:<console-session-id>:<byte-offset>",
   "definition": {
     "grantee": { "kind": "assignment", "id": "<assignment-id>" },
-    "actions": ["launch_session", "restart_session"],
+    "actions": ["launch_session", "restart_session", "close_session"],
     "scope": "Do whatever is needed on the planner overnight, including helpers.",
     "projectSlugs": [],
     "limits": { "maxConcurrentSessions": null, "models": [] },
@@ -75,6 +75,18 @@ Use `launch_status` with the returned request ID to obtain the native assignment
 `restart` takes the original `sessionId`. It preserves the native conversation, assignment and inbox.
 Current work, drafts and provider choices defer restart. Finished or manually paused sessions cannot restart automatically.
 
+`close` takes a `sessionId` and an optional `requestId`/`grantId`. It requires an active grant with `close_session` and a session whose stored `launchedBy` is the calling assignment. Sharing a grant or supervising another agent does not permit closing that agent's other sessions. Human-created sessions are outside this agent action.
+
+```json
+{ "action": "close", "sessionId": "<owned-console-session-id>", "requestId": "<unique-request-id>" }
+```
+
+Close stops the owned provider and releases its Work binding, while keeping native history available in Browse. It waits until the native transcript is indexed and readable. It does not wait for launch memory, a session slot, an idle prompt or a model selection. Project/model settings that prevent new launches do not prevent cleanup under a covering close grant. Ownership and current authority are checked again under the session command lock. Reusing the request ID retrieves that original close; it cannot close a different session. Use `launch_status` to inspect the durable result. Closed bindings are never automatically recovered.
+
+New grant definitions include launch, restart and close by default. Existing records retain their explicit actions; they do not gain `close_session` automatically. Bryan can approve that action in a new broad grant. Agents with a cached MCP schema use `node scripts/agent-coord.mjs grants` with the same JSON; the helper obtains their credentials.
+
+An agent-created session whose assignment is finished and whose native process has exited is archived automatically once its indexed native transcript is readable. It leaves Work, retains Browse history and is not restored by polling, reconciliation or recovery. Missing history defers archival without restarting the finished helper. Live native processes, unknown liveness, human-created conversations and manual suspension remain protected. A human can explicitly resume a manually suspended conversation.
+
 The provider recovery controller handles capacity failures and unexpected process exits with bounded backoff.
 Useful output resets its consecutive failure budget. A new running turn clears the visible retry notice.
 
@@ -82,7 +94,7 @@ Each request reserves one session ID before launch. Requests survive a backend r
 Retry with the same `requestId` to retrieve the same action rather than launch another session.
 The queue checks `MemAvailable` against the configured pressure floor plus 250 MiB per new session.
 It waits for memory or the grant's concurrent-session slot, then continues without another approval.
-`launch_status` explains queued, starting, completed, failed and cancelled actions.
+`launch_status` explains queued, starting, completed, failed and cancelled session actions.
 
 ## Inherit and relay existing scope
 

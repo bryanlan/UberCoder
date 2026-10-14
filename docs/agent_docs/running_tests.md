@@ -104,3 +104,15 @@ and process identities, releases its sessions, and retains `proof.json` under it
 printed temporary evidence directory. `PROOF_PROVIDERS=codex` or `claude` narrows
 the run. Native hooks and MCP must point to that private runtime. Do not use a
 running production database or provider session as a fixture.
+
+Owned helper close/archive (#82): `NODE_ENV=test npm run test -w @agent-console/server -- agent-session-launches session-owned-close agent-grants` and `NODE_ENV=test npm run test -w @agent-console/web -- GrantsPage`. These use disposable SQLite/native transcript fixtures and verify exact launcher ownership, current grant authority, history retention, low-memory cleanup, durable request deduplication, automatic finished/exited archival, no recovery after close, missing-history deferral and manual-pause protection.
+
+After `npm run build`, opt into real-provider verification with
+`node scripts/prove-session-close.mjs --run`. It uses a private project, SQLite
+database, runtime and tmux socket. For each provider it closes an owned helper,
+then finishes another helper's assignment and exits that disposable provider.
+Both histories must remain intact, the Work bindings must end, and reconciliation
+must not recover them. Pending helpers retry transcript adoption using their exact
+registered native identity. Evidence remains under `/tmp/console-close-proof-*`.
+`PROOF_PROVIDERS=codex` or `claude` limits the run; provider authentication and
+tmux are required. The fixture releases only its own sessions during cleanup.

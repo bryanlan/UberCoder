@@ -23,6 +23,17 @@ it('lets Bryan edit a broad request and approve its scope and practical limits',
   fireEvent.click(screen.getByRole('button',{name:'Approve edited grant'}));
   await waitFor(()=>expect(decide).toHaveBeenCalledWith('request-one','approve',expect.objectContaining({scope:'Complete Phase 1 with any needed helpers.',limits:{maxConcurrentSessions:3,models:[]}}),'current-csrf'));
 });
+it('offers an explicit permission to close only owned sessions', async () => {
+  const decide = vi.spyOn(api, 'decideGrant').mockResolvedValue({ grant: { ...pending, status: 'active' } });
+  mount([pending]);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+  const close = screen.getByRole('checkbox', { name: 'Close owned sessions' });
+  expect(close).not.toBeChecked();
+  fireEvent.click(close);
+  fireEvent.click(screen.getByRole('button', { name: 'Approve edited grant' }));
+  await waitFor(() => expect(decide).toHaveBeenCalledWith('request-one', 'approve',
+    expect.objectContaining({ actions: ['launch_session', 'restart_session', 'close_session'] }), 'current-csrf'));
+});
 it('offers denial for requests and one-click revoke for immediately activated grants',async()=>{
   const decide=vi.spyOn(api,'decideGrant').mockResolvedValue({grant:{...pending,status:'denied'}}), revoke=vi.spyOn(api,'revokeGrant').mockResolvedValue({grant:{...pending,status:'revoked'}});
   mount([pending,{...pending,id:'active-one',status:'active',provenance:{kind:'human_message',quote:'I authorize all necessary planner work.',messageId:'live:one:0',sessionId:'one'}}]);

@@ -25,6 +25,9 @@ export async function dispatchGrants(coordination: CoordinationService, grants: 
     case 'restart':
       if (!launches) throw new Error('Session launches are unavailable.');
       return launches.request(input.assignmentId, 'restart_session', input);
+    case 'close':
+      if (!launches) throw new Error('Session controls are unavailable.');
+      return launches.request(input.assignmentId, 'close_session', input);
     case 'launch_status':
       if (!launches) throw new Error('Session launches are unavailable.');
       return launches.status(input.assignmentId, input.requestId);

@@ -447,9 +447,34 @@ export class SessionManager {
     return this.db.boundSessions.list().filter(isTreeVisibleBoundSession);
   }
 
-  private assignmentForSession(session: BoundSession): { id: string; status: string } | undefined {
-    return this.db.sqlite.prepare('select id,status from coordination_assignments where provider=? and native_session_id=?')
-      .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string; status: string } | undefined;
+  private assignmentForSession(session: BoundSession): { id: string; status: string; pid: number; processStart: string; nativeSessionId: string } | undefined {
+    type Assignment = { id: string; status: string; pid: number; processStart: string; nativeSessionId: string };
+    if (session.conversationRef.startsWith('pending:')) {
+      // Native registration records this exact Console binding before its
+      // transcript exists. Ambiguous registrations cannot supply an identity.
+      const rows = this.db.sqlite.prepare(`select a.id,a.status,a.pid,a.process_start as processStart,a.native_session_id as nativeSessionId
+        from coordination_assignments a join meta m on m.key='console-session:' || a.id
+        where m.value=? and a.provider=? limit 2`).all(session.id, session.provider) as Assignment[];
+      return rows.length === 1 ? rows[0] : undefined;
+    }
+    return this.db.sqlite.prepare('select id,status,pid,process_start as processStart,native_session_id as nativeSessionId from coordination_assignments where provider=? and native_session_id=?')
+      .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as Assignment | undefined;
+  }
+
+  private isFinishedLaunchedSession(session: BoundSession): boolean {
+    return !!session.launchContext && this.assignmentForSession(session)?.status === 'finished';
+  }
+
+  private async archiveFinishedExitedSession(sessionId: string): Promise<void> {
+    const session = this.db.boundSessions.getById(sessionId);
+    if (!session?.shouldRestore || session.manualSuspendedAt || !this.isFinishedLaunchedSession(session)) return;
+    const assignment = this.assignmentForSession(session)!;
+    if (processStart(assignment.pid) === assignment.processStart || !(await this.hasReadableIndexedTranscript(session))) return;
+    if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') return;
+    const current = this.db.boundSessions.getById(sessionId);
+    if (!current?.shouldRestore || current.manualSuspendedAt || !this.isFinishedLaunchedSession(current)) return;
+    this.runRecovery.cancel(sessionId);
+    await this.releaseSessionInternal(sessionId);
   }
 
   private unattendedAssignment(session: BoundSession): { id: string; status: string } | undefined {
@@ -913,10 +938,23 @@ export class SessionManager {
       sessions.sort((a, b) => this.sessionIdleTimestampMs(a) - this.sessionIdleTimestampMs(b));
     }
     let pressureSuspended = false;
-    for (const session of sessions) {
+    for (let session of sessions) {
       // A user suspension survives reconciliation and backend restarts until
       // that conversation is explicitly opened again.
       if (session.manualSuspendedAt) continue;
+      if (session.launchContext && session.conversationRef.startsWith('pending:')) {
+        const registered = this.assignmentForSession(session);
+        if (registered) await this.adoptRegisteredSession(session.id, session.provider, registered.nativeSessionId);
+        session = this.db.boundSessions.getById(session.id) ?? session;
+        if (!session.shouldRestore) continue;
+      }
+      if (this.isFinishedLaunchedSession(session)) {
+        const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+        if (liveness !== 'alive') {
+          if (liveness === 'dead') await this.runtimes.run(session.id, 'archiveFinishedExitedSession', () => this.archiveFinishedExitedSession(session.id));
+          continue;
+        }
+      }
       if (this.isWorkReleaseDue(session)) {
         try {
           await this.runtimes.run(session.id, 'releaseExpiredWorkSession', async () => {
@@ -1383,9 +1421,13 @@ export class SessionManager {
     }
   }
 
-  private async restoreSession(requestedSession: BoundSession): Promise<BoundSession | undefined> {
+  private async restoreSession(requestedSession: BoundSession, explicitResume = false): Promise<BoundSession | undefined> {
     let session = this.getCurrentRestorableSession(requestedSession);
     if (!session) {
+      return undefined;
+    }
+    if (!explicitResume && this.isFinishedLaunchedSession(session)) {
+      await this.archiveFinishedExitedSession(session.id);
       return undefined;
     }
     // Restores do not move recency, so grant an explicit grace window before the
@@ -1588,6 +1630,42 @@ export class SessionManager {
       const restored = await this.restoreSession(session);
       if (!restored) throw new Error('The original conversation could not be restored.');
       return restored;
+    });
+  }
+
+  async closeGrantedSession(sessionId: string, launchedBy: string, authorized: () => boolean): Promise<void> {
+    const pending = this.mustGetSession(sessionId);
+    if (pending.launchContext?.launchedBy !== launchedBy || !authorized()) throw new Error('Session ownership or close authority changed.');
+    if (pending.conversationRef.startsWith('pending:')) {
+      const registered = this.assignmentForSession(pending);
+      if (registered) await this.adoptRegisteredSession(sessionId, pending.provider, registered.nativeSessionId);
+    }
+    await this.runtimes.run(sessionId, 'closeGrantedSession', async () => {
+      let session = this.mustGetSession(sessionId);
+      if (session.launchContext?.launchedBy !== launchedBy) throw new Error('You can close only sessions your assignment launched.');
+      if (!authorized()) throw new Error('The grant no longer covers closing this session.');
+      if (!session.shouldRestore && session.status === 'ended') return;
+      if (session.conversationRef.startsWith('pending:') && this.recoveryDependencies) {
+        const project = await this.recoveryDependencies.projectService.getProjectBySlug(session.projectSlug);
+        if (project) session = await this.tryResolvePendingResumeSession(session, project,
+          this.recoveryDependencies.providerRegistry.get(session.provider),
+          this.recoveryDependencies.projectService.getMergedProviderSettings(project, session.provider));
+      }
+      if (!(await this.hasReadableIndexedTranscript(session))) {
+        throw new SessionInputRejectedError('Close is waiting for the native transcript to be indexed and readable.');
+      }
+      const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+      if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
+      if (liveness === 'alive' && await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) {
+        throw new Error('Session ownership changed before close.');
+      }
+      const current = this.mustGetSession(sessionId);
+      if (current.launchContext?.launchedBy !== launchedBy || current.projectSlug !== session.projectSlug || !authorized()) {
+        throw new Error('Session ownership or close authority changed.');
+      }
+      this.pauseUnattended(sessionId);
+      this.runRecovery.cancel(sessionId);
+      await this.releaseSessionInternal(sessionId);
     });
   }
 
@@ -2697,14 +2775,21 @@ export class SessionManager {
   }
 
   private async releaseSessionInternal(sessionId: string, removePendingConversation = false): Promise<void> {
-    let session = this.mustGetSession(sessionId);
-    if (session.modelProfileRequest) {
-      session = this.db.boundSessions.replaceModelProfileRequest(session.id, undefined, nowIso()) ?? session;
-    }
+    const session = this.mustGetSession(sessionId);
+    if (!session.shouldRestore && session.status === 'ended') return;
+    if (session.modelProfileRequest) this.db.boundSessions.replaceModelProfileRequest(sessionId, undefined, nowIso());
+    const retainBindingAfterFailure = (text: string) => {
+      const retained: BoundSession = { ...session, status: session.status === 'releasing' ? 'bound' : session.status,
+        shouldRestore: session.status === 'releasing' ? true : session.shouldRestore, updatedAt: nowIso() };
+      this.db.boundSessions.upsert(retained);
+      this.appendEvent(retained, { type: 'status', text, timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: retained });
+    };
     const releasing = {
       ...session,
       status: 'releasing' as const,
       shouldRestore: false,
+      modelProfileRequest: undefined,
       updatedAt: nowIso(),
       isWorking: false,
     };
@@ -2714,10 +2799,7 @@ export class SessionManager {
 
     const initialLiveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (initialLiveness === 'unknown') {
-      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.boundSessions.upsert(failed);
-      this.appendEvent(failed, { type: 'status', text: 'Failed to verify tmux session before release.', timestamp: nowIso() });
-      this.eventBus.emit({ type: 'session.updated', session: failed });
+      retainBindingAfterFailure('Failed to verify tmux session before release. The conversation remains available.');
       throw new Error(`Failed to verify tmux session ${session.tmuxSessionName}`);
     }
 
@@ -2740,22 +2822,15 @@ export class SessionManager {
       ? 'dead'
       : await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (finalLiveness !== 'dead') {
-      const failed = { ...releasing, status: 'error' as const, updatedAt: nowIso(), isWorking: false };
-      this.db.boundSessions.upsert(failed);
-      this.appendEvent(failed, {
-        type: 'status',
-        text: finalLiveness === 'unknown'
+      retainBindingAfterFailure(finalLiveness === 'unknown'
           ? 'Failed to verify tmux session release.'
-          : 'Failed to release tmux session cleanly.',
-        timestamp: nowIso(),
-      });
-      this.eventBus.emit({ type: 'session.updated', session: failed });
+          : 'Failed to release tmux session cleanly. The conversation remains available.');
       throw new Error(`Failed to release tmux session ${session.tmuxSessionName}`);
     }
 
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
-    let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false };
+    let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false, pid: undefined };
     this.db.boundSessions.upsert(ended);
     if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
     if (session.pressureSuspendedAt) ended = this.db.boundSessions.setPressureSuspendedAt(session.id, undefined) ?? ended;
@@ -2815,8 +2890,13 @@ export class SessionManager {
     sessionId: string,
     options: { startLine?: number } = {},
   ): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
-    const session = this.mustGetSession(sessionId);
+    let session = this.mustGetSession(sessionId);
     if (session.manualSuspendedAt || session.pressureSuspendedAt) return undefined;
+    if (session.launchContext && session.conversationRef.startsWith('pending:')) {
+      const registered = this.assignmentForSession(session);
+      if (registered) await this.adoptRegisteredSession(sessionId, session.provider, registered.nativeSessionId);
+      session = this.mustGetSession(sessionId);
+    }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     const liveSession = liveness === 'dead'
       ? await this.runtimes.run(sessionId, 'restoreSessionForScreen', async () => {
@@ -2870,7 +2950,7 @@ export class SessionManager {
     options: { restoreMissing?: boolean; resumeSuspension?: boolean } = {},
   ): Promise<BoundSession | undefined> {
     let session = this.db.boundSessions.getById(staleSession.id);
-    if (!session || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
+    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
       return undefined;
     }
     const restoreMissing = options.restoreMissing ?? true;
@@ -2883,6 +2963,10 @@ export class SessionManager {
       return session;
     }
     if (liveness === 'dead') {
+      if (!options.resumeSuspension && this.isFinishedLaunchedSession(session)) {
+        await this.archiveFinishedExitedSession(session.id);
+        return undefined;
+      }
       if (restoreMissing && session.shouldRestore && this.unattendedAssignment(session)
         && (session.pid !== undefined || session.runFailure?.code === 'process_exited')
         && !this.suspendedSessionIds.has(session.id) && session.status !== 'releasing') {
@@ -2903,7 +2987,7 @@ export class SessionManager {
         return undefined;
       }
       if (restoreMissing && session.shouldRestore && session.status !== 'releasing') {
-        return await this.restoreSession(session);
+        return await this.restoreSession(session, options.resumeSuspension === true);
       }
       if (session.shouldRestore && session.status !== 'releasing') {
         return undefined;

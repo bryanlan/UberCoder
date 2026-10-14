@@ -30,7 +30,7 @@
 ## Key Files
 
 - `apps/server/src/grants/` — standing grants, human-message provenance, browser push,
-  authenticated transport and the durable launch/restart queue.
+  authenticated transport and durable launch/restart/owned-close actions.
 - `apps/web/src/pages/GrantsPage.tsx` and `apps/web/public/grant-push-sw.js` — grants,
   decisions, uses, revoke and notification actions.
 - `docs/agent-grants.md` — approved grant behavior and operational contract.

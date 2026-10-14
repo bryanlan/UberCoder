@@ -18,7 +18,7 @@ interface RequestRow { id: string; assignment_id: string; grant_id: string; acti
   status: 'queued' | 'starting' | 'completed' | 'failed' | 'cancelled'; session_id: string;
   input_json: string; reason: string | null; created_at: string; updated_at: string }
 
-/** One durable launch queue, using the same project/provider/session pipeline as the UI. */
+/** Durable session actions, using the same project/provider/session pipeline as the UI. */
 export class AgentSessionLaunches {
   private running?: Promise<void>;
   private again = false;
@@ -61,10 +61,22 @@ export class AgentSessionLaunches {
     const prior = this.row(id);
     if (prior) {
       if (prior.assignment_id !== assignmentId || prior.action !== action) throw new Error('Request ID is already used by a different action.');
+      if (action === 'close_session' && prior.session_id !== input.sessionId) throw new Error('Request ID is already used for a different session.');
       return this.status(assignmentId, id);
     }
     const actor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(assignmentId) as { status: string } | undefined;
     if (!actor || actor.status === 'finished') throw new Error('A finished assignment cannot launch work.');
+    if (action === 'close_session') {
+      if (!input.sessionId) throw new Error('sessionId is required.');
+      const target = this.db.boundSessions.getById(input.sessionId);
+      if (!target || target.launchContext?.launchedBy !== assignmentId) throw new Error('You can close only sessions your assignment launched.');
+      input.projectSlug = target.projectSlug; input.provider = target.provider;
+      const grant = this.grants.grantsFor(assignmentId).find(candidate => (!input.grantId || input.grantId === candidate.id)
+        && candidate.actions.includes(action) && (!candidate.projectSlugs.length || candidate.projectSlugs.includes(target.projectSlug)));
+      if (!grant) return { requiresGrant: true, action, projectSlug: target.projectSlug,
+        reason: 'No active grant covers closing this owned session. Include close_session in the authorized grant.' };
+      return this.enqueue(assignmentId, action, input, grant, target.id, id);
+    }
     if (input.supervisorId) {
       const supervisor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(input.supervisorId) as { status: string } | undefined;
       if (!supervisor || supervisor.status === 'finished') throw new Error('Choose an unfinished supervising assignment.');
@@ -98,11 +110,15 @@ export class AgentSessionLaunches {
       && (!candidate.limits.models.length || (model && candidate.limits.models.includes(model))));
     if (!grant) return { requiresGrant: true, action, projectSlug: project.slug, model,
       reason: 'No active grant covers this action, project and model. Request one broad grant with the required actions and scope.' };
-    const now = new Date().toISOString(), sessionId = target?.id ?? randomUUID();
+    return this.enqueue(assignmentId, action, input, grant, target?.id ?? randomUUID(), id);
+  }
+
+  private enqueue(assignmentId: string, action: AgentGrantAction, input: LaunchInput, grant: AgentGrant, sessionId: string, id: string) {
+    const now = new Date().toISOString();
     this.db.sqlite.prepare('insert into agent_session_requests values(?,?,?,?,?,?,?,?,?,?)').run(id, assignmentId, grant.id, action,
       'queued', sessionId, JSON.stringify(input), null, now, now);
     this.grants.logUse({ id, grantId: grant.id, assignmentId, action, sessionId,
-      detail: { status: 'queued', description: `${action === 'launch_session' ? 'Launch' : 'Restart'} requested: ${input.title ?? project.displayName}`, requestId: id } });
+      detail: { status: 'queued', description: `${action === 'launch_session' ? 'Launch' : action === 'restart_session' ? 'Restart' : 'Close'} requested: ${input.title ?? input.projectSlug}`, requestId: id } });
     this.wake(); return this.status(assignmentId, id);
   }
 
@@ -124,10 +140,25 @@ export class AgentSessionLaunches {
   private update(row: RequestRow, status: RequestRow['status'], reason?: string): void {
     this.db.sqlite.prepare('update agent_session_requests set status=?,reason=?,updated_at=? where id=?').run(status, reason ?? null, new Date().toISOString(), row.id);
     if (status !== 'queued') this.grants.logUse({ id: row.id, grantId: row.grant_id, assignmentId: row.assignment_id,
-      action: row.action, sessionId: row.session_id, detail: { status, description: status === 'completed' ? 'Console session ready' : status === 'starting' ? 'Starting Console session' : reason ?? status, requestId: row.id } });
+      action: row.action, sessionId: row.session_id, detail: { status, description: status === 'completed' ? row.action === 'close_session' ? 'Console session closed; history retained' : 'Console session ready' : status === 'starting' ? row.action === 'close_session' ? 'Closing Console session' : 'Starting Console session' : reason ?? status, requestId: row.id } });
   }
   private async process(row: RequestRow): Promise<void> {
     const input = JSON.parse(row.input_json) as LaunchInput;
+    if (row.action === 'close_session') {
+      const actor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(row.assignment_id) as { status: string } | undefined;
+      if (!actor || actor.status === 'finished') { this.update(row, 'cancelled', 'The requesting assignment has finished.'); return; }
+      const authorized = () => this.grants.grantsFor(row.assignment_id).some(grant => grant.id === row.grant_id
+        && grant.actions.includes('close_session') && (!grant.projectSlugs.length || grant.projectSlugs.includes(input.projectSlug!)));
+      if (!authorized()) { this.update(row, 'cancelled', 'The grant no longer covers closing this owned session.'); return; }
+      this.update(row, 'starting');
+      try {
+        await this.sessions.closeGrantedSession(row.session_id, row.assignment_id, authorized);
+        this.update(row, 'completed');
+      } catch (error) {
+        this.update(row, error instanceof SessionInputRejectedError ? 'queued' : 'failed', error instanceof Error ? error.message : 'Session close failed.');
+      }
+      return;
+    }
     if (row.status === 'starting') {
       const prior = this.db.boundSessions.getById(row.session_id);
       if (prior?.shouldRestore && prior.status === 'bound'

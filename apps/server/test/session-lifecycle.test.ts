@@ -1446,7 +1446,7 @@ describe('SessionManager lifecycle', () => {
     db.close();
   });
 
-  it('surfaces release failures instead of reporting ended sessions', async () => {
+  it.each(['kill', 'liveness'] as const)('retains a visible binding when release fails on %s', async (failure) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const tmux = new FakeTmux();
@@ -1461,9 +1461,13 @@ describe('SessionManager lifecycle', () => {
       kind: 'history',
     });
 
-    tmux.failKill = true;
-    await expect(manager.releaseSession(session.id)).rejects.toThrow(/Failed to release/);
-    expect(db.boundSessions.getById(session.id)?.status).toBe('error');
+    if (failure === 'kill') tmux.failKill = true;
+    else tmux.hasSessionResults.push(new Error('tmux unavailable'));
+    await expect(manager.releaseSession(session.id)).rejects.toThrow(/Failed to (?:release|verify)/);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(manager.listActiveSessions().map(s => s.id)).toContain(session.id);
+    expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    await manager.stop();
     db.close();
   });
 

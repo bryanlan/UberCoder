@@ -39,11 +39,111 @@ async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
     return id;
   };
   cleanups.push(async()=>{await launches.stop();await manager.stop();db.close();fs.rmSync(root,{recursive:true,force:true});});
-  return {db,tmux,grants,coordination,actor,grant,get launches(){return launches;},launch,child,setMemory:(value:string)=>{memory=value;},
+  return {db,tmux,grants,coordination,manager,actor,grant,get launches(){return launches;},launch,child,setMemory:(value:string)=>{memory=value;},
     restartQueue:async()=>{await launches.stop(); launches=queue();}};
 }
 
+function indexHistory(db: AppDatabase, session: BoundSession): string {
+  const ref = randomUUID(), transcriptPath = path.join(path.dirname(path.dirname(session.eventLogPath!)), `native-${session.id}.jsonl`);
+  fs.writeFileSync(transcriptPath, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: 'Completed helper work.' } }) + '\n');
+  db.boundSessions.upsert({ ...session, conversationRef: ref, resumeConversationRef: ref });
+  db.conversationIndex.upsert({ ref, kind: 'history', projectSlug: session.projectSlug, provider: session.provider,
+    title: session.title ?? 'Helper', updatedAt: new Date().toISOString(), transcriptPath, isBound: true, degraded: false });
+  return transcriptPath;
+}
+
 describe('Granted real-session launch pipeline',()=>{
+  it('closes its own helper under low memory, retains history and deduplicates close across controller restart', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    const transcriptPath = indexHistory(f.db, session), before = fs.readFileSync(transcriptPath, 'utf8');
+    f.setMemory('MemAvailable: 100 kB');
+    const requestId = randomUUID();
+    await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId });
+    await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]).toMatchObject({ status: 'completed', action: 'close_session' });
+    expect(f.db.boundSessions.getById(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
+    expect(f.manager.listActiveSessions().map(s => s.id)).not.toContain(session.id);
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(false);
+    expect(fs.readFileSync(transcriptPath, 'utf8')).toBe(before);
+    await f.restartQueue();
+    await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId });
+    await f.launches.drain(); await f.manager.reconcileSessions();
+    expect(f.tmux.created.filter(name => name === session.tmuxSessionName)).toHaveLength(1);
+    expect(f.grants.snapshot().uses.filter(use => use.action === 'close_session')).toHaveLength(1);
+  });
+
+  it('does not let another agent sharing the same grant close a helper, or let the launcher close a human session', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    const other = f.child(session.id);
+    expect(f.grants.grantsFor(other)[0]?.id).toBe(f.grant.id);
+    await expect(f.launches.request(other, 'close_session', { sessionId: session.id })).rejects.toThrow('only sessions your assignment launched');
+    const human = f.db.boundSessions.list().find(s => !s.launchContext)!;
+    await expect(f.launches.request(f.actor, 'close_session', { sessionId: human.id })).rejects.toThrow('only sessions your assignment launched');
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+  });
+
+  it('keeps existing grants narrow until close_session is explicitly authorized', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    const definition = { ...f.grant, actions: ['launch_session', 'restart_session'] };
+    f.db.sqlite.prepare('update agent_grants set definition_json=? where id=?').run(JSON.stringify(definition), f.grant.id);
+    expect(await f.launches.request(f.actor, 'close_session', { sessionId: session.id })).toMatchObject({ requiresGrant: true });
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+  });
+
+  it('waits for indexed history, then closes the original target from a persisted starting request', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!, requestId = randomUUID();
+    await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId }); await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]).toMatchObject({ status: 'queued', reason: expect.stringContaining('transcript') });
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    indexHistory(f.db, f.db.boundSessions.getById(session.id)!);
+    f.db.sqlite.prepare("update agent_session_requests set status='starting' where id=?").run(requestId);
+    await f.restartQueue(); await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]?.status).toBe('completed');
+    expect(f.db.boundSessions.getById(session.id)?.shouldRestore).toBe(false);
+    await expect(f.launches.request(f.actor, 'close_session', { sessionId: randomUUID(), requestId })).rejects.toThrow('different session');
+  });
+
+  it('cancels a history-deferred close when the grant is revoked', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!, requestId = randomUUID();
+    await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId }); await f.launches.drain();
+    f.grants.revoke(f.grant.id); indexHistory(f.db, session); await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]?.status).toBe('cancelled');
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+  });
+
+  it('reports a failed close and retains the live helper in Work when tmux cannot stop it', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!; indexHistory(f.db, session);
+    f.tmux.failKill = true;
+    const requestId = randomUUID(); await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId }); await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]?.status).toBe('failed');
+    expect(f.db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(f.manager.listActiveSessions().map(s => s.id)).toContain(session.id);
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+  });
+
+  it.each(['authority', 'ownership'] as const)('rechecks %s inside the session command lock before close', async (boundary) => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!; indexHistory(f.db, session);
+    const original = f.tmux.getOption.bind(f.tmux);
+    f.tmux.getOption = async (name, key) => {
+      if (key === '@agent_console_session_id') {
+        if (boundary === 'authority') f.grants.revoke(f.grant.id);
+        else return 'another-session';
+      }
+      return original(name, key);
+    };
+    const requestId = randomUUID(); await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId }); await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]?.status).toBe('failed');
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    expect(f.db.boundSessions.getById(session.id)?.shouldRestore).toBe(true);
+  });
+
   it('queues under low memory, launches the same reservation when memory returns, and records agent input separately',async()=>{
     const f=await fixture();f.setMemory('MemAvailable: 100 kB');const request=await f.launch() as {requests:Array<{id:string;sessionId:string}>};
     const id=request.requests[0]!.id;expect(f.launches.status(f.actor,id).requests[0]).toMatchObject({status:'queued',reason:'Waiting for available memory.'});expect(f.tmux.created).toEqual([]);
