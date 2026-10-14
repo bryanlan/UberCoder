@@ -92,6 +92,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
+  const currentSelectionRef = useRef(routeSelection);
+  currentSelectionRef.current = routeSelection;
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
@@ -104,6 +106,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
   const [rebindingConversationKey, setRebindingConversationKey] = useState<string>();
   const [renamingConversationKey, setRenamingConversationKey] = useState<string>();
+  const [closingConversationKey, setClosingConversationKey] = useState<string>();
   const liveMessageRefreshTimersRef = useRef(new Map<string, number>());
   const realtimeDegraded = Boolean(eventError);
 
@@ -568,11 +571,12 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   });
 
   const releaseMutation = useMutation({
-    mutationFn: (sessionId: string) => api.releaseSession(sessionId, authQuery.data?.csrfToken),
-    onSuccess: () => {
+    mutationFn: ({ sessionId }: { sessionId: string; projectSlug?: string; provider?: ProviderId; conversationRef?: string }) =>
+      api.releaseSession(sessionId, authQuery.data?.csrfToken),
+    onSuccess: (_result, variables) => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
-      invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
+      invalidateConversationData(queryClient, variables.projectSlug, variables.provider, variables.conversationRef);
     },
   });
 
@@ -632,7 +636,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   async function handleRelease(sessionId: string): Promise<void> {
     setActionError(undefined);
     try {
-      await releaseMutation.mutateAsync(sessionId);
+      await releaseMutation.mutateAsync({ sessionId, projectSlug: selectedProjectSlug, provider: selectedProvider, conversationRef: selectedConversationRef });
     } catch (error) {
       setActionError(describeError(error, 'Unable to release this session.'));
     }
@@ -780,6 +784,34 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
+  async function handleCloseConversation(projectSlug: string, provider: ProviderId, conversationRef: string): Promise<boolean> {
+    if (releaseMutation.isPending || closingConversationKey) return false;
+    setActionError(undefined);
+    const session = treeQuery.data?.boundSessions.find((item) => (
+      item.projectSlug === projectSlug && item.provider === provider && item.conversationRef === conversationRef
+    ));
+    if (!session) {
+      setActionError('This conversation has no loaded session to close.');
+      return false;
+    }
+    setClosingConversationKey(`${projectSlug}:${provider}:${conversationRef}`);
+    try {
+      await releaseMutation.mutateAsync({ sessionId: session.id, projectSlug, provider, conversationRef });
+      const currentSelection = currentSelectionRef.current;
+      if (currentSelection.selectedProjectSlug === projectSlug
+        && currentSelection.selectedProvider === provider
+        && currentSelection.selectedConversationRef === conversationRef) {
+        navigate(`/projects/${encodeURIComponent(projectSlug)}`);
+      }
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to close this conversation.'));
+      return false;
+    } finally {
+      setClosingConversationKey(undefined);
+    }
+  }
+
   async function handleToggleRecentActivity(): Promise<void> {
     await handleUpdateUiPreferences(
       { recentActivitySortEnabled: !uiPreferences.recentActivitySortEnabled },
@@ -864,10 +896,12 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         onRenameProject={handleRenameProject}
         onRebindConversation={handleRebindConversation}
         onRenameConversation={handleRenameConversation}
+        onCloseConversation={handleCloseConversation}
         creatingConversationKey={creatingConversationKey}
         renamingProjectKey={renamingProjectKey}
         rebindingConversationKey={rebindingConversationKey}
         renamingConversationKey={renamingConversationKey}
+        closingConversationKey={closingConversationKey}
         updatingUiPreferences={updateUiPreferencesMutation.isPending}
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}

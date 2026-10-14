@@ -46,6 +46,7 @@ it('keeps a project and its new-conversation actions after its last child is evi
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}
           onRenameConversation={async () => true} updatingUiPreferences={false}
+          onCloseConversation={async () => true}
           onRefresh={() => {}} refreshing={false}
         />
       </MemoryRouter>
@@ -118,6 +119,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}
           onRenameConversation={async () => true} updatingUiPreferences={false}
+          onCloseConversation={async () => true}
           onRefresh={() => {}} refreshing={false}
         />
       </MemoryRouter>

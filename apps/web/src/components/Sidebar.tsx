@@ -33,10 +33,12 @@ interface SidebarProps {
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
+  onCloseConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   creatingConversationKey?: string;
   renamingProjectKey?: string;
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
+  closingConversationKey?: string;
   updatingUiPreferences: boolean;
   onRefresh: () => void;
   refreshing: boolean;
@@ -203,8 +205,11 @@ function ConversationLink({
   onClose,
   onRebindConversation,
   onRenameConversation,
+  onCloseConversation,
   rebinding,
   renaming,
+  closing,
+  closeDisabled,
   lastInteractionAt,
   lastResponseAt,
   isWorking,
@@ -224,8 +229,11 @@ function ConversationLink({
   onClose: () => void;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
+  onCloseConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   rebinding: boolean;
   renaming: boolean;
+  closing: boolean;
+  closeDisabled: boolean;
   lastInteractionAt?: string;
   lastResponseAt?: string;
   isWorking: boolean;
@@ -359,7 +367,8 @@ function ConversationLink({
                 setDraftTitle('');
                 setEditing(true);
               }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800"
+              disabled={closing}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Pencil className="h-3.5 w-3.5 text-slate-400" />
               Rename
@@ -370,11 +379,24 @@ function ConversationLink({
                 setMenuOpen(false);
                 void onRebindConversation(project.slug, provider, conversationRef);
               }}
-              disabled={!canRebind || rebinding}
+              disabled={!canRebind || rebinding || closing}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus className="h-3.5 w-3.5 text-slate-400" />
               {rebinding ? 'Rebinding…' : 'Rebind'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false);
+                void onCloseConversation(project.slug, provider, conversationRef);
+              }}
+              disabled={!isBound || closeDisabled || rebinding}
+              title={isBound ? 'Unload this session' : 'Session is already closed'}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <X className="h-3.5 w-3.5 text-slate-400" />
+              {closing ? 'Closing…' : 'Close'}
             </button>
           </div>
         )}
@@ -406,8 +428,10 @@ function ProjectSection({
   onEndProjectDrag,
   onRebindConversation,
   onRenameConversation,
+  onCloseConversation,
   rebindingConversationKey,
   renamingConversationKey,
+  closingConversationKey,
   tailscaleIpv4,
 }: {
   project: SidebarProject;
@@ -426,8 +450,10 @@ function ProjectSection({
   onEndProjectDrag: () => void;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
+  onCloseConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   rebindingConversationKey?: string;
   renamingConversationKey?: string;
+  closingConversationKey?: string;
   tailscaleIpv4?: string;
 }) {
   const location = useLocation();
@@ -674,8 +700,11 @@ function ProjectSection({
                 onClose={onClose}
                 onRebindConversation={onRebindConversation}
                 onRenameConversation={onRenameConversation}
+                onCloseConversation={onCloseConversation}
                 rebinding={rebindingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
                 renaming={renamingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
+                closing={closingConversationKey === `${project.slug}:${provider}:${conversation.ref}`}
+                closeDisabled={Boolean(closingConversationKey)}
                 lastInteractionAt={activityTimestamp}
                 lastResponseAt={lastResponseAt}
                 isWorking={isWorking}
@@ -722,10 +751,12 @@ export function Sidebar({
   onRenameProject,
   onRebindConversation,
   onRenameConversation,
+  onCloseConversation,
   creatingConversationKey,
   renamingProjectKey,
   rebindingConversationKey,
   renamingConversationKey,
+  closingConversationKey,
   updatingUiPreferences,
   onRefresh,
   refreshing,
@@ -908,8 +939,10 @@ export function Sidebar({
                 }}
                 onRebindConversation={onRebindConversation}
                 onRenameConversation={onRenameConversation}
+                onCloseConversation={onCloseConversation}
                 rebindingConversationKey={rebindingConversationKey}
                 renamingConversationKey={renamingConversationKey}
+                closingConversationKey={closingConversationKey}
                 tailscaleIpv4={tailscaleIpv4}
               />
             )) : (

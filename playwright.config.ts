@@ -5,6 +5,8 @@ const webPort = Number(process.env.AGENT_CONSOLE_E2E_WEB_PORT ?? 5178);
 
 export default defineConfig({
   testDir: './apps/web/e2e',
+  // Server-backed browser fixtures need shared runtime exports rather than declaration paths.
+  tsconfig: './apps/server/tsconfig.e2e.json',
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
