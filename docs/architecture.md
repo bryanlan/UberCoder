@@ -431,6 +431,22 @@ submit a free-text answer to a provider question, remains the existing control
 surface. The
 existing rejection path retains the local draft and binding.
 
+When a native menu replaces the active composer, the live bridge's explicit
+key buttons keep a held chat draft separate and send only the selected key.
+An explicit numeric choice is sent before Enter and consumed on success.
+Text Bypass completes its buffered text delivery before control keys, clears
+consumed selection previews and restores them on rejected submission. Menu
+selections retain image attachments; the backend classifies selection tokens
+separately from conversation input.
+Controls remain visible when mobile controls are otherwise hidden. Enter in a
+chat draft retains the normal guarded submission behavior; quoted menu text
+above an active composer does not change how its buttons submit chat.
+
+The input's saved height is capped at 30% of the visible viewport on mobile,
+including viewport changes when the keyboard opens, and 60% on desktop. Its
+44-pixel touch resize handle and visible Smaller button let the user reduce it;
+Smaller resets the input to 96 pixels without changing its draft.
+
 Console-managed Codex launches set `check_for_update_on_startup=false` so new and
 restored conversations reach their composer without a host software-update menu.
 Codex updates remain a host maintenance action. Existing update menus with
