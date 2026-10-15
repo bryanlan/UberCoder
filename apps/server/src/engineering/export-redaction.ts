@@ -11,6 +11,7 @@ const pathIdentifier = /[a-z0-9_./ +@()\[\]-]+/i;
 const publicFields = new Set<string>(contract.public_fields);
 const identifierFields = new Set<string>(contract.identifier_fields);
 const pathFields = new Set<string>(contract.path_fields);
+const fieldIdentifiers = new Map(Object.entries(contract.identifier_field_patterns).map(([field, pattern]) => [field, new RegExp(`^(?:${pattern})$`)]));
 const repoIdentifierFields = new Set<string>(contract.repo_identifier_fields);
 const publicValues: Record<string, readonly string[]> = contract.public_values;
 const fullMatch = (pattern: RegExp, value: string) => pattern.exec(value)?.[0] === value;
@@ -44,6 +45,11 @@ export function sanitizeExport<T>(value: T): T {
     if (typeof item === 'string') {
       if (identifierFields.has(field) && (fullMatch(identifier, item) || fullMatch(uuid, item)
         || prefixedIdentifiers.some(pattern => fullMatch(pattern, item)))) {
+        allowed.add(item);
+        for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
+      }
+      const fieldPattern = fieldIdentifiers.get(field);
+      if (fieldPattern && fullMatch(fieldPattern, item)) {
         allowed.add(item);
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }
