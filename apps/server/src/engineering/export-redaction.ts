@@ -9,7 +9,9 @@ const uuid = /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/i;
 const identifier = /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const prefixedIdentifiers = contract.identifier_patterns.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
 const pathIdentifier = /[^\x00-\x1f\x7f:="'<>|\\]+/;
+const countMapPaths = contract.count_map_paths.map(path => path.split('.'));
 const publicFields = new Set<string>(contract.public_fields);
+const freeTextFields = new Set<string>(contract.free_text_fields);
 const identifierFields = new Set<string>(contract.identifier_fields);
 const pathFields = new Set<string>(contract.path_fields);
 const fieldIdentifiers = new Map(Object.entries(contract.identifier_field_patterns).map(([field, pattern]) => [field, new RegExp(`^(?:${pattern})$`)]));
@@ -18,10 +20,17 @@ const publicValues: Record<string, readonly string[]> = contract.public_values;
 const fullMatch = (pattern: RegExp, value: string) => pattern.exec(value)?.[0] === value;
 
 export function isPathIdentifier(value: string, allowName = false): boolean {
-  if (!((allowName || value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value)) && fullMatch(pathIdentifier, value)
-    && Array.from(value).length <= contract.max_export_text_length)) return false;
-  if (rules.filter(rule => !rule.metadata_exempt).some(rule => value.replace(rule.regex, rule.replacement) !== value)) return false;
-  return redactProviders(value) === value;
+  return Boolean(value.trim() && (allowName || value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value))
+    && fullMatch(pathIdentifier, value) && Array.from(value).length <= contract.max_export_text_length);
+}
+
+function isMetadata(value: string, field: string): boolean {
+  if (freeTextFields.has(field)) return false;
+  if (identifierFields.has(field) && (fullMatch(identifier, value) || fullMatch(uuid, value)
+    || prefixedIdentifiers.some(pattern => fullMatch(pattern, value)))) return true;
+  const fieldPattern = fieldIdentifiers.get(field);
+  if (fieldPattern && fullMatch(fieldPattern, value)) return true;
+  return pathFields.has(field) && isPathIdentifier(value, repoIdentifierFields.has(field));
 }
 
 function entropy(value: string): number {
@@ -55,17 +64,8 @@ export function sanitizeExport<T>(value: T): T {
   const allowed = new Set<string>();
   function collect(item: unknown, field = ''): void {
     if (typeof item === 'string') {
-      if (identifierFields.has(field) && (fullMatch(identifier, item) || fullMatch(uuid, item)
-        || prefixedIdentifiers.some(pattern => fullMatch(pattern, item)))) {
+      if (isMetadata(item, field)) {
         allowed.add(item);
-        for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
-      }
-      const fieldPattern = fieldIdentifiers.get(field);
-      if (fieldPattern && fullMatch(fieldPattern, item)) {
-        allowed.add(item);
-        for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
-      }
-      if (pathFields.has(field) && isPathIdentifier(item, repoIdentifierFields.has(field))) {
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }
     } else if (Array.isArray(item)) {
@@ -74,17 +74,22 @@ export function sanitizeExport<T>(value: T): T {
       for (const [key, child] of Object.entries(item)) collect(child, key);
     }
   }
-  function walk(item: unknown, field = ''): unknown {
+  function walk(item: unknown, field = '', fieldPath: readonly string[] = []): unknown {
     const publicValue = typeof item === 'string' && (publicValues[field] ?? []).includes(item);
+    if (typeof item === 'string' && (publicValue || isMetadata(item, field))) return item;
     if (fullMatch(sensitiveKey, field) && !publicFields.has(field) && !publicValue) return '[credential omitted]';
     if (typeof item === 'string') {
-      if (pathFields.has(field) && isPathIdentifier(item, repoIdentifierFields.has(field))) return item;
       return Array.from(redactText(item, allowed)).slice(0, contract.max_export_text_length).join('');
     }
-    if (Array.isArray(item)) return item.map(child => walk(child, field));
-    if (item && typeof item === 'object') return Object.fromEntries(
-      Object.entries(item).map(([key, child]) => [key, walk(child, key)]),
-    );
+    if (Array.isArray(item)) return item.map(child => walk(child, field, fieldPath));
+    if (item && typeof item === 'object') {
+      const countMap = countMapPaths.some(path => path.length <= fieldPath.length
+        && path.every((part, index) => part === fieldPath[fieldPath.length - path.length + index]));
+      return Object.fromEntries(Object.entries(item).map(([key, child]) => [key,
+        countMap && typeof child === 'number' && Number.isSafeInteger(child) && child >= 0
+          ? child : walk(child, key, [...fieldPath, key])]),
+      );
+    }
     return item;
   }
   collect(value);

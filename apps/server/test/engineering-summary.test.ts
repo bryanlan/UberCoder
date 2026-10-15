@@ -5,8 +5,10 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { appConfigSchema } from '../src/config/schema.js';
+import { AppDatabase } from '../src/db/database.js';
+import { CoordinationService } from '../src/coordination/service.js';
 import { engineeringSummary, readProcessIdentity } from '../src/engineering/summary.js';
 import { redactText } from '../src/engineering/export-redaction.js';
 import redactionContract from '../src/engineering/export_redaction.v1.json' with { type: 'json' };
@@ -14,7 +16,7 @@ import redactionContract from '../src/engineering/export_redaction.v1.json' with
 const roots: string[] = [];
 const now = Date.parse('2026-10-15T06:00:00Z');
 const stamp = '2026-10-15T05:00:00.000Z';
-afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'engineering-summary-')); roots.push(root);
@@ -370,6 +372,30 @@ it('exports retained yesterday update history in stable UTC order without substi
   expect(fs.readFileSync(options.database)).toEqual(before);
 });
 
+it('exports completion-only yesterday activity emitted by the real coordination service', () => {
+  const options = fixture();
+  options.database = path.join(path.dirname(options.database), 'completion.sqlite');
+  const db = new AppDatabase(options.database);
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try {
+    const service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
+    vi.setSystemTime(new Date('2026-10-13T12:00:00Z'));
+    const { assignmentId } = service.register({ provider: 'codex', token: 'private-test-token',
+      nativeSessionId: 'completion-only', pid: process.pid, cwd: path.dirname(options.database) });
+    vi.setSystemTime(new Date('2026-10-14T18:00:00Z'));
+    service.finish(assignmentId!, 'Completed the review. PASSWORD=shortpass');
+    expect(db.sqlite.prepare("select kind from coordination_events where assignment_id=? order by seq").all(assignmentId)).toEqual([{ kind: 'started' }, { kind: 'finished' }]);
+  } finally { db.close(); vi.useRealTimers(); }
+  const before = fs.readFileSync(options.database), result = engineeringSummary(options);
+  expect(result.sources.activity.status).toBe('ok');
+  expect(result.agents.activity_yesterday).toMatchObject({ date: '2026-10-14', timezone: 'UTC', total: 1, sampled: false });
+  expect(result.agents.activity_yesterday?.items).toHaveLength(1);
+  expect(result.agents.activity_yesterday?.items[0]).toMatchObject({ checkout: null,
+    at: '2026-10-14T18:00:00.000Z', summary: '[credential-bearing line omitted]' });
+  expect(JSON.stringify(result)).not.toContain('shortpass');
+  expect(fs.readFileSync(options.database)).toEqual(before);
+});
+
 it('bounds yesterday history and keeps history failures separate from ownership', () => {
   const options = fixture(), db = new Database(options.database);
   const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
@@ -537,8 +563,11 @@ it('redacts every pinned provider vector through all permitted exporter text fie
 
 it('redacts CLI, environment and HTTP credentials through the complete source CLI output', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
-  const cases = redactionContract.cases.filter(vector => /--user| -u |--password|Authorization:|PGPASSWORD|MYSQL_PWD|^glpat-/.test(vector.input));
-  expect(cases).toHaveLength(9);
+  const cases = redactionContract.cases.filter(vector => vector.input.includes('shortpass') || vector.input.startsWith('glpat-'));
+  expect(cases.some(vector => vector.input.startsWith('redis-cli -a'))).toBe(true);
+  expect(cases.some(vector => vector.input.startsWith('mysql -p'))).toBe(true);
+  expect(cases.some(vector => vector.input.startsWith('machine '))).toBe(true);
+  expect(cases.some(vector => vector.input.startsWith('db.example:5432:'))).toBe(true);
   const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
   try {
     for (const vector of cases) {

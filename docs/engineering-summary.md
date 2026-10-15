@@ -63,7 +63,7 @@ configuration and `agents` and `wiki` are null.
   the latest matching checkout update event (null when no event remains).
   `activity_summary` is the latest scope summary, or empty when none is available.
   Activity text is capped at 2,000 characters and common credentials are redacted.
-  Only permitted update-event history is selected separately below. The states active/waiting require the assignment's
+  Permitted update and completion history is selected separately below. The states active/waiting require the assignment's
   PID and recorded Linux process
   start to match. Disconnected assignments and stale active rows are idle.
   `started_never_finished` is a subset, not another disjoint state: unfinished,
@@ -80,7 +80,7 @@ configuration and `agents` and `wiki` are null.
   resolve `/proc/<pid>/cwd` to the Git worktree root with read-only Git commands.
   Failed lookups retain live process identity with unknown checkout; a
   stale bound row or unrelated reused PID is insufficient.
-- `activity_yesterday`: retained `coordination_events.kind='update'` records from
+- `activity_yesterday`: retained `coordination_events.kind in ('update','finished')` records from
   UTC yesterday `[00:00, next 00:00)`, sorted by timestamp and event sequence. It
   includes `date`, `timezone: UTC`, retained `total`, `sampled`, and at most 1,000
   `items` with numeric event `id`, `assignment_id`, nullable `checkout`, `at`,
@@ -129,8 +129,11 @@ wiki bodies/revision summaries and arbitrary JSON payloads are excluded.
 Descriptions are capped at 1,000 characters, and search topics at 160;
 the shared `export_redaction.v1.json` rules redact credentials, database URLs and
 database paths and high-entropy credential candidates across exported values.
-Structural keys and validated identifier-map keys remain unchanged. Typed metadata
-identifiers are collected before scrubbing to preserve commit and session identity. Output
+Structural keys remain unchanged. The shared contract declares free-text fields;
+unknown text also receives redaction. Validated typed identifiers and paths bypass
+credential rules, and declared repository count maps preserve nonnegative integer
+counts even when repository labels contain credential-related words. Typed metadata
+identifiers are collected before free-text scrubbing to preserve commit and session identity. Output
 remains internal operational metadata.
 
 ## Verification

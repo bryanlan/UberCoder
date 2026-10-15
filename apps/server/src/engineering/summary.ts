@@ -164,11 +164,11 @@ function readConfiguredProjects(configPath: string): string[] {
 
 function readYesterdayActivity(db: Database.Database, now: number, report: ReportInvalid) {
   const end = Date.parse(iso(now).slice(0, 10)), start = end - DAY;
-  const total = count(db, "select count(*) as n from coordination_events where kind='update' and timestamp>=? and timestamp<?", iso(start), iso(end));
+  const total = count(db, "select count(*) as n from coordination_events where kind in ('update','finished') and timestamp>=? and timestamp<?", iso(start), iso(end));
   const items = validRows(db.prepare(`select e.seq as id,e.assignment_id,e.checkout,e.timestamp as at,
       coalesce(a.description,'Assignment metadata unavailable') as description,e.text as summary
     from coordination_events e left join coordination_assignments a on a.id=e.assignment_id
-    where e.kind='update' and e.timestamp>=? and e.timestamp<? order by e.timestamp,e.seq limit 1000`)
+    where e.kind in ('update','finished') and e.timestamp>=? and e.timestamp<? order by e.timestamp,e.seq limit 1000`)
     .all(iso(start), iso(end)) as Array<{ id: number; assignment_id: string; checkout: string | null; at: string; description: string; summary: string }>, row => integer(row.id, 1) && nonempty(row.assignment_id) && nullableText(row.checkout)
       && timestamp(row.at) && text(row.description) && text(row.summary), report, 'activity');
   return { date: iso(start).slice(0, 10), timezone: 'UTC' as const, total, sampled: total > items.length, items };
