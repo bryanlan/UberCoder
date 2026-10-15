@@ -11,6 +11,7 @@ import type {
   ProviderId,
   RecordedUserInput,
   SessionEvent,
+  SessionInputResponse,
   SessionKeystrokeRequest,
   TreeResponse,
   UiPreferences,
@@ -102,6 +103,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  const pendingSubmissionIds = useRef(new Map<string, string>());
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
   const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
   const [rebindingConversationKey, setRebindingConversationKey] = useState<string>();
@@ -675,7 +677,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<boolean> {
+  async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<SessionInputResponse | undefined> {
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
     const optimisticSubmittedText = optimisticSubmittedTextForKeystrokes(body);
@@ -701,9 +703,18 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       });
     };
     try {
-      const response = await api.sendKeystrokes(sessionId, body, authQuery.data?.csrfToken);
+      const completeChatSubmit = body.keys?.length === 1 && body.keys[0] === 'Enter'
+        && body.submittedText?.trim() && !body.submittedText.trim().startsWith('/');
+      const submissionKey = `${sessionId}:${body.submittedText ?? ''}`;
+      const submissionId = completeChatSubmit
+        ? body.submissionId ?? pendingSubmissionIds.current.get(submissionKey) ?? crypto.randomUUID() : undefined;
+      if (submissionId) pendingSubmissionIds.current.set(submissionKey, submissionId);
+      const response = await api.sendKeystrokes(sessionId, completeChatSubmit
+        ? { ...body, submissionId } : body, authQuery.data?.csrfToken);
+      pendingSubmissionIds.current.delete(submissionKey);
       const updatedSession = response.session;
       applyUpdatedSessionToSelection(sessionId, updatedSession);
+      if (response.queuedInput) discardOptimisticMessage();
       if (response.recordedUserInput) {
         appendRecordedSubmittedText({
           session: updatedSession,
@@ -714,11 +725,11 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       if (refreshTimelineMessages) {
         scheduleSelectedTimelineMessageRefresh();
       }
-      return true;
+      return response;
     } catch (error) {
       discardOptimisticMessage();
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
-      return false;
+      return undefined;
     }
   }
 

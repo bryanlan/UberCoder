@@ -249,6 +249,7 @@ export interface BoundSession {
   /** Automatically suspended during low available memory; selecting the conversation resumes it. */
   pressureSuspendedAt?: string;
   isWorking?: boolean;
+  queuedInputs?: SessionQueuedInput[];
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;
@@ -276,9 +277,20 @@ export interface RecordedUserInput {
 export interface SessionInputResponse {
   session: BoundSession;
   recordedUserInput?: RecordedUserInput;
+  queuedInput?: SessionQueuedInput;
+}
+
+export interface SessionQueuedInput {
+  requestId: string;
+  text: string;
+  requestedAt: string;
+  state: 'queued' | 'waiting_for_input' | 'submitting' | 'needs_review';
+  reason: string;
 }
 
 export interface SessionKeystrokeRequest {
+  /** Idempotent, server-owned delivery of a complete chat draft. */
+  submissionId?: string;
   text?: string;
   keys?: string[];
   deferScreenUpdate?: boolean;

@@ -68,6 +68,100 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
     .run(timestamp, timestamp, timestamp, timestamp, timestamp, timestamp, sessionId);
 }
 
+describe('Queued human input after a staged automatic notice', () => {
+  async function stagedNotice(notice: 'peer' | 'unattended' = 'peer') {
+    let memory = 'MemAvailable: 8000000 kB';
+    const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
+    if (notice === 'unattended') {
+      signalContinuation(f.db, f.recipient, { key: 'ready', timestamp: new Date().toISOString(), source: f.sender, reason: 'Work ready' });
+      await f.manager.wakePendingAssignments(); continuationDue(f.db, f.recipient);
+    }
+    const paste = f.tmux.pasteText.bind(f.tmux);
+    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    if (notice === 'peer') f.send();
+    await f.manager.wakePendingAssignments();
+    expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged' });
+    memory = 'MemAvailable: 8000000 kB'; f.tmux.pasteText = paste;
+    const submitted: string[] = [], keys = f.tmux.sendKeys.bind(f.tmux);
+    f.tmux.sendKeys = async (name, input) => {
+      if (input.includes('C-u')) f.tmux.paneText = claudeReady;
+      if (input.includes('Enter')) submitted.push(f.tmux.paneText);
+      await keys(name, input);
+    };
+    const text = 'The complete human request.\nPreserve this second line.';
+    const submit = () => f.manager.sendKeystrokes(f.session.id, { text, submittedText: text, keys: ['Enter'], submissionId: randomUUID() });
+    return { ...f, submitted, text, submit };
+  }
+
+  it.each(['peer', 'unattended'] as const)('gives a queued human message priority over a confirmed unsent %s notice', async notice => {
+    const f = await stagedNotice(notice);
+    const result = await f.submit();
+    expect(result.recordedUserInput?.text).toBe(f.text);
+    expect(result.queuedInput).toBeUndefined();
+    expect(f.submitted).toEqual([claudeReady.replace('❯ ', '❯ ' + f.text)]);
+    expect(f.tmux.sentKeys.filter(input => input.includes('Enter'))).toEqual([['Enter']]);
+    expect(f.db.meta.get(peerWakeComposerKey(f.session.id))).toBe('');
+  });
+
+  it.each(['human_text', 'missing_proof', 'changed_binding', 'uncertain_enter'] as const)
+    ('preserves the native draft when automatic notice ownership is invalid: %s', async guard => {
+    const f = await stagedNotice();
+    if (guard === 'human_text') f.tmux.paneText = claudeReady.replace('❯ ', '❯ ' + PEER_WAKE_PROMPT + ' HUMAN_DRAFT');
+    if (guard === 'missing_proof') f.db.meta.set(peerWakeComposerKey(f.session.id), '');
+    if (guard === 'changed_binding') f.db.sqlite.prepare('update bound_sessions set started_at=? where id=?').run(new Date(0).toISOString(), f.session.id);
+    if (guard === 'uncertain_enter') {
+      const composer = JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!);
+      f.db.meta.set(peerWakeComposerKey(f.session.id), JSON.stringify({ ...composer, status: 'submitting' }));
+    }
+    const before = f.tmux.paneText;
+    const result = await f.submit();
+    expect(result.recordedUserInput).toBeUndefined();
+    expect(result.queuedInput).toBeDefined();
+    expect(f.tmux.sentKeys).toEqual([]);
+    expect(f.tmux.paneText).toBe(before);
+    expect(f.submitted).toEqual([]);
+  });
+
+  it.each(['native_typing', 'cancel'] as const)('rechecks %s immediately before retiring automatic text', async guard => {
+    const f = await stagedNotice();
+    const capture = f.tmux.capturePane.bind(f.tmux); let captures = 0, cancel: Promise<unknown> | undefined;
+    f.tmux.capturePane = async (...args) => {
+      if (++captures === 2) {
+        if (guard === 'native_typing') f.tmux.paneText = claudeReady.replace('❯ ', '❯ ' + PEER_WAKE_PROMPT + ' HUMAN_DRAFT');
+        else {
+          const request = f.db.boundSessions.getById(f.session.id)!.queuedInputs![0]!;
+          cancel = f.manager.cancelQueuedInput(f.session.id, request.requestId);
+        }
+      }
+      return capture(...args);
+    };
+    await f.submit(); await cancel;
+    expect(captures).toBeGreaterThanOrEqual(2);
+    expect(f.tmux.sentKeys).toEqual([]);
+    expect(f.submitted).toEqual([]);
+    expect(f.tmux.paneText).toContain(guard === 'native_typing' ? 'HUMAN_DRAFT' : PEER_WAKE_PROMPT);
+  });
+
+  it('retains an uncertain clear for review across restart and never repeats it or Enter', async () => {
+    const f = await stagedNotice();
+    f.tmux.sendKeys = async (_name, input) => {
+      f.tmux.sentKeys.push(input);
+      if (input.includes('C-u')) { f.tmux.paneText = claudeReady; throw new Error('Clear outcome is uncertain.'); }
+    };
+    const result = await f.submit();
+    expect(result.queuedInput).toMatchObject({ state: 'needs_review', text: f.text });
+    expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'retiring' });
+    await f.manager.stop();
+    const restarted = createRecoveryManager(f.db, f.tmux, f.root, new RealtimeEventBus(), claudeProvider);
+    try {
+      await restarted.wakePendingAssignments();
+      await new Promise(resolve => setTimeout(resolve, 1100));
+      expect(f.tmux.sentKeys).toEqual([['C-e', 'C-u']]);
+      expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toMatchObject([{ state: 'needs_review', text: f.text }]);
+    } finally { await restarted.stop(); }
+  });
+});
+
 describe('Peer message wake and one-hour sleep', () => {
   it('keeps inbox timers responsive with hundreds of disconnected assignments', async () => {
     const f = await fixture();

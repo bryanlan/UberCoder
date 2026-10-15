@@ -29,6 +29,7 @@ const screenQuerySchema = z.object({
 });
 const keystrokeKeySchema = z.enum(['Enter', 'Escape', 'Up', 'Down', 'Left', 'Right', 'BSpace', 'Tab', 'C-c']);
 const keystrokeBodySchema = z.object({
+  submissionId: z.string().uuid().optional(),
   text: z.string().min(1).optional(),
   keys: z.array(keystrokeKeySchema).min(1).optional(),
   deferScreenUpdate: z.boolean().optional(),
@@ -37,6 +38,8 @@ const keystrokeBodySchema = z.object({
   imageIds: z.array(z.string().uuid()).min(1).max(MAX_PROMPT_IMAGES).optional(),
 }).refine((value) => Boolean(value.text || value.keys?.length), {
   message: 'Expected literal text or at least one key token.',
+}).refine((value) => !value.submissionId || (Boolean(value.submittedText?.trim()) && value.keys?.length === 1 && value.keys[0] === 'Enter'), {
+  message: 'Queued submission requires a complete message and a single Enter.',
 }).refine((value) => !value.imageIds || (value.keys?.length === 1 && value.keys[0] === 'Enter' && new Set(value.imageIds).size === value.imageIds.length), {
   message: 'Images require a single Enter submission and unique image IDs.',
 });
@@ -53,6 +56,7 @@ function sessionInputResponse(result: SessionCommandResult): SessionInputRespons
   return {
     session: result.session,
     recordedUserInput: result.recordedUserInput,
+    queuedInput: result.queuedInput,
   };
 }
 
@@ -405,6 +409,8 @@ export async function registerSessionRoutes(
     const isLiteralSelectionKeystroke = shouldRestartFromSubmittedPrompt && submittedPromptText
       ? await sessions.allowsLiteralSelectionKeystroke(sessionId, submittedPromptText)
       : false;
+    // Native choices and slash commands remain explicit controls.
+    if (isLiteralSelectionKeystroke || submittedPromptText?.startsWith('/')) delete parsed.data.submissionId;
     if (submittedPromptText && shouldRestartFromSubmittedPrompt && !isLiteralSelectionKeystroke) {
       const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
         db,
@@ -429,6 +435,21 @@ export async function registerSessionRoutes(
         reply.code(error.statusCode).send({ error: error.message });
         return;
       }
+      throw error;
+    }
+  });
+
+  app.delete('/api/sessions/:sessionId/queued-inputs/:requestId', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch { return; }
+    const parsed = modelProfileRequestParamsSchema.safeParse(request.params);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid queued message route.' });
+    if (!sessions.getSessionById(parsed.data.sessionId)) return reply.code(404).send({ error: 'Session not found.' });
+    try {
+      return await sessions.cancelQueuedInput(parsed.data.sessionId, parsed.data.requestId);
+    } catch (error) {
+      if (error instanceof SessionInputRejectedError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });

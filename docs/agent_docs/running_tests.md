@@ -25,6 +25,7 @@ it does not query the live Console database.
   to verify that an aborted older auth response cannot replace the renewed login.
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
+- Durable queued chat submission: `NODE_ENV=test npm run test -w @agent-console/server -- session-input-queue session-routes session-interactive-input`. These fixtures use disposable SQLite databases and fake tmux transports to verify delayed repaint, database reopen, FIFO, matching drafts, cancellation before/during Enter, failed suspension, model-switch deferral, ownership and uncertain Enter. `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane` covers the queued Text Bypass handoff and sending-state controls. Browser coverage in `apps/web/e2e/input-rejection.spec.ts` verifies separate consecutive messages, pending-message display, refresh without resubmission, cancellation and preservation of genuine rejection behavior. Use isolated E2E ports; browser fixtures intercept provider input.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
 - Large event-log prompt restoration and cache races: `NODE_ENV=test npm run test -w @agent-console/server -- last-user-input session-output-restoration session-recency session-runtime`.
 - Timeline merge, transcript catch-up, stale transcript cache, or duplicated bubble fixes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- timeline-merge transcript-watcher conversation-routes provider-conversation-cache`.
@@ -137,6 +138,13 @@ notices retain their original permission revision and attempt count when later r
 Browser-push transport is mocked; tests verify payloads, deep links, no approval actions,
 per-device retry after partial success, expired subscriptions, and deduplication across restart and message batches.
 These tests do not establish production adoption or delivery to Bryan's browser.
+
+Combined queued-input handoff: `NODE_ENV=test npm run test -w @agent-console/server --
+peer-message-wake session-input-queue`. A queued human request supersedes an exact owned
+unsent peer/work notice without submitting that notice. Fixtures cover mixed human text,
+missing proof, changed binding, uncertain Enter, native typing/cancellation during final
+checks, and an uncertain native clear across restart. Native editing is simulated; real
+provider acceptance remains an opt-in operational check.
 
 
 Coordination delivery under load: `NODE_ENV=test npm run test -w @agent-console/server -- coordination peer-message-wake transcript-responsiveness`. These cover partial composer repaints, Stop during a slow inbox poll, deferred duplicate polls without false outage/acknowledgement, mixed human/control input and CPU-heavy transcript discovery. For the private real-provider proof, `PROOF_METADATA_LOAD=/absolute/path/to/a/large/claude.jsonl` runs read-only metadata load alongside inbox traffic; the proof requires zero native hook failures. `PROOF_CLAUDE_EXECUTABLE=/absolute/path/to/installed/version` tests an older native binary using a private executable copy named claude and private hook settings, preserving production processes and configuration.

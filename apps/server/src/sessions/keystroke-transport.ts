@@ -9,6 +9,7 @@ import {
 } from './screen-heuristics.js';
 
 export interface KeystrokeSendPayload {
+  submissionId?: string;
   text?: string;
   keys?: string[];
   deferScreenUpdate?: boolean;

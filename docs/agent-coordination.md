@@ -99,6 +99,15 @@ Human text, a different binding, manual Stop and a failed or interrupted Enter p
 path. The backend writes the submitting phase before invoking Enter; uncertain submissions
 remain blocked from automatic replay. Deferrals do not spend a successful response attempt.
 
+A queued human message has priority over a staged automatic notice. When the original
+assignment, PID and binding still own the exact known single-line notice, the backend may
+remove that unsent notice without submitting it. It rechecks ownership and the live composer,
+journals a `retiring` phase, uses Claude's documented end-of-line and delete-to-start editing
+keys, then confirms an empty ready composer before entering the human message. See
+[Claude's editing shortcuts](https://code.claude.com/docs/en/interactive-mode#text-editing).
+Changed or mixed human text is preserved. An uncertain clear or interrupted retirement becomes
+a reviewable queued message across restart; neither clear nor Enter is automatically replayed.
+
 Send returns id, queued, recipient, delivery and a plain-English note. The recipient reports working, idle or stopped, provider, last messaging contact, and resumableInConsole. Process identity is checked by PID and start time; an unambiguous current Console binding supplies working/suspension state. A recorded resumable binding is not a guarantee that a provider restart will succeed.
 
 - next_step: queued for the next supported native hook; long tools can delay it.
