@@ -45,3 +45,4 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - `docs/agent_docs/running_tests.md` — current test commands, host prerequisites, and e2e caveats.
 - `config/agent-console.example.json` — runtime config template for projects, proxy allowlists, auth, and providers.
 - `docs/agent-wiki.md` — per-repository shared pages, agent and browser use, revision history, and pilot review.
+- `docs/worktree-lifecycle.md` — what the hourly worktree sweep keeps and removes, and the worktree rules for agents.
