@@ -36,6 +36,7 @@ class InputTmux extends FakeTmux {
   }
   override async sendKeys(name: string, keys: string[]): Promise<void> {
     await super.sendKeys(name, keys);
+    if (keys.includes('C-c') && /^› ?\S/m.test(this.paneText)) this.paneText = ready();
     if (keys.includes('Enter')) {
       await this.onEnter?.();
       this.paneText = busy;
@@ -166,14 +167,52 @@ describe('durable human input queue', () => {
     expect(f.tmux.sent).toEqual([]);
   });
 
-  it('cancels during text transport before Enter and retains the native draft', async () => {
+  it('cancels during text transport before Enter and clears only the text it typed', async () => {
     const f = await fixture();
     const id = randomUUID();
     f.tmux.onText = async () => { await f.manager.cancelQueuedInput(f.session.id, id); };
     await f.submit('cancel me', id);
-    expect(f.tmux.sentKeys).toEqual([]);
-    expect(f.tmux.paneText).toContain('cancel me');
+    await vi.waitFor(() => expect(f.tmux.sentKeys).toEqual([['C-c']]), { timeout: 4000 });
+    expect(f.tmux.paneText).not.toContain('cancel me');
     expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
+  });
+
+  it('keeps a cancelled message when it was appended to an existing human draft', async () => {
+    const f = await fixture();
+    const id = randomUUID();
+    f.tmux.paneText = ready('my own words ');
+    f.tmux.onText = async () => { await f.manager.cancelQueuedInput(f.session.id, id); };
+    await f.manager.sendKeystrokes(f.session.id, { text: 'cancel me', submittedText: 'my own words cancel me', keys: ['Enter'], submissionId: id });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(f.tmux.sentKeys).toEqual([]);
+    expect(f.tmux.paneText).toContain('my own words cancel me');
+  });
+
+  it('after Stop, clears the stranded queued text once before typing the next message', async () => {
+    const f = await fixture();
+    let stop: Promise<unknown> | undefined;
+    f.tmux.onText = async () => { f.tmux.onText = undefined; stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
+    await f.submit('stranded by Stop');
+    await stop;
+    expect(f.tmux.paneText).toContain('stranded by Stop');
+    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    const result = await f.submit('the next message');
+    expect(result.recordedUserInput?.text).toBe('the next message');
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c'], ['Enter']]);
+    expect(f.tmux.sent).toEqual(['stranded by Stop', 'the next message']);
+  });
+
+  it('does not clear stranded text after the human edits it', async () => {
+    const f = await fixture();
+    let stop: Promise<unknown> | undefined;
+    f.tmux.onText = async () => { f.tmux.onText = undefined; stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
+    await f.submit('stranded by Stop');
+    await stop;
+    f.tmux.paneText = ready('stranded by Stop, edited by hand');
+    expect((await f.submit('the next message')).queuedInput?.state).toBe('queued');
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.paneText).toContain('edited by hand');
   });
 
   it('Stop during text entry prevents the queued Enter', async () => {

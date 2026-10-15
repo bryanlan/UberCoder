@@ -17,6 +17,8 @@ export interface SessionRuntimeState {
   claudeProfile?: import('@agent-console/shared').ClaudeCostProfileKey;
   submittedTurnAt?: string;
   claudeFolderTrustPending?: boolean;
+  /** Native process whose hidden pane already has the Console minimum size. */
+  paneSizedPid?: number;
 }
 
 interface SessionRuntime {

@@ -12,7 +12,7 @@ import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { ProviderRunState } from '../providers/types.js';
-import { isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
+import { CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS, isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
 import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
@@ -52,7 +52,7 @@ import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
-import { InputQueue, queuedInputSummary, type QueuedInputRecord } from './input-queue.js';
+import { cancelledRemnant, InputQueue, queuedInputSummary, type QueuedInputRecord } from './input-queue.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -904,6 +904,18 @@ export class SessionManager {
         { err: error, sessionId: session.id, tmuxSessionName: session.tmuxSessionName },
         'Failed to attach tmux raw-log pipe.',
       );
+    }
+  }
+
+  private async tryEnsurePaneSize(session: BoundSession): Promise<void> {
+    const state = this.runtimeState(session.id);
+    if (session.pid === undefined || session.pid === null || state.paneSizedPid === session.pid) return;
+    try {
+      await this.tmuxClient.ensureMinimumWindowSize(session.tmuxSessionName, CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS);
+      state.paneSizedPid = session.pid;
+    } catch (error) {
+      this.logger?.warn({ err: error, sessionId: session.id, tmuxSessionName: session.tmuxSessionName },
+        'Failed to size the hidden tmux pane.');
     }
   }
 
@@ -2129,6 +2141,10 @@ export class SessionManager {
   private cancelQueuedInputs(sessionId: string): void {
     if (!this.db.isOpen()) return;
     for (const record of this.inputQueue.list(sessionId)) {
+      // The human's own Stop key reaches the provider; clear our typed text
+      // before the next queued message instead of racing a repeated Escape.
+      const remnant = cancelledRemnant(record);
+      if (remnant) this.inputQueue.setRemnant(sessionId, remnant);
       this.inputQueue.put(sessionId, record.state === 'submitting'
         ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
         : { ...record, state: 'cancelled' });
@@ -2144,8 +2160,37 @@ export class SessionManager {
       throw new SessionInputRejectedError('Submission has already started. Check the conversation before sending again.');
     }
     this.saveQueuedInput(sessionId, { ...record, state: 'cancelled' });
+    const remnant = cancelledRemnant(record);
+    if (remnant) {
+      this.inputQueue.setRemnant(sessionId, remnant);
+      void this.runtimes.run(sessionId, 'clearCancelledInput', () => this.clearQueuedInputRemnantInternal(sessionId))
+        .catch((error: unknown) => this.logger?.warn({ err: error, sessionId }, 'Cancelled message text was left in the native composer.'));
+    }
     this.scheduleInputDrain(sessionId);
     return { session: this.mustGetSession(sessionId) };
+  }
+
+  /** Clears cancelled queue text only while it is the whole, unchanged, idle native draft. */
+  private async clearQueuedInputRemnantInternal(sessionId: string): Promise<boolean> {
+    const remnant = this.inputQueue.remnant(sessionId);
+    const session = this.db.boundSessions.getById(sessionId);
+    if (!remnant || !session || this.stopped) return false;
+    if (session.pid !== remnant.panePid) { this.inputQueue.setRemnant(sessionId, undefined); return false; }
+    if (session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
+    const screen = await this.captureSessionScreen(session, false);
+    if (!screenLooksReadyForLiteralPrompt(screen)) return false;
+    if (!screen.inputText.trim()) { this.inputQueue.setRemnant(sessionId, undefined); return true; }
+    if (!screenInputMatchesText(screen, remnant.text)) return false;
+    // Journal before transport: an uncertain clear is never repeated, because
+    // a second clear key on an empty composer can arm the provider's exit.
+    this.inputQueue.setRemnant(sessionId, undefined);
+    await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']));
+    const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(remnant.text),
+      candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
+    if (!cleared) return false;
+    this.inputQueue.stage(sessionId, undefined);
+    await this.emitScreenUpdate(this.mustGetSession(sessionId));
+    return true;
   }
 
   private async queueInputInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
@@ -2288,6 +2333,11 @@ export class SessionManager {
           this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'Automatic notice removal could not be confirmed. Check the live draft before sending again.' });
         return;
       }
+    }
+    if (record.state === 'queued' && screen.inputText.trim() && this.inputQueue.remnant(sessionId)
+      && !this.queuedInputConfirmed(sessionId, record, screen, session.pid)) {
+      if (!await stillOwned()) return;
+      if (await this.clearQueuedInputRemnantInternal(sessionId)) screen = await this.captureSessionScreen(session, false);
     }
     let confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     if (record.state === 'queued' && !confirmed) {
@@ -3467,6 +3517,7 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     await this.tryEnsureRawLogPipe(refreshed);
+    await this.tryEnsurePaneSize(refreshed);
     this.watchSessionOutput(refreshed);
     if (!this.runtimeState(refreshed.id).lastScreenHash) {
       await this.emitScreenUpdate(refreshed);

@@ -16,7 +16,16 @@ export interface QueuedInputRecord {
 }
 
 const prefix = (sessionId: string) => `session-input:${sessionId}:`;
+const remnantKey = (sessionId: string) => `session-input-remnant:${sessionId}`;
 const pendingKey = (sessionId: string) => `session-input-pending:${sessionId}`;
+export interface QueuedInputRemnant { requestId: string; text: string; panePid: number }
+
+/** Only text typed by the queue into an empty composer is Console-owned after cancellation. */
+export function cancelledRemnant(record: QueuedInputRecord): QueuedInputRemnant | undefined {
+  if (!['awaiting_input', 'failed'].includes(record.state) || record.panePid === undefined || record.baselineInput?.trim()) return undefined;
+  return { requestId: record.requestId, text: record.text, panePid: record.panePid };
+}
+
 const pending = (record: QueuedInputRecord) => !['submitted', 'cancelled'].includes(record.state);
 
 /** Delivery journals use the existing durable metadata store, not runtime files. */
@@ -34,6 +43,19 @@ export class InputQueue {
     if (!draft) { this.sqlite.prepare('delete from meta where key = ?').run(key); return; }
     this.sqlite.prepare('insert into meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value')
       .run(key, JSON.stringify(draft));
+  }
+
+  /** Text this queue typed into an otherwise empty composer before the human cancelled it. */
+  remnant(sessionId: string): QueuedInputRemnant | undefined {
+    const row = this.sqlite.prepare('select value from meta where key = ?')
+      .get(remnantKey(sessionId)) as { value: string } | undefined;
+    return row ? JSON.parse(row.value) as QueuedInputRemnant : undefined;
+  }
+
+  setRemnant(sessionId: string, remnant: QueuedInputRemnant | undefined): void {
+    if (!remnant) { this.sqlite.prepare('delete from meta where key = ?').run(remnantKey(sessionId)); return; }
+    this.sqlite.prepare('insert into meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value')
+      .run(remnantKey(sessionId), JSON.stringify(remnant));
   }
 
   revision(sessionId: string): number {

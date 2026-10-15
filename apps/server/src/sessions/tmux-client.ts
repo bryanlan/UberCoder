@@ -8,6 +8,14 @@ import { shellEscape } from '../lib/shell.js';
 
 const DEFAULT_TMUX_SOCKET_NAME = 'agent-console';
 
+/**
+ * Hidden panes have no attached client, so tmux would size them 80x24. Native
+ * composers then clip behind provider panels and drafts cannot be verified.
+ * Keep the familiar width and give the composer room to render completely.
+ */
+export const CONSOLE_PANE_COLUMNS = 80;
+export const CONSOLE_PANE_ROWS = 50;
+
 export class TmuxError extends Error {
   constructor(
     message: string,
@@ -116,13 +124,16 @@ export interface TmuxClient {
   killSession(sessionName: string): Promise<void>;
   hasSession(sessionName: string): Promise<boolean>;
   getPanePid(sessionName: string): Promise<number | undefined>;
+  /** Grows a smaller window to at least this size; returns whether it resized. */
+  ensureMinimumWindowSize(sessionName: string, columns: number, rows: number): Promise<boolean>;
   getOption(sessionName: string, name: string): Promise<string | undefined>;
   setOption(sessionName: string, name: string, value: string): Promise<void>;
 }
 
 export class ShellTmuxClient implements TmuxClient {
   async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
-    const args = ['new-session', '-d', '-s', sessionName, '-c', cwd, shellCommand];
+    const args = ['new-session', '-d', '-x', String(CONSOLE_PANE_COLUMNS), '-y', String(CONSOLE_PANE_ROWS),
+      '-s', sessionName, '-c', cwd, shellCommand];
     try {
       await runScopedTmux(sessionName, args);
     } catch {
@@ -216,6 +227,15 @@ export class ShellTmuxClient implements TmuxClient {
     } catch {
       return undefined;
     }
+  }
+
+  async ensureMinimumWindowSize(sessionName: string, columns: number, rows: number): Promise<boolean> {
+    const output = await runTmux(['display-message', '-p', '-t', sessionName, '#{window_width} #{window_height}']);
+    const [width, height] = output.trim().split(/\s+/).map(Number);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || (width! >= columns && height! >= rows)) return false;
+    // Never shrink a window someone attached and enlarged.
+    await runTmux(['resize-window', '-t', sessionName, '-x', String(Math.max(width!, columns)), '-y', String(Math.max(height!, rows))]);
+    return true;
   }
 
   async getOption(sessionName: string, name: string): Promise<string | undefined> {
