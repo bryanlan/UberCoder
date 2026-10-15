@@ -14,8 +14,9 @@ node apps/server/dist/engineering/summary-cli.js
 ```
 
 The default configuration path is `AGENT_CONSOLE_CONFIG`, or
-`~/.config/agent-console/config.json`. Only its `databasePath` is used. Explicit
-paths avoid needing a config file:
+`~/.config/agent-console/config.json`. Only `databasePath`, `projectsRoot` and configured project `path` values are read.
+No config profiles, auth settings, provider commands or project notes are exported.
+Explicit database paths remain available even if the project configuration is unreadable:
 
 ```bash
 node_modules/.bin/tsx apps/server/src/engineering/summary-cli.ts \
@@ -34,13 +35,17 @@ and `sources`, even when useful sections are present.
 ## Version 1 contract
 
 The root contains `schema_version`, `generated_at`, `status`, `sources`, `issues`,
-`agents` and `wiki`. Each source has a withheld path marker, observation time,
+`configured_projects`, `agents` and `wiki`. `configured_projects` is a sorted,
+deduplicated array of checkout paths from the projects map, including inactive
+projects. An absent explicit path resolves under `projectsRoot`, matching Console.
+`sources.projects` independently reports missing, malformed or unreadable configuration;
+a valid empty map is available with an empty array. Each source has a withheld path marker, observation time,
 status and issues. Database locations stay private, including failed or malformed
 URL-like inputs.
 An unavailable section is `null`. Console sections are independent: a schema
 failure reading assignments does not hide working message, grant or wake counts.
-When the invocation itself cannot be parsed, `sources` is empty and `agents` and
-`wiki` are null.
+When the invocation itself cannot be parsed, `sources.projects` reports unavailable
+configuration and `agents` and `wiki` are null.
 
 `agents` contains:
 
@@ -50,7 +55,7 @@ When the invocation itself cannot be parsed, `sources` is empty and `agents` and
   the latest matching checkout update event (null when no event remains).
   `activity_summary` is the latest scope summary, or empty when none is available.
   Activity text is capped at 2,000 characters and common credentials are redacted.
-  Event text is not selected. The states active/waiting require the assignment's
+  Only permitted update-event history is selected separately below. The states active/waiting require the assignment's
   PID and recorded Linux process
   start to match. Disconnected assignments and stale active rows are idle.
   `started_never_finished` is a subset, not another disjoint state: unfinished,
@@ -67,6 +72,14 @@ When the invocation itself cannot be parsed, `sources` is empty and `agents` and
   resolve `/proc/<pid>/cwd` to the Git worktree root with read-only Git commands.
   Failed lookups retain live process identity with unknown checkout; a
   stale bound row or unrelated reused PID is insufficient.
+- `activity_yesterday`: retained `coordination_events.kind='update'` records from
+  UTC yesterday `[00:00, next 00:00)`, sorted by timestamp and event sequence. It
+  includes `date`, `timezone: UTC`, retained `total`, `sampled`, and at most 1,000
+  `items` with numeric event `id`, `assignment_id`, nullable `checkout`, `at`,
+  assignment `description`, and event `summary`. Text is redacted before display
+  limits. This is history, not a reconstruction from the latest scope. Missing
+  history is null with `sources.activity` unavailable, without invalidating
+  otherwise valid live ownership evidence. Message bodies remain excluded.
 - `messages`: retained total, unsupplied, unacknowledged, pending to unfinished
   recipients, and a zero-filled 14 UTC calendar-day series including today so far.
   Unsupplied means never offered to the recipient; unacknowledged includes both

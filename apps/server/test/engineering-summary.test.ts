@@ -18,11 +18,13 @@ afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursiv
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'engineering-summary-')); roots.push(root);
   const database = path.join(root, 'console.sqlite'), wikiDatabase = path.join(root, 'wiki.sqlite');
+  const config = path.join(root, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ projectsRoot: '/repo', projects: {} }));
   const db = new Database(database), wiki = new Database(wikiDatabase);
   db.exec(`
     create table coordination_assignments(id,provider,native_session_id,description,status,pid,process_start,started_at,last_seen_at,token_hash);
     create table coordination_scopes(assignment_id,checkout,repository,summary);
-    create table coordination_events(assignment_id,checkout,kind,text,timestamp);
+    create table coordination_events(seq integer primary key autoincrement,assignment_id,checkout,kind,text,timestamp);
     create table coordination_messages(id,sender_id,recipient_id,text,created_at,supplied_at,acknowledged_at);
     create table bound_sessions(id,provider,project_slug,status,pid,conversation_ref,resume_conversation_ref,raw_log_path);
     create table meta(key,value);
@@ -43,7 +45,7 @@ function fixture() {
   addAssignment('ended', 'finished', 104, 'ended-start', '2026-10-10T00:00:00.000Z');
   db.prepare('insert into coordination_scopes values(?,?,?,?)').run('live', '/repo/wt', '/repo/.git', 'Current work token=SECRETVALUE');
   db.prepare('insert into coordination_scopes values(?,?,?,?)').run('old', '/repo/old', '/repo/.git', 'Older work');
-  db.prepare('insert into coordination_events values(?,?,?,?,?)').run('live', '/repo/wt', 'update', 'PRIVATE_EVENT_TEXT', stamp);
+  db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run('live', '/repo/wt', 'update', 'PRIVATE_EVENT_TEXT', stamp);
   db.prepare('insert into bound_sessions values(?,?,?,?,?,?,?,?)').run('session-live', 'codex', 'project', 'bound', 101, 'native-live', null, 'PRIVATE_LOG_PATH');
   db.prepare('insert into bound_sessions values(?,?,?,?,?,?,?,?)').run('session-stale', 'codex', 'project', 'bound', 103, 'native-old', null, 'PRIVATE_LOG_PATH');
   for (const [id, sent, supplied, ack] of [['m1', stamp, null, null], ['m2', stamp, stamp, null], ['m3', '2026-09-01T00:00:00Z', stamp, stamp]]) {
@@ -68,7 +70,7 @@ function fixture() {
     [5, 'codex:searcher', null, 'search', 0, 'token=SECRETVALUE missing docs'],
   ]) wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(id, '/repo/.git', actor, action, results, stamp, 'Page', query, revision);
   db.close(); wiki.close();
-  return { database, wikiDatabase, now,
+  return { database, wikiDatabase, config, now,
     processIdentity: (pid: number) => pid === 101 ? { start: 'native-start', name: 'codex', cwd: '/repo/wt' }
       : pid === 102 ? { start: 'wait-start', name: 'codex', cwd: '/repo/wait' }
         : pid === 103 ? { start: 'reused-pid', name: 'codex', cwd: '/unrelated' } : null,
@@ -115,7 +117,7 @@ it('shows independent source failures without creating missing databases or an a
   expect(failed.status).toBe('error');
   expect(failed.agents.counts).toBeNull();
   expect(failed.agents.messages).toBeNull();
-  expect(failed.issues).toHaveLength(2);
+  expect(failed.issues).toHaveLength(3);
 });
 
 it('keeps unaffected Console measurements visible when one schema is unsupported', () => {
@@ -162,9 +164,11 @@ it('runs the source CLI without a backend and returns structured failures for op
   const help = run('--help');
   expect(help.status).toBe(0);
   expect(help.stdout).toContain('--wiki-database');
-  const result = run('--database', options.database, '--wiki-database', options.wikiDatabase);
+  fs.writeFileSync(options.config, JSON.stringify({ projectsRoot: '/repo', projects: { configured: {} }, password: 'PRIVATE_CONFIG_SECRET' }));
+  const result = run('--config', options.config, '--database', options.database, '--wiki-database', options.wikiDatabase);
   expect(result.status).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({ schema_version: 1, status: 'ok' });
+  expect(JSON.parse(result.stdout)).toMatchObject({ schema_version: 1, status: 'ok', configured_projects: ['/repo/configured'], sources: { projects: { status: 'ok' } } });
+  expect(result.stdout).not.toContain('PRIVATE_CONFIG_SECRET');
   const missing = path.join(path.dirname(options.database), 'absent.sqlite');
   const partial = run('--database', options.database, '--wiki-database', missing);
   expect(partial.status).toBe(2);
@@ -174,7 +178,7 @@ it('runs the source CLI without a backend and returns structured failures for op
   fs.writeFileSync(badConfig, 'PRIVATE_SECRET_CONFIG');
   const invalid = run('--config', badConfig);
   expect(invalid.status).toBe(1);
-  expect(JSON.parse(invalid.stdout)).toMatchObject({ status: 'error' });
+  expect(JSON.parse(invalid.stdout)).toMatchObject({ status: 'error', configured_projects: [], sources: { projects: { status: 'error' } } });
   expect(invalid.stdout + invalid.stderr).not.toContain('PRIVATE_SECRET_CONFIG');
 });
 
@@ -315,4 +319,86 @@ it('deduplicates unattributed history assignments sharing one verified provider 
   const processIdentity = (pid: number) => pid === 101 ? { start: 'native-start', name: 'codex', cwd: null, unattributed: true } : null;
   const result = engineeringSummary({ ...options, processIdentity });
   expect(result.agents.unattributed_sessions).toEqual([{ provider: 'codex', assignment_id: 'live', session_id: 'session-live', description: 'Assignment live' }]);
+});
+
+
+it('exports only configured project paths and faults independently on missing or malformed configuration', () => {
+  const options = fixture();
+  const configuration = { projectsRoot: '/repo', projects: {
+    fallback: { active: false, notes: 'PRIVATE_PROJECT_NOTES' },
+    explicit: { path: '/elsewhere/checkout', providers: { token: 'PRIVATE_PROVIDER' } },
+    duplicate: { path: '/elsewhere/checkout' },
+  }, auth: { password: 'PRIVATE_CONFIG_AUTH' }, profiles: ['PRIVATE_PROFILE'] };
+  fs.writeFileSync(options.config, JSON.stringify(configuration));
+  const before = fs.readFileSync(options.config);
+  const result = engineeringSummary(options);
+  expect(result.configured_projects).toEqual(['/elsewhere/checkout', '/repo/fallback']);
+  expect(result.sources.projects.status).toBe('ok');
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_');
+  expect(fs.readFileSync(options.config)).toEqual(before);
+  for (const value of ['{', JSON.stringify({ projects: [] }), JSON.stringify({ projects: { bad: { path: 7 } } })]) {
+    fs.writeFileSync(options.config, value);
+    const failed = engineeringSummary(options);
+    expect(failed.configured_projects).toEqual([]);
+    expect(failed.sources.projects.status).toBe('error');
+    expect(failed.sources.console.status).toBe('ok');
+    expect(failed.status).toBe('partial');
+  }
+  fs.unlinkSync(options.config);
+  expect(engineeringSummary(options).sources.projects.status).toBe('error');
+  expect(fs.existsSync(options.config)).toBe(false);
+});
+
+it('exports retained yesterday update history in stable UTC order without substituting current summaries', () => {
+  const options = fixture(), db = new Database(options.database);
+  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
+  insert.run('live', '/repo/wt', 'update', 'Earlier retained result', '2026-10-14T00:00:00.000Z');
+  insert.run('live', '/repo/wt', 'update', 'PASSWORD="synthetic_history_secret"', '2026-10-14T23:59:59.999Z');
+  insert.run('live', '/repo/wt', 'message', 'PRIVATE_MESSAGE', '2026-10-14T12:00:00.000Z');
+  insert.run('live', '/repo/wt', 'update', 'PRIVATE_PREVIOUS_DAY', '2026-10-13T23:59:59.999Z');
+  db.close();
+  const before = fs.readFileSync(options.database), result = engineeringSummary(options);
+  expect(result.agents.activity_yesterday).toMatchObject({ date: '2026-10-14', timezone: 'UTC', total: 2, sampled: false });
+  expect(result.agents.activity_yesterday?.items).toEqual([
+    { id: 2, assignment_id: 'live', checkout: '/repo/wt', at: '2026-10-14T00:00:00.000Z', description: 'Assignment live', summary: 'Earlier retained result' },
+    { id: 3, assignment_id: 'live', checkout: '/repo/wt', at: '2026-10-14T23:59:59.999Z', description: 'Assignment live', summary: '[credential-bearing line omitted]' },
+  ]);
+  expect(result.sources.activity.status).toBe('ok');
+  expect(JSON.stringify(result)).not.toContain('synthetic_history_secret');
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_PREVIOUS_DAY');
+  expect(fs.readFileSync(options.database)).toEqual(before);
+});
+
+it('bounds yesterday history and keeps history failures separate from ownership', () => {
+  const options = fixture(), db = new Database(options.database);
+  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
+  db.transaction(() => { for (let i = 0; i < 1001; i++) insert.run('live', '/repo/wt', 'update', `Update ${i}`, '2026-10-14T12:00:00.000Z'); })();
+  const result = engineeringSummary(options);
+  expect(result.agents.activity_yesterday).toMatchObject({ total: 1001, sampled: true });
+  expect(result.agents.activity_yesterday?.items).toHaveLength(1000);
+  expect(result.agents.activity_yesterday?.items[0]?.summary).toBe('Update 0');
+  db.exec('alter table coordination_events rename column text to unavailable'); db.close();
+  const failed = engineeringSummary(options);
+  expect(failed.agents.activity_yesterday).toBeNull();
+  expect(failed.sources.activity.status).toBe('error');
+  expect(failed.sources.console.status).toBe('ok');
+  expect(failed.agents.assignments?.find(a => a.id === 'live')?.live_process).toBe(true);
+  expect(failed.status).toBe('partial');
+});
+
+
+it('redacts a bare Google API key containing both URL-safe punctuation characters through the full exporter', () => {
+  const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
+  const key = 'AIza' + 'AbCdEfGhIjKlMnOpQ' + '_' + 'rStUvWxYz0123456' + '-';
+  expect(key).toHaveLength(39);
+  db.prepare('update coordination_assignments set description=?').run(`Review ${key} diagnostics`);
+  db.prepare('update coordination_scopes set summary=?').run(`Review ${key} diagnostics`);
+  db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
+    .run('live', '/repo/wt', 'update', `Review ${key} diagnostics`, '2026-10-14T12:00:00.000Z');
+  wiki.prepare('update wiki_pages set title=?').run(`Review ${key} diagnostics`);
+  db.close(); wiki.close();
+  const result = JSON.stringify(engineeringSummary(options));
+  expect(result).not.toContain(key);
+  expect(result).not.toContain('AbCdEfGhIjKlMnOpQ');
+  expect(result).not.toContain('rStUvWxYz0123456');
 });
