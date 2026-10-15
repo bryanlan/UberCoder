@@ -6,6 +6,7 @@ const sensitiveKey = new RegExp(contract.sensitive_key, 'i');
 const entropyPattern = new RegExp(contract.entropy.pattern, 'g');
 const uuid = /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/i;
 const identifier = /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i;
+const prefixedIdentifiers = contract.identifier_patterns.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
 const pathIdentifier = /[a-z0-9_./ +@()\[\]-]+/i;
 const publicFields = new Set<string>(contract.public_fields);
 const identifierFields = new Set<string>(contract.identifier_fields);
@@ -40,7 +41,11 @@ export function sanitizeExport<T>(value: T): T {
   const allowed = new Set<string>();
   function collect(item: unknown, field = ''): void {
     if (typeof item === 'string') {
-      if (identifierFields.has(field) && (fullMatch(identifier, item) || fullMatch(uuid, item))) allowed.add(item);
+      if (identifierFields.has(field) && (fullMatch(identifier, item) || fullMatch(uuid, item)
+        || prefixedIdentifiers.some(pattern => fullMatch(pattern, item)))) {
+        allowed.add(item);
+        for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
+      }
       if (pathFields.has(field) && isPathIdentifier(item)) {
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }

@@ -18,12 +18,12 @@
       "replacement": "[authenticated connection omitted]"
     },
     {
-      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=]\\s*(?:[+-][ \\t]*)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*').*$",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=]\\s*(?:[+-][ \\t]*)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*').*$",
       "flags": "im",
       "replacement": "[credential-bearing line omitted]"
     },
     {
-      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=][ \\t]*(?:\\r?\\n[+-]?[ \\t]*)?[^\\r\\n]*$",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=][ \\t]*(?:\\r?\\n[+-]?[ \\t]*)?[^\\r\\n]*$",
       "flags": "im",
       "replacement": "[credential-bearing line omitted]"
     },
@@ -247,6 +247,16 @@
         "session_started_at": "2026-10-15T00:00:00Z",
         "author_assignment_id": "01a13e61-b44e-7292-aa58-3b429c5ed251"
       }
+    },
+    {
+      "input": {
+        "run_id": "run_0123456789abcdef0123456789abcdef",
+        "summary": "Run run_0123456789abcdef0123456789abcdef"
+      },
+      "expected": {
+        "run_id": "run_0123456789abcdef0123456789abcdef",
+        "summary": "Run run_0123456789abcdef0123456789abcdef"
+      }
     }
   ],
   "public_fields": [
@@ -314,7 +324,9 @@
     "token_budget",
     "tokens_used",
     "total_sessions",
-    "total_tokens"
+    "total_tokens",
+    "unattributed_live_sessions",
+    "unattributed_sessions"
   ],
   "public_values": {
     "auth": [
@@ -380,5 +392,8 @@
     "SESSION",
     "COOKIE",
     "TOKEN"
+  ],
+  "identifier_patterns": [
+    "run_[a-f0-9]{32}"
   ]
 }
