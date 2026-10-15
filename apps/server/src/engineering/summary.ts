@@ -15,7 +15,7 @@ interface SessionRow {
   id: string; provider: string; project_slug: string; status: string; pid: number | null;
   conversation_ref: string; resume_conversation_ref: string | null;
 }
-export interface ProcessIdentity { start: string; name: string; cwd: string | null }
+export interface ProcessIdentity { start: string; name: string; cwd: string | null; unattributed?: boolean }
 export interface SummaryOptions {
   database: string; wikiDatabase: string; now?: number;
   processIdentity?: (pid: number) => ProcessIdentity | null;
@@ -35,15 +35,21 @@ export function readProcessIdentity(pid: number): ProcessIdentity | null {
     const tail = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
     if (tail[0] === 'Z' || !tail[19]) return null;
     let cwd: string | null = null;
+    let unattributed = false;
     try {
       const processDirectory = fs.readlinkSync(`/proc/${pid}/cwd`);
-      const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+      const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
       for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE']) delete env[name];
       cwd = fs.realpathSync(execFileSync('git', ['-C', processDirectory, 'rev-parse', '--show-toplevel'], {
         env, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'],
       }).trim());
-    } catch { /* A live process without a proven Git checkout makes ownership partial. */ }
-    return { start: tail[19], name: raw.slice(raw.indexOf('(') + 1, raw.lastIndexOf(')')), cwd };
+    } catch (error) {
+      const fault = error as { status?: number; stderr?: Buffer | string };
+      // A readable non-Git working directory is normal for cross-repo sessions.
+      // Permission failures, timeouts and unavailable Git remain unknown evidence.
+      unattributed = fault.status === 128 && String(fault.stderr ?? '').includes('not a git repository');
+    }
+    return { start: tail[19], name: raw.slice(raw.indexOf('(') + 1, raw.lastIndexOf(')')), cwd, unattributed };
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ESRCH'].includes(String(error.code))) return null;
     throw new Error('Process ownership could not be read.');
@@ -67,14 +73,16 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
   const scopes = new Map<string, Scope[]>();
   for (const row of scopeRows) scopes.set(row.assignment_id, [...scopes.get(row.assignment_id) ?? [], {
     checkout: row.checkout, repository: row.repository, summary: row.summary, updated_at: row.updated_at }]);
+  const sessionProcessKeys = new Map<string, string>();
   const sessions = sessionRows.map(s => {
     const owner = rows.find(a => a.provider === s.provider
       && (a.native_session_id === s.conversation_ref || a.native_session_id === s.resume_conversation_ref));
     const p = s.pid ? identity(s.pid) : null;
     // A stale bound row and a recycled unrelated PID are not proof of a live session.
     const live = Boolean(p && p.name === s.provider && (!owner || (owner.pid === s.pid && owner.process_start === p.start)));
+    if (live) sessionProcessKeys.set(s.id, `${s.provider}:${s.pid}:${p!.start}`);
     return { id: s.id, provider: s.provider, project: s.project_slug, status: s.status,
-      live, checkout: live ? p!.cwd : null, assignment_id: owner?.id ?? null };
+      live, checkout: live ? p!.cwd : null, unattributed: Boolean(live && p!.unattributed), assignment_id: owner?.id ?? null };
   });
   const counts = { total: rows.length, active: 0, waiting: 0, idle: 0, finished: 0, started_never_finished: 0 };
   const assignments = rows.map(row => {
@@ -92,11 +100,27 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
       ?? (assignmentScopes.length === 1 ? assignmentScopes[0] : undefined);
     return { id: row.id, provider: row.provider, description: row.description,
       status: state, recorded_status: row.status, started_at: row.started_at, last_seen_at: row.last_seen_at,
-      live_process: live, process_checkout: live ? p!.cwd : null,
+      live_process: live, process_checkout: live ? p!.cwd : null, process_unattributed: Boolean(live && p!.unattributed),
       live_session: live || sessionIds.length > 0, session_ids: sessionIds, started_never_finished: neverFinished,
       activity_summary: latestScope?.summary ?? '', scopes: assignmentScopes };
   });
-  return { counts, assignments, sessions };
+  const unattributed = new Map<string, { provider: string; assignment_id: string | null; session_id: string | null; description: string }>();
+  const assignmentRows = new Map(rows.map(row => [row.id, row]));
+  // Assignments are newest first; multiple historical assignments can share a process.
+  for (const assignment of assignments.filter(a => a.live_process && a.process_unattributed)) {
+    const row = assignmentRows.get(assignment.id)!;
+    const key = `${row.provider}:${row.pid}:${row.process_start}`;
+    if (!unattributed.has(key)) unattributed.set(key, { provider: assignment.provider, assignment_id: assignment.id,
+      session_id: null, description: assignment.description });
+  }
+  for (const session of sessions.filter(s => s.live && s.unattributed)) {
+    const key = sessionProcessKeys.get(session.id)!;
+    const existing = unattributed.get(key);
+    if (existing) { if (!existing.session_id) existing.session_id = session.id; }
+    else unattributed.set(key, { provider: session.provider, assignment_id: session.assignment_id, session_id: session.id,
+      description: 'Live provider session without an assignment' });
+  }
+  return { counts, assignments, sessions, unattributed_sessions: [...unattributed.values()] };
 }
 
 function readMessages(db: Database.Database, now: number) {
@@ -257,8 +281,8 @@ export function engineeringSummary(options: SummaryOptions) {
           try {
             if (stage === 'assignments') {
               agents = readAssignments(db, options, now);
-              if (agents.assignments.some(a => a.live_process && !a.process_checkout)
-                || agents.sessions.some(s => s.live && !s.checkout)) {
+              if (agents.assignments.some(a => a.live_process && !a.process_checkout && !a.process_unattributed)
+                || agents.sessions.some(s => s.live && !s.checkout && !s.unattributed)) {
                 failed(source, 'ownership', { code: 'PROCESS_CHECKOUT_UNAVAILABLE' });
               }
             }
@@ -277,7 +301,7 @@ export function engineeringSummary(options: SummaryOptions) {
   }
   const status: Status = Object.values(sources).every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
   const result = sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues,
-    agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null,
+    agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null, unattributed_sessions: agents?.unattributed_sessions ?? null,
       messages, wakes, grants }, wiki });
   // Analyze complete values and typed identifiers before applying narrower display limits.
   const bounded = (value: string, limit: number) => value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, limit);
@@ -286,6 +310,7 @@ export function engineeringSummary(options: SummaryOptions) {
     assignment.activity_summary = bounded(assignment.activity_summary, 2000);
     for (const scope of assignment.scopes) scope.summary = bounded(scope.summary, 2000);
   }
+  for (const session of result.agents.unattributed_sessions ?? []) session.description = bounded(session.description, 1000);
   for (const query of result.wiki?.no_result_searches ?? []) query.query = bounded(query.query, 160);
   return result;
 }

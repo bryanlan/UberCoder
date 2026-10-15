@@ -286,3 +286,33 @@ it('redacts credential-key spelling, quoting, separators and line breaks through
     expect(checked).toBe(keys.length * 3 * 2 * 2);
   } finally { db.close(); wiki.close(); }
 }, 30_000);
+
+it('publishes a real readable non-Git process as one unattributed session without a source fault', async () => {
+  const options = fixture(), cwd = path.dirname(options.database);
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd, stdio: 'ignore' });
+  try {
+    await once(child, 'spawn');
+    const identity = readProcessIdentity(child.pid!);
+    const db = new Database(options.database);
+    db.prepare("update coordination_assignments set provider='node',pid=?,process_start=? where id='live'").run(child.pid, identity!.start);
+    db.prepare("update bound_sessions set provider='node',pid=? where id='session-live'").run(child.pid);
+    db.close();
+    const result = engineeringSummary({ ...options, processIdentity: undefined });
+    expect(identity).toMatchObject({ cwd: null, unattributed: true });
+    expect(result.status).toBe('ok');
+    expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({ live_process: true, process_unattributed: true });
+    expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, unattributed: true });
+    expect(result.agents.unattributed_sessions).toEqual([{ provider: 'node', assignment_id: 'live', session_id: 'session-live', description: 'Assignment live' }]);
+  } finally { child.kill(); await once(child, 'exit'); }
+});
+
+it('deduplicates unattributed history assignments sharing one verified provider process', () => {
+  const options = fixture();
+  const db = new Database(options.database);
+  db.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')
+    .run('earlier', 'codex', 'earlier-native', 'Earlier assignment', 'finished', 101, 'native-start', '2026-10-01T00:00:00Z', stamp, 'PRIVATE_TOKEN');
+  db.close();
+  const processIdentity = (pid: number) => pid === 101 ? { start: 'native-start', name: 'codex', cwd: null, unattributed: true } : null;
+  const result = engineeringSummary({ ...options, processIdentity });
+  expect(result.agents.unattributed_sessions).toEqual([{ provider: 'codex', assignment_id: 'live', session_id: 'session-live', description: 'Assignment live' }]);
+});
