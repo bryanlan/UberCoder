@@ -215,6 +215,7 @@ function ConversationLink({
   isWorking,
   manualSuspendedAt,
   pressureSuspendedAt,
+  idleSuspendedAt,
   runFailure,
   autoTrackedAt,
   launchContext,
@@ -239,6 +240,7 @@ function ConversationLink({
   isWorking: boolean;
   manualSuspendedAt?: string;
   pressureSuspendedAt?: string;
+  idleSuspendedAt?: string;
   runFailure?: RunFailure;
   autoTrackedAt?: string;
   launchContext?: import('@agent-console/shared').AgentLaunchContext;
@@ -251,7 +253,7 @@ function ConversationLink({
   const rowRef = useRef<HTMLDivElement | null>(null);
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
-  const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt);
+  const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt || idleSuspendedAt);
   const indicatorClassName = getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
 
   async function submitRename(): Promise<void> {
@@ -334,7 +336,7 @@ function ConversationLink({
           className={clsx('h-2.5 w-2.5 rounded-full', indicatorClassName)}
           title={[
             !isBound ? 'History' : isWorking ? 'AI is thinking' : runFailure && runFailure.status !== 'retrying' ? 'Provider stopped · review failure' : lastResponseAt ? `Ready for you · response ${formatRelativeAge(lastResponseAt, nowMs)}` : 'No completed response yet',
-            pressureSuspendedAt ? 'Suspended to free memory · select to resume' : manualSuspendedAt ? 'Suspended · select to resume' : undefined,
+            pressureSuspendedAt ? 'Suspended to free memory · select to resume' : manualSuspendedAt ? 'Suspended · select to resume' : idleSuspendedAt ? 'Asleep after extended idle · select to resume' : undefined,
             `Last activity: ${formatRelativeAge(lastInteractionAt, nowMs)}`,
             autoTrackedAt ? `Auto-tracked: ${formatRelativeAge(autoTrackedAt, nowMs)}` : undefined,
           ].filter(Boolean).join(' · ')}
@@ -687,7 +689,7 @@ function ProjectSection({
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
-            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, autoTrackedAt, runFailure, launchContext }) => (
+            {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt, autoTrackedAt, runFailure, launchContext }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
                 project={project}
@@ -710,6 +712,7 @@ function ProjectSection({
                 isWorking={isWorking}
                 manualSuspendedAt={manualSuspendedAt}
                 pressureSuspendedAt={pressureSuspendedAt}
+                idleSuspendedAt={idleSuspendedAt}
                 runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
                 launchContext={launchContext}

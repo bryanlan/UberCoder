@@ -1734,7 +1734,7 @@ export function ConversationPane({
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
       {sessionSuspended && (
         <div className="border-b border-slate-700 bg-slate-800/70 px-4 py-2 text-sm text-slate-200">
-          {resumeError ? `Unable to resume: ${resumeError}` : resuming ? 'Resuming suspended session…' : boundSession?.pressureSuspendedAt ? 'Session suspended to free memory.' : 'Session suspended.'}
+          {resumeError ? `Unable to resume: ${resumeError}` : resuming ? 'Resuming suspended session…' : boundSession?.pressureSuspendedAt ? 'Session suspended to free memory.' : boundSession?.idleSuspendedAt ? 'Session asleep after extended idle.' : 'Session suspended.'}
           {!resuming && <button type="button" onClick={() => { void onRetryResume(); }} className="ml-3 text-sky-300 hover:text-sky-200">{resumeError ? 'Retry' : 'Resume'}</button>}
         </div>
       )}

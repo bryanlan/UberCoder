@@ -69,6 +69,22 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
 }
 
 describe('Queued human input after a staged automatic notice', () => {
+  it('journals notice ownership before a failed paste without replaying it', async () => {
+    const f = await fixture('claude');
+    let calls = 0;
+    f.tmux.pasteText = async () => {
+      calls++;
+      expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'pasting', pid: f.session.pid });
+      throw new Error('Unconfirmed paste transport');
+    };
+    f.send(); await f.manager.wakePendingAssignments();
+    expect(calls).toBe(1);
+    expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'pasting' });
+    await f.manager.wakePendingAssignments();
+    expect(calls).toBe(1);
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
   async function stagedNotice(notice: 'peer' | 'unattended' = 'peer') {
     let memory = 'MemAvailable: 8000000 kB';
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });

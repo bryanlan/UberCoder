@@ -32,7 +32,8 @@ async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
     title:'Planner lead', startedAt:new Date().toISOString(), updatedAt:new Date().toISOString(), eventLogPath:log });
   const grant = await grants.record(actor, { grantee:{kind:'assignment',id:actor}, scope:words, limits:{maxConcurrentSessions,models} }, `live:${lead}:0`);
   let memory = 'MemAvailable: 8000000 kB';
-  const queue = () => new AgentSessionLaunches(db, grants, manager, { getProjectBySlug: async slug => slug===project.slug?project:undefined, getMergedProviderSettings:()=>providerSettings },
+  let projectRead: (() => Promise<void>) | undefined;
+  const queue = () => new AgentSessionLaunches(db, grants, manager, { getProjectBySlug: async slug => { await projectRead?.(); return slug===project.slug?project:undefined; }, getMergedProviderSettings:()=>providerSettings },
     {get:()=>adapter},events,1024*1024,()=>memory);
   let launches = queue();
   const launch = async (input = {}) => { const result = await launches.request(actor,'launch_session',{ projectSlug:project.slug,provider:'codex',model:'gpt-6-luna',effort:'medium',flags:['--no-alt-screen'],prompt:'Complete the planner lane.',title:'Planner lane',...input }); await launches.drain(); return result; };
@@ -42,6 +43,7 @@ async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
   };
   cleanups.push(async()=>{await launches.stop();await manager.stop();db.close();fs.rmSync(root,{recursive:true,force:true});});
   return {db,tmux,grants,coordination,manager,actor,grant,get launches(){return launches;},launch,child,setMemory:(value:string)=>{memory=value;},
+    onProjectRead: (hook: () => Promise<void>) => { projectRead = hook; },
     restartQueue:async()=>{await launches.stop(); launches=queue();}};
 }
 
@@ -55,6 +57,35 @@ function indexHistory(db: AppDatabase, session: BoundSession): string {
 }
 
 describe('Granted real-session launch pipeline',()=>{
+  it.each(['memory', 'launch', 'failure'] as const)('does not resurrect cancellation during a %s retry', async boundary => {
+    const f = await fixture(); f.setMemory('MemAvailable: 100 kB');
+    await f.launch();
+    const request = f.launches.status(f.actor).requests[0]!;
+    if (boundary !== 'memory') f.setMemory('MemAvailable: 8000000 kB');
+    f.onProjectRead(async () => {
+      expect(f.launches.cancel(request.id, f.actor).cancelled).toBe(true);
+      if (boundary === 'failure') throw new Error('Project read failed after cancellation');
+    });
+    await f.launches.drain();
+    expect(f.launches.status(f.actor, request.id).requests[0]).toMatchObject({ status: 'cancelled', reason: 'Cancelled by requester.' });
+    await f.restartQueue(); await f.launches.drain();
+    expect(f.launches.cancel(request.id, f.actor).cancelled).toBe(true);
+    expect(f.launches.status(f.actor, request.id).requests[0]?.status).toBe('cancelled');
+    expect(f.tmux.created).toHaveLength(0);
+  });
+
+  it('allows human cancellation, rejects another owner, and reports started requests as too late', async () => {
+    const f = await fixture(); f.setMemory('MemAvailable: 100 kB'); await f.launch();
+    const request = f.launches.status(f.actor).requests[0]!;
+    expect(() => f.launches.cancel(request.id, randomUUID())).toThrow('another assignment');
+    f.db.sqlite.prepare("update agent_session_requests set status='starting' where id=?").run(request.id);
+    expect(f.launches.cancel(request.id)).toMatchObject({ cancelled: false, reason: expect.stringContaining('Too late') });
+    f.db.sqlite.prepare("update agent_session_requests set status='queued' where id=?").run(request.id);
+    expect(f.launches.cancel(request.id).cancelled).toBe(true);
+    await f.launch({ requestId: request.id });
+    expect(f.tmux.created).toHaveLength(0);
+  });
+
   it('wakes a supervisor after granted worker launches, an ordinary turn end and notifySupervisor', async () => {
     const f = await fixture();
     await f.launch({ title: 'Lane one', supervisorId: f.actor }); await f.launch({ title: 'Lane two', supervisorId: f.actor });

@@ -412,6 +412,7 @@ export function buildParsedTranscript(input: TranscriptParseInput & {
       originator: input.metadata?.originator,
       source: input.metadata?.source,
       threadSource: input.metadata?.threadSource,
+      forkedFromId: input.metadata?.forkedFromId,
       firstUserTextHash: firstUser ? stableTextHash(normalizeComparableText(firstUser.text)) : undefined,
       lastUserTextHash: lastUser ? stableTextHash(normalizeComparableText(lastUser.text)) : undefined,
       firstUserAt: firstUser?.timestamp,

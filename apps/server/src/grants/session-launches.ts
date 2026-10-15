@@ -44,11 +44,32 @@ export class AgentSessionLaunches {
     const rows = id ? [this.row(id)].filter((row): row is RequestRow => !!row)
       : this.db.sqlite.prepare('select * from agent_session_requests where assignment_id=? order by created_at desc limit 100').all(assignmentId) as RequestRow[];
     if (rows.some(row => row.assignment_id !== assignmentId)) throw new Error('That request belongs to another assignment.');
-    return { requests: rows.map(row => {
+    return this.describe(rows);
+  }
+
+  snapshot() {
+    return this.describe(this.db.sqlite.prepare("select * from agent_session_requests where status in ('queued','starting') order by created_at,id").all() as RequestRow[]);
+  }
+
+  cancel(id: string, assignmentId?: string) {
+    const row = this.row(id);
+    if (!row) throw new Error('Unknown session request.');
+    if (assignmentId && row.assignment_id !== assignmentId) throw new Error('That request belongs to another assignment.');
+    this.update(row, 'cancelled', 'Cancelled by requester.', 'queued');
+    const current = this.row(id)!;
+    return { ...this.describe([current]), cancelled: current.status === 'cancelled',
+      ...(current.status !== 'cancelled' ? { reason: 'Too late to cancel: the request is no longer queued.' } : {}) };
+  }
+
+  private describe(rows: RequestRow[]) {
+    let availableBytes: number | undefined;
+    try { const match = /^MemAvailable:\s+(\d+)\s+kB$/m.exec(this.readMemory()); if (match) availableBytes = Number(match[1]) * 1024; } catch {}
+    return { availableBytes, requiredBytes: this.memoryFloorBytes + SESSION_MEMORY_BYTES, requests: rows.map(row => {
       const session = this.db.boundSessions.getById(row.session_id);
       const native = session && this.db.sqlite.prepare('select id from coordination_assignments where provider=? and native_session_id=?')
         .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string } | undefined;
       return { id: row.id, status: row.status, reason: row.reason, grantId: row.grant_id, action: row.action,
+        assignmentId: row.assignment_id, title: (JSON.parse(row.input_json) as LaunchInput).title,
         sessionId: row.session_id, session, agentAssignmentId: native?.id, updatedAt: row.updated_at };
     }) };
   }
@@ -137,10 +158,14 @@ export class AgentSessionLaunches {
     })().finally(() => { this.running = undefined; });
     return this.running;
   }
-  private update(row: RequestRow, status: RequestRow['status'], reason?: string): void {
-    this.db.sqlite.prepare('update agent_session_requests set status=?,reason=?,updated_at=? where id=?').run(status, reason ?? null, new Date().toISOString(), row.id);
+  private update(row: RequestRow, status: RequestRow['status'], reason?: string, expected = row.status): boolean {
+    const changed = this.db.sqlite.prepare('update agent_session_requests set status=?,reason=?,updated_at=? where id=? and status=?')
+      .run(status, reason ?? null, new Date().toISOString(), row.id, expected).changes;
+    if (!changed) return false;
+    row.status = status;
     if (status !== 'queued') this.grants.logUse({ id: row.id, grantId: row.grant_id, assignmentId: row.assignment_id,
       action: row.action, sessionId: row.session_id, detail: { status, description: status === 'completed' ? row.action === 'close_session' ? 'Console session closed; history retained' : 'Console session ready' : status === 'starting' ? row.action === 'close_session' ? 'Closing Console session' : 'Starting Console session' : reason ?? status, requestId: row.id } });
+    return true;
   }
   private async process(row: RequestRow): Promise<void> {
     const input = JSON.parse(row.input_json) as LaunchInput;
@@ -150,7 +175,7 @@ export class AgentSessionLaunches {
       const authorized = () => this.grants.grantsFor(row.assignment_id).some(grant => grant.id === row.grant_id
         && grant.actions.includes('close_session') && (!grant.projectSlugs.length || grant.projectSlugs.includes(input.projectSlug!)));
       if (!authorized()) { this.update(row, 'cancelled', 'The grant no longer covers closing this owned session.'); return; }
-      this.update(row, 'starting');
+      if (!this.update(row, 'starting')) return;
       try {
         await this.sessions.closeGrantedSession(row.session_id, row.assignment_id, authorized);
         this.update(row, 'completed');
@@ -173,7 +198,7 @@ export class AgentSessionLaunches {
       }
       // No launch row means shutdown preceded bind. An unchanged restart PID
       // means shutdown preceded replacement. Continue the original reservation.
-      this.update(row, 'queued');
+      if (!this.update(row, 'queued')) return;
     }
     const actor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(row.assignment_id) as { status: string } | undefined;
     if (!actor || actor.status === 'finished') { this.update(row, 'cancelled', 'The requesting assignment has finished.'); return; }
@@ -210,7 +235,7 @@ export class AgentSessionLaunches {
       const reason = available === undefined ? 'Waiting for a memory reading.' : available < this.memoryFloorBytes + SESSION_MEMORY_BYTES ? 'Waiting for available memory.' : 'Waiting for a granted session slot.';
       this.update(row, 'queued', reason); return;
     }
-    this.update(row, 'starting');
+    if (!this.update(row, 'starting')) return;
     try {
       if (!this.grants.grantsFor(row.assignment_id).some(candidate => candidate.id === grant.id)) {
         this.update(row, 'cancelled', 'The grant was revoked or expired before launch.'); return;

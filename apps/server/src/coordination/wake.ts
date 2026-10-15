@@ -32,7 +32,7 @@ export interface PeerWakeComposer {
   pid: number;
   startedAt: string;
   timestamp: string;
-  status: 'staged' | 'retiring' | 'submitting';
+  status: 'pasting' | 'staged' | 'retiring' | 'submitting';
   notice: 'peer' | 'unattended';
   continuationRevision?: number;
   messages: Array<{ id: string; key: string }>;

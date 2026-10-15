@@ -95,6 +95,14 @@ Retry with the same `requestId` to retrieve the same action rather than launch a
 The queue checks `MemAvailable` against the configured pressure floor plus 250 MiB per new session.
 It waits for memory or the grant's concurrent-session slot, then continues without another approval.
 `launch_status` explains queued, starting, completed, failed and cancelled session actions.
+Use `cancel` with the original `requestId` to withdraw your own queued action, including launch,
+restart or close. Cancellation needs no new grant and survives backend restart. Every queue
+transition checks its expected current state, including memory-wait retries. A request that has
+already started returns its current state and session identity with a too-late result; cancellation
+never kills a running session. Reusing the request ID cannot relaunch cancelled work.
+The authenticated grants page lists pending session actions, their waiting reasons, available
+memory and launch requirement, and lets Bryan cancel a queued request. Changing a brief does
+not cancel a stored request.
 
 ## Inherit and relay existing scope
 

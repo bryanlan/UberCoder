@@ -148,7 +148,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);
   await registerCoordinationRoutes(app, authService, coordination);
-  registerGrantRoutes(app, authService, grants, grantPush);
+  registerGrantRoutes(app, authService, grants, grantPush, agentLaunches);
   registerWorkerRoutes(app, authService, workers);
   registerWikiRoutes(app, authService, wiki, projectService);
   new LocalhostProxyService(projectService, authService).register(app);

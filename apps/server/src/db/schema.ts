@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 17;
+export const CURRENT_SCHEMA_VERSION = 18;
 
 interface Migration {
   version: number;
@@ -298,6 +298,9 @@ const MIGRATIONS: Migration[] = [
       action text not null, status text not null, session_id text not null,
       input_json text not null, reason text, created_at text not null, updated_at text not null
     ); create index agent_session_requests_status on agent_session_requests(status,created_at);`);
+  } },
+  { version: 18, name: 'idle-session-suspension', up(sqlite) {
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'idle_suspended_at', 'idle_suspended_at text');
   } },
 ];
 

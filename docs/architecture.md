@@ -567,7 +567,32 @@ An unexpected provider exit with unattended work remaining uses this same durabl
 backoff. Reconciliation and queued peer messages cannot bypass it. The backend
 resumes the original conversation, preserves its assignment and inbox, and submits
 the recovery notice after native readiness. Three failed relaunches stop recovery.
-Intentional automatic sleep has a cleared PID and retains the existing wake path;
+Intentional automatic idle sleep has a persisted marker and a cleared PID. Passive
+screen polling does not restore it; intentional user and peer wake paths remain available;
 manual suspension, finished assignments and resource limits stay respected.
 Failure transitions advance the session revision timestamp so browser polls and
 events accept the cleared status; they do not advance conversation recency.
+
+### Durable ordinary idle sleep and pending identity
+
+Ordinary idle sleep persists `idleSuspendedAt` on the bound session, independently of manual
+and pressure suspension. All sleep reasons are visible in Work without changing the response-age
+dot. Screen polling and passive ensure calls leave an idle sleeper stopped, including calls from
+older browser builds. Selection, human input, queued messages, model changes and eligible peer
+messages may restore the same conversation. Successful restoration or release clears the idle
+marker. Ordinary idle sleepers remain eligible for the existing nine-day Work release.
+
+Reconciliation resolves recorded pending conversations before applying idle rules. Exact registered
+identity is preferred for both human-created and agent-created sessions. An idle pending Codex session
+without a registration uses the existing bounded provider candidate search. Claude retains its
+normal transcript-discovery adoption path; reconciliation does not add full history scans.
+Human-created registrations are polled for adoption after recorded input exists. Forked Codex histories,
+ambiguous fingerprints and native identities already owned by another retained binding are refused.
+The pending guard stays in place until the resumable native identity is known. This does not change
+general transcript discovery cadence or permit stopping unresolved sessions.
+
+Automatic Claude notices record their binding and intended notice kind before paste (`pasting`),
+then confirmation (`staged`) and Enter invocation (`submitting`). An exact owned never-submitted
+notice may be discarded by successful sleep or retired by the existing guarded human-input path.
+Partial, clipped, mixed or unowned drafts, uncertain Enter and interrupted retirement remain
+protected. The ordinary ready-prompt, working-turn, background-task and ownership guards still apply.

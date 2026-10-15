@@ -11,6 +11,7 @@ export interface SidebarConversation {
   isWorking: boolean;
   manualSuspendedAt?: string;
   pressureSuspendedAt?: string;
+  idleSuspendedAt?: string;
   autoTrackedAt?: string;
   runFailure?: BoundSessionItem['runFailure'];
   launchContext?: BoundSessionItem['launchContext'];
@@ -64,6 +65,7 @@ export function deriveSidebarProjects({
             isWorking: session?.isWorking === true,
             manualSuspendedAt: session?.manualSuspendedAt,
             pressureSuspendedAt: session?.pressureSuspendedAt,
+            idleSuspendedAt: session?.idleSuspendedAt,
             autoTrackedAt: session?.autoTrackedAt,
             runFailure: session?.runFailure,
             launchContext: session?.launchContext,

@@ -14,6 +14,10 @@ export function GrantsPage({ csrfToken, backHref }: { csrfToken?: string; backHr
   const [useOffset, setUseOffset] = useState(0), [edit, setEdit] = useState<{ id: string; definition: AgentGrantDefinition }>();
   const [pushState, setPushState] = useState<string>();
   const list = useQuery({ queryKey: ['grants', useOffset], queryFn: () => api.grants(useOffset), refetchInterval: 5000 });
+  const [queueNotice, setQueueNotice] = useState<string>();
+  const queue = useQuery({ queryKey: ['session-requests'], queryFn: api.sessionRequests, refetchInterval: 5000 });
+  const cancel = useMutation({ mutationFn: (id: string) => api.cancelSessionRequest(id, csrfToken),
+    onSuccess: result => { setQueueNotice(result.cancelled ? 'Request cancelled.' : result.reason); void cache.invalidateQueries({ queryKey: ['session-requests'] }); } });
   const change = useMutation({ mutationFn: async ({ id, action, definition }: { id: string; action: 'approve' | 'deny' | 'revoke'; definition?: AgentGrantDefinition }) =>
     action === 'revoke' ? api.revokeGrant(id, csrfToken) : api.decideGrant(id, action, definition, csrfToken),
     onSuccess: () => { setEdit(undefined); void cache.invalidateQueries({ queryKey: ['grants'] }); } });
@@ -36,6 +40,17 @@ export function GrantsPage({ csrfToken, backHref }: { csrfToken?: string; backHr
       <div><h1 className="text-xl font-semibold text-slate-100">Agent grants</h1><p className="mt-1 text-sm text-slate-400">Give agents enough permission to keep working. Broad grants remain active until their chosen expiry or revocation.</p></div>
       <div className="flex gap-2"><button className={button} onClick={() => void enablePush()}>Enable notifications</button><Link className={button} to={backHref}>Back to Console</Link></div>
     </div>
+    {queueNotice && <p role="status" className="mb-4 text-sm text-slate-300">{queueNotice}</p>}
+    {(queue.error || cancel.error) && <p role="alert" className="mb-4 text-rose-300">{(queue.error ?? cancel.error)?.message}</p>}
+    {!!queue.data?.requests.length && <section className="mb-6 space-y-2" aria-label="Session requests">
+      <h2 className="font-semibold text-slate-100">Session requests</h2>
+      <p className="text-sm text-slate-400">Available memory: {queue.data.availableBytes === undefined ? 'unknown' : `${Math.floor(queue.data.availableBytes / 1024 ** 2)} MiB`} · Launch requirement: {Math.ceil(queue.data.requiredBytes / 1024 ** 2)} MiB</p>
+      {queue.data.requests.map(request => <article key={request.id} className="rounded-lg border border-slate-700 p-3">
+        <p className="text-slate-100">{request.title ?? request.action.replace('_session', '')} · {request.status}</p>
+        {request.reason && <p className="text-sm text-slate-400">{request.reason}</p>}
+        {request.status === 'queued' && <button className={button} disabled={cancel.isPending} onClick={() => cancel.mutate(request.id)}>Cancel request</button>}
+      </article>)}
+    </section>}
     {pushState && <p role="status" className="mb-4 text-sm text-slate-300">{pushState}</p>}
     {(change.error || list.error) && <p role="alert" className="mb-4 text-rose-300">{(change.error ?? list.error)?.message}</p>}
     {list.isLoading && <p className="text-slate-400">Loading grants…</p>}
