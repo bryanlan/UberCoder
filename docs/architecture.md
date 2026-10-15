@@ -265,6 +265,11 @@ Restart may resume observation of typed text, but an interrupted or uncertain En
 the conversation and never causes automatic replay. Queue state is projected on
 the bound session and is excluded from transcript/search content until submission.
 Pending human messages defer automatic peer input and automatic session sleep.
+A confirmed unsent Console notice may yield to a queued human message only with
+matching staged proof, binding, ownership and exact composer text. On an idle
+Claude prompt, its native clear-input control removes the entire notice; line
+editing may leave earlier wrapped rows behind. Delivery requires a verified empty
+composer afterward, and an uncertain clear stays reviewable without replay.
 Model switches defer while a queued message owns typed or unconfirmed native input.
 Stop, successful explicit suspension, release, or cancelling a queued send prevents further
 automatic submission; already typed native text stays available for inspection.

@@ -84,7 +84,7 @@ describe('Queued human input after a staged automatic notice', () => {
     memory = 'MemAvailable: 8000000 kB'; f.tmux.pasteText = paste;
     const submitted: string[] = [], keys = f.tmux.sendKeys.bind(f.tmux);
     f.tmux.sendKeys = async (name, input) => {
-      if (input.includes('C-u')) f.tmux.paneText = claudeReady;
+      if (input.includes('C-c')) f.tmux.paneText = claudeReady;
       if (input.includes('Enter')) submitted.push(f.tmux.paneText);
       await keys(name, input);
     };
@@ -101,6 +101,17 @@ describe('Queued human input after a staged automatic notice', () => {
     expect(f.submitted).toEqual([claudeReady.replace('❯ ', '❯ ' + f.text)]);
     expect(f.tmux.sentKeys.filter(input => input.includes('Enter'))).toEqual([['Enter']]);
     expect(f.db.meta.get(peerWakeComposerKey(f.session.id))).toBe('');
+  });
+
+  it('clears the whole idle Claude composer when the known notice wraps across rows', async () => {
+    const f = await stagedNotice();
+    f.tmux.paneText = ['Claude Code', 'Opus 5.5 · Claude Max', '─'.repeat(80),
+      '❯ ' + PEER_WAKE_PROMPT.match(/.{1,80}(?:\s|$)/g)!.map(row => row.trim()).join('\n  '), '─'.repeat(80),
+      '  bypass permissions on (shift+tab to cycle)'].join('\n');
+    const result = await f.submit();
+    expect(result.recordedUserInput?.text).toBe(f.text);
+    expect(f.tmux.sentKeys).toEqual([['C-c'], ['Enter']]);
+    expect(f.submitted).toEqual([claudeReady.replace('❯ ', '❯ ' + f.text)]);
   });
 
   it.each(['human_text', 'missing_proof', 'changed_binding', 'uncertain_enter'] as const)
@@ -146,7 +157,7 @@ describe('Queued human input after a staged automatic notice', () => {
     const f = await stagedNotice();
     f.tmux.sendKeys = async (_name, input) => {
       f.tmux.sentKeys.push(input);
-      if (input.includes('C-u')) { f.tmux.paneText = claudeReady; throw new Error('Clear outcome is uncertain.'); }
+      if (input.includes('C-c')) { f.tmux.paneText = claudeReady; throw new Error('Clear outcome is uncertain.'); }
     };
     const result = await f.submit();
     expect(result.queuedInput).toMatchObject({ state: 'needs_review', text: f.text });
@@ -156,7 +167,7 @@ describe('Queued human input after a staged automatic notice', () => {
     try {
       await restarted.wakePendingAssignments();
       await new Promise(resolve => setTimeout(resolve, 1100));
-      expect(f.tmux.sentKeys).toEqual([['C-e', 'C-u']]);
+      expect(f.tmux.sentKeys).toEqual([['C-c']]);
       expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toMatchObject([{ state: 'needs_review', text: f.text }]);
     } finally { await restarted.stop(); }
   });

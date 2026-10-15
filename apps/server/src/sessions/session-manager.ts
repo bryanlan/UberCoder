@@ -2275,7 +2275,9 @@ export class SessionManager {
       // reviewed, rather than clearing whatever now occupies the composer.
       this.db.meta.set(noticeKey, JSON.stringify({ ...notice, status: 'retiring' } satisfies PeerWakeComposer));
       try {
-        await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-e', 'C-u']));
+        // Claude's idle clear-input control removes the entire composer;
+        // line editing can leave earlier wrapped rows of this notice behind.
+        await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']));
         const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(noticePrompt),
           candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
         if (!cleared || !canRetire()) throw new Error('Automatic notice removal could not be confirmed.');
