@@ -16,7 +16,7 @@ import redactionContract from '../src/engineering/export_redaction.v1.json' with
 const roots: string[] = [];
 const now = Date.parse('2026-10-15T06:00:00Z');
 const stamp = '2026-10-15T05:00:00.000Z';
-afterEach(() => { vi.useRealTimers(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'engineering-summary-')); roots.push(root);
@@ -140,6 +140,40 @@ it('preserves unknown or divergent wiki source provenance without claiming fresh
     .toMatchObject({ source_status: 'unavailable', commits_behind: null, stale: null });
   expect(engineeringSummary({ ...options, git: (_repo, args) => args[0] === 'rev-parse' ? 'head' : '2 15' }).wiki?.pages[0])
     .toMatchObject({ source_status: 'diverged', commits_behind: null, stale: null });
+});
+
+it('disables configured Git monitoring and optional writes for process and Wiki reads', async () => {
+  const options = fixture(), root = path.dirname(options.database), repo = path.join(root, 'repo');
+  const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const git = (...args: string[]) => execFileSync(realGit, ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  fs.mkdirSync(repo); execFileSync(realGit, ['init', '-q', repo]);
+  git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.invalid');
+  fs.writeFileSync(path.join(repo, 'tracked.txt'), 'original\n'); git('add', '.'); git('commit', '-qm', 'initial');
+  const marker = path.join(root, 'hook-invoked'), hook = path.join(root, 'monitor.cjs');
+  fs.writeFileSync(hook, `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(marker)}, 'called\\n');process.stdout.write('guard-token\\0/\\0');\n`, { mode: 0o755 });
+  git('config', 'core.fsmonitor', hook); git('config', 'core.untrackedCache', 'true');
+  git('status', '--porcelain'); expect(fs.existsSync(marker)).toBe(true); fs.unlinkSync(marker);
+  const index = path.join(repo, '.git', 'index'), before = fs.readFileSync(index);
+  const wiki = new Database(options.wikiDatabase);
+  for (const table of ['wiki_pages', 'wiki_revisions', 'wiki_access']) wiki.prepare(`update ${table} set repository=?`).run(path.join(repo, '.git'));
+  wiki.prepare('update wiki_revisions set head_commit=?').run(git('rev-parse', 'HEAD')); wiki.close();
+  const bin = path.join(root, 'bin'), audit = path.join(root, 'git-audit.jsonl'); fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, 'git'), `#!${process.execPath}\nconst {spawnSync}=require('node:child_process'),fs=require('node:fs');
+const args=process.argv.slice(2),command=args.findIndex(v=>v==='rev-parse'||v==='rev-list'),globals=args.slice(0,command);
+const get=key=>spawnSync(${JSON.stringify(realGit)},[...globals,'config','--get',key],{encoding:'utf8'}).stdout.trim();
+fs.appendFileSync(${JSON.stringify(audit)},JSON.stringify({monitor:get('core.fsmonitor'),cache:get('core.untrackedCache'),locks:process.env.GIT_OPTIONAL_LOCKS})+'\\n');
+const result=spawnSync(${JSON.stringify(realGit)},args,{encoding:'utf8'});process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');process.exit(result.status??1);\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: repo, stdio: 'ignore' });
+  try {
+    await once(child, 'spawn'); vi.stubEnv('PATH', `${bin}${path.delimiter}${process.env.PATH}`);
+    expect(readProcessIdentity(child.pid!)?.cwd).toBe(repo);
+    expect(engineeringSummary({ ...options, git: undefined }).wiki?.pages[0]?.source_status).toBe('current');
+    const calls = fs.readFileSync(audit, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    expect(calls).toHaveLength(3);
+    expect(calls).toEqual(Array(3).fill({ monitor: 'false', cache: 'false', locks: '0' }));
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(fs.readFileSync(index)).toEqual(before);
+  } finally { child.kill(); await once(child, 'exit'); }
 });
 
 it('compares wiki provenance against the actual repository HEAD using read-only Git', () => {

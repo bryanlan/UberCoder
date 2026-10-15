@@ -26,6 +26,12 @@ export interface SummaryOptions {
 }
 
 const DAY = 86_400_000;
+const READ_ONLY_GIT_OPTIONS = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
+function readOnlyGitEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
+  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE']) delete env[name];
+  return env;
+}
 const READ_ERROR_CODES = new Set(['SQLITE_ERROR', 'SQLITE_CANTOPEN', 'SQLITE_BUSY', 'SQLITE_LOCKED',
   'SQLITE_NOTADB', 'SQLITE_CORRUPT', 'SQLITE_READONLY', 'ENOENT', 'EACCES', 'PROCESS_CHECKOUT_UNAVAILABLE', 'INVALID_ITEM']);
 const iso = (n: number) => new Date(n).toISOString();
@@ -53,10 +59,8 @@ export function readProcessIdentity(pid: number): ProcessIdentity | null {
     let unattributed = false;
     try {
       const processDirectory = fs.readlinkSync(`/proc/${pid}/cwd`);
-      const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' };
-      for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE']) delete env[name];
-      cwd = fs.realpathSync(execFileSync('git', ['-C', processDirectory, 'rev-parse', '--show-toplevel'], {
-        env, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd = fs.realpathSync(execFileSync('git', [...READ_ONLY_GIT_OPTIONS, '-C', processDirectory, 'rev-parse', '--show-toplevel'], {
+        env: readOnlyGitEnvironment(), encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'],
       }).trim());
     } catch (error) {
       const fault = error as { status?: number; stderr?: Buffer | string };
@@ -250,8 +254,8 @@ interface WikiPage {
   source_checkout: string | null; source_branch: string | null; source_commit: string | null;
 }
 function readWiki(db: Database.Database, options: SummaryOptions, report: ReportInvalid) {
-  const git = options.git ?? ((repository, args) => execFileSync('git', ['--git-dir', repository, ...args],
-    { encoding: 'utf8', timeout: 1500, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim());
+  const git = options.git ?? ((repository, args) => execFileSync('git', [...READ_ONLY_GIT_OPTIONS, '--git-dir', repository, ...args],
+    { env: readOnlyGitEnvironment(), encoding: 'utf8', timeout: 1500, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim());
   const rows = validRows(db.prepare(`select p.repository,p.title,p.current_revision as revision,r.id as source_revision,r.author,p.updated_at,
       r.checkout as source_checkout,r.branch as source_branch,r.head_commit as source_commit
     from wiki_pages p left join wiki_revisions r on r.id=p.current_revision order by p.repository,p.title_key`).all() as Array<WikiPage & { source_revision: number | null }>, row => row.source_revision === row.revision && nonempty(row.repository) && text(row.title) && integer(row.revision, 1)
