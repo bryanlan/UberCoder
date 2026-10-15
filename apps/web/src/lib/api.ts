@@ -206,6 +206,8 @@ export const api = {
     ),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+  cancelQueuedInput: (sessionId: string, requestId: string, csrfToken?: string) =>
+    request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/queued-inputs/${encodeURIComponent(requestId)}`, { method: 'DELETE' }, csrfToken),
   setSessionModelProfile: (sessionId: string, profile: ModelProfileKey, csrfToken?: string) =>
     request<SessionModelProfileResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/model-profile`,

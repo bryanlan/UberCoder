@@ -173,6 +173,7 @@ export function applySessionUpdateToTimeline(
       ? {
           ...(current.boundSession ?? session),
           ...session,
+          queuedInputs: session.queuedInputs,
         }
       : undefined,
   };

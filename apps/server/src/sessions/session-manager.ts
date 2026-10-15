@@ -52,6 +52,7 @@ import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
+import { InputQueue, queuedInputSummary, type QueuedInputRecord } from './input-queue.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -259,6 +260,9 @@ export class SessionManager {
   private readonly runRecovery: RunRecovery;
   private readonly unsubscribeRealtimeEvents: () => void;
   private readonly runtimes: SessionRuntimeRegistry;
+  private readonly inputQueue: InputQueue;
+  private readonly inputDrainTimers = new Map<string, NodeJS.Timeout>();
+  private readonly activeInputCommands = new Set<Promise<unknown>>();
   private reconciliationTimer?: ReturnType<typeof setInterval>;
   private reconciliationStartupTimer?: ReturnType<typeof setTimeout>;
   // Sessions confirmed suspended (tmux dead) this process lifetime, so each
@@ -306,6 +310,7 @@ export class SessionManager {
     this.readLastUserInput = options.readLastUserInput ?? readLastUserInput;
     this.queueCodexNotice = options.queueCodexNotice ?? queueCodexNotice;
     fs.mkdirSync(this.runtimeDir, { recursive: true });
+    this.inputQueue = new InputQueue(db.sqlite);
     this.runtimes = new SessionRuntimeRegistry({
       onSlowCommand: ({ sessionId, label, elapsedMs }) => {
         this.logger?.warn(
@@ -325,7 +330,7 @@ export class SessionManager {
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
           .get(session.provider, session.conversationRef) as { status: string } | undefined;
         if (assignment?.status === 'finished') return 'This assignment is finished.';
-        if (session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest) return 'This session is paused or has a pending model change.';
+        if (session.manualSuspendedAt || session.pressureSuspendedAt || session.queuedInputs?.length || session.modelProfileRequest) return 'This session is paused or has a pending model change.';
         const available = this.availableMemoryBytes();
         if (this.pressureSuspendAvailableBytes !== undefined
           && (available === undefined || available < this.pressureSuspendAvailableBytes)) return 'Recovery is stopped while available memory is below the configured threshold.';
@@ -358,7 +363,7 @@ export class SessionManager {
           const available = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
           return isCurrent() && !this.stopped && this.getCurrentRestorableSession(session)?.id === session.id
             && this.unattendedAssignment(session) !== undefined
-            && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.modelProfileRequest
+            && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.modelProfileRequest && !current.queuedInputs?.length
             && assignment?.status !== 'finished'
             && (this.pressureSuspendAvailableBytes === undefined || (available !== undefined && available >= this.pressureSuspendAvailableBytes));
         };
@@ -437,6 +442,13 @@ export class SessionManager {
       onError: (error) => this.logger?.warn({ err: error }, 'Run recovery failed.'),
     });
     this.unsubscribeRealtimeEvents = this.eventBus.subscribe((event) => this.handleRealtimeLifecycleEvent(event));
+    for (const session of this.db.boundSessions.list()) {
+      for (const record of this.inputQueue.list(session.id)) {
+        if (record.state === 'submitting') this.inputQueue.put(session.id, { ...record, state: 'failed',
+          reason: 'The server restarted during submission. Check the conversation before sending again.' });
+      }
+      this.scheduleInputDrain(session.id);
+    }
   }
 
   private listRestorableSessions(): BoundSession[] {
@@ -564,7 +576,7 @@ export class SessionManager {
           }
         }
         if (!current || this.getCurrentRestorableSession(current)?.id !== current.id
-          || current.isWorking || current.modelProfileRequest || current.manualSuspendedAt
+          || current.isWorking || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt
           || current.conversationRef.startsWith('pending:')) return;
         if (current.runFailure) return; // Typed provider failures use the single RunRecovery budget.
         let control = prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
@@ -642,7 +654,7 @@ export class SessionManager {
         if (!allowed() || !current || this.getCurrentRestorableSession(current)?.id !== current.id
           || !assignment || assignment.status === 'finished' || current.status !== 'bound'
           || current.isWorking || this.providerTurnIsWorking(current.id) === true
-          || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
+          || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt || current.pressureSuspendedAt
           || !screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
           || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
           || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
@@ -650,7 +662,7 @@ export class SessionManager {
           const latest = this.db.boundSessions.getById(session.id);
           const availableNow = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
           return allowed() && latest?.status === 'bound' && this.getCurrentRestorableSession(latest)?.id === latest.id
-            && !latest.manualSuspendedAt && !latest.pressureSuspendedAt && !latest.modelProfileRequest
+            && !latest.manualSuspendedAt && !latest.pressureSuspendedAt && !latest.modelProfileRequest && !latest.queuedInputs?.length
             && (this.pressureSuspendAvailableBytes === undefined || (availableNow !== undefined && availableNow >= this.pressureSuspendAvailableBytes));
         };
         const messages = pending();
@@ -729,6 +741,9 @@ export class SessionManager {
     const sessionsToDetach = this.listRestorableSessions()
       .filter((session) => session.rawLogPath && (session.status === 'starting' || session.status === 'bound'));
     this.stopped = true;
+    for (const timer of this.inputDrainTimers.values()) clearTimeout(timer);
+    this.inputDrainTimers.clear();
+    await Promise.allSettled([...this.activeInputCommands]);
     await this.assignmentWakeRun;
     this.scheduledModelProfileDrains.clear();
     this.requestedModelProfileRedrains.clear();
@@ -1057,7 +1072,7 @@ export class SessionManager {
   }
 
   private isPressureSuspendable(session: BoundSession): boolean {
-    if (!session.shouldRestore || session.status !== 'bound' || session.isWorking || session.modelProfileRequest
+    if (!session.shouldRestore || session.status !== 'bound' || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest
       || session.manualSuspendedAt || session.pressureSuspendedAt || session.conversationRef.startsWith('pending:')) {
       return false;
     }
@@ -1120,7 +1135,7 @@ export class SessionManager {
   }
 
   private isWorkReleaseDue(session: BoundSession): boolean {
-    if (!session.shouldRestore || session.isWorking || session.modelProfileRequest) return false;
+    if (!session.shouldRestore || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest) return false;
     const idleSinceMs = this.sessionIdleTimestampMs(session);
     return idleSinceMs > 0 && Date.now() - idleSinceMs >= WORK_SESSION_RELEASE_MS;
   }
@@ -1139,7 +1154,7 @@ export class SessionManager {
   }
 
   private isIdleSuspendable(session: BoundSession): boolean {
-    if (session.isWorking || session.modelProfileRequest || session.conversationRef.startsWith('pending:')) {
+    if (session.isWorking || session.queuedInputs?.length || session.modelProfileRequest || session.conversationRef.startsWith('pending:')) {
       return false;
     }
     const graceUntilMs = this.suspensionGraceUntilMs.get(session.id);
@@ -1932,6 +1947,8 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
+    this.inputQueue.invalidateNativeInput(sessionId);
+    this.inputQueue.stage(sessionId, undefined);
     this.pauseAutomaticInput(sessionId);
     this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
@@ -1984,9 +2001,238 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+    if (!payload.submissionId && (payload.text || payload.keys?.length)) this.inputQueue.invalidateNativeInput(sessionId);
     if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId);
     if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
+    if (payload.keys?.some(key => key === 'Escape' || key === 'C-c')) this.cancelQueuedInputs(sessionId);
+    if (!payload.submissionId && payload.keys?.length) this.inputQueue.stage(sessionId, undefined);
+    if (payload.submissionId) {
+      const run = this.runtimes.run(sessionId, 'queueInput', () => this.queueInputInternal(sessionId, payload));
+      this.activeInputCommands.add(run);
+      try { return await run; } finally { this.activeInputCommands.delete(run); }
+    }
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
+  }
+
+  private publishInputQueue(sessionId: string): BoundSession {
+    const session = this.updateBoundSessionFields(sessionId, { updatedAt: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session });
+    return session;
+  }
+
+  private saveQueuedInput(sessionId: string, record: QueuedInputRecord): void {
+    this.inputQueue.put(sessionId, record);
+    this.publishInputQueue(sessionId);
+  }
+
+  private cancelQueuedInputs(sessionId: string): void {
+    if (!this.db.isOpen()) return;
+    for (const record of this.inputQueue.list(sessionId)) {
+      this.inputQueue.put(sessionId, record.state === 'submitting'
+        ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
+        : { ...record, state: 'cancelled' });
+    }
+    if (this.db.boundSessions.getById(sessionId)) this.publishInputQueue(sessionId);
+  }
+
+  async cancelQueuedInput(sessionId: string, requestId: string): Promise<SessionInputResponse> {
+    // Invalidate before waiting on a slow capture or text transport.
+    const record = this.inputQueue.get(sessionId, requestId);
+    if (!record) throw new SessionInputRejectedError('Queued message not found.');
+    if (record.state === 'submitting' || record.state === 'submitted') {
+      throw new SessionInputRejectedError('Submission has already started. Check the conversation before sending again.');
+    }
+    this.saveQueuedInput(sessionId, { ...record, state: 'cancelled' });
+    this.scheduleInputDrain(sessionId);
+    return { session: this.mustGetSession(sessionId) };
+  }
+
+  private async queueInputInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+    const session = this.mustGetSession(sessionId);
+    const text = payload.submittedText?.trim();
+    if (!text || payload.keys?.length !== 1 || payload.keys[0] !== 'Enter') {
+      throw new SessionInputRejectedError('Queued submission requires a complete message and a single Enter.');
+    }
+    let record = this.inputQueue.get(sessionId, payload.submissionId!);
+    if (record && record.text !== text) throw new SessionInputRejectedError('This submission ID already belongs to another message.');
+    if (!record) {
+      if (!session.shouldRestore || !['bound', 'starting'].includes(session.status)) {
+        throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
+      }
+      record = { requestId: payload.submissionId!, text, initialText: payload.text?.trim() === text ? undefined : payload.text,
+        requestedAt: nowIso(), state: 'queued', reason: 'Waiting for the session to accept the message.' };
+      this.saveQueuedInput(sessionId, record);
+    }
+    await this.drainQueuedInputInternal(sessionId);
+    record = this.inputQueue.get(sessionId, record.requestId)!;
+    this.scheduleInputDrain(sessionId);
+    const result = sessionCommandResult(this.mustGetSession(sessionId), record.recordedUserInput);
+    if (record.state !== 'submitted' && record.state !== 'cancelled') result.queuedInput = queuedInputSummary(record);
+    return result;
+  }
+
+  private scheduleInputDrain(sessionId: string): void {
+    if (this.stopped || !this.db.isOpen() || this.inputDrainTimers.has(sessionId)) return;
+    const first = this.inputQueue.list(sessionId)[0];
+    if (!first || first.state === 'submitting' || first.state === 'failed') return;
+    const timer = setTimeout(() => {
+      const run = this.runtimes.run(sessionId, 'drainQueuedInput', () => this.drainQueuedInputInternal(sessionId));
+      this.activeInputCommands.add(run);
+      void run
+        .catch((error: unknown) => {
+          if (!this.stopped && this.db.isOpen()) this.logger?.warn({ err: error, sessionId }, 'Queued message delivery deferred.');
+        }).finally(() => {
+          this.activeInputCommands.delete(run);
+          this.inputDrainTimers.delete(sessionId);
+          this.scheduleInputDrain(sessionId);
+        });
+    }, 1_000);
+    timer.unref?.();
+    this.inputDrainTimers.set(sessionId, timer);
+  }
+
+  private async drainQueuedInputInternal(sessionId: string): Promise<void> {
+    if (this.stopped || !this.db.isOpen()) return;
+    const first = this.inputQueue.list(sessionId)[0];
+    if (!first || ['submitting', 'failed'].includes(first.state)) return;
+    let record: QueuedInputRecord = first;
+    const attemptRevision = this.inputQueue.revision(sessionId);
+    if (record.nativeRevision !== undefined && record.nativeRevision !== this.inputQueue.revision(sessionId)) {
+      this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'The live draft was changed. Check it before sending again.' });
+      return;
+    }
+    const defer = (reason: string) => {
+      if (record.reason !== reason && this.inputQueue.get(sessionId, record.requestId)?.state === record.state) {
+        record = { ...record, reason };
+        this.saveQueuedInput(sessionId, record);
+      }
+    };
+    const session = this.mustGetSession(sessionId);
+    if (!session.shouldRestore || session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) {
+      defer('Waiting for the original session to be available.'); return;
+    }
+    if (this.stopped || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest?.state === 'applying') {
+      defer('Waiting for the session to resume.'); return;
+    }
+    const stillOwned = async (): Promise<boolean> => {
+      if (this.stopped || !this.db.isOpen()) return false;
+      if (this.inputQueue.revision(sessionId) !== attemptRevision) return false;
+      const current = this.db.boundSessions.getById(sessionId);
+      if (!current || current.status !== 'bound' || current.manualSuspendedAt || current.pressureSuspendedAt
+        || this.getCurrentRestorableSession(current)?.id !== sessionId
+        || (record.nativeRevision !== undefined && record.nativeRevision !== this.inputQueue.revision(sessionId))
+        || this.inputQueue.get(sessionId, record.requestId)?.state !== record.state) return false;
+      if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'alive') return false;
+      if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== sessionId) return false;
+      const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName);
+      const latest = this.db.boundSessions.getById(sessionId);
+      return !this.stopped && latest?.status === 'bound' && !latest.manualSuspendedAt && !latest.pressureSuspendedAt
+        && this.getCurrentRestorableSession(latest)?.id === sessionId
+        && this.inputQueue.get(sessionId, record.requestId)?.state === record.state
+        && this.inputQueue.revision(sessionId) === attemptRevision
+        && (record.nativeRevision === undefined || record.nativeRevision === this.inputQueue.revision(sessionId))
+        && pid !== undefined && pid === session.pid && (record.panePid === undefined || record.panePid === pid);
+    };
+    if (!await stillOwned()) { defer('Waiting to verify the original live session.'); return; }
+    let screen = await this.captureSessionScreen(session, false);
+    const turnWorking = this.providerTurnIsWorking(sessionId);
+    if (!screenLooksReadyForLiteralPrompt(screen)
+      || turnWorking === true || (turnWorking === undefined && session.isWorking)) {
+      defer(screenShowsInteractiveSelectionHint(screen)
+        ? 'Waiting for you to finish the approval or menu.' : 'Waiting for the session to accept input.');
+      return;
+    }
+    let confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
+    if (record.state === 'queued' && !confirmed) {
+      let transportText = record.text;
+      if (screen.inputText.trim()) {
+        const delta = record.initialText?.trimEnd();
+        const prefix = delta && record.text.endsWith(delta) ? record.text.slice(0, -delta.length).trim() : '';
+        if (!prefix || !this.queuedInputConfirmed(sessionId, { ...record, text: prefix }, screen, session.pid)) {
+          defer('Waiting for the existing terminal draft to be sent or cleared.'); return;
+        }
+        transportText = record.initialText!;
+      }
+      if (!await stillOwned()) return;
+      // Persist before transport: after a crash, observe this paste, never repeat it.
+      record = { ...record, state: 'awaiting_input', baselineInput: screen.inputText,
+        panePid: session.pid ?? undefined, nativeRevision: this.inputQueue.revision(sessionId), reason: 'Waiting for the typed message to appear.' };
+      this.saveQueuedInput(sessionId, record);
+      try {
+        await this.runInputTmuxAction(session, () => shouldUseBracketedPasteTransport(transportText)
+          ? this.tmuxClient.pasteText(session.tmuxSessionName, transportText)
+          : this.sendLiteralTextToSession(session.tmuxSessionName, transportText));
+      } catch {
+        if (this.inputQueue.get(sessionId, record.requestId)?.state === 'awaiting_input') {
+          this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'Text delivery could not be confirmed. Check the live draft before sending again.' });
+        }
+        return;
+      }
+      const settled = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(transportText),
+        candidate => this.queuedInputConfirmed(sessionId, record, candidate, session.pid));
+      screen = settled ?? screen;
+      confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
+    } else if (record.state === 'awaiting_input') {
+      confirmed ||= this.queuedInputConfirmed(sessionId, record, screen, session.pid);
+    }
+    if (!confirmed || !screenLooksReadyForLiteralPrompt(screen) || !await stillOwned()) return;
+    screen = await this.captureSessionScreen(session, false);
+    if (!screenLooksReadyForLiteralPrompt(screen)
+      || !this.queuedInputConfirmed(sessionId, record, screen, session.pid) || !await stillOwned()) return;
+    const observedInput = record;
+    record = { ...record, state: 'submitting', nativeRevision: this.inputQueue.revision(sessionId),
+      reason: 'Sending the message.' };
+    this.saveQueuedInput(sessionId, record);
+    try {
+      if (this.stopped || !await stillOwned()) {
+        if (this.db.isOpen() && this.inputQueue.get(sessionId, record.requestId)?.state === 'submitting') {
+          this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'Session ownership changed before submission. Check the live draft before sending again.' });
+        }
+        return;
+      }
+      // Ownership reads can yield while the native composer changes. Observe it
+      // last, then perform synchronous queue/revision checks before sending Enter.
+      const finalScreen = await this.captureSessionScreen(session, false);
+      if (!screenLooksReadyForLiteralPrompt(finalScreen)
+        || !this.queuedInputConfirmed(sessionId, observedInput, finalScreen, session.pid)
+        || this.providerTurnIsWorking(sessionId) === true
+        || this.inputQueue.revision(sessionId) !== attemptRevision
+        || this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') {
+        if (this.inputQueue.get(sessionId, record.requestId)?.state === 'submitting') {
+          this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'The live draft changed before submission. Check it before sending again.' });
+        }
+        return;
+      }
+      this.runtimeState(sessionId).submittedTurnAt = nowIso();
+      await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']));
+      const inputAt = nowIso();
+      const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
+      if (updated.conversationRef.startsWith('pending:')) {
+        recordPendingUserInput({ db: this.db, pendingRef: updated.conversationRef, boundSessionId: sessionId, text: record.text, inputAt });
+      }
+      const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));
+      this.inputQueue.stage(sessionId, undefined);
+      this.saveQueuedInput(sessionId, { ...record, state: 'submitted', initialText: undefined, baselineInput: undefined, recordedUserInput });
+      await this.emitScreenUpdate(this.mustGetSession(sessionId));
+    } catch {
+      if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitted') {
+        this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'Submission could not be confirmed. Check the conversation before sending again.' });
+      }
+    }
+  }
+
+  private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen): boolean {
+    if (record.state !== 'awaiting_input' || screen.inputText === record.baselineInput) return false;
+    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
+    return Boolean(placeholder && placeholder[1]?.trim() === (record.baselineInput ?? '').trim());
+  }
+
+  private queuedInputConfirmed(sessionId: string, record: QueuedInputRecord, screen: SessionScreen, pid: number | null | undefined): boolean {
+    if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen)) return true;
+    const staged = this.inputQueue.staged(sessionId);
+    if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim()) return false;
+    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
+    return Boolean(placeholder && placeholder[1]?.trim() === staged.prefix.trim());
   }
 
   private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
@@ -2032,6 +2278,9 @@ export class SessionManager {
         };
       }
       const transportText = plan.transportText;
+      const staged = this.inputQueue.staged(liveSession.id);
+      const previousDraft = staged?.panePid === liveSession.pid ? staged : undefined;
+      const draftBase = previousDraft?.text ?? (preparedScreen?.inputActive ? preparedScreen.inputText : undefined);
       if (plan.useBracketedPasteTransport) {
         await this.runInputTmuxAction(
           liveSession,
@@ -2042,6 +2291,15 @@ export class SessionManager {
           liveSession,
           () => this.sendLiteralTextToSession(liveSession.tmuxSessionName, transportText),
         );
+      }
+
+      if (draftBase !== undefined && liveSession.pid !== undefined && liveSession.pid !== null) {
+        this.inputQueue.stage(liveSession.id, {
+          text: draftBase + transportText,
+          prefix: plan.useBracketedPasteTransport && !previousDraft?.hasPaste ? draftBase : previousDraft?.prefix ?? draftBase,
+          hasPaste: plan.useBracketedPasteTransport || previousDraft?.hasPaste,
+          panePid: liveSession.pid,
+        });
       }
 
       const activityAt = nowIso();
@@ -2454,6 +2712,13 @@ export class SessionManager {
     session = this.mustGetSession(session.id);
     request = session.modelProfileRequest;
     if (!request || request.state !== 'queued') return;
+    const pendingInputs = this.inputQueue.list(session.id);
+    const stagedInput = this.inputQueue.staged(session.id);
+    if (pendingInputs.some(input => input.state !== 'queued')
+      || (pendingInputs.length && stagedInput && stagedInput.panePid === session.pid && stagedInput.text.trim())) {
+      this.deferModelProfileRequest(session, request, 'unsent_input');
+      return;
+    }
     if (session.conversationRef.startsWith('pending:')) {
       if (this.hasRecordedPendingUserInput(session)) {
         this.deferModelProfileRequest(session, request, 'awaiting_native_conversation');
@@ -2680,6 +2945,7 @@ export class SessionManager {
   }
 
   async releaseSession(sessionId: string): Promise<void> {
+    this.cancelQueuedInputs(sessionId);
     this.pauseAutomaticInput(sessionId);
     this.runRecovery.cancel(sessionId);
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
@@ -2728,7 +2994,7 @@ export class SessionManager {
       || unparsedInput || (!manualInputWait && !screen.inputActive && turnIsWorking !== false);
     if (mode !== 'idle' && !manualInputWait && this.hasActiveCoordinationAssignment(session)) return 'assignment';
     if (!current || !current.shouldRestore || current.status !== 'bound' || (!manualInputWait && current.isWorking)
-      || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
+      || current.modelProfileRequest || (mode !== 'manual' && current.queuedInputs?.length) || current.manualSuspendedAt || current.pressureSuspendedAt
       || current.conversationRef.startsWith('pending:') || (!manualInputWait && turnIsWorking === true)
       || sessionScreenShowsWorking(screen) || (requireReadyPrompt && screenIsStartingUp(screen))
       || screenShowsBackgroundWork(screen)
@@ -2768,8 +3034,10 @@ export class SessionManager {
       this.runtimes.clearEphemeral(session.id);
       this.runRecovery.cancel(session.id);
       this.suspendedSessionIds.add(session.id);
-      const suspended = this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
+      let suspended = this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
       if (!suspended) throw new Error('Session disappeared while suspending.');
+      this.cancelQueuedInputs(sessionId);
+      suspended = this.mustGetSession(sessionId);
       this.appendEvent(suspended, { type: 'status', text: 'Session suspended; opening this conversation will resume it.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: suspended });
       return suspended;

@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionKeystrokeRequest } from '@agent-console/shared';
+import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane } from './ConversationPane';
 import { api } from '../lib/api';
 
@@ -27,7 +28,7 @@ describe('clipboard images', () => {
     for (const bypass of [false, true]) {
       it(`${provider} ${bypass ? 'bypass' : 'draft'} image-only submissions retain images on rejection and clear them on success`, async () => {
         const upload = vi.spyOn(api, 'uploadImage').mockResolvedValue(pastedImage);
-        const send = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+        const send = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce({ session: boundSession() });
         try {
           renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send });
           const textbox = screen.getByRole('textbox');
@@ -55,7 +56,7 @@ describe('clipboard images', () => {
   it('blocks submission while uploading, supports retry and keeps captions on rejected sends', async () => {
     const pending = deferred<typeof pastedImage>();
     const upload = vi.spyOn(api, 'uploadImage').mockImplementationOnce(() => pending.promise).mockResolvedValue(pastedImage);
-    const send = vi.fn().mockResolvedValue(false);
+    const send = vi.fn().mockResolvedValue(undefined);
     try {
       renderPane({ onSendKeystrokes: send });
       const textbox = screen.getByRole('textbox');
@@ -180,18 +181,19 @@ function renderPane(input: {
   screenStatus?: string;
   screenStatusAnsi?: string;
   screenModel?: string;
-  onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
   onSetModelProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
   onCancelModelProfileRequest?: (sessionId: string, requestId: string) => Promise<boolean>;
   onSuspend?: (sessionId: string) => Promise<void>;
   onLocalSubmittedText?: (sessionId: string, text: string) => { id: string } | undefined;
   sessionOverrides?: Partial<BoundSession>;
 } = {}) {
-  const onSendKeystrokes = input.onSendKeystrokes ?? vi.fn().mockResolvedValue(true);
+  const onSendKeystrokes = input.onSendKeystrokes ?? vi.fn().mockResolvedValue({ session: boundSession() });
   const onSetModelProfile = input.onSetModelProfile ?? vi.fn().mockResolvedValue(true);
   const onCancelModelProfileRequest = input.onCancelModelProfileRequest ?? vi.fn().mockResolvedValue(true);
   const onLocalSubmittedText = input.onLocalSubmittedText ?? vi.fn(() => ({ id: 'optimistic-1' }));
   const view = render(
+    <QueryClientProvider client={new QueryClient()}>
     <MemoryRouter>
       <ConversationPane
         projects={[project()]}
@@ -234,7 +236,8 @@ function renderPane(input: {
         conversationKey={`demo:${input.sessionOverrides?.provider ?? 'codex'}:conversation-1`}
         historyPrependVersion={0}
       />
-    </MemoryRouter>,
+    </MemoryRouter>
+    </QueryClientProvider>,
   );
   return { ...view, onSendKeystrokes, onSetModelProfile, onCancelModelProfileRequest, onLocalSubmittedText };
 }
@@ -303,7 +306,7 @@ it('submits a busy-session profile immediately and does not carry its server que
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
-        onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+        onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
@@ -362,7 +365,7 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
-        onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+        onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         onLocalSubmittedText={vi.fn(() => ({ id: 'optimistic-2' }))}
@@ -408,6 +411,50 @@ it('cancels the exact server-owned queued profile request', async () => {
 });
 
 describe('ConversationPane live input bridge', () => {
+  it('stops Text Bypass after queue acceptance and keeps the next message local until Enter', async () => {
+    const queuedInput = { requestId: 'queued-1', text: 'first message', requestedAt: baseTime,
+      state: 'queued' as const, reason: 'Waiting for the session to accept input.' };
+    const send = vi.fn(async (_sessionId: string, payload: SessionKeystrokeRequest): Promise<SessionInputResponse> => ({
+      session: boundSession(), ...(payload.keys?.includes('Enter') ? { queuedInput } : {}),
+    }));
+    renderPane({ onSendKeystrokes: send });
+    const textbox = screen.getByRole('textbox');
+    const bypass = screen.getByRole('button', { name: 'Text Bypass' });
+    fireEvent.change(textbox, { target: { value: '' } });
+    fireEvent.click(bypass);
+    await waitFor(() => expect(bypass).toHaveAttribute('aria-pressed', 'true'));
+    for (const key of 'first message') fireEvent.keyDown(textbox, { key });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(bypass).toHaveAttribute('aria-pressed', 'false'));
+    await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+    expect(send.mock.calls.map(call => call[1])).toEqual([
+      { text: 'first message', deferScreenUpdate: true },
+      { keys: ['Enter'], submittedText: 'first message', clientOptimisticMessageId: 'optimistic-1' },
+    ]);
+    fireEvent.change(textbox, { target: { value: 'second message' } });
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(send).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+    expect(send).toHaveBeenLastCalledWith('session-1', {
+      text: 'second message', submittedText: 'second message', keys: ['Enter'],
+    });
+  });
+
+  it('keeps Text Bypass disabled when a pending send is restored', () => {
+    renderPane({ sessionOverrides: { queuedInputs: [{ requestId: 'queued-1', text: 'pending message', requestedAt: baseTime,
+      state: 'queued', reason: 'Waiting for the session to accept input.' }] } });
+    expect(screen.getByRole('button', { name: 'Text Bypass' })).toBeDisabled();
+  });
+
+  it('shows an in-flight send without offering cancellation', () => {
+    renderPane({ sessionOverrides: { queuedInputs: [{ requestId: 'sending-1', text: 'sending message', requestedAt: baseTime,
+      state: 'submitting', reason: 'Sending the message.' }] } });
+    expect(screen.getByText('Sending…')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Cancel queued send' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Dismiss' })).not.toBeInTheDocument();
+  });
+
   it('allows the server to decide suspension when the provider working label includes an input wait', () => {
     const onSuspend = vi.fn().mockResolvedValue(undefined);
     renderPane({ sessionOverrides: { isWorking: true }, onSuspend,
@@ -419,7 +466,7 @@ describe('ConversationPane live input bridge', () => {
   });
 
   it('restores a rejected draft and keeps it when the conversation is reopened', async () => {
-    const send = deferred<boolean>();
+    const send = deferred<SessionInputResponse | undefined>();
     const onSendKeystrokes = vi.fn(() => send.promise);
     const view = renderPane({ onSendKeystrokes });
     const textbox = screen.getByRole('textbox');
@@ -427,7 +474,7 @@ describe('ConversationPane live input bridge', () => {
     fireEvent.keyDown(textbox, { key: 'Enter' });
     expect(textbox).toHaveValue('');
 
-    send.resolve(false);
+    send.resolve(undefined);
 
     await waitFor(() => expect(textbox).toHaveValue('keep the background build running'));
     expect(onSendKeystrokes).toHaveBeenCalledTimes(1);
@@ -439,7 +486,7 @@ describe('ConversationPane live input bridge', () => {
   });
 
   it('clears the normal draft immediately after Enter while the keystroke request is pending', () => {
-    const send = deferred<boolean>();
+    const send = deferred<SessionInputResponse | undefined>();
     renderPane({
       onSendKeystrokes: vi.fn(() => send.promise),
     });
@@ -451,11 +498,11 @@ describe('ConversationPane live input bridge', () => {
     fireEvent.keyDown(textbox, { key: 'Enter' });
 
     expect(textbox.value).toBe('');
-    send.resolve(true);
+    send.resolve({ session: boundSession() });
   });
 
   it('clears the text-bypass preview immediately after local submission even when terminal input still contains that text', async () => {
-    const send = deferred<boolean>();
+    const send = deferred<SessionInputResponse | undefined>();
     const onLocalSubmittedText = vi.fn(() => ({ id: 'optimistic-1' }));
     const { rerender } = renderPane({
       onSendKeystrokes: vi.fn(() => send.promise),
@@ -517,7 +564,7 @@ describe('ConversationPane live input bridge', () => {
     );
 
     expect(textbox.value).toBe('');
-    send.resolve(true);
+    send.resolve({ session: boundSession() });
   });
 
   it('does not promote server-derived input text into a pending user transcript row', () => {
@@ -528,7 +575,7 @@ describe('ConversationPane live input bridge', () => {
   });
 
   it('submits /model from ordinary entry as a terminal command', async () => {
-    const onSendKeystrokes = vi.fn().mockResolvedValue(true);
+    const onSendKeystrokes = vi.fn().mockResolvedValue({ session: boundSession() });
     const { onLocalSubmittedText } = renderPane({ onSendKeystrokes });
     const textbox = screen.getByRole('textbox');
     fireEvent.change(textbox, { target: { value: '/model' } });
@@ -541,7 +588,7 @@ describe('ConversationPane live input bridge', () => {
   });
 
   it('submits /model from Text Bypass without creating a conversation turn', async () => {
-    const onSendKeystrokes = vi.fn().mockResolvedValue(true);
+    const onSendKeystrokes = vi.fn().mockResolvedValue({ session: boundSession() });
     const { onLocalSubmittedText } = renderPane({ onSendKeystrokes });
     const textbox = screen.getByRole('textbox');
     fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
@@ -667,7 +714,7 @@ describe('ConversationPane external Claude handoff', () => {
             onBind={onBind}
             onRelease={vi.fn()}
             onSuspend={vi.fn()}
-            onSendKeystrokes={vi.fn().mockResolvedValue(true)}
+            onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
             onSetModelProfile={vi.fn().mockResolvedValue(true)}
             onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
             onLocalSubmittedText={vi.fn()}

@@ -13,6 +13,36 @@ function commandResult(session: BoundSession, recordedUserInput?: { id: string; 
 }
 
 describe('session routes', () => {
+  it('returns queued delivery separately from submitted input and exposes cancellation', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-queued-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
+    const session: BoundSession = { id: 'queued-session', provider: 'claude', projectSlug: 'demo', conversationRef: 'native-chat',
+      tmuxSessionName: 'fixture', status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
+    const submissionId = 'd5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5';
+    const queuedInput = { requestId: submissionId, text: 'my draft', requestedAt: session.updatedAt,
+      state: 'queued' as const, reason: 'Waiting for input.' };
+    const sendKeystrokes = vi.fn(async () => ({ ...commandResult(session), queuedInput }));
+    const cancelQueuedInput = vi.fn(async () => ({ session }));
+    const ensureAuthenticated = vi.fn(async () => undefined);
+    const app = fastify();
+    await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never, {} as never,
+      { getSessionById: () => session, allowsLiteralSelectionKeystroke: async () => false, sendKeystrokes, cancelQueuedInput } as never);
+    try {
+      const payload = { submissionId, text: 'my draft', submittedText: 'my draft', keys: ['Enter'] };
+      const accepted = await app.inject({ method: 'POST', url: '/api/sessions/queued-session/keys', payload });
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json()).toEqual({ session, queuedInput });
+      expect(sendKeystrokes).toHaveBeenCalledWith(session.id, payload);
+      const invalid = await app.inject({ method: 'POST', url: '/api/sessions/queued-session/keys', payload: { ...payload, keys: ['Escape'] } });
+      expect(invalid.statusCode).toBe(400);
+      expect(sendKeystrokes).toHaveBeenCalledTimes(1);
+      const cancelled = await app.inject({ method: 'DELETE', url: `/api/sessions/queued-session/queued-inputs/${submissionId}` });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelQueuedInput).toHaveBeenCalledWith(session.id, submissionId);
+      expect(ensureAuthenticated).toHaveBeenCalledTimes(3);
+    } finally { await app.close(); db.close(); await fs.rm(tempDir, { recursive: true, force: true }); }
+  });
+
   it('bounds raw output responses to the useful tail of large session logs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));

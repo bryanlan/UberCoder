@@ -1,6 +1,7 @@
 import { RunFailureNotice } from './RunFailureNotice';
+import { QueuedInputNotice } from './QueuedInputNotice';
 import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, Pause, PlugZap, Unplug } from 'lucide-react';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
@@ -275,6 +276,7 @@ function LiveSessionInputBridge({
   activeModelProfile,
   visibleModel,
   modelProfileRequest,
+  hasQueuedInput,
 }: {
   csrfToken?: string;
   sessionId: string;
@@ -282,7 +284,7 @@ function LiveSessionInputBridge({
   conversationKey: string;
   conversationRef: string;
   provider: ConversationTimeline['conversation']['provider'];
-  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
@@ -300,6 +302,7 @@ function LiveSessionInputBridge({
   activeModelProfile?: ModelProfileKey;
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
+  hasQueuedInput: boolean;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftText ?? '');
@@ -456,14 +459,41 @@ function LiveSessionInputBridge({
     const request = withImages ? { ...payload, imageIds: clipboardImages.images.map(image => image.id) } : payload;
     const task = keyQueueRef.current
       .then(async () => {
-        const sent = await onSendKeystrokes(sessionId, request);
-        if (sent && withImages) clipboardImages.clear();
-        return sent;
+        const response = await onSendKeystrokes(sessionId, request);
+        if (response?.queuedInput && textBypassEnabled) stopTextBypassForQueue();
+        if (response && withImages) clipboardImages.clear();
+        return response !== undefined;
       })
       .catch(() => false);
     keyQueueRef.current = task.then(() => undefined, () => undefined);
     return task;
   }
+
+  function stopTextBypassForQueue(immediate = true): void {
+    if (flushTimerRef.current !== undefined) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = undefined;
+    }
+    pendingTextRef.current = '';
+    const nextDraft = bypassPreviewTextRef.current ?? '';
+    committedInputRef.current = '';
+    keepBypassSelectionPinnedRef.current = false;
+    setBypassPreview(undefined);
+    // Complete the handoff before another native input event can run.
+    const updateDraft = () => {
+      setTextBypassEnabled(false);
+      setDraftText(nextDraft);
+      setDraftDirty(Boolean(nextDraft));
+    };
+    if (immediate) flushSync(updateDraft);
+    else updateDraft();
+    onLocalDraftText(sessionId, nextDraft);
+    upsertLiveBridgeDraft(conversationKey, () => ({ draftText: nextDraft, draftDirty: Boolean(nextDraft) }));
+  }
+
+  useEffect(() => {
+    if (hasQueuedInput && textBypassEnabled && !bridgeBusyRef.current) stopTextBypassForQueue(false);
+  }, [hasQueuedInput, textBypassEnabled, bridgeBusy]);
 
   function enqueueKeystrokes(payload: SessionKeystrokeRequest): void {
     void queueKeystrokes(payload);
@@ -632,6 +662,10 @@ function LiveSessionInputBridge({
   }
 
   async function syncDraftAndEnableBypass(extraKeys: SessionKeyToken[] = []): Promise<void> {
+    if (hasQueuedInput) {
+      if (extraKeys.length) await queueKeystrokes({ keys: extraKeys });
+      return;
+    }
     const ok = await syncDraftToRemote(extraKeys);
     if (!ok) {
       return;
@@ -641,6 +675,7 @@ function LiveSessionInputBridge({
   }
 
   async function handleToggleTextBypass(): Promise<void> {
+    if (hasQueuedInput) return;
     await runBridgeAction(async () => {
       if (textBypassEnabled) {
         const ok = await flushBufferedText();
@@ -1207,7 +1242,7 @@ function LiveSessionInputBridge({
               <button
                 type="button"
                 aria-pressed={textBypassEnabled}
-                disabled={bridgeBusy}
+                disabled={bridgeBusy || hasQueuedInput}
                 onPointerDown={(event) => event.preventDefault()}
                 onClick={() => {
                   void handleToggleTextBypass();
@@ -1268,7 +1303,7 @@ interface ConversationPaneProps {
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSuspend: (sessionId: string) => Promise<void>;
-  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<boolean>;
+  onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
@@ -1666,6 +1701,7 @@ export function ConversationPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {boundSession?.queuedInputs?.length ? <QueuedInputNotice sessionId={boundSession.id} inputs={boundSession.queuedInputs} csrfToken={csrfToken} /> : null}
       {boundSession?.runFailure && !sessionSuspended && <RunFailureNotice failure={boundSession.runFailure}
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
       {sessionSuspended && (
@@ -1883,6 +1919,7 @@ export function ConversationPane({
           csrfToken={csrfToken}
           key={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           sessionId={boundSession.id}
+          hasQueuedInput={Boolean(boundSession.queuedInputs?.length)}
           projectSlug={timeline.conversation.projectSlug}
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           conversationRef={timeline.conversation.ref}

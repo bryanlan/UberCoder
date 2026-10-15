@@ -94,6 +94,10 @@
   canonical conversation ownership, startup verification, recovery,
   bounded recent-conversation auto-tracking, working state, confirmed response timestamps, nine-day Work-mode release, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.
+- `apps/server/src/sessions/input-queue.ts` - durable human-message delivery journals,
+  Text Bypass draft provenance and request summaries projected on bound sessions.
+- `apps/web/src/components/QueuedInputNotice.tsx` - queued-message display and cancellation;
+  pending requests stay separate from submitted transcript turns.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
   normalization for user-visible live output.
 - `apps/server/src/sessions/last-user-input.ts` - asynchronous prompt restoration and session-local

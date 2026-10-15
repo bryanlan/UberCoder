@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import type { BoundSession, ModelProfileKey, ModelProfileRequest } from '@agent-console/shared';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
+import { InputQueue } from '../../sessions/input-queue.js';
 
 const treeVisibleBoundSessionSql = (alias: string) => `${alias}.should_restore = 1 and ${alias}.status in ('starting', 'bound', 'releasing')`;
 
@@ -15,6 +16,12 @@ function nextUpdatedAt(current: string, candidate: string): string {
 
 export class BoundSessionsRepo {
   constructor(private readonly sqlite: Database.Database) {}
+
+  private mapRow(row: SqliteRow): BoundSession {
+    const session = mapBoundSessionRow(row);
+    const queuedInputs = new InputQueue(this.sqlite).summaries(session.id);
+    return queuedInputs.length ? { ...session, queuedInputs } : session;
+  }
 
   upsert(session: BoundSession): void {
     const shouldRestore = session.shouldRestore ?? ['starting', 'bound', 'releasing'].includes(session.status);
@@ -215,7 +222,7 @@ export class BoundSessionsRepo {
 
   list(): BoundSession[] {
     const rows = this.sqlite.prepare(`select * from bound_sessions order by updated_at desc`).all() as SqliteRow[];
-    return rows.map(mapBoundSessionRow);
+    return rows.map(row => this.mapRow(row));
   }
 
   listTreeVisible(): BoundSession[] {
@@ -237,12 +244,12 @@ export class BoundSessionsRepo {
         )
       order by updated_at desc
     `).all() as SqliteRow[];
-    return rows.map(mapBoundSessionRow);
+    return rows.map(row => this.mapRow(row));
   }
 
   getById(id: string): BoundSession | undefined {
     const row = this.sqlite.prepare(`select * from bound_sessions where id = ?`).get(id) as SqliteRow | undefined;
-    return row ? mapBoundSessionRow(row) : undefined;
+    return row ? this.mapRow(row) : undefined;
   }
 
   getRestorableByConversation(projectSlug: string, provider: string, conversationRef: string): BoundSession | undefined {
@@ -252,7 +259,7 @@ export class BoundSessionsRepo {
       order by updated_at desc
       limit 1
     `).get(projectSlug, provider, conversationRef) as SqliteRow | undefined;
-    return row ? mapBoundSessionRow(row) : undefined;
+    return row ? this.mapRow(row) : undefined;
   }
 
   delete(id: string): void {
