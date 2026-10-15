@@ -82,8 +82,8 @@ it('exports complete metadata while excluding private payload columns and scrubb
   expect(JSON.stringify(result)).not.toContain('SECRETVALUE');
   expect(result.agents.counts).toEqual({ total: 4, active: 1, waiting: 1, idle: 1, finished: 1, started_never_finished: 1 });
   expect(result.agents.assignments?.find(a => a.id === 'old')).toMatchObject({ live_session: false, recorded_status: 'active' });
-  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({ activity_summary: 'Current work token=[redacted]',
-    scopes: [{ checkout: '/repo/wt', repository: '/repo/.git', summary: 'Current work token=[redacted]', updated_at: stamp }] });
+  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({ activity_summary: '[credential-bearing line omitted]',
+    scopes: [{ checkout: '/repo/wt', repository: '/repo/.git', summary: '[credential-bearing line omitted]', updated_at: stamp }] });
   expect(result.agents.sessions?.find(s => s.id === 'session-stale')).toMatchObject({ live: false, checkout: null });
   expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, checkout: '/repo/wt' });
   expect(result.agents.messages).toMatchObject({ total: 3, unsupplied: 1, unacknowledged: 2, pending_to_unfinished: 2 });
@@ -148,7 +148,7 @@ it('compares wiki provenance against the actual repository HEAD using read-only 
 });
 
 it('scrubs common credential forms without removing useful topic words', () => {
-  expect(safeText('postgresql://user:pass@host/db token=hidden missing docs')).toBe('[redacted URL] token=[redacted] missing docs');
+  expect(safeText('postgresql://user:pass@host/db token=hidden missing docs')).toBe('[credential-bearing line omitted]');
   expect(safeText('Bearer abcdefghijklmnopqrst ghp_abcdefghijklmnopqrst')).not.toContain('abcdefghijkl');
   expect(safeText('x'.repeat(200))).toHaveLength(160);
 });
@@ -174,4 +174,78 @@ it('runs the source CLI without a backend and returns structured failures for op
   expect(invalid.status).toBe(1);
   expect(JSON.parse(invalid.stdout)).toMatchObject({ status: 'error' });
   expect(invalid.stdout + invalid.stderr).not.toContain('PRIVATE_SECRET_CONFIG');
+});
+
+
+it('keeps a finished assignment live while its verified bound session is running', () => {
+  const options = fixture();
+  const db = new Database(options.database);
+  db.prepare("update coordination_assignments set status='finished' where id='live'").run();
+  db.close();
+  const result = engineeringSummary(options);
+  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({
+    status: 'finished', live_session: true, session_ids: ['session-live'],
+  });
+  expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, checkout: '/repo/wt' });
+});
+
+it('sanitizes wiki titles, descriptions, activity, map keys and failed database paths', () => {
+  const options = fixture();
+  const marker = 'SYNTHETIC_EXPORT_CREDENTIAL';
+  const secret = `RESEND_API_KEY="${marker}"`;
+  const db = new Database(options.database);
+  db.prepare('update coordination_assignments set description=?').run(secret);
+  db.prepare('update coordination_scopes set summary=?').run(secret);
+  db.close();
+  const wiki = new Database(options.wikiDatabase);
+  wiki.prepare('update wiki_pages set title=?').run(secret);
+  wiki.close();
+  expect(JSON.stringify(engineeringSummary(options))).not.toContain(marker);
+  const failed = engineeringSummary({ ...options, database: `postgresql://host/${marker}`,
+    wikiDatabase: `/private/${marker}/wiki.sqlite` });
+  const output = JSON.stringify(failed);
+  expect(failed.status).toBe('error');
+  expect(output).not.toContain(marker);
+  expect(output).not.toContain('/private/');
+});
+
+
+it('withholds database paths in the CLI even after URL-like inputs are normalized', () => {
+  const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
+  const marker = 'SYNTHETIC_CLI_PRIVATE_PATH';
+  const result = spawnSync(process.execPath, ['--import', 'tsx', cli, '--database', `postgresql://user:${marker}@host/data`,
+    '--wiki-database', `/private/${marker}/source`], { encoding: 'utf8' });
+  expect(result.status).toBe(2);
+  const output = result.stdout + result.stderr;
+  expect(output).not.toContain(marker);
+  expect(output).not.toContain('/private/');
+  expect(JSON.parse(result.stdout).sources.console.path).toBe('[database path omitted]');
+});
+
+
+it('exports actual process checkout ownership without scope or bound-session rows', () => {
+  const options = fixture();
+  const db = new Database(options.database);
+  db.prepare("delete from coordination_scopes where assignment_id='live'").run();
+  db.prepare("delete from bound_sessions where id='session-live'").run();
+  db.close();
+  expect(engineeringSummary(options).agents.assignments?.find(a => a.id === 'live')).toMatchObject({
+    live_session: true, live_process: true, process_checkout: '/repo/wt', scopes: [], session_ids: [],
+  });
+});
+
+it('retains finished process ownership without a bound session and exposes unknown cwd', () => {
+  const options = fixture();
+  const db = new Database(options.database);
+  db.prepare("update coordination_assignments set status='finished' where id='live'").run();
+  db.prepare("delete from bound_sessions where id='session-live'").run();
+  db.close();
+  const processIdentity = (pid: number) => pid === 101 ? { start: 'native-start', name: 'codex', cwd: null } : null;
+  const result = engineeringSummary({ ...options, processIdentity });
+  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({
+    status: 'finished', live_session: true, live_process: true, process_checkout: null,
+  });
+  expect(result.status).toBe('partial');
+  expect(result.sources.console.status).toBe('partial');
+  expect(result.issues).toContainEqual(expect.objectContaining({ code: 'ownership:PROCESS_CHECKOUT_UNAVAILABLE' }));
 });

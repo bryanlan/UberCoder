@@ -1,0 +1,12 @@
+import { expect, it } from 'vitest';
+import contract from '../src/engineering/export_redaction.v1.json' with { type: 'json' };
+import { redactText, sanitizeExport } from '../src/engineering/export-redaction.js';
+
+it.each(contract.cases)('applies shared export redaction: $input', ({ input, expected }) => {
+  expect(redactText(input)).toBe(expected);
+});
+it('sanitizes nested objects, arrays, sensitive field values and free-text map keys', () => {
+  expect(sanitizeExport({ title: 'postgres://private-host/db', nested: [{ RESEND_API_KEY: 'synthetic',
+    total_tokens: 4200, 'password=synthetic': 'safe' }] })).toEqual({ title: '[database URL omitted]',
+    nested: [{ RESEND_API_KEY: '[credential omitted]', total_tokens: 4200, '[credential-bearing line omitted]': 'safe' }] });
+});

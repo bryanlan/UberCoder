@@ -34,7 +34,9 @@ and `sources`, even when useful sections are present.
 ## Version 1 contract
 
 The root contains `schema_version`, `generated_at`, `status`, `sources`, `issues`,
-`agents` and `wiki`. Each source has its path, observation time, status and issues.
+`agents` and `wiki`. Each source has a withheld path marker, observation time,
+status and issues. Database locations stay private, including failed or malformed
+URL-like inputs.
 An unavailable section is `null`. Console sections are independent: a schema
 failure reading assignments does not hide working message, grant or wake counts.
 When the invocation itself cannot be parsed, `sources` is empty and `agents` and
@@ -53,7 +55,11 @@ When the invocation itself cannot be parsed, `sources` is empty and `agents` and
   start to match. Disconnected assignments and stale active rows are idle.
   `started_never_finished` is a subset, not another disjoint state: unfinished,
   started more than 24 hours ago, and with no proven live process or session.
-  Finished assignments never claim a checkout. Live session paths come from
+  Every assignment exports `live_process` and its actual `process_checkout`,
+  including finished assignments. A finished assignment retains proven process or
+  session ownership until that provider exits. Assignment completion alone does
+  not release a checkout. A live process with unreadable cwd makes the Console
+  source partial while retaining available metadata. Live session paths come from
   `/proc/<pid>/cwd`; a stale bound row or unrelated reused PID is insufficient.
 - `messages`: retained total, unsupplied, unacknowledged, pending to unfinished
   recipients, and a zero-filled 14 UTC calendar-day series including today so far.
@@ -93,8 +99,9 @@ page. The command never checks out a branch, fetches, or modifies Git state.
 Queries name their selected columns. Message bodies, provider prompts, auth state,
 wiki bodies/revision summaries and arbitrary JSON payloads are excluded.
 Descriptions are capped at 1,000 characters, and search topics at 160;
-common credential and URL-password forms are redacted from these permitted text
-fields. Output remains internal operational metadata.
+the shared `export_redaction.v1.json` rules redact credentials, database URLs and
+database paths recursively across every exported field and map key. Output
+remains internal operational metadata.
 
 ## Verification
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
+import { redactText, sanitizeExport } from './export-redaction.js';
 
 type Status = 'ok' | 'partial' | 'error';
 interface Issue { source: string; code: string; message: string }
@@ -22,17 +23,15 @@ export interface SummaryOptions {
 }
 
 const DAY = 86_400_000;
+const READ_ERROR_CODES = new Set(['SQLITE_ERROR', 'SQLITE_CANTOPEN', 'SQLITE_BUSY', 'SQLITE_LOCKED',
+  'SQLITE_NOTADB', 'SQLITE_CORRUPT', 'SQLITE_READONLY', 'ENOENT', 'EACCES', 'PROCESS_CHECKOUT_UNAVAILABLE']);
 const iso = (n: number) => new Date(n).toISOString();
 const count = (db: Database.Database, sql: string, ...args: string[]) =>
   (db.prepare(sql).get(...args) as { n: number }).n;
 
-/** Only descriptions, activity summaries and wiki topics are free text in the export. */
+/** Cap permitted human text after redaction; the complete export is sanitized too. */
 export function safeText(value: string, limit = 160): string {
-  return value.replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(/\b[a-z][a-z\d+.-]*:\/\/[^\s]*@[^\s]+/gi, '[redacted URL]')
-    .replace(/\b(?:Bearer\s+|sk-(?:proj-|ant-)?|gh[pousr]_|github_pat_)[A-Za-z0-9_./+\-=]{12,}/gi, '[redacted credential]')
-    .replace(/\b((?:api[_-]?key|password|passwd|token|secret|authorization)["']?\s*[=:]\s*)["']?[^\s,;]+/gi, '$1[redacted]')
-    .slice(0, limit);
+  return redactText(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, limit);
 }
 
 export function readProcessIdentity(pid: number): ProcessIdentity | null {
@@ -78,7 +77,7 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
   const counts = { total: rows.length, active: 0, waiting: 0, idle: 0, finished: 0, started_never_finished: 0 };
   const assignments = rows.map(row => {
     const p = identity(row.pid);
-    const live = Boolean(p && p.start === row.process_start && row.status !== 'finished');
+    const live = Boolean(p && p.start === row.process_start && p.name === row.provider);
     const sessionIds = sessions.filter(s => s.assignment_id === row.id && s.live).map(s => s.id);
     const state = row.status === 'finished' ? 'finished' : live && row.status === 'active' ? 'active'
       : live && row.status === 'waiting' ? 'waiting' : 'idle';
@@ -91,7 +90,8 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
       ?? (assignmentScopes.length === 1 ? assignmentScopes[0] : undefined);
     return { id: row.id, provider: row.provider, description: safeText(row.description, 1000),
       status: state, recorded_status: row.status, started_at: row.started_at, last_seen_at: row.last_seen_at,
-      live_session: row.status !== 'finished' && (live || sessionIds.length > 0), session_ids: sessionIds, started_never_finished: neverFinished,
+      live_process: live, process_checkout: live ? p!.cwd : null,
+      live_session: live || sessionIds.length > 0, session_ids: sessionIds, started_never_finished: neverFinished,
       activity_summary: latestScope?.summary ?? '', scopes: assignmentScopes };
   });
   return { counts, assignments, sessions };
@@ -227,14 +227,15 @@ export function engineeringSummary(options: SummaryOptions) {
   if (!Number.isFinite(now)) throw new Error('Invalid summary time.');
   const issues: Issue[] = [];
   const sources: Record<'console' | 'wiki', Source> = {
-    console: { path: options.database, status: 'ok', observed_at: iso(now), issues: [] },
-    wiki: { path: options.wikiDatabase, status: 'ok', observed_at: iso(now), issues: [] },
+    console: { path: '[database path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
+    wiki: { path: '[database path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
   };
   const failed = (source: 'console' | 'wiki', stage: string, error: unknown) => {
     const rawCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'READ_FAILED';
     // Do not echo driver errors: malformed config/SQL can carry private values.
-    const issue = { source, code: `${stage}:${/^[A-Z0-9_]+$/.test(rawCode) ? rawCode : 'READ_FAILED'}`,
-      message: `${stage} could not be read. Check the source path, permissions and schema; this section is unavailable.` };
+    const issue = { source, code: `${stage}:${READ_ERROR_CODES.has(rawCode) ? rawCode : 'READ_FAILED'}`,
+      message: stage === 'ownership' ? 'A verified live provider process has no readable checkout; ownership evidence is incomplete.'
+        : `${stage} could not be read. Check the source path, permissions and schema; this section is unavailable.` };
     issues.push(issue); sources[source].issues.push(issue);
   };
   let agents: ReturnType<typeof readAssignments> | null = null;
@@ -246,13 +247,19 @@ export function engineeringSummary(options: SummaryOptions) {
     let db: Database.Database | undefined;
     let successes = 0;
     try {
-      db = new Database(sources[source].path, { readonly: true, fileMustExist: true, timeout: 2000 });
+      db = new Database(source === 'console' ? options.database : options.wikiDatabase, { readonly: true, fileMustExist: true, timeout: 2000 });
       db.pragma('query_only = ON');
       db.exec('BEGIN');
       if (source === 'console') {
         for (const stage of ['assignments', 'messages', 'wakes', 'grants']) {
           try {
-            if (stage === 'assignments') agents = readAssignments(db, options, now);
+            if (stage === 'assignments') {
+              agents = readAssignments(db, options, now);
+              if (agents.assignments.some(a => a.live_process && !a.process_checkout)
+                || agents.sessions.some(s => s.live && !s.checkout)) {
+                failed(source, 'ownership', { code: 'PROCESS_CHECKOUT_UNAVAILABLE' });
+              }
+            }
             if (stage === 'messages') messages = readMessages(db, now);
             if (stage === 'wakes') wakes = readWakes(db, now);
             if (stage === 'grants') grants = readGrants(db, now);
@@ -267,7 +274,7 @@ export function engineeringSummary(options: SummaryOptions) {
     }
   }
   const status: Status = Object.values(sources).every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
-  return { schema_version: 1, generated_at: iso(now), status, sources, issues,
+  return sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues,
     agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null,
-      messages, wakes, grants }, wiki };
+      messages, wakes, grants }, wiki });
 }
