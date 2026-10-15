@@ -2,12 +2,13 @@ import contract from './export_redaction.v1.json' with { type: 'json' };
 
 // Independently runnable owners package the same versioned data contract.
 const rules = contract.rules.map(rule => ({ ...rule, regex: new RegExp(rule.pattern, `${rule.flags}g`) }));
+const providerRules = contract.provider_rules.map(rule => ({ ...rule, regex: new RegExp(rule.pattern, `${rule.flags}g`) }));
 const sensitiveKey = new RegExp(contract.sensitive_key, 'i');
 const entropyPattern = new RegExp(contract.entropy.pattern, 'g');
 const uuid = /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/i;
 const identifier = /^(?:[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/i;
 const prefixedIdentifiers = contract.identifier_patterns.map(pattern => new RegExp(`^(?:${pattern})$`, 'i'));
-const pathIdentifier = /[a-z0-9_./ +@()\[\]-]+/i;
+const pathIdentifier = /[^\x00-\x1f\x7f:="'<>|\\]+/;
 const publicFields = new Set<string>(contract.public_fields);
 const identifierFields = new Set<string>(contract.identifier_fields);
 const pathFields = new Set<string>(contract.path_fields);
@@ -17,8 +18,10 @@ const publicValues: Record<string, readonly string[]> = contract.public_values;
 const fullMatch = (pattern: RegExp, value: string) => pattern.exec(value)?.[0] === value;
 
 export function isPathIdentifier(value: string, allowName = false): boolean {
-  return (allowName || value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value)) && fullMatch(pathIdentifier, value)
-    && value.length <= contract.max_export_text_length;
+  if (!((allowName || value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value)) && fullMatch(pathIdentifier, value)
+    && Array.from(value).length <= contract.max_export_text_length)) return false;
+  if (rules.filter(rule => !rule.metadata_exempt).some(rule => value.replace(rule.regex, rule.replacement) !== value)) return false;
+  return redactProviders(value) === value;
 }
 
 function entropy(value: string): number {
@@ -32,9 +35,18 @@ function entropy(value: string): number {
   return result;
 }
 
+function redactProviders(value: string): string {
+  for (const rule of providerRules) {
+    if (!rule.keywords.length || rule.keywords.some(keyword => value.toLowerCase().includes(keyword))) {
+      value = value.replace(rule.regex, rule.replacement);
+    }
+  }
+  return value;
+}
+
 export function redactText(value: string, allowedIdentifiers: ReadonlySet<string> = new Set()): string {
   const text = rules.reduce((result, rule) => result.replace(rule.regex, rule.replacement), value);
-  return text.replace(entropyPattern, candidate => allowedIdentifiers.has(candidate) || fullMatch(uuid, candidate)
+  return redactProviders(text).replace(entropyPattern, candidate => allowedIdentifiers.has(candidate) || fullMatch(uuid, candidate)
     || entropy(candidate) < contract.entropy.minimum_bits_per_character ? candidate : contract.entropy.replacement);
 }
 

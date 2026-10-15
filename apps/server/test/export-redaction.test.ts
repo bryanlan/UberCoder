@@ -13,3 +13,7 @@ it('sanitizes arrays and nested sensitive fields while preserving public token c
     total_tokens: 4200 }] })).toEqual({ title: '[connection URL omitted]',
     nested: [{ RESEND_API_KEY: '[credential omitted]', total_tokens: 4200 }] });
 });
+
+it.each(contract.provider_cases)('redacts the pinned provider vector $rule_id', ({ input, matched }) => {
+  expect(redactText(input)).not.toContain(matched);
+});

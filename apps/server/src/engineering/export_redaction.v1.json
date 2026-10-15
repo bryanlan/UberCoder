@@ -1,56 +1,72 @@
 {
   "version": 1,
-  "sensitive_key": "^[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
+  "sensitive_key": "^[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
   "rules": [
     {
-      "pattern": "^([ \\t]*)(?:[+-][ \\t]*)?(?:[\"'])?[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:[\"'])?[ \\t]*[:=][ \\t]*[|>](?:[-+]?[1-9]?[-+]?)[ \\t]*(?:\\#[^\\r\\n]*)?(?:\\r?\\n(?:[+-]?\\1[ \\t]+[^\\r\\n]*|[ \\t]*(?=\\r?$)))*",
+      "pattern": "^.*(?:^|[\\s])(?:--(?:user|password|passwd|pass|secret|token|api[-_]key|access[-_]key|client[-_]secret|private[-_]key|credential|auth(?:orization)?)|-u)(?:[= \\t])[^\\r\\n]*$",
       "flags": "im",
-      "replacement": "[credential block omitted]"
+      "replacement": "[credential-bearing line omitted]",
+      "metadata_exempt": false
+    },
+    {
+      "pattern": "^([ \\t]*)(?:[+-][ \\t]*)?(?:[\"'])?[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:[\"'])?[ \\t]*[:=][ \\t]*[|>](?:[-+]?[1-9]?[-+]?)[ \\t]*(?:\\#[^\\r\\n]*)?(?:\\r?\\n(?:[+-]?\\1[ \\t]+[^\\r\\n]*|[ \\t]*(?=\\r?$)))*",
+      "flags": "im",
+      "replacement": "[credential block omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "(?<![A-Za-z0-9_-])(?:AIza[A-Za-z0-9_-]{35}|ya29\\.[A-Za-z0-9._-]{12,}|SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}|re_[A-Za-z0-9]{20,})(?![A-Za-z0-9_-])",
       "flags": "i",
-      "replacement": "[credential omitted]"
+      "replacement": "[credential omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
       "flags": "is",
-      "replacement": "[private key omitted]"
+      "replacement": "[private key omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "\\b[a-z][a-z0-9+.-]{0,30}://[^\\s\"'<>]+",
       "flags": "i",
-      "replacement": "[connection URL omitted]"
+      "replacement": "[connection URL omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "\\b[^\\s/:@]+:[^\\s/@]+@[^\\s\"'<>]+",
       "flags": "i",
-      "replacement": "[authenticated connection omitted]"
+      "replacement": "[authenticated connection omitted]",
+      "metadata_exempt": false
     },
     {
-      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=]\\s*(?:[+-][ \\t]*)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*').*$",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=]\\s*(?:[+-][ \\t]*)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*').*$",
       "flags": "im",
-      "replacement": "[credential-bearing line omitted]"
+      "replacement": "[credential-bearing line omitted]",
+      "metadata_exempt": false
     },
     {
-      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=][ \\t]*(?:\\r?\\n[+-]?[ \\t]*)?[^\\r\\n]*$",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens|unattributed_live_sessions|unattributed_sessions)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=][ \\t]*(?:\\r?\\n[+-]?[ \\t]*)?[^\\r\\n]*$",
       "flags": "im",
-      "replacement": "[credential-bearing line omitted]"
+      "replacement": "[credential-bearing line omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "\\b(?:Bearer\\s+|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_./+=-]{12,}",
       "flags": "i",
-      "replacement": "[credential omitted]"
+      "replacement": "[credential omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b|\\bxox[abp]-[A-Za-z0-9-]{10,}|\\beyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+){2}\\b",
       "flags": "i",
-      "replacement": "[credential omitted]"
+      "replacement": "[credential omitted]",
+      "metadata_exempt": false
     },
     {
       "pattern": "(?:[a-z]:[\\\\/]|/|\\.\\.?/)[^\\s\\\"'<>|]*\\.(?:sqlite3?|db)(?:-(?:wal|shm))?(?:\\?[^\\s\\\"'<>|]*)?",
       "flags": "i",
-      "replacement": "[database path omitted]"
+      "replacement": "[database path omitted]",
+      "metadata_exempt": true
     }
   ],
   "cases": [
@@ -237,6 +253,42 @@
     {
       "input": "re_aaaaaaaaaaaaaaaaaaaaaaaa",
       "expected": "[credential omitted]"
+    },
+    {
+      "input": "curl --user name:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -u name:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "tool --password shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "tool --password=shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -H \"Authorization: Bearer shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -H \"Authorization: Basic bmFtZTpw\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "PGPASSWORD=shortpass tool",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "MYSQL_PWD=shortpass tool",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "glpat-aaaaaaaaaaaaaaaaaaaa",
+      "expected": "[credential omitted]"
     }
   ],
   "object_cases": [
@@ -366,6 +418,22 @@
         "branch": "work/engineering-observability-ownership-projection",
         "source_branch": "work/engineering-observability-ownership-projection",
         "integration_target": "origin/engineering-observability-ownership-projection"
+      }
+    },
+    {
+      "input": {
+        "repos": [
+          "~/code/waltium",
+          "/repo/a&b",
+          "工程/検証"
+        ]
+      },
+      "expected": {
+        "repos": [
+          "~/code/waltium",
+          "/repo/a&b",
+          "工程/検証"
+        ]
       }
     }
   ],
@@ -522,5 +590,3170 @@
     "branch": "[A-Za-z0-9_./-]{1,500}",
     "source_branch": "[A-Za-z0-9_./-]{1,500}",
     "integration_target": "[A-Za-z0-9_./-]{1,500}"
-  }
+  },
+  "provider_source": {
+    "tag": "v8.30.1",
+    "url": "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1",
+    "published_at": "2026-03-21T02:17:58Z",
+    "license": "MIT",
+    "license_text": "MIT License\n\nCopyright (c) 2019 Zachary Rice\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n",
+    "source_url": "https://github.com/gitleaks/gitleaks/blob/v8.30.1/config/gitleaks.toml",
+    "sha256": "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf",
+    "upstream_rules": 222,
+    "converted_rules": 220,
+    "excluded": [
+      {
+        "id": "generic-api-key",
+        "reason": "replaced by contextual key rules"
+      },
+      {
+        "id": "pkcs12-file",
+        "reason": "path-only binary rule"
+      }
+    ]
+  },
+  "provider_rules": [
+    {
+      "id": "1password-secret-key",
+      "pattern": "\\bA3-[A-Z0-9]{6}-(?:(?:[A-Z0-9]{11})|(?:[A-Z0-9]{6}-[A-Z0-9]{5}))-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\\b",
+      "flags": "",
+      "keywords": [
+        "a3-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "1password-service-account-token",
+      "pattern": "ops_eyJ[a-zA-Z0-9+/]{250,}={0,3}",
+      "flags": "",
+      "keywords": [
+        "ops_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "adafruit-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:adafruit)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9_-]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "adafruit"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "adobe-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:adobe)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "adobe"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "adobe-client-secret",
+      "pattern": "\\b(p8e-[a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "p8e-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "age-secret-key",
+      "pattern": "AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}",
+      "flags": "",
+      "keywords": [
+        "age-secret-key-1"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "airtable-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:airtable)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{17})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "airtable"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "airtable-personnal-access-token",
+      "pattern": "\\b(pat[A-Za-z0-9]{14}\\.[a-f0-9]{64})\\b",
+      "flags": "",
+      "keywords": [
+        "airtable"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "algolia-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:algolia)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "algolia"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "alibaba-access-key-id",
+      "pattern": "\\b(LTAI[a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "ltai"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "alibaba-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:alibaba)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "alibaba"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "anthropic-admin-api-key",
+      "pattern": "\\b(sk-ant-admin01-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sk-ant-admin01"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "anthropic-api-key",
+      "pattern": "\\b(sk-ant-api03-[a-zA-Z0-9_\\-]{93}AA)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sk-ant-api03"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "artifactory-api-key",
+      "pattern": "\\bAKCp[A-Za-z0-9]{69}\\b",
+      "flags": "",
+      "keywords": [
+        "akcp"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "artifactory-reference-token",
+      "pattern": "\\bcmVmd[A-Za-z0-9]{59}\\b",
+      "flags": "",
+      "keywords": [
+        "cmvmd"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "asana-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "asana"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "asana-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:asana)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "asana"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "atlassian-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:(?:ATLASSIAN|[Aa]tlassian)|(?:CONFLUENCE|[Cc]onfluence)|(?:JIRA|[Jj]ira))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{20}[a-f0-9]{4})(?:[\\x60'\"\\s;]|\\\\[nr]|$)|\\b(ATATT3[A-Za-z0-9_\\-=]{186})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "atlassian",
+        "confluence",
+        "jira",
+        "atatt3"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "authress-service-client-access-key",
+      "pattern": "\\b((?:sc|ext|scauth|authress)_[a-z0-9]{5,30}\\.[a-z0-9]{4,6}\\.(?:acc)[_-][a-z0-9-]{10,32}\\.[a-z0-9+/_=-]{30,120})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sc_",
+        "ext_",
+        "scauth_",
+        "authress_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "aws-access-token",
+      "pattern": "\\b((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\\b",
+      "flags": "",
+      "keywords": [
+        "a3t",
+        "akia",
+        "asia",
+        "abia",
+        "acca"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "aws-amazon-bedrock-api-key-long-lived",
+      "pattern": "\\b(ABSK[A-Za-z0-9+/]{109,269}={0,2})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "absk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "aws-amazon-bedrock-api-key-short-lived",
+      "pattern": "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t",
+      "flags": "",
+      "keywords": [
+        "bedrock-api-key-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "azure-ad-client-secret",
+      "pattern": "(?:^|[\\\\'\"\\x60\\s>=:(,)])([a-zA-Z0-9_~.]{3}\\dQ~[a-zA-Z0-9_~.-]{31,34})(?:$|[\\\\'\"\\x60\\s<),])",
+      "flags": "",
+      "keywords": [
+        "q~"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "beamer-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:beamer)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(b_[a-z0-9=_\\-]{44})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "beamer"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "bitbucket-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "bitbucket"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "bitbucket-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:bitbucket)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "bitbucket"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "bittrex-access-key",
+      "pattern": "[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "bittrex"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "bittrex-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:bittrex)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "bittrex"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "cisco-meraki-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Mm]eraki|MERAKI))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "meraki"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "clickhouse-cloud-api-secret-key",
+      "pattern": "\\b(4b1d[A-Za-z0-9]{38})\\b",
+      "flags": "",
+      "keywords": [
+        "4b1d"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "clojars-api-token",
+      "pattern": "CLOJARS_[a-z0-9]{60}",
+      "flags": "i",
+      "keywords": [
+        "clojars_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "cloudflare-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "cloudflare"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "cloudflare-global-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:cloudflare)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{37})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "cloudflare"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "cloudflare-origin-ca-key",
+      "pattern": "\\b(v1\\.0-[a-f0-9]{24}-[a-f0-9]{146})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "cloudflare",
+        "v1.0-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "codecov-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:codecov)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "codecov"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "cohere-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:cohere|CO_API_KEY)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-zA-Z0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "cohere",
+        "co_api_key"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "coinbase-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:coinbase)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9_-]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "coinbase"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "confluent-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "confluent"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "confluent-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:confluent)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "confluent"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "contentful-delivery-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:contentful)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{43})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "contentful"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "curl-auth-header",
+      "pattern": "\\bcurl\\b(?:.*?|.*?(?:[\\r\\n]{1,2}.*?){1,5})[ \\t\\n\\r](?:-H|--header)(?:=|[ \\t]{0,5})(?:\"(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))\"|'(?:Authorization:[ \\t]{0,5}(?:Basic[ \\t]([a-z0-9+/]{8,}={0,3})|(?:Bearer|(?:Api-)?Token)[ \\t]([\\w=~@.+/-]{8,})|([\\w=~@.+/-]{8,}))|(?:(?:X-(?:[a-z]+-)?)?(?:Api-?)?(?:Key|Token)):[ \\t]{0,5}([\\w=~@.+/-]{8,}))')(?:\\B|\\s|(?![\\s\\S]))",
+      "flags": "i",
+      "keywords": [
+        "curl"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "curl-auth-user",
+      "pattern": "\\bcurl\\b(?:.*|.*(?:[\\r\\n]{1,2}.*){1,5})[ \\t\\n\\r](?:-u|--user)(?:=|[ \\t]{0,5})(\"(:[^\"]{3,}|[^:\"]{3,}:|[^:\"]{3,}:[^\"]{3,})\"|'([^:']{3,}:[^']{3,})'|((?:\"[^\"]{3,}\"|'[^']{3,}'|[\\w$@.-]+):(?:\"[^\"]{3,}\"|'[^']{3,}'|[\\w${}@.-]+)))(?:\\s|(?![\\s\\S]))",
+      "flags": "",
+      "keywords": [
+        "curl"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "databricks-api-token",
+      "pattern": "\\b(dapi[a-f0-9]{32}(?:-\\d)?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "dapi"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "datadog-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:datadog)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "datadog"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "defined-networking-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:dnkey)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(dnkey-[a-z0-9=_\\-]{26}-[a-z0-9=_\\-]{52})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "dnkey"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "digitalocean-access-token",
+      "pattern": "\\b(doo_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "doo_v1_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "digitalocean-pat",
+      "pattern": "\\b(dop_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "dop_v1_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "digitalocean-refresh-token",
+      "pattern": "\\b(dor_v1_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "dor_v1_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "discord-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "discord"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "discord-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9]{18})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "discord"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "discord-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:discord)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "discord"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "doppler-api-token",
+      "pattern": "dp\\.pt\\.[a-z0-9]{43}",
+      "flags": "i",
+      "keywords": [
+        "dp.pt."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "droneci-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:droneci)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "droneci"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "dropbox-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{15})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "dropbox"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "dropbox-long-lived-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{11}(AAAAAAAAAA)[a-z0-9\\-_=]{43})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "dropbox"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "dropbox-short-lived-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:dropbox)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(sl\\.[a-z0-9\\-=_]{135})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "dropbox"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "duffel-api-token",
+      "pattern": "duffel_(?:test|live)_[a-z0-9_\\-=]{43}",
+      "flags": "i",
+      "keywords": [
+        "duffel_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "dynatrace-api-token",
+      "pattern": "dt0c01\\.[a-z0-9]{24}\\.[a-z0-9]{64}",
+      "flags": "i",
+      "keywords": [
+        "dt0c01."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "easypost-api-token",
+      "pattern": "\\bEZAK[a-z0-9]{54}\\b",
+      "flags": "i",
+      "keywords": [
+        "ezak"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "easypost-test-api-token",
+      "pattern": "\\bEZTK[a-z0-9]{54}\\b",
+      "flags": "i",
+      "keywords": [
+        "eztk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "etsy-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:(?:ETSY|[Ee]tsy))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "etsy"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "facebook-access-token",
+      "pattern": "\\b(\\d{15,16}(\\||%)[0-9a-z\\-_]{27,40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "facebook"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "facebook-page-access-token",
+      "pattern": "\\b(EAA[MC][a-z0-9]{100,})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "eaam",
+        "eaac"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "facebook-secret",
+      "pattern": "[\\w.-]{0,50}?(?:facebook)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "facebook"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "fastly-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:fastly)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "fastly"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "finicity-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "finicity"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "finicity-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:finicity)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "finicity"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "finnhub-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:finnhub)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "finnhub"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "flickr-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:flickr)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "flickr"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "flutterwave-encryption-key",
+      "pattern": "FLWSECK_TEST-[a-h0-9]{12}",
+      "flags": "i",
+      "keywords": [
+        "flwseck_test"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "flutterwave-public-key",
+      "pattern": "FLWPUBK_TEST-[a-h0-9]{32}-X",
+      "flags": "i",
+      "keywords": [
+        "flwpubk_test"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "flutterwave-secret-key",
+      "pattern": "FLWSECK_TEST-[a-h0-9]{32}-X",
+      "flags": "i",
+      "keywords": [
+        "flwseck_test"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "flyio-access-token",
+      "pattern": "\\b((?:fo1_[\\w-]{43}|fm1[ar]_[a-zA-Z0-9+\\/]{100,}={0,3}|fm2_[a-zA-Z0-9+\\/]{100,}={0,3}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "fo1_",
+        "fm1",
+        "fm2_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "frameio-api-token",
+      "pattern": "fio-u-[a-z0-9\\-_=]{64}",
+      "flags": "i",
+      "keywords": [
+        "fio-u-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "freemius-secret-key",
+      "pattern": "[\"']secret_key[\"']\\s*=>\\s*[\"'](sk_[\\S]{29})[\"']",
+      "flags": "i",
+      "keywords": [
+        "secret_key"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "freshbooks-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:freshbooks)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "freshbooks"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gcp-api-key",
+      "pattern": "\\b(AIza[\\w-]{35})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "aiza"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "github-app-token",
+      "pattern": "(?:ghu|ghs)_[0-9a-zA-Z]{36}",
+      "flags": "",
+      "keywords": [
+        "ghu_",
+        "ghs_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "github-fine-grained-pat",
+      "pattern": "github_pat_\\w{82}",
+      "flags": "",
+      "keywords": [
+        "github_pat_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "github-oauth",
+      "pattern": "gho_[0-9a-zA-Z]{36}",
+      "flags": "",
+      "keywords": [
+        "gho_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "github-pat",
+      "pattern": "ghp_[0-9a-zA-Z]{36}",
+      "flags": "",
+      "keywords": [
+        "ghp_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "github-refresh-token",
+      "pattern": "ghr_[0-9a-zA-Z]{36}",
+      "flags": "",
+      "keywords": [
+        "ghr_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-cicd-job-token",
+      "pattern": "glcbt-[0-9a-zA-Z]{1,5}_[0-9a-zA-Z_-]{20}",
+      "flags": "",
+      "keywords": [
+        "glcbt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-deploy-token",
+      "pattern": "gldt-[0-9a-zA-Z_\\-]{20}",
+      "flags": "",
+      "keywords": [
+        "gldt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-feature-flag-client-token",
+      "pattern": "glffct-[0-9a-zA-Z_\\-]{20}",
+      "flags": "",
+      "keywords": [
+        "glffct-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-feed-token",
+      "pattern": "glft-[0-9a-zA-Z_\\-]{20}",
+      "flags": "",
+      "keywords": [
+        "glft-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-incoming-mail-token",
+      "pattern": "glimt-[0-9a-zA-Z_\\-]{25}",
+      "flags": "",
+      "keywords": [
+        "glimt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-kubernetes-agent-token",
+      "pattern": "glagent-[0-9a-zA-Z_\\-]{50}",
+      "flags": "",
+      "keywords": [
+        "glagent-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-oauth-app-secret",
+      "pattern": "gloas-[0-9a-zA-Z_\\-]{64}",
+      "flags": "",
+      "keywords": [
+        "gloas-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-pat",
+      "pattern": "glpat-[\\w-]{20}",
+      "flags": "",
+      "keywords": [
+        "glpat-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-pat-routable",
+      "pattern": "\\bglpat-[0-9a-zA-Z_-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      "flags": "",
+      "keywords": [
+        "glpat-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-ptt",
+      "pattern": "glptt-[0-9a-f]{40}",
+      "flags": "",
+      "keywords": [
+        "glptt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-rrt",
+      "pattern": "GR1348941[\\w-]{20}",
+      "flags": "",
+      "keywords": [
+        "gr1348941"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-runner-authentication-token",
+      "pattern": "glrt-[0-9a-zA-Z_\\-]{20}",
+      "flags": "",
+      "keywords": [
+        "glrt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-runner-authentication-token-routable",
+      "pattern": "\\bglrt-t\\d_[0-9a-zA-Z_\\-]{27,300}\\.[0-9a-z]{2}[0-9a-z]{7}\\b",
+      "flags": "",
+      "keywords": [
+        "glrt-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-scim-token",
+      "pattern": "glsoat-[0-9a-zA-Z_\\-]{20}",
+      "flags": "",
+      "keywords": [
+        "glsoat-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitlab-session-cookie",
+      "pattern": "_gitlab_session=[0-9a-z]{32}",
+      "flags": "",
+      "keywords": [
+        "_gitlab_session="
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gitter-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:gitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9_-]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "gitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "gocardless-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:gocardless)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(live_[a-z0-9\\-_=]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "live_",
+        "gocardless"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "grafana-api-key",
+      "pattern": "\\b(eyJrIjoi[A-Za-z0-9]{70,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "eyjrijoi"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "grafana-cloud-api-token",
+      "pattern": "\\b(glc_[A-Za-z0-9+/]{32,400}={0,3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "glc_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "grafana-service-account-token",
+      "pattern": "\\b(glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "glsa_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "harness-api-key",
+      "pattern": "(?:pat|sat)\\.[a-zA-Z0-9_-]{22}\\.[a-zA-Z0-9]{24}\\.[a-zA-Z0-9]{20}",
+      "flags": "",
+      "keywords": [
+        "pat.",
+        "sat."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "hashicorp-tf-api-token",
+      "pattern": "[a-z0-9]{14}\\.(?:atlasv1)\\.[a-z0-9\\-_=]{60,70}",
+      "flags": "i",
+      "keywords": [
+        "atlasv1"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "hashicorp-tf-password",
+      "pattern": "[\\w.-]{0,50}?(?:administrator_login_password|password)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(\"[a-z0-9=_\\-]{8,20}\")(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "administrator_login_password",
+        "password"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "heroku-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:heroku)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "heroku"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "heroku-api-key-v2",
+      "pattern": "\\b((HRKU-AA[0-9a-zA-Z_-]{58}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "hrku-aa"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "hubspot-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:hubspot)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "hubspot"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "huggingface-access-token",
+      "pattern": "\\b(hf_(?:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "hf_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "huggingface-organization-api-token",
+      "pattern": "\\b(api_org_(?:[a-z]{34}))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "api_org_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "infracost-api-token",
+      "pattern": "\\b(ico-[a-zA-Z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "ico-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "intercom-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:intercom)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{60})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "intercom"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "intra42-client-secret",
+      "pattern": "\\b(s-s4t2(?:ud|af)-[abcdef0123456789]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "intra",
+        "s-s4t2ud-",
+        "s-s4t2af-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "jfrog-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{73})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "jfrog",
+        "artifactory",
+        "bintray",
+        "xray"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "jfrog-identity-token",
+      "pattern": "[\\w.-]{0,50}?(?:jfrog|artifactory|bintray|xray)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "jfrog",
+        "artifactory",
+        "bintray",
+        "xray"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "jwt",
+      "pattern": "\\b(ey[a-zA-Z0-9]{17,}\\.ey[a-zA-Z0-9\\/\\\\_-]{17,}\\.(?:[a-zA-Z0-9\\/\\\\_-]{10,}={0,2})?)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "ey"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "jwt-base64",
+      "pattern": "\\bZXlK(?:(aGJHY2lPaU)|(aGNIVWlPaU)|(aGNIWWlPaU)|(aGRXUWlPaU)|(aU5qUWlP)|(amNtbDBJanBi)|(amRIa2lPaU)|(bGNHc2lPbn)|(bGJtTWlPaU)|(cWEzVWlPaU)|(cWQyc2lPb)|(cGMzTWlPaU)|(cGRpSTZJ)|(cmFXUWlP)|(clpYbGZiM0J6SWpwY)|(cmRIa2lPaUp)|(dWIyNWpaU0k2)|(d01tTWlP)|(d01uTWlPaU)|(d2NIUWlPaU)|(emRXSWlPaU)|(emRuUWlP)|(MFlXY2lPaU)|(MGVYQWlPaUp)|(MWNtd2l)|(MWMyVWlPaUp)|(MlpYSWlPaU)|(MlpYSnphVzl1SWpv)|(NElqb2)|(NE5XTWlP)|(NE5YUWlPaU)|(NE5YUWpVekkxTmlJNkl)|(NE5YVWlPaU)|(NmFYQWlPaU))[a-zA-Z0-9\\/\\\\_+\\-\\r\\n]{40,}={0,2}",
+      "flags": "",
+      "keywords": [
+        "zxlk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "kraken-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:kraken)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9\\/=_\\+\\-]{80,90})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "kraken"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "kubernetes-secret-yaml",
+      "pattern": "(?:\\bkind:[ \\t]*[\"']?\\bsecret\\b[\"']?(?:.){0,200}?\\bdata:(?:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:[\"']?[a-z0-9+/]{10,}={0,3}[\"']?|\\{\\{[ \\t\\w\"|$:=,.-]+}}|\"\"|''))|\\bdata:(?:.){0,100}?\\s+([\\w.-]+:(?:[ \\t]*(?:\\||>[-+]?)\\s+)?[ \\t]*(?:[\"']?[a-z0-9+/]{10,}={0,3}[\"']?|\\{\\{[ \\t\\w\"|$:=,.-]+}}|\"\"|''))(?:.){0,200}?\\bkind:[ \\t]*[\"']?\\bsecret\\b[\"']?)",
+      "flags": "is",
+      "keywords": [
+        "secret"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "kucoin-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{24})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "kucoin"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "kucoin-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:kucoin)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "kucoin"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "launchdarkly-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:launchdarkly)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "launchdarkly"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "linear-api-key",
+      "pattern": "lin_api_[a-z0-9]{40}",
+      "flags": "i",
+      "keywords": [
+        "lin_api_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "linear-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:linear)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "linear"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "linkedin-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{14})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "linkedin",
+        "linked_in",
+        "linked-in"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "linkedin-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:linked[_-]?in)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "linkedin",
+        "linked_in",
+        "linked-in"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "lob-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}((live|test)_[a-f0-9]{35})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "test_",
+        "live_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "lob-pub-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:lob)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}((test|live)_pub_[a-f0-9]{31})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "test_pub",
+        "live_pub",
+        "_pub"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "looker-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "looker"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "looker-client-secret",
+      "pattern": "[\\w.-]{0,50}?(?:looker)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "looker"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mailchimp-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:MailchimpSDK.initialize|mailchimp)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{32}-us\\d\\d)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mailchimp"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mailgun-private-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(key-[a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mailgun"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mailgun-pub-key",
+      "pattern": "[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(pubkey-[a-f0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mailgun"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mailgun-signing-key",
+      "pattern": "[\\w.-]{0,50}?(?:mailgun)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-h0-9]{32}-[a-h0-9]{8}-[a-h0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mailgun"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mapbox-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:mapbox)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(pk\\.[a-z0-9]{60}\\.[a-z0-9]{22})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mapbox"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "mattermost-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:mattermost)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{26})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "mattermost"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "maxmind-license-key",
+      "pattern": "\\b([A-Za-z0-9]{6}_[A-Za-z0-9]{29}_mmk)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "_mmk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "messagebird-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "messagebird",
+        "message-bird",
+        "message_bird"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "messagebird-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:message[_-]?bird)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "messagebird",
+        "message-bird",
+        "message_bird"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "microsoft-teams-webhook",
+      "pattern": "https://[a-z0-9]+\\.webhook\\.office\\.com/webhookb2/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}@[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}/IncomingWebhook/[a-z0-9]{32}/[a-z0-9]{8}-([a-z0-9]{4}-){3}[a-z0-9]{12}",
+      "flags": "",
+      "keywords": [
+        "webhook.office.com",
+        "webhookb2",
+        "incomingwebhook"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "netlify-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:netlify)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{40,46})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "netlify"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "new-relic-browser-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(NRJS-[a-f0-9]{19})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "nrjs-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "new-relic-insert-key",
+      "pattern": "[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(NRII-[a-z0-9-]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "nrii-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "new-relic-user-api-id",
+      "pattern": "[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "new-relic",
+        "newrelic",
+        "new_relic"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "new-relic-user-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:new-relic|newrelic|new_relic)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(NRAK-[a-z0-9]{27})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "nrak"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "notion-api-token",
+      "pattern": "\\b(ntn_[0-9]{11}[A-Za-z0-9]{32}[A-Za-z0-9]{3})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "ntn_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "npm-access-token",
+      "pattern": "\\b(npm_[a-z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "npm_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "nuget-config-password",
+      "pattern": "<add key=\\\"(?:(?:ClearText)?Password)\\\"\\s*value=\\\"(.{8,})\\\"\\s*/>",
+      "flags": "i",
+      "keywords": [
+        "<add key="
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "nytimes-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:nytimes|new-york-times,|newyorktimes)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9=_\\-]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "nytimes",
+        "new-york-times",
+        "newyorktimes"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "octopus-deploy-api-key",
+      "pattern": "\\b(API-[A-Z0-9]{26})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "api-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "okta-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Oo]kta|OKTA))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(00[\\w=\\-]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "okta"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "openai-api-key",
+      "pattern": "\\b(sk-(?:proj|svcacct|admin)-(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})T3BlbkFJ(?:[A-Za-z0-9_-]{74}|[A-Za-z0-9_-]{58})\\b|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "t3blbkfj"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "openshift-user-token",
+      "pattern": "\\b(sha256~[\\w-]{43})(?:[^\\w-]|(?![\\s\\S]))",
+      "flags": "",
+      "keywords": [
+        "sha256~"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "perplexity-api-key",
+      "pattern": "\\b(pplx-[a-zA-Z0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$|\\b)",
+      "flags": "",
+      "keywords": [
+        "pplx-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "plaid-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(access-(?:sandbox|development|production)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "plaid"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "plaid-client-id",
+      "pattern": "[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{24})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "plaid"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "plaid-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:plaid)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "plaid"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "planetscale-api-token",
+      "pattern": "\\b(pscale_tkn_[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "pscale_tkn_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "planetscale-oauth-token",
+      "pattern": "\\b(pscale_oauth_[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "pscale_oauth_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "planetscale-password",
+      "pattern": "\\b(pscale_pw_[\\w=\\.-]{32,64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "pscale_pw_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "postman-api-token",
+      "pattern": "\\b(PMAK-[a-f0-9]{24}\\-[a-f0-9]{34})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "pmak-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "prefect-api-token",
+      "pattern": "\\b(pnu_[a-zA-Z0-9]{36})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "pnu_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "private-key",
+      "pattern": "-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?: BLOCK)?-----[\\s\\S-]{64,}?KEY(?: BLOCK)?-----",
+      "flags": "i",
+      "keywords": [
+        "-----begin"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "privateai-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:private[_-]?ai)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{32})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "privateai",
+        "private_ai",
+        "private-ai"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "pulumi-api-token",
+      "pattern": "\\b(pul-[a-f0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "pul-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "pypi-upload-token",
+      "pattern": "pypi-AgEIcHlwaS5vcmc[\\w-]{50,1000}",
+      "flags": "",
+      "keywords": [
+        "pypi-ageichlwas5vcmc"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "rapidapi-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:rapidapi)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9_-]{50})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "rapidapi"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "readme-api-token",
+      "pattern": "\\b(rdme_[a-z0-9]{70})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "rdme_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "rubygems-api-token",
+      "pattern": "\\b(rubygems_[a-f0-9]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "rubygems_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "scalingo-api-token",
+      "pattern": "\\b(tk-us-[\\w-]{48})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "tk-us-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sendbird-access-id",
+      "pattern": "[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sendbird"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sendbird-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:sendbird)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sendbird"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sendgrid-api-token",
+      "pattern": "\\b(SG\\.[a-z0-9=_\\-\\.]{66})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sg."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sendinblue-api-token",
+      "pattern": "\\b(xkeysib-[a-f0-9]{64}\\-[a-z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "xkeysib-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sentry-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:sentry)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sentry"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sentry-org-token",
+      "pattern": "\\bsntrys_eyJpYXQiO[a-zA-Z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[a-zA-Z0-9+/]{10,200}={0,2}_[a-zA-Z0-9+/]{43}(?:[^a-zA-Z0-9+/]|(?![\\s\\S]))",
+      "flags": "",
+      "keywords": [
+        "sntrys_eyjpyxqio"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sentry-user-token",
+      "pattern": "\\b(sntryu_[a-f0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sntryu_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "settlemint-application-access-token",
+      "pattern": "\\b(sm_aat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sm_aat"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "settlemint-personal-access-token",
+      "pattern": "\\b(sm_pat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sm_pat"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "settlemint-service-access-token",
+      "pattern": "\\b(sm_sat_[a-zA-Z0-9]{16})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sm_sat"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "shippo-api-token",
+      "pattern": "\\b(shippo_(?:live|test)_[a-fA-F0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "shippo_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "shopify-access-token",
+      "pattern": "shpat_[a-fA-F0-9]{32}",
+      "flags": "",
+      "keywords": [
+        "shpat_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "shopify-custom-access-token",
+      "pattern": "shpca_[a-fA-F0-9]{32}",
+      "flags": "",
+      "keywords": [
+        "shpca_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "shopify-private-app-access-token",
+      "pattern": "shppa_[a-fA-F0-9]{32}",
+      "flags": "",
+      "keywords": [
+        "shppa_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "shopify-shared-secret",
+      "pattern": "shpss_[a-fA-F0-9]{32}",
+      "flags": "",
+      "keywords": [
+        "shpss_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sidekiq-secret",
+      "pattern": "[\\w.-]{0,50}?(?:BUNDLE_ENTERPRISE__CONTRIBSYS__COM|BUNDLE_GEMS__CONTRIBSYS__COM)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-f0-9]{8}:[a-f0-9]{8})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "bundle_enterprise__contribsys__com",
+        "bundle_gems__contribsys__com"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sidekiq-sensitive-url",
+      "pattern": "\\bhttps?://([a-f0-9]{8}:[a-f0-9]{8})@(?:gems.contribsys.com|enterprise.contribsys.com)(?:[\\/|\\#|\\?|:]|$)",
+      "flags": "i",
+      "keywords": [
+        "gems.contribsys.com",
+        "enterprise.contribsys.com"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-app-token",
+      "pattern": "xapp-\\d-[A-Z0-9]+-\\d+-[a-z0-9]+",
+      "flags": "i",
+      "keywords": [
+        "xapp"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-bot-token",
+      "pattern": "xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*",
+      "flags": "",
+      "keywords": [
+        "xoxb"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-config-access-token",
+      "pattern": "xoxe.xox[bp]-\\d-[A-Z0-9]{163,166}",
+      "flags": "i",
+      "keywords": [
+        "xoxe.xoxb-",
+        "xoxe.xoxp-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-config-refresh-token",
+      "pattern": "xoxe-\\d-[A-Z0-9]{146}",
+      "flags": "i",
+      "keywords": [
+        "xoxe-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-legacy-bot-token",
+      "pattern": "xoxb-[0-9]{8,14}-[a-zA-Z0-9]{18,26}",
+      "flags": "",
+      "keywords": [
+        "xoxb"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-legacy-token",
+      "pattern": "xox[os]-\\d+-\\d+-\\d+-[a-fA-F\\d]+",
+      "flags": "",
+      "keywords": [
+        "xoxo",
+        "xoxs"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-legacy-workspace-token",
+      "pattern": "xox[ar]-(?:\\d-)?[0-9a-zA-Z]{8,48}",
+      "flags": "",
+      "keywords": [
+        "xoxa",
+        "xoxr"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-user-token",
+      "pattern": "xox[pe](?:-[0-9]{10,13}){3}-[a-zA-Z0-9-]{28,34}",
+      "flags": "",
+      "keywords": [
+        "xoxp-",
+        "xoxe-"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "slack-webhook-url",
+      "pattern": "(?:https?://)?hooks.slack.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{43,56}",
+      "flags": "",
+      "keywords": [
+        "hooks.slack.com"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "snyk-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:snyk[_.-]?(?:(?:api|oauth)[_.-]?)?(?:key|token))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "snyk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sonar-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:sonar[_.-]?(login|token))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}((?:squ_|sqp_|sqa_)?[a-z0-9=_\\-]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sonar"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sourcegraph-access-token",
+      "pattern": "\\b(\\b(sgp_(?:[a-fA-F0-9]{16}|local)_[a-fA-F0-9]{40}|sgp_[a-fA-F0-9]{40}|[a-fA-F0-9]{40})\\b)(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sgp_",
+        "sourcegraph"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "square-access-token",
+      "pattern": "\\b((?:EAAA|sq0atp-)[\\w-]{22,60})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sq0atp-",
+        "eaaa"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "squarespace-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:squarespace)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "squarespace"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "stripe-access-token",
+      "pattern": "\\b((?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "sk_test",
+        "sk_live",
+        "sk_prod",
+        "rk_test",
+        "rk_live",
+        "rk_prod"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sumologic-access-id",
+      "pattern": "[\\w.-]{0,50}?(?:[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3})(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(su[a-zA-Z0-9]{12})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sumo"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "sumologic-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:(?:[Ss]umo|SUMO))(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{64})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "sumo"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "telegram-bot-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:telegr)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9]{5,16}:(?:A)[a-z0-9_\\-]{34})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "telegr"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "travisci-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:travis)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{22})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "travis"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twilio-api-key",
+      "pattern": "SK[0-9a-fA-F]{32}",
+      "flags": "",
+      "keywords": [
+        "sk"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitch-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:twitch)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{30})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitch"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitter-access-secret",
+      "pattern": "[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{45})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitter-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([0-9]{15,25}-[a-zA-Z0-9]{20,40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitter-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{25})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitter-api-secret",
+      "pattern": "[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{50})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "twitter-bearer-token",
+      "pattern": "[\\w.-]{0,50}?(?:twitter)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(A{22}[a-zA-Z0-9%]{80,100})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "twitter"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "typeform-api-token",
+      "pattern": "[\\w.-]{0,50}?(?:typeform)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(tfp_[a-z0-9\\-_\\.=]{59})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "tfp_"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "vault-batch-token",
+      "pattern": "\\b(hvb\\.[\\w-]{138,300})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "",
+      "keywords": [
+        "hvb."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "vault-service-token",
+      "pattern": "\\b((?:hvs\\.[\\w-]{90,120}|s\\.(?:[a-z0-9]{24})))(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "hvs.",
+        "s."
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "yandex-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(t1\\.[A-Z0-9a-z_-]+[=]{0,2}\\.[A-Z0-9a-z_-]{86}[=]{0,2})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "yandex"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "yandex-api-key",
+      "pattern": "[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(AQVN[A-Za-z0-9_\\-]{35,38})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "yandex"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "yandex-aws-access-token",
+      "pattern": "[\\w.-]{0,50}?(?:yandex)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}(YC[a-zA-Z0-9_\\-]{38})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "yandex"
+      ],
+      "replacement": "[credential omitted]"
+    },
+    {
+      "id": "zendesk-secret-key",
+      "pattern": "[\\w.-]{0,50}?(?:zendesk)(?:[ \\t\\w.-]{0,20})[\\s'\"]{0,3}(?:=|>|:{1,3}=|\\|\\||:|=>|\\?=|,)[\\x60'\"\\s=]{0,5}([a-z0-9]{40})(?:[\\x60'\"\\s;]|\\\\[nr]|$)",
+      "flags": "i",
+      "keywords": [
+        "zendesk"
+      ],
+      "replacement": "[credential omitted]"
+    }
+  ],
+  "provider_cases": [
+    {
+      "rule_id": "1password-secret-key",
+      "input": "a3- A3-G54JI4-5DONQV-Z9PXA-DV5JJ-Q4N5T-7854L ",
+      "matched": "A3-G54JI4-5DONQV-Z9PXA-DV5JJ-Q4N5T-7854L"
+    },
+    {
+      "rule_id": "1password-service-account-token",
+      "input": "ops_ ops_eyJflC//ym7++zhW+5i/J+7yBr6J6k+6//dAQ/4+93wL+o3/94b83++A85/WK8+/G+/++++2T/D7dhy46G+/+dl+5/qC/Oil+2/+/0T2z5/+++7D/ny2dkbe56+8//+n18+/D7/+2T9++9+/+/B6H0/o7+v8b1/S+X3+T+VTAacd//uxJr+6/+eo+5+J//B+//I/+/LU+y/+4X+O//JC++xn17+/YQ+E+iCa+R//LnN+32M+6D5/dFlz/p+// ",
+      "matched": "ops_eyJflC//ym7++zhW+5i/J+7yBr6J6k+6//dAQ/4+93wL+o3/94b83++A85/WK8+/G+/++++2T/D7dhy46G+/+dl+5/qC/Oil+2/+/0T2z5/+++7D/ny2dkbe56+8//+n18+/D7/+2T9++9+/+/B6H0/o7+v8b1/S+X3+T+VTAacd//uxJr+6/+eo+5+J//B+//I/+/LU+y/+4X+O//JC++xn17+/YQ+E+iCa+R//LnN+32M+6D5/dFlz/p+//"
+    },
+    {
+      "rule_id": "adafruit-api-key",
+      "input": "adafruit adafruit,2j_e9k-_y22__-_122--a2_-_-2m9-2_ ",
+      "matched": "adafruit adafruit,2j_e9k-_y22__-_122--a2_-_-2m9-2_ "
+    },
+    {
+      "rule_id": "adobe-client-id",
+      "input": "adobe adobe>ae42c8adf14cb647deaeb6a2a4af5acf\\r ",
+      "matched": "adobe adobe>ae42c8adf14cb647deaeb6a2a4af5acf\\r"
+    },
+    {
+      "rule_id": "adobe-client-secret",
+      "input": "p8e- p8e-8v7k99681uh450kim7z29z20mg15swdp\\r ",
+      "matched": "p8e-8v7k99681uh450kim7z29z20mg15swdp\\r"
+    },
+    {
+      "rule_id": "age-secret-key",
+      "input": "age-secret-key-1 AGE-SECRET-KEY-1PLXJT9FPA8GMFJF34X5T96XLEFPF4NMN49469G26ARRUVCRATHKR0RJEVD ",
+      "matched": "AGE-SECRET-KEY-1PLXJT9FPA8GMFJF34X5T96XLEFPF4NMN49469G26ARRUVCRATHKR0RJEVD"
+    },
+    {
+      "rule_id": "airtable-api-key",
+      "input": "airtable airtable:=990s839e13m06rb3r\\r ",
+      "matched": "airtable airtable:=990s839e13m06rb3r\\r"
+    },
+    {
+      "rule_id": "airtable-personnal-access-token",
+      "input": "airtable patyi1QJp4T71NkZ4.3ed2aabfcc8dbdbc5e5f9514b618008724d41c2ffda04845e9f3b9f43a980702 ",
+      "matched": "patyi1QJp4T71NkZ4.3ed2aabfcc8dbdbc5e5f9514b618008724d41c2ffda04845e9f3b9f43a980702"
+    },
+    {
+      "rule_id": "algolia-api-key",
+      "input": "algolia algolia:=4u46d32efj8gnup12413xt16gn989eml\\n ",
+      "matched": "algolia algolia:=4u46d32efj8gnup12413xt16gn989eml\\n"
+    },
+    {
+      "rule_id": "alibaba-access-key-id",
+      "input": "ltai LTAIkzxgcu55k8gg0qi71uz3\" ",
+      "matched": "LTAIkzxgcu55k8gg0qi71uz3\""
+    },
+    {
+      "rule_id": "alibaba-secret-key",
+      "input": "alibaba alibaba,ld16500rkp63w27n12rf6w1z202h3m ",
+      "matched": "alibaba alibaba,ld16500rkp63w27n12rf6w1z202h3m "
+    },
+    {
+      "rule_id": "anthropic-admin-api-key",
+      "input": "sk-ant-admin01 sk-ant-admin01-V-p_--_7__X3P-1---WN--_---uWu_B_0K__Lmg-J_X__-6MKI6wZ_wAV__N_9jAQ4---__9-_E__7Wl_d_Z-___R8-55AA ",
+      "matched": "sk-ant-admin01-V-p_--_7__X3P-1---WN--_---uWu_B_0K__Lmg-J_X__-6MKI6wZ_wAV__N_9jAQ4---__9-_E__7Wl_d_Z-___R8-55AA "
+    },
+    {
+      "rule_id": "anthropic-api-key",
+      "input": "sk-ant-api03 sk-ant-api03--19GWbY_kn_g7-_--2--_Z_7pa-mwiLhU-7_4N7t7_9g4_1sVpyk_Y_-d4y_NQNU_-01Gy-pY_S-N_V_4u_f--JF86_QvAA ",
+      "matched": "sk-ant-api03--19GWbY_kn_g7-_--2--_Z_7pa-mwiLhU-7_4N7t7_9g4_1sVpyk_Y_-d4y_NQNU_-01Gy-pY_S-N_V_4u_f--JF86_QvAA "
+    },
+    {
+      "rule_id": "artifactory-api-key",
+      "input": "akcp AKCpuEsYz2D2GF195vRZs55o8NdHq76Z7eKNc5JAfa93N5P02i3jnrMFk2ajao154t8AbE22i ",
+      "matched": "AKCpuEsYz2D2GF195vRZs55o8NdHq76Z7eKNc5JAfa93N5P02i3jnrMFk2ajao154t8AbE22i"
+    },
+    {
+      "rule_id": "artifactory-reference-token",
+      "input": "cmvmd cmVmdQ7sR9hs4X6m10FJBaNKgA0mQRnm8zo8DfSMGqcF0B24MMN23S5kUQ79awtc ",
+      "matched": "cmVmdQ7sR9hs4X6m10FJBaNKgA0mQRnm8zo8DfSMGqcF0B24MMN23S5kUQ79awtc"
+    },
+    {
+      "rule_id": "asana-client-id",
+      "input": "asana asana=>9225056341390709' ",
+      "matched": "asana asana=>9225056341390709'"
+    },
+    {
+      "rule_id": "asana-client-secret",
+      "input": "asana asana=3320ygyn574n8u6171twkgs77nsdwl27\\r ",
+      "matched": "asana asana=3320ygyn574n8u6171twkgs77nsdwl27\\r"
+    },
+    {
+      "rule_id": "atlassian-api-token",
+      "input": "atlassian ATATT3Y___=C_fd4-3==--b_81_9--=OI-4=ds5W_=-0=Kn7Q=Nnb-_4_=25y_-0M2=_Q_=mp14A-__w2_3__54=6_o772-A=---O__-_5=-0e4_y==_Q-2ua=lC=4m7===2-=K=___--=W=Cf=9HxrT=5=-h5r__77=H-=3_-__zg8__-KHB_rOn_Q-=-i-\\n ",
+      "matched": "ATATT3Y___=C_fd4-3==--b_81_9--=OI-4=ds5W_=-0=Kn7Q=Nnb-_4_=25y_-0M2=_Q_=mp14A-__w2_3__54=6_o772-A=---O__-_5=-0e4_y==_Q-2ua=lC=4m7===2-=K=___--=W=Cf=9HxrT=5=-h5r__77=H-=3_-__zg8__-KHB_rOn_Q-=-i-\\n"
+    },
+    {
+      "rule_id": "authress-service-client-access-key",
+      "input": "sc_ authress_jj9ot.09zo.acc_1g8968ug--.==+_-_-0-=-_=+-_--q/_0_+4//-d-  ",
+      "matched": "authress_jj9ot.09zo.acc_1g8968ug--.==+_-_-0-=-_=+-_--q/_0_+4//-d- "
+    },
+    {
+      "rule_id": "aws-access-token",
+      "input": "a3t AKIA65CD422KTD265F2Z ",
+      "matched": "AKIA65CD422KTD265F2Z"
+    },
+    {
+      "rule_id": "aws-amazon-bedrock-api-key-long-lived",
+      "input": "absk ABSKPL+//gojUQ+z/3/L2++5+Z3+u+/t5XYnF9/6/1Y+10/+f+/7+s/+iK6+5/+/Sy0O/+O++q/Q+kq+86+P2c0//A/++HH+///u/+ux+t++2EpW/` ",
+      "matched": "ABSKPL+//gojUQ+z/3/L2++5+Z3+u+/t5XYnF9/6/1Y+10/+f+/7+s/+iK6+5/+/Sy0O/+O++q/Q+kq+86+P2c0//A/++HH+///u/+ux+t++2EpW/`"
+    },
+    {
+      "rule_id": "aws-amazon-bedrock-api-key-short-lived",
+      "input": "bedrock-api-key- bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t ",
+      "matched": "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t"
+    },
+    {
+      "rule_id": "azure-ad-client-secret",
+      "input": "q~ ~~67Q~~tUrI-~gMb..~J.-R2X~.a~S~u_oAw.' ",
+      "matched": " ~~67Q~~tUrI-~gMb..~J.-R2X~.a~S~u_oAw.'"
+    },
+    {
+      "rule_id": "beamer-api-token",
+      "input": "beamer beamer=>b_z=_z--832d_-3-_4=_=5l_=t80-p_5-____-2s3==w_= ",
+      "matched": "beamer beamer=>b_z=_z--832d_-3-_4=_=5l_=t80-p_5-____-2s3==w_= "
+    },
+    {
+      "rule_id": "bitbucket-client-id",
+      "input": "bitbucket bitbucket?=61c599q4r32a0112p610nr9lq95ga13c ",
+      "matched": "bitbucket bitbucket?=61c599q4r32a0112p610nr9lq95ga13c "
+    },
+    {
+      "rule_id": "bitbucket-client-secret",
+      "input": "bitbucket bitbucket=>_=t=-a=__=_-8_=--m_p-4_2=--=-u6-_0--o=-3y9p-6=0-0-s=_0s6-7=-61-2 ",
+      "matched": "bitbucket bitbucket=>_=t=-a=__=_-8_=--m_p-4_2=--=-u6-_0--o=-3y9p-6=0-0-s=_0s6-7=-61-2 "
+    },
+    {
+      "rule_id": "bittrex-access-key",
+      "input": "bittrex bittrex||2vjhyh1z84p16m9imt61q2c9px6f7q7l\\r ",
+      "matched": "bittrex bittrex||2vjhyh1z84p16m9imt61q2c9px6f7q7l\\r"
+    },
+    {
+      "rule_id": "bittrex-secret-key",
+      "input": "bittrex bittrex:95l0zkkvk3mf7x9305si2u73gscuv527\\r ",
+      "matched": "bittrex bittrex:95l0zkkvk3mf7x9305si2u73gscuv527\\r"
+    },
+    {
+      "rule_id": "cisco-meraki-api-key",
+      "input": "meraki Meraki,0767bfbe2e9a62b6ad47e3a1ebb66ef8cbaafdfc\\n ",
+      "matched": "meraki Meraki,0767bfbe2e9a62b6ad47e3a1ebb66ef8cbaafdfc\\n"
+    },
+    {
+      "rule_id": "clickhouse-cloud-api-secret-key",
+      "input": "4b1d 4b1dpjr6L319iCKgfaGzjx44yeg8BS618A82649efm ",
+      "matched": "4b1dpjr6L319iCKgfaGzjx44yeg8BS618A82649efm"
+    },
+    {
+      "rule_id": "clojars-api-token",
+      "input": "clojars_ CLOJARS_9gekr8cs24ccaylh90b1cfluqg39qwkg08ghr5r01z98c9d9n9x57809v1p7 ",
+      "matched": "CLOJARS_9gekr8cs24ccaylh90b1cfluqg39qwkg08ghr5r01z98c9d9n9x57809v1p7"
+    },
+    {
+      "rule_id": "cloudflare-api-key",
+      "input": "cloudflare cloudflare:_484gq_dg_7c-a9_52-j--_x--x_154q-2q40___ ",
+      "matched": "cloudflare cloudflare:_484gq_dg_7c-a9_52-j--_x--x_154q-2q40___ "
+    },
+    {
+      "rule_id": "cloudflare-global-api-key",
+      "input": "cloudflare cloudflare=>d9bdfcc35ff70cc12bca379b4d1bd6345df77 ",
+      "matched": "cloudflare cloudflare=>d9bdfcc35ff70cc12bca379b4d1bd6345df77 "
+    },
+    {
+      "rule_id": "cloudflare-origin-ca-key",
+      "input": "cloudflare v1.0-c3ad70c212e6dddad92e4d4d-ebdf3ca454ee36b43a3ecff4d20d1d5efb23d8cfd386ed94a8b5ae97c0da860a3f84612f1c81ebf5f704d5d9b06474b5e20abeb100c4f31f4bbebab9c8f638e9d595eff8ecd3ffdbca  ",
+      "matched": "v1.0-c3ad70c212e6dddad92e4d4d-ebdf3ca454ee36b43a3ecff4d20d1d5efb23d8cfd386ed94a8b5ae97c0da860a3f84612f1c81ebf5f704d5d9b06474b5e20abeb100c4f31f4bbebab9c8f638e9d595eff8ecd3ffdbca "
+    },
+    {
+      "rule_id": "codecov-access-token",
+      "input": "codecov codecov,0ni9r6mw8803451i464l72d56ed54242\\r ",
+      "matched": "codecov codecov,0ni9r6mw8803451i464l72d56ed54242\\r"
+    },
+    {
+      "rule_id": "cohere-api-token",
+      "input": "cohere CO_API_KEY?=w6OwS001AC4Ue14Hej4bP1f6b3S5fsqO7XzjegC2 ",
+      "matched": "cohere CO_API_KEY?=w6OwS001AC4Ue14Hej4bP1f6b3S5fsqO7XzjegC2 "
+    },
+    {
+      "rule_id": "coinbase-access-token",
+      "input": "coinbase coinbase,-_0t0_-37kj2-80__g-__8-9nvmw1-ao_4__8_--bx-_7_h--58_--8x92_6_4--\" ",
+      "matched": "coinbase coinbase,-_0t0_-37kj2-80__g-__8-9nvmw1-ao_4__8_--bx-_7_h--58_--8x92_6_4--\""
+    },
+    {
+      "rule_id": "confluent-access-token",
+      "input": "confluent confluent?=2870n1p0rp45fk48\\r ",
+      "matched": "confluent confluent?=2870n1p0rp45fk48\\r"
+    },
+    {
+      "rule_id": "confluent-secret-key",
+      "input": "confluent confluent=37h6l800et9xhvlp409yvx25r5o71hxtub3zkq11311lkt162sgc19k74i2q67ch\\r ",
+      "matched": "confluent confluent=37h6l800et9xhvlp409yvx25r5o71hxtub3zkq11311lkt162sgc19k74i2q67ch\\r"
+    },
+    {
+      "rule_id": "contentful-delivery-api-token",
+      "input": "contentful contentful=>4k-i=_0=f4-=3_==--3_o-6i-9_--_h_6==k-=-1__d\\r ",
+      "matched": "contentful contentful=>4k-i=_0=f4-=3_==--3_o-6i-9_--_h_6==k-=-1__d\\r"
+    },
+    {
+      "rule_id": "curl-auth-header",
+      "input": "curl curl\r\n--header=\"Authorization:Basic q5/8w+9/\" ",
+      "matched": "curl curl\r\n--header=\"Authorization:Basic q5/8w+9/\""
+    },
+    {
+      "rule_id": "curl-auth-user",
+      "input": "curl curl\n--user'aaa:qqq' ",
+      "matched": "curl curl\n--user'aaa:qqq' "
+    },
+    {
+      "rule_id": "databricks-api-token",
+      "input": "dapi dapie6dd3e61cfd5a5a5f3cbb65a3f7e5ab7\\n ",
+      "matched": "dapie6dd3e61cfd5a5a5f3cbb65a3f7e5ab7\\n"
+    },
+    {
+      "rule_id": "datadog-access-token",
+      "input": "datadog datadog=>974fz91on43n33vitet8z4pg5z0gk5z0is99c3cs\\n ",
+      "matched": "datadog datadog=>974fz91on43n33vitet8z4pg5z0gk5z0is99c3cs\\n"
+    },
+    {
+      "rule_id": "defined-networking-api-token",
+      "input": "dnkey dnkey?=dnkey-__05-g--0_2_=__=--4-8=k==--_1=-8-g_-3=5=-_v-_5-=p=uy-_-f--pk2v__-=_4-4-___=-bi0 ",
+      "matched": "dnkey dnkey?=dnkey-__05-g--0_2_=__=--4-8=k==--_1=-8-g_-3=5=-_v-_5-=p=uy-_-f--pk2v__-=_4-4-___=-bi0 "
+    },
+    {
+      "rule_id": "digitalocean-access-token",
+      "input": "doo_v1_ doo_v1_ba35c9f74b625d86bff8fa20d8ed4c1f7d58efac8a1a13bcdbbfeba86a72c72b  ",
+      "matched": "doo_v1_ba35c9f74b625d86bff8fa20d8ed4c1f7d58efac8a1a13bcdbbfeba86a72c72b "
+    },
+    {
+      "rule_id": "digitalocean-pat",
+      "input": "dop_v1_ dop_v1_c3bd10e34bf2feb2c7fadb9fefee2a2aaee867039145baefb2fcff8831eaaae6 ",
+      "matched": "dop_v1_c3bd10e34bf2feb2c7fadb9fefee2a2aaee867039145baefb2fcff8831eaaae6 "
+    },
+    {
+      "rule_id": "digitalocean-refresh-token",
+      "input": "dor_v1_ dor_v1_88cbb9da4b01206afb9b272b9c6f6fe5e1facb889538d8c0d7d4dc56a605b79d\\r ",
+      "matched": "dor_v1_88cbb9da4b01206afb9b272b9c6f6fe5e1facb889538d8c0d7d4dc56a605b79d\\r"
+    },
+    {
+      "rule_id": "discord-api-token",
+      "input": "discord discord:=be5bdc6af4da74e74d1bccfadd50bf09faace9c877d89ce4d96f3f27e9d2e7e3\" ",
+      "matched": "discord discord:=be5bdc6af4da74e74d1bccfadd50bf09faace9c877d89ce4d96f3f27e9d2e7e3\""
+    },
+    {
+      "rule_id": "discord-client-id",
+      "input": "discord discord>420055308000501991\\r ",
+      "matched": "discord discord>420055308000501991\\r"
+    },
+    {
+      "rule_id": "discord-client-secret",
+      "input": "discord discord>=_-9-64-_-_0--=b-9-_--b___h=l--9 ",
+      "matched": "discord discord>=_-9-64-_-_0--=b-9-_--b___h=l--9 "
+    },
+    {
+      "rule_id": "doppler-api-token",
+      "input": "dp.pt. dp.pt.49u0hk4v2l13nfl8boysd84hd9ylhwx768i09r4ga9q ",
+      "matched": "dp.pt.49u0hk4v2l13nfl8boysd84hd9ylhwx768i09r4ga9q"
+    },
+    {
+      "rule_id": "droneci-access-token",
+      "input": "droneci droneci,2j7x02sl9s78tr5p61uuqd2ukb7ax09u\\r ",
+      "matched": "droneci droneci,2j7x02sl9s78tr5p61uuqd2ukb7ax09u\\r"
+    },
+    {
+      "rule_id": "dropbox-api-token",
+      "input": "dropbox dropbox||f0cwd19660v04i4 ",
+      "matched": "dropbox dropbox||f0cwd19660v04i4 "
+    },
+    {
+      "rule_id": "dropbox-long-lived-api-token",
+      "input": "dropbox dropbox>6xz89xw3696AAAAAAAAAA-==_-c8=-_=6=--==_s_1d=j7=7=__=1=r3-xaa--__\\n ",
+      "matched": "dropbox dropbox>6xz89xw3696AAAAAAAAAA-==_-c8=-_=6=--==_s_1d=j7=7=__=1=r3-xaa--__\\n"
+    },
+    {
+      "rule_id": "dropbox-short-lived-api-token",
+      "input": "dropbox dropbox:sl.3lj5=-i__co--8c=h---8_sd------x54_--xo--z=-9o_-a_-0=0--___==_6_=_=-d__1_1-8_--_2=h--_=_k_==-1q==-__=4-8-ez97-___--_45_=_o--1-55z9--_===' ",
+      "matched": "dropbox dropbox:sl.3lj5=-i__co--8c=h---8_sd------x54_--xo--z=-9o_-a_-0=0--___==_6_=_=-d__1_1-8_--_2=h--_=_k_==-1q==-__=4-8-ez97-___--_45_=_o--1-55z9--_==='"
+    },
+    {
+      "rule_id": "duffel-api-token",
+      "input": "duffel_ duffel_live_e=_-=-q_=-=1g=r_-_o9-0__g=-0--==e=_-__-=_-- ",
+      "matched": "duffel_live_e=_-=-q_=-=1g=r_-_o9-0__g=-0--==e=_-__-=_--"
+    },
+    {
+      "rule_id": "dynatrace-api-token",
+      "input": "dt0c01. dt0c01.1x2h3a681va9116cois819zi.01wx2329kqtpnn7s5523cgls1320o66509ae7bkw0264c78nj4n1350b9i5526xo ",
+      "matched": "dt0c01.1x2h3a681va9116cois819zi.01wx2329kqtpnn7s5523cgls1320o66509ae7bkw0264c78nj4n1350b9i5526xo"
+    },
+    {
+      "rule_id": "easypost-api-token",
+      "input": "ezak EZAKe63u5v9071f95jxx00bai400lexp6848zjdbnxp829f835g752som2 ",
+      "matched": "EZAKe63u5v9071f95jxx00bai400lexp6848zjdbnxp829f835g752som2"
+    },
+    {
+      "rule_id": "easypost-test-api-token",
+      "input": "eztk EZTK0f3919lt4ab032867p9x92605vr09871ywe9fy4x4m193vob4ic757 ",
+      "matched": "EZTK0f3919lt4ab032867p9x92605vr09871ywe9fy4x4m193vob4ic757"
+    },
+    {
+      "rule_id": "etsy-access-token",
+      "input": "etsy ETSY||74c129550171d35w97ms23d6\\r ",
+      "matched": "etsy ETSY||74c129550171d35w97ms23d6\\r"
+    },
+    {
+      "rule_id": "facebook-access-token",
+      "input": "facebook 777777777777777|-oj-kl-_-y__i64_k-_-_77____\\r ",
+      "matched": "777777777777777|-oj-kl-_-y__i64_k-_-_77____\\r"
+    },
+    {
+      "rule_id": "facebook-page-access-token",
+      "input": "eaam EAAM4238s279k53m7hmphs1e2kc11r315303pndd179i5zidm24cr7u35m3kmn8trig5g1rf8j86ctumt11547x915fmtuet83741kn7\\n ",
+      "matched": "EAAM4238s279k53m7hmphs1e2kc11r315303pndd179i5zidm24cr7u35m3kmn8trig5g1rf8j86ctumt11547x915fmtuet83741kn7\\n"
+    },
+    {
+      "rule_id": "facebook-secret",
+      "input": "facebook facebook=>bb7ca6657f285c93ffd42ace1de4220b\\n ",
+      "matched": "facebook facebook=>bb7ca6657f285c93ffd42ace1de4220b\\n"
+    },
+    {
+      "rule_id": "fastly-api-token",
+      "input": "fastly fastly,=____mgr5w=5--=-===ez=p-_2o-9-g_ ",
+      "matched": "fastly fastly,=____mgr5w=5--=-===ez=p-_2o-9-g_ "
+    },
+    {
+      "rule_id": "finicity-api-token",
+      "input": "finicity finicity:=a6add7bfb7bee4cebb3a2dc04eb98fb8 ",
+      "matched": "finicity finicity:=a6add7bfb7bee4cebb3a2dc04eb98fb8 "
+    },
+    {
+      "rule_id": "finicity-client-secret",
+      "input": "finicity finicity>ahpb391u4ao73qxng49p\" ",
+      "matched": "finicity finicity>ahpb391u4ao73qxng49p\""
+    },
+    {
+      "rule_id": "finnhub-access-token",
+      "input": "finnhub finnhub:=w573w889a42b750tdbec ",
+      "matched": "finnhub finnhub:=w573w889a42b750tdbec "
+    },
+    {
+      "rule_id": "flickr-access-token",
+      "input": "flickr flickr?=582q2883c9209kqpo0f159325k122q57\" ",
+      "matched": "flickr flickr?=582q2883c9209kqpo0f159325k122q57\""
+    },
+    {
+      "rule_id": "flutterwave-encryption-key",
+      "input": "flwseck_test FLWSECK_TEST-7b4hg2h6e854 ",
+      "matched": "FLWSECK_TEST-7b4hg2h6e854"
+    },
+    {
+      "rule_id": "flutterwave-public-key",
+      "input": "flwpubk_test FLWPUBK_TEST-5385dg5b4cab1hg5cd6ch0hc464bh10h-X ",
+      "matched": "FLWPUBK_TEST-5385dg5b4cab1hg5cd6ch0hc464bh10h-X"
+    },
+    {
+      "rule_id": "flutterwave-secret-key",
+      "input": "flwseck_test FLWSECK_TEST-9efheh2g77213e731f5g2eee4ghg6eg5-X ",
+      "matched": "FLWSECK_TEST-9efheh2g77213e731f5g2eee4ghg6eg5-X"
+    },
+    {
+      "rule_id": "flyio-access-token",
+      "input": "fo1_ fm1r_/3/W++0///+2J+/0dAwz0Ue//y3e+Z+/PpyB4+1+xa+G++OLhT/H2/+++/NWD+/+MZ//+/+Pk/X//2x/5/u///893+90Lsp/4++n; ",
+      "matched": "fm1r_/3/W++0///+2J+/0dAwz0Ue//y3e+Z+/PpyB4+1+xa+G++OLhT/H2/+++/NWD+/+MZ//+/+Pk/X//2x/5/u///893+90Lsp/4++n;"
+    },
+    {
+      "rule_id": "frameio-api-token",
+      "input": "fio-u- fio-u-74-_ox_-=_w-0==_-_m90-9-=17-=_____-=-x-1_=1==-43xv_-_-===_l_jg9= ",
+      "matched": "fio-u-74-_ox_-=_w-0==_-_m90-9-=17-=_____-=-x-1_=1==-43xv_-_-===_l_jg9="
+    },
+    {
+      "rule_id": "freemius-secret-key",
+      "input": "secret_key \"secret_key'=>'sk_qqqqqqqqqqqqqqqqqqqqqqqqqqqqq' ",
+      "matched": "\"secret_key'=>'sk_qqqqqqqqqqqqqqqqqqqqqqqqqqqqq'"
+    },
+    {
+      "rule_id": "freshbooks-access-token",
+      "input": "freshbooks freshbooks:71twu995z20335f39csl738dj1370mpy4p19801tyxh49di1u4a2jgd771p39i5w\\r ",
+      "matched": "freshbooks freshbooks:71twu995z20335f39csl738dj1370mpy4p19801tyxh49di1u4a2jgd771p39i5w\\r"
+    },
+    {
+      "rule_id": "gcp-api-key",
+      "input": "aiza AIzaqq-q-qqqq-q------qq-q--qqq---qq--q- ",
+      "matched": "AIzaqq-q-qqqq-q------qq-q--qqq---qq--q- "
+    },
+    {
+      "rule_id": "github-app-token",
+      "input": "ghu_ ghs_6Pw683CFeP5jT5KcYUc7r131s1TC8FI2py80 ",
+      "matched": "ghs_6Pw683CFeP5jT5KcYUc7r131s1TC8FI2py80"
+    },
+    {
+      "rule_id": "github-fine-grained-pat",
+      "input": "github_pat_ github_pat_qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq ",
+      "matched": "github_pat_qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+    },
+    {
+      "rule_id": "github-oauth",
+      "input": "gho_ gho_inRS41ocDdLqXJs9B9i5a38CRo669ZGCTuk0 ",
+      "matched": "gho_inRS41ocDdLqXJs9B9i5a38CRo669ZGCTuk0"
+    },
+    {
+      "rule_id": "github-pat",
+      "input": "ghp_ ghp_1QLJ3jRe5Nno3OmuFc2vqA8ClsRc1Qe4c8d5 ",
+      "matched": "ghp_1QLJ3jRe5Nno3OmuFc2vqA8ClsRc1Qe4c8d5"
+    },
+    {
+      "rule_id": "github-refresh-token",
+      "input": "ghr_ ghr_d0dZcDvYw86YtL2cD2V26K26C395Cw9Ns6bd ",
+      "matched": "ghr_d0dZcDvYw86YtL2cD2V26K26C395Cw9Ns6bd"
+    },
+    {
+      "rule_id": "gitlab-cicd-job-token",
+      "input": "glcbt- glcbt-Y_5-ki50-0-wX7l-x4_GDi ",
+      "matched": "glcbt-Y_5-ki50-0-wX7l-x4_GDi"
+    },
+    {
+      "rule_id": "gitlab-deploy-token",
+      "input": "gldt- gldt-768Hf-8Xic-42-9O-8_M ",
+      "matched": "gldt-768Hf-8Xic-42-9O-8_M"
+    },
+    {
+      "rule_id": "gitlab-feature-flag-client-token",
+      "input": "glffct- glffct-_7V7-Kd-Z-W9i_Xd-b6o ",
+      "matched": "glffct-_7V7-Kd-Z-W9i_Xd-b6o"
+    },
+    {
+      "rule_id": "gitlab-feed-token",
+      "input": "glft- glft-f4-_h-_4v_-q-n_---__ ",
+      "matched": "glft-f4-_h-_4v_-q-n_---__"
+    },
+    {
+      "rule_id": "gitlab-incoming-mail-token",
+      "input": "glimt- glimt-y_--_ADI73_--3_x_--_98Ms- ",
+      "matched": "glimt-y_--_ADI73_--3_x_--_98Ms-"
+    },
+    {
+      "rule_id": "gitlab-kubernetes-agent-token",
+      "input": "glagent- glagent-_j-a-22-_9-4D--4h2--sl-2__d2eWAwC---3GO-3sc-_x2Q-1 ",
+      "matched": "glagent-_j-a-22-_9-4D--4h2--sl-2__d2eWAwC---3GO-3sc-_x2Q-1"
+    },
+    {
+      "rule_id": "gitlab-oauth-app-secret",
+      "input": "gloas- gloas--_d_5f4t---rT_45_KmpD_a_-4o-N23--5_-N8-___-X__jK_-_-V4-u-_-g88_G ",
+      "matched": "gloas--_d_5f4t---rT_45_KmpD_a_-4o-N23--5_-N8-___-X__jK_-_-V4-u-_-g88_G"
+    },
+    {
+      "rule_id": "gitlab-pat",
+      "input": "glpat- glpat--q--q---q---qq---q-- ",
+      "matched": "glpat--q--q---q---qq---q--"
+    },
+    {
+      "rule_id": "gitlab-pat-routable",
+      "input": "glpat- glpat-s_-0e-s60ut5-f_Z6_B__X-_40o.b3p4v0y7b ",
+      "matched": "glpat-s_-0e-s60ut5-f_Z6_B__X-_40o.b3p4v0y7b"
+    },
+    {
+      "rule_id": "gitlab-ptt",
+      "input": "glptt- glptt-e309fa1fc30ab0ef121ddc45761caf4ed4d3d056 ",
+      "matched": "glptt-e309fa1fc30ab0ef121ddc45761caf4ed4d3d056"
+    },
+    {
+      "rule_id": "gitlab-rrt",
+      "input": "gr1348941 GR1348941-q--qq--q-qq-q--q--q ",
+      "matched": "GR1348941-q--qq--q-qq-q--q--q"
+    },
+    {
+      "rule_id": "gitlab-runner-authentication-token",
+      "input": "glrt- glrt-_rU0G__A63X_F1K_--7- ",
+      "matched": "glrt-_rU0G__A63X_F1K_--7-"
+    },
+    {
+      "rule_id": "gitlab-runner-authentication-token-routable",
+      "input": "glrt- glrt-t7_0nyvEtTiog669HB65-7_mm___--.b3a61oeu9 ",
+      "matched": "glrt-t7_0nyvEtTiog669HB65-7_mm___--.b3a61oeu9"
+    },
+    {
+      "rule_id": "gitlab-scim-token",
+      "input": "glsoat- glsoat-yKi8U0Z64-mHl-r_y-a2 ",
+      "matched": "glsoat-yKi8U0Z64-mHl-r_y-a2"
+    },
+    {
+      "rule_id": "gitlab-session-cookie",
+      "input": "_gitlab_session= _gitlab_session=43jl105z518ddqw07p4h2xk4vx754525 ",
+      "matched": "_gitlab_session=43jl105z518ddqw07p4h2xk4vx754525"
+    },
+    {
+      "rule_id": "gitter-access-token",
+      "input": "gitter gitter:=u-k9_a-_--_f_-y_-8m___g__nrw---e_----y_1' ",
+      "matched": "gitter gitter:=u-k9_a-_--_f_-y_-8m___g__nrw---e_----y_1'"
+    },
+    {
+      "rule_id": "gocardless-api-token",
+      "input": "live_ gocardless,live_0e5f7_--4=-ok-1_-5-=-_u=__=_-_y-7_=9-0_1 ",
+      "matched": "gocardless,live_0e5f7_--4=-ok-1_-5-=-_u=__=_-_y-7_=9-0_1 "
+    },
+    {
+      "rule_id": "grafana-api-key",
+      "input": "eyjrijoi eyJrIjoi9cp599mO09r4Ibk707DO9ou3cB03uI66339s3em5QX8C965btN6meo476KED86jOxKcRn5\\n ",
+      "matched": "eyJrIjoi9cp599mO09r4Ibk707DO9ou3cB03uI66339s3em5QX8C965btN6meo476KED86jOxKcRn5\\n"
+    },
+    {
+      "rule_id": "grafana-cloud-api-token",
+      "input": "glc_ glc_+g7TL4yyMcPa+a3+U+/e4//ua9IUE/// ",
+      "matched": "glc_+g7TL4yyMcPa+a3+U+/e4//ua9IUE/// "
+    },
+    {
+      "rule_id": "grafana-service-account-token",
+      "input": "glsa_ glsa_1GnZmap4f6lNJa6ivFX8JRpb2vl3KBeB_2ceCBF24\\r ",
+      "matched": "glsa_1GnZmap4f6lNJa6ivFX8JRpb2vl3KBeB_2ceCBF24\\r"
+    },
+    {
+      "rule_id": "harness-api-key",
+      "input": "pat. pat.qML2__a1-__9_7_V5--18p.6kN3MmmeoppxpTHy9wZPnK71.U3HO2fZgZWH0O0EZg1Y7 ",
+      "matched": "pat.qML2__a1-__9_7_V5--18p.6kN3MmmeoppxpTHy9wZPnK71.U3HO2fZgZWH0O0EZg1Y7"
+    },
+    {
+      "rule_id": "hashicorp-tf-api-token",
+      "input": "atlasv1 8spxwqkrl3k32f.atlasv1.-w3l-_=o=_=_4_j-2t7_=9-q==0_===b-c=bs=7315x_-=v=_8_u46-6=3-_ ",
+      "matched": "8spxwqkrl3k32f.atlasv1.-w3l-_=o=_=_4_j-2t7_=9-q==0_===b-c=bs=7315x_-=v=_8_u46-6=3-_"
+    },
+    {
+      "rule_id": "hashicorp-tf-password",
+      "input": "administrator_login_password administrator_login_password?=\"_=-t_4r=\"` ",
+      "matched": "administrator_login_password?=\"_=-t_4r=\"`"
+    },
+    {
+      "rule_id": "heroku-api-key",
+      "input": "heroku heroku:f4e5ed30-8ea5-7da6-3de8-4cc8f78a4c3f\\r ",
+      "matched": "heroku heroku:f4e5ed30-8ea5-7da6-3de8-4cc8f78a4c3f\\r"
+    },
+    {
+      "rule_id": "heroku-api-key-v2",
+      "input": "hrku-aa HRKU-AA-_I__K-_0-fE32---mo--4yK-_-_C97T0_Bj5_-0_a8Oo8O4-l_RY-zR_f ",
+      "matched": "HRKU-AA-_I__K-_0-fE32---mo--4yK-_-_C97T0_Bj5_-0_a8Oo8O4-l_RY-zR_f "
+    },
+    {
+      "rule_id": "hubspot-api-key",
+      "input": "hubspot hubspot:=5FB15205-EAF7-3D18-A050-289B9B2BA9CA; ",
+      "matched": "hubspot hubspot:=5FB15205-EAF7-3D18-A050-289B9B2BA9CA;"
+    },
+    {
+      "rule_id": "huggingface-access-token",
+      "input": "hf_ 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` ",
+      "matched": "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`"
+    },
+    {
+      "rule_id": "huggingface-organization-api-token",
+      "input": "api_org_ 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 ",
+      "matched": "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 "
+    },
+    {
+      "rule_id": "infracost-api-token",
+      "input": "ico- ico-etvtN75NAxzZLmyIF35pTDwTx8KW3R1I ",
+      "matched": "ico-etvtN75NAxzZLmyIF35pTDwTx8KW3R1I "
+    },
+    {
+      "rule_id": "intercom-api-key",
+      "input": "intercom intercom||g-i=--9a9z9a=3u-=-=-=-x=d_r-d=-i--_=4-7=__=l-_3=--_e-u-g1a30  ",
+      "matched": "intercom intercom||g-i=--9a9z9a=3u-=-=-=-x=d_r-d=-i--_=4-7=__=l-_3=--_e-u-g1a30 "
+    },
+    {
+      "rule_id": "intra42-client-secret",
+      "input": "intra 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` ",
+      "matched": "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`"
+    },
+    {
+      "rule_id": "jfrog-api-key",
+      "input": "jfrog xray?=19bw02g5502lqjuj204729j6lh2iml5id8tj1e066k97v16979h327x0ifjplsg7beh7vjlk5\\n ",
+      "matched": "jfrog xray?=19bw02g5502lqjuj204729j6lh2iml5id8tj1e066k97v16979h327x0ifjplsg7beh7vjlk5\\n"
+    },
+    {
+      "rule_id": "jfrog-identity-token",
+      "input": "jfrog bintray>6u98gy64je474b3a4mu2q4hi4otc669f7797nwr83066i20c5e9d73qvqa8h6yt8\\n ",
+      "matched": "jfrog bintray>6u98gy64je474b3a4mu2q4hi4otc669f7797nwr83066i20c5e9d73qvqa8h6yt8\\n"
+    },
+    {
+      "rule_id": "jwt",
+      "input": "ey ey4vsrCM6U9Mv9drnFc.ey0-1\\Tvm9B5_V/0m96.\\n ",
+      "matched": "ey4vsrCM6U9Mv9drnFc.ey0-1\\Tvm9B5_V/0m96.\\n"
+    },
+    {
+      "rule_id": "jwt-base64",
+      "input": "zxlk ZXlKamNtbDBJanBi\\\\---8-+z\n+_\r\ru-+\r\\\nj-_-///7/Bo\\/i_/\\\nbD ",
+      "matched": "ZXlKamNtbDBJanBi\\\\---8-+z\n+_\r\ru-+\r\\\nj-_-///7/Bo\\/i_/\\\nbD"
+    },
+    {
+      "rule_id": "kraken-access-token",
+      "input": "kraken kraken:_/3+-u_/3_+_g/x/=2_+/6o_++/+p---_m=7_--=3t===-g=+==j/++_+/_=9+x/__5=s=8-_-+-/=-/\\n ",
+      "matched": "kraken kraken:_/3+-u_/3_+_g/x/=2_+/6o_++/+p---_m=7_--=3t===-g=+==j/++_+/_=9+x/__5=s=8-_-+-/=-/\\n"
+    },
+    {
+      "rule_id": "kubernetes-secret-yaml",
+      "input": "secret data: -:d16/19/4//kind:secret ",
+      "matched": "data: -:d16/19/4//kind:secret"
+    },
+    {
+      "rule_id": "kucoin-access-token",
+      "input": "kucoin kucoin?=1dfabaed21be62d51091f54e\\r ",
+      "matched": "kucoin kucoin?=1dfabaed21be62d51091f54e\\r"
+    },
+    {
+      "rule_id": "kucoin-secret-key",
+      "input": "kucoin kucoin=>87b2b1de-7c2d-8bcf-b107-7df7aeb195f0\\r ",
+      "matched": "kucoin kucoin=>87b2b1de-7c2d-8bcf-b107-7df7aeb195f0\\r"
+    },
+    {
+      "rule_id": "launchdarkly-access-token",
+      "input": "launchdarkly launchdarkly==_f_72=39-440_34k_6=_-g--i9____=ei=rs_o-' ",
+      "matched": "launchdarkly launchdarkly==_f_72=39-440_34k_6=_-g--i9____=ei=rs_o-'"
+    },
+    {
+      "rule_id": "linear-api-key",
+      "input": "lin_api_ lin_api_d6s257e2544fqb4pztsm9mi21283i12pd324m91a ",
+      "matched": "lin_api_d6s257e2544fqb4pztsm9mi21283i12pd324m91a"
+    },
+    {
+      "rule_id": "linear-client-secret",
+      "input": "linear linear,22b43eedaaafe3fc92f1011634eb16c3\\n ",
+      "matched": "linear linear,22b43eedaaafe3fc92f1011634eb16c3\\n"
+    },
+    {
+      "rule_id": "linkedin-client-id",
+      "input": "linkedin linkedin||33232z573c3x7y ",
+      "matched": "linkedin linkedin||33232z573c3x7y "
+    },
+    {
+      "rule_id": "linkedin-client-secret",
+      "input": "linkedin linkedin>rw3m1cq85w0v09l3\" ",
+      "matched": "linkedin linkedin>rw3m1cq85w0v09l3\""
+    },
+    {
+      "rule_id": "lob-api-key",
+      "input": "test_ lob:test_4f45642b5c7c4a135ac2a2800fe9b73e157 ",
+      "matched": "lob:test_4f45642b5c7c4a135ac2a2800fe9b73e157 "
+    },
+    {
+      "rule_id": "lob-pub-api-key",
+      "input": "test_pub lob?=test_pub_f64df0739a7ebaa05aaa1174104e517 ",
+      "matched": "lob?=test_pub_f64df0739a7ebaa05aaa1174104e517 "
+    },
+    {
+      "rule_id": "looker-client-id",
+      "input": "looker looker?=en221ks5g09ym56lex09\\n ",
+      "matched": "looker looker?=en221ks5g09ym56lex09\\n"
+    },
+    {
+      "rule_id": "looker-client-secret",
+      "input": "looker looker=>5v9za7kylbi4tsdjy0tcn97e\\r ",
+      "matched": "looker looker=>5v9za7kylbi4tsdjy0tcn97e\\r"
+    },
+    {
+      "rule_id": "mailchimp-api-key",
+      "input": "mailchimp mailchimp||2cec1d7113b29bd8f7d80894b4cbff6b-us77  ",
+      "matched": "mailchimp mailchimp||2cec1d7113b29bd8f7d80894b4cbff6b-us77 "
+    },
+    {
+      "rule_id": "mailgun-private-api-token",
+      "input": "mailgun mailgun=>key-cf9d2efcbd1decc5820cfbbe2a06b08c ",
+      "matched": "mailgun mailgun=>key-cf9d2efcbd1decc5820cfbbe2a06b08c "
+    },
+    {
+      "rule_id": "mailgun-pub-key",
+      "input": "mailgun mailgun||pubkey-ed825f123adec363ca9db5680ecfdebf\\r ",
+      "matched": "mailgun mailgun||pubkey-ed825f123adec363ca9db5680ecfdebf\\r"
+    },
+    {
+      "rule_id": "mailgun-signing-key",
+      "input": "mailgun mailgun:be7g64ec727f57bac71be4dcf5656c6f-fh2dhb84-a6a2eh4e; ",
+      "matched": "mailgun mailgun:be7g64ec727f57bac71be4dcf5656c6f-fh2dhb84-a6a2eh4e;"
+    },
+    {
+      "rule_id": "mapbox-api-token",
+      "input": "mapbox mapbox=pk.xi8a1e8i27y4dztec29f40fa1rkglwlfp8cu76j98400ncrc5v821ltx1e22.6iih9980d9gba77ps310v7; ",
+      "matched": "mapbox mapbox=pk.xi8a1e8i27y4dztec29f40fa1rkglwlfp8cu76j98400ncrc5v821ltx1e22.6iih9980d9gba77ps310v7;"
+    },
+    {
+      "rule_id": "mattermost-access-token",
+      "input": "mattermost mattermost:xm55371lp39p37n06d6eu983k7; ",
+      "matched": "mattermost mattermost:xm55371lp39p37n06d6eu983k7;"
+    },
+    {
+      "rule_id": "maxmind-license-key",
+      "input": "_mmk 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\\r ",
+      "matched": "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\\r"
+    },
+    {
+      "rule_id": "messagebird-api-token",
+      "input": "messagebird messagebird||49m0t18i2l5r98wvmi8r7f6kw\\n ",
+      "matched": "messagebird messagebird||49m0t18i2l5r98wvmi8r7f6kw\\n"
+    },
+    {
+      "rule_id": "messagebird-client-id",
+      "input": "messagebird messagebird>efd66c04-46ae-d0e7-c6ca-8dbdabc125df' ",
+      "matched": "messagebird messagebird>efd66c04-46ae-d0e7-c6ca-8dbdabc125df'"
+    },
+    {
+      "rule_id": "microsoft-teams-webhook",
+      "input": "webhook.office.com https://e.webhook.office.com/webhookb2/47s8e2l4-7572-6q81-y6we-63638si7jzl5@vau0b98k-0n57-s6b5-ult3-hqz2619gj7of/IncomingWebhook/silft02tn01x87591o4u9b79bj69o1j4/gcrxx3i5-359s-qi8u-897q-3365h6kv6g7s ",
+      "matched": "https://e.webhook.office.com/webhookb2/47s8e2l4-7572-6q81-y6we-63638si7jzl5@vau0b98k-0n57-s6b5-ult3-hqz2619gj7of/IncomingWebhook/silft02tn01x87591o4u9b79bj69o1j4/gcrxx3i5-359s-qi8u-897q-3365h6kv6g7s"
+    },
+    {
+      "rule_id": "netlify-access-token",
+      "input": "netlify netlify=>9-__==--ea=i-6=__5o-_we_k_=b=e-df_49=b-9\\n ",
+      "matched": "netlify netlify=>9-__==--ea=i-6=__5o-_we_k_=b=e-df_49=b-9\\n"
+    },
+    {
+      "rule_id": "new-relic-browser-api-token",
+      "input": "nrjs- new-relic>NRJS-3bae9b8d9a6ae257e3e ",
+      "matched": "new-relic>NRJS-3bae9b8d9a6ae257e3e "
+    },
+    {
+      "rule_id": "new-relic-insert-key",
+      "input": "nrii- newrelic:NRII-z-7g7ck-5-d2v-n0in--59-00y41-n-t\" ",
+      "matched": "newrelic:NRII-z-7g7ck-5-d2v-n0in--59-00y41-n-t\""
+    },
+    {
+      "rule_id": "new-relic-user-api-id",
+      "input": "new-relic newrelic?=72w6329icn9jh7uedvg7e35h77zem9z7onp7g8o8s2i18l5dt1u7u5715ss8000j  ",
+      "matched": "new-relic newrelic?=72w6329icn9jh7uedvg7e35h77zem9z7onp7g8o8s2i18l5dt1u7u5715ss8000j "
+    },
+    {
+      "rule_id": "new-relic-user-api-key",
+      "input": "nrak new_relic=>NRAK-3197ik90xmlnk4y2v7d614154g1 ",
+      "matched": "new_relic=>NRAK-3197ik90xmlnk4y2v7d614154g1 "
+    },
+    {
+      "rule_id": "notion-api-token",
+      "input": "ntn_ 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` ",
+      "matched": "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`"
+    },
+    {
+      "rule_id": "npm-access-token",
+      "input": "npm_ npm_97p5dv7e6zzfxgu341aoehhgiya9240871z2 ",
+      "matched": "npm_97p5dv7e6zzfxgu341aoehhgiya9240871z2 "
+    },
+    {
+      "rule_id": "nuget-config-password",
+      "input": "<add key= <add key=\"Password\"value=\"qqqqqqqq\"/> ",
+      "matched": "<add key=\"Password\"value=\"qqqqqqqq\"/>"
+    },
+    {
+      "rule_id": "nytimes-access-token",
+      "input": "nytimes newyorktimes>1-__k7__=0-o_=__s_==_=16_=--==_m ",
+      "matched": "nytimes newyorktimes>1-__k7__=0-o_=__s_==_=16_=--==_m "
+    },
+    {
+      "rule_id": "octopus-deploy-api-key",
+      "input": "api- API-O1RA1CTBBSM5TJKSBMLNKKPO8P\\r ",
+      "matched": "API-O1RA1CTBBSM5TJKSBMLNKKPO8P\\r"
+    },
+    {
+      "rule_id": "okta-access-token",
+      "input": "okta okta=>00q=-q---q=-=q-q=-q---q====q=-qqq==qq-=--= ",
+      "matched": "okta okta=>00q=-q---q=-=q-q=-q---q====q=-qqq==qq-=--= "
+    },
+    {
+      "rule_id": "openai-api-key",
+      "input": "t3blbkfj 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\" ",
+      "matched": "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\""
+    },
+    {
+      "rule_id": "openshift-user-token",
+      "input": "sha256~ sha256~-qq-q---qq-q-q---qqq--qqq-------q-qq-q-q-q- ",
+      "matched": "sha256~-qq-q---qq-q-q---qqq--qqq-------q-qq-q-q-q- "
+    },
+    {
+      "rule_id": "perplexity-api-key",
+      "input": "pplx- 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 ",
+      "matched": "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 "
+    },
+    {
+      "rule_id": "plaid-api-token",
+      "input": "plaid plaid:=access-production-27234251-abfd-e987-6066-f1bd6d5a2aa0\\r ",
+      "matched": "plaid plaid:=access-production-27234251-abfd-e987-6066-f1bd6d5a2aa0\\r"
+    },
+    {
+      "rule_id": "plaid-client-id",
+      "input": "plaid plaid=>905m4714v6apd3fqa5h41444` ",
+      "matched": "plaid plaid=>905m4714v6apd3fqa5h41444`"
+    },
+    {
+      "rule_id": "plaid-secret-key",
+      "input": "plaid plaid,gk8349bmpocx5v83ki8hc0n47upmpp\\n ",
+      "matched": "plaid plaid,gk8349bmpocx5v83ki8hc0n47upmpp\\n"
+    },
+    {
+      "rule_id": "planetscale-api-token",
+      "input": "pscale_tkn_ pscale_tkn_=-==qq=-..q.q=-q-q.-q.q.q=.qqq--\" ",
+      "matched": "pscale_tkn_=-==qq=-..q.q=-q-q.-q.q.q=.qqq--\""
+    },
+    {
+      "rule_id": "planetscale-oauth-token",
+      "input": "pscale_oauth_ pscale_oauth_=qq-=qq--..=-=.=...=.=-====-.q== ",
+      "matched": "pscale_oauth_=qq-=qq--..=-=.=...=.=-====-.q== "
+    },
+    {
+      "rule_id": "planetscale-password",
+      "input": "pscale_pw_ pscale_pw_=.-.-q===..---.==q-..-=.==.=q.q. ",
+      "matched": "pscale_pw_=.-.-q===..---.==q-..-=.==.=q.q. "
+    },
+    {
+      "rule_id": "postman-api-token",
+      "input": "pmak- PMAK-3ff7e052a6ad1ad2c9d8da1f-816084f0dc94a5beb8e4f11b3f7e3ad93d\\r ",
+      "matched": "PMAK-3ff7e052a6ad1ad2c9d8da1f-816084f0dc94a5beb8e4f11b3f7e3ad93d\\r"
+    },
+    {
+      "rule_id": "prefect-api-token",
+      "input": "pnu_ pnu_4CF28Ge4r6ckPnh1K4J2pZkn9qwO7NCzsd48\\r ",
+      "matched": "pnu_4CF28Ge4r6ckPnh1K4J2pZkn9qwO7NCzsd48\\r"
+    },
+    {
+      "rule_id": "private-key",
+      "input": "-----begin -----BEGINPRIVATE KEY-----q- -q--qq q   qq-- q- - qqq  ----   qqq-- q-q -qqq-  -qqq qqq q-KEY----- ",
+      "matched": "-----begin -----BEGINPRIVATE KEY-----q- -q--qq q   qq-- q- - qqq  ----   qqq-- q-q -qqq-  -qqq qqq q-KEY-----"
+    },
+    {
+      "rule_id": "privateai-api-token",
+      "input": "privateai privateai=7w2f1xk1i3la0piyy1655jk7a82k5c5v` ",
+      "matched": "privateai privateai=7w2f1xk1i3la0piyy1655jk7a82k5c5v`"
+    },
+    {
+      "rule_id": "pulumi-api-token",
+      "input": "pul- pul-758a45772e7cac6cbad5dbcdcffffccf8bedc2fe\\r ",
+      "matched": "pul-758a45772e7cac6cbad5dbcdcffffccf8bedc2fe\\r"
+    },
+    {
+      "rule_id": "pypi-upload-token",
+      "input": "pypi-ageichlwas5vcmc pypi-AgEIcHlwaS5vcmcq-q-q-qqqqqq-qqqq--qqqq---q---q-q--q--qq--q-q----q ",
+      "matched": "pypi-AgEIcHlwaS5vcmcq-q-q-qqqqqq-qqqq--qqqq---q---q-q--q--qq--q-q----q"
+    },
+    {
+      "rule_id": "rapidapi-access-token",
+      "input": "rapidapi rapidapi=q-2s2e4__3_w_-_-s2o__-k0_tj6_-v-2gs--n6rn3c-89__z_\\r ",
+      "matched": "rapidapi rapidapi=q-2s2e4__3_w_-_-s2o__-k0_tj6_-v-2gs--n6rn3c-89__z_\\r"
+    },
+    {
+      "rule_id": "readme-api-token",
+      "input": "rdme_ rdme_7ec27v4lsttb7bei1tsaq989552416zq5744rn46yfy2z6qf3fv27nf4sw8srkln4ub70g ",
+      "matched": "rdme_7ec27v4lsttb7bei1tsaq989552416zq5744rn46yfy2z6qf3fv27nf4sw8srkln4ub70g "
+    },
+    {
+      "rule_id": "rubygems-api-token",
+      "input": "rubygems_ rubygems_526aa7cb2fcccbb23c4051ee4aacfdfb733ebca68aff30ea' ",
+      "matched": "rubygems_526aa7cb2fcccbb23c4051ee4aacfdfb733ebca68aff30ea'"
+    },
+    {
+      "rule_id": "scalingo-api-token",
+      "input": "tk-us- tk-us--qq---q-q--qq--q-qqqq--qq---qq--qq-q-q--q-q--q-q` ",
+      "matched": "tk-us--qq---q-q--qq--q-qqqq--qq---qq--qq-q-q--q-q--q-q`"
+    },
+    {
+      "rule_id": "sendbird-access-id",
+      "input": "sendbird sendbird,cc2e4dab-2fac-eabe-1f99-9dfaed1b25e5; ",
+      "matched": "sendbird sendbird,cc2e4dab-2fac-eabe-1f99-9dfaed1b25e5;"
+    },
+    {
+      "rule_id": "sendbird-access-token",
+      "input": "sendbird sendbird:=7443e240a02101dcf478ea2e913b25356df30cd8\\r ",
+      "matched": "sendbird sendbird:=7443e240a02101dcf478ea2e913b25356df30cd8\\r"
+    },
+    {
+      "rule_id": "sendgrid-api-token",
+      "input": "sg. SG.r.0.3=3nuy2=_=8_==._--cs_z4_.-====1w.-ig__=-=.=oe.3_lx.===a...._7- ",
+      "matched": "SG.r.0.3=3nuy2=_=8_==._--cs_z4_.-====1w.-ig__=-=.=oe.3_lx.===a...._7- "
+    },
+    {
+      "rule_id": "sendinblue-api-token",
+      "input": "xkeysib- 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; ",
+      "matched": "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;"
+    },
+    {
+      "rule_id": "sentry-access-token",
+      "input": "sentry sentry=f529b885f23482a567daaefdd833e672e65f9b4be93bd443cf76a73b8ab0bd76 ",
+      "matched": "sentry sentry=f529b885f23482a567daaefdd833e672e65f9b4be93bd443cf76a73b8ab0bd76 "
+    },
+    {
+      "rule_id": "sentry-org-token",
+      "input": "sntrys_eyjpyxqio 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 ",
+      "matched": "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 "
+    },
+    {
+      "rule_id": "sentry-user-token",
+      "input": "sntryu_ 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\" ",
+      "matched": "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\""
+    },
+    {
+      "rule_id": "settlemint-application-access-token",
+      "input": "sm_aat sm_aat_E0c40PVaz37gplIg` ",
+      "matched": "sm_aat_E0c40PVaz37gplIg`"
+    },
+    {
+      "rule_id": "settlemint-personal-access-token",
+      "input": "sm_pat sm_pat_9J4KJ2Ej6r02Ni03\\r ",
+      "matched": "sm_pat_9J4KJ2Ej6r02Ni03\\r"
+    },
+    {
+      "rule_id": "settlemint-service-access-token",
+      "input": "sm_sat sm_sat_2L4PB2QN1rXUp8p6  ",
+      "matched": "sm_sat_2L4PB2QN1rXUp8p6 "
+    },
+    {
+      "rule_id": "shippo-api-token",
+      "input": "shippo_ shippo_live_eeCc6c000CDEAa9dc7cb0Be21fad2a1AA0a9d919` ",
+      "matched": "shippo_live_eeCc6c000CDEAa9dc7cb0Be21fad2a1AA0a9d919`"
+    },
+    {
+      "rule_id": "shopify-access-token",
+      "input": "shpat_ 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 ",
+      "matched": "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"
+    },
+    {
+      "rule_id": "shopify-custom-access-token",
+      "input": "shpca_ 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 ",
+      "matched": "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"
+    },
+    {
+      "rule_id": "shopify-private-app-access-token",
+      "input": "shppa_ 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 ",
+      "matched": "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"
+    },
+    {
+      "rule_id": "shopify-shared-secret",
+      "input": "shpss_ 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 ",
+      "matched": "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"
+    },
+    {
+      "rule_id": "sidekiq-secret",
+      "input": "bundle_enterprise__contribsys__com BUNDLE_ENTERPRISE__CONTRIBSYS__COM:100dd091:bdd1b2ac ",
+      "matched": "BUNDLE_ENTERPRISE__CONTRIBSYS__COM:100dd091:bdd1b2ac "
+    },
+    {
+      "rule_id": "sidekiq-sensitive-url",
+      "input": "gems.contribsys.com http://74c92fcf:720e275b@enterpriseqcontribsysqcom? ",
+      "matched": "http://74c92fcf:720e275b@enterpriseqcontribsysqcom?"
+    },
+    {
+      "rule_id": "slack-app-token",
+      "input": "xapp xapp-7-9-7-j ",
+      "matched": "xapp-7-9-7-j"
+    },
+    {
+      "rule_id": "slack-bot-token",
+      "input": "xoxb xoxb-0735634414-2566787400 ",
+      "matched": "xoxb-0735634414-2566787400"
+    },
+    {
+      "rule_id": "slack-config-access-token",
+      "input": "xoxe.xoxb- xoxeqxoxp-7-C7H86R33J6666320Y316O1R34CR8AVZ7J1PRVS282R7E7M4ZZQSD83JAUU51RL2R33K2F1T33MY4MG51Q1L56X332BH2V8DINLCCMJ5FCBR38X3DKX8XCXC51GQ2FTX7A8845Z0I6WF43763A91Y0ZTSA0MCPX7002H ",
+      "matched": "xoxeqxoxp-7-C7H86R33J6666320Y316O1R34CR8AVZ7J1PRVS282R7E7M4ZZQSD83JAUU51RL2R33K2F1T33MY4MG51Q1L56X332BH2V8DINLCCMJ5FCBR38X3DKX8XCXC51GQ2FTX7A8845Z0I6WF43763A91Y0ZTSA0MCPX7002H"
+    },
+    {
+      "rule_id": "slack-config-refresh-token",
+      "input": "xoxe- xoxe-7-SS14ASGB68ZN1EL0UOB6W8FYM8YU60V4HPOL01BZ3MD785G99FIAF80RC3WT6EA3H1726PUTKTC48Q5D12Z75SEX8LPJ11X0J016X21402YW95QMZVV6W44522U5NB17RO3BN33UXWWXIMSS1L ",
+      "matched": "xoxe-7-SS14ASGB68ZN1EL0UOB6W8FYM8YU60V4HPOL01BZ3MD785G99FIAF80RC3WT6EA3H1726PUTKTC48Q5D12Z75SEX8LPJ11X0J016X21402YW95QMZVV6W44522U5NB17RO3BN33UXWWXIMSS1L"
+    },
+    {
+      "rule_id": "slack-legacy-bot-token",
+      "input": "xoxb xoxb-78385385-v064WXvJ4NV475a93Z ",
+      "matched": "xoxb-78385385-v064WXvJ4NV475a93Z"
+    },
+    {
+      "rule_id": "slack-legacy-token",
+      "input": "xoxo xoxs-7-7-7-7 ",
+      "matched": "xoxs-7-7-7-7"
+    },
+    {
+      "rule_id": "slack-legacy-workspace-token",
+      "input": "xoxa xoxr-BkZ4J1B9 ",
+      "matched": "xoxr-BkZ4J1B9"
+    },
+    {
+      "rule_id": "slack-user-token",
+      "input": "xoxp- xoxe-5817698601-5133356630-6315720139--Q4ufg5-jOm6t8-Mo-Gwx9g86w16 ",
+      "matched": "xoxe-5817698601-5133356630-6315720139--Q4ufg5-jOm6t8-Mo-Gwx9g86w16"
+    },
+    {
+      "rule_id": "slack-webhook-url",
+      "input": "hooks.slack.com hooksqslackqcom/workflows//+9+yK/RC+6//58+6//a/++W3/pqN+Yt+/r//+2W/E+ ",
+      "matched": "hooksqslackqcom/workflows//+9+yK/RC+6//58+6//a/++W3/pqN+Yt+/r//+2W/E+"
+    },
+    {
+      "rule_id": "snyk-api-token",
+      "input": "snyk snykkey,18892e4b-38e0-cc0b-c25f-be85a992a221' ",
+      "matched": "snykkey,18892e4b-38e0-cc0b-c25f-be85a992a221'"
+    },
+    {
+      "rule_id": "sonar-api-token",
+      "input": "sonar sonartoken||33ej-y6y5=8i==_4==3==_-_-==-6110ue9-_h2_\\n ",
+      "matched": "sonartoken||33ej-y6y5=8i==_4==3==_-_-==-6110ue9-_h2_\\n"
+    },
+    {
+      "rule_id": "sourcegraph-access-token",
+      "input": "sgp_ sgp_bDFd7a77183C24bb_95dDEfe8FEA6BaD57ec8bCbc7Fa11cDAD8F47cdd ",
+      "matched": "sgp_bDFd7a77183C24bb_95dDEfe8FEA6BaD57ec8bCbc7Fa11cDAD8F47cdd "
+    },
+    {
+      "rule_id": "square-access-token",
+      "input": "sq0atp- EAAA-q--q--q-qq---qq-q---- ",
+      "matched": "EAAA-q--q--q-qq---qq-q---- "
+    },
+    {
+      "rule_id": "squarespace-access-token",
+      "input": "squarespace squarespace||7cc1b3d6-f96b-ecec-f4fa-7532c1b738aa ",
+      "matched": "squarespace squarespace||7cc1b3d6-f96b-ecec-f4fa-7532c1b738aa "
+    },
+    {
+      "rule_id": "stripe-access-token",
+      "input": "sk_test sk_prod_CnK01FM2hD\\n ",
+      "matched": "sk_prod_CnK01FM2hD\\n"
+    },
+    {
+      "rule_id": "sumologic-access-id",
+      "input": "sumo SUMO>su5vMo5H520Gd4\\r ",
+      "matched": "sumo SUMO>su5vMo5H520Gd4\\r"
+    },
+    {
+      "rule_id": "sumologic-access-token",
+      "input": "sumo Sumo||uhu65949ra16aopx80x1p5pq5ys9yq00d87yd6r96yc58jquy48fp8qj1n6vb4b1' ",
+      "matched": "sumo Sumo||uhu65949ra16aopx80x1p5pq5ys9yq00d87yd6r96yc58jquy48fp8qj1n6vb4b1'"
+    },
+    {
+      "rule_id": "telegram-bot-api-token",
+      "input": "telegr telegr=>62656:A5-x-0_-e-y1-0--o2_55i--_-6_s-j2_o- ",
+      "matched": "telegr telegr=>62656:A5-x-0_-e-y1-0--o2_55i--_-6_s-j2_o- "
+    },
+    {
+      "rule_id": "travisci-access-token",
+      "input": "travis travis=>n44bw77aui2372u9t248vg  ",
+      "matched": "travis travis=>n44bw77aui2372u9t248vg "
+    },
+    {
+      "rule_id": "twilio-api-key",
+      "input": "sk SK2F0eDCa2EbFCfE53Ee21F1f8DD395Be3 ",
+      "matched": "SK2F0eDCa2EbFCfE53Ee21F1f8DD395Be3"
+    },
+    {
+      "rule_id": "twitch-api-token",
+      "input": "twitch twitch=>v0d66439ozv9924lyk0oz9df3ok92b\\n ",
+      "matched": "twitch twitch=>v0d66439ozv9924lyk0oz9df3ok92b\\n"
+    },
+    {
+      "rule_id": "twitter-access-secret",
+      "input": "twitter twitter,lcm3c0ne5hu5m2401q1l716nhyrw8vv4ek009771499iy ",
+      "matched": "twitter twitter,lcm3c0ne5hu5m2401q1l716nhyrw8vv4ek009771499iy "
+    },
+    {
+      "rule_id": "twitter-access-token",
+      "input": "twitter twitter?=932558746354635-DihHFBM9p8RFf35kz2I2 ",
+      "matched": "twitter twitter?=932558746354635-DihHFBM9p8RFf35kz2I2 "
+    },
+    {
+      "rule_id": "twitter-api-key",
+      "input": "twitter twitter=9794qxw23tem97zdsd054s6h3\\n ",
+      "matched": "twitter twitter=9794qxw23tem97zdsd054s6h3\\n"
+    },
+    {
+      "rule_id": "twitter-api-secret",
+      "input": "twitter twitter:=0ejltaz404595dg3l0522jb3x8be8gr41x8d85h15w05k8ej0i` ",
+      "matched": "twitter twitter:=0ejltaz404595dg3l0522jb3x8be8gr41x8d85h15w05k8ej0i`"
+    },
+    {
+      "rule_id": "twitter-bearer-token",
+      "input": "twitter twitter,AAAAAAAAAAAAAAAAAAAAAA%Np0Xhf%P%%kx0%rWO%06v%2D%s%60K6Z5Iy152kFVvt%3y%4Z%%%MIdrxuN%%1%7o%90%m%P9XT8%eu' ",
+      "matched": "twitter twitter,AAAAAAAAAAAAAAAAAAAAAA%Np0Xhf%P%%kx0%rWO%06v%2D%s%60K6Z5Iy152kFVvt%3y%4Z%%%MIdrxuN%%1%7o%90%m%P9XT8%eu'"
+    },
+    {
+      "rule_id": "typeform-api-token",
+      "input": "tfp_ typeform?=tfp_..-mo_._21=m--_-.o.61=-pv8==9.5.__72-._-_75._=--=.8._.7-=.= ",
+      "matched": "typeform?=tfp_..-mo_._21=m--_-.o.61=-pv8==9.5.__72-._-_75._=--=.8._.7-=.= "
+    },
+    {
+      "rule_id": "vault-batch-token",
+      "input": "hvb. hvb.q----q--qqqqq--qqq--qqq-q-qq-q-qq---qqq--qqq---qqq-q--q-----qq-q-q-q-qq-qqqqqq--q--q-qq-qq--q-q--q-qq--q--qq--q---q-----q--qqqq-q--qqqqqq-\\r ",
+      "matched": "hvb.q----q--qqqqq--qqq--qqq-q-qq-q-qq---qqq--qqq---qqq-q--q-----qq-q-q-q-qq-qqqqqq--q--q-qq-qq--q-q--q-qq--q--qq--q---q-----q--qqqq-q--qqqqqq-\\r"
+    },
+    {
+      "rule_id": "vault-service-token",
+      "input": "hvs. hvs.qq------q--qqqqq-qqqqqq--q---qqq-----qqq--q-qq-qq-qq-qq-q---qqqqqq-q-------qq-q-qqq-q-qq-q  ",
+      "matched": "hvs.qq------q--qqqqq-qqqqqq--q---qqq-----qqq--q-qq-qq-qq-qq-q---qqqqqq-q-------qq-q-qqq-q-qq-q "
+    },
+    {
+      "rule_id": "yandex-access-token",
+      "input": "yandex yandex=>t1.m.E0-I-x9p8J-A_p1-P_2--2U9Wh_-xC-_s_-r8-3-f2-H5B-Q_s-n___-v---_p-aCy__P4WT_A-p_q_Z3Ya1_-\\n ",
+      "matched": "yandex yandex=>t1.m.E0-I-x9p8J-A_p1-P_2--2U9Wh_-xC-_s_-r8-3-f2-H5B-Q_s-n___-v---_p-aCy__P4WT_A-p_q_Z3Ya1_-\\n"
+    },
+    {
+      "rule_id": "yandex-api-key",
+      "input": "yandex yandex?=AQVN0wzx6-BFh_4-wjaY__7b-p-1L-e_1e-_a__ ",
+      "matched": "yandex yandex?=AQVN0wzx6-BFh_4-wjaY__7b-p-1L-e_1e-_a__ "
+    },
+    {
+      "rule_id": "yandex-aws-access-token",
+      "input": "yandex yandex>YCy_ra__---9U_m__--r1hN5w---_Eq1-d-_0__5\\r ",
+      "matched": "yandex yandex>YCy_ra__---9U_m__--r1hN5w---_Eq1-d-_0__5\\r"
+    },
+    {
+      "rule_id": "zendesk-secret-key",
+      "input": "zendesk zendesk,881362ar1o53wm0g0mb9217awk6r79906s76oj0k` ",
+      "matched": "zendesk zendesk,881362ar1o53wm0g0mb9217awk6r79906s76oj0k`"
+    }
+  ]
 }
