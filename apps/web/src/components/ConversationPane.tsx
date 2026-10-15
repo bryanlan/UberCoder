@@ -1415,15 +1415,6 @@ function screenHasInteractiveControlText(text: string): boolean {
     || /^\/[a-z][\w-]*\s+.+/im.test(normalized);
 }
 
-function screenShowsProviderProgress(text: string): boolean {
-  const normalized = text
-    .split('\n')
-    .map((line) => line.trim().replace(/\s+/g, ' '))
-    .filter(Boolean)
-    .join('\n');
-  return /(?:thinking|still thinking|almost done thinking|fluttering|running \d+ shell command|running shell command|background command|esc to interrupt|bypass permissions on)/i.test(normalized);
-}
-
 function liveScreenDisplayText(screen: ConversationTimeline['liveScreen']): string {
   const content = (screen?.content ?? screen?.contentAnsi ?? '').trim();
   if (content) {
@@ -1440,14 +1431,14 @@ function liveScreenDisplayAnsiText(screen: ConversationTimeline['liveScreen']): 
       : screen?.statusAnsi;
 }
 
-function shouldShowLiveScreenContent(screen: ConversationTimeline['liveScreen']): boolean {
+function shouldShowLiveScreenContent(screen: ConversationTimeline['liveScreen'], isWorking: boolean | undefined): boolean {
   const visibleText = liveScreenDisplayText(screen);
   if (!visibleText || visibleText === WAITING_FOR_SESSION_OUTPUT_TEXT) {
     return false;
   }
   const screenText = `${visibleText}\n${screen?.status ?? ''}`;
-  return screenHasInteractiveControlText(screenText)
-    || screenShowsProviderProgress(screenText);
+  return (screen?.inputActive === false && screenHasInteractiveControlText(screenText))
+    || isWorking === true;
 }
 
 export function ConversationPane({
@@ -1667,7 +1658,7 @@ export function ConversationPane({
     () => groupTranscriptTurns(visibleHistoryMessages),
     [visibleHistoryMessages],
   );
-  const liveScreenPanel = liveScreen && shouldShowLiveScreenContent(liveScreen) ? (
+  const liveScreenPanel = liveScreen && shouldShowLiveScreenContent(liveScreen, boundSession?.isWorking) ? (
     <div
       data-testid="live-screen-panel"
       className="mt-4 rounded-md border border-slate-800 bg-slate-950 p-3 shadow-inner"

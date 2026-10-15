@@ -178,6 +178,7 @@ function timeline(input: {
 function renderPane(input: {
   inputText?: string;
   inputActive?: boolean;
+  messages?: NormalizedMessage[];
   mobileControlsHidden?: boolean;
   screenContent?: string;
   screenContentAnsi?: string;
@@ -205,6 +206,7 @@ function renderPane(input: {
         timeline={timeline({
           inputText: input.inputText,
           inputActive: input.inputActive,
+          messages: input.messages,
           screenContent: input.screenContent,
           screenContentAnsi: input.screenContentAnsi,
           screenStatus: input.screenStatus,
@@ -622,7 +624,9 @@ describe('ConversationPane live input bridge', () => {
 
   it('quoted menu instructions at an active composer keep normal chat submission', async () => {
     const send = vi.fn().mockResolvedValue({ session: boundSession() });
-    renderPane({ inputActive: true, screenContent: 'Enter to confirm · Esc to cancel', onSendKeystrokes: send });
+    renderPane({ inputActive: true, sessionOverrides: { isWorking: false },
+      screenContent: 'Enter to confirm · Esc to cancel', onSendKeystrokes: send });
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'This is my chat message' } });
     fireEvent.click(screen.getByRole('button', { name: 'Enter' }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('session-1', {
@@ -828,6 +832,8 @@ describe('ConversationPane live input bridge', () => {
 
   it('shows interactive live screen output for terminal pickers', () => {
     renderPane({
+      sessionOverrides: { isWorking: false },
+      inputActive: false,
       inputText: '/model',
       screenContent: [
         'gpt-5.5 default fast · ~/code/demo',
@@ -844,13 +850,21 @@ describe('ConversationPane live input bridge', () => {
     ['Select Model and Effort', 'enter select · esc back'],
     ['Select Reasoning Level for GPT-6-Sol', 'enter default · s session · esc back'],
   ])('shows the current Codex %s picker', (heading, footer) => {
-    renderPane({ screenContent: `${heading}\n› 2. GPT-6-Sol (current)\n${footer}` });
+    renderPane({ inputActive: false, sessionOverrides: { isWorking: false },
+      screenContent: `${heading}\n› 2. GPT-6-Sol (current)\n${footer}` });
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(heading);
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(footer);
   });
 
+  it('shows a Claude approval menu while the session is idle', () => {
+    renderPane({ inputActive: false, sessionOverrides: { provider: 'claude', isWorking: false },
+      screenContent: 'Do you want to proceed?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel' });
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('Do you want to proceed?');
+  });
+
   it('shows provider progress while Claude is still thinking', () => {
     renderPane({
+      sessionOverrides: { provider: 'claude', isWorking: true },
       screenContent: [
         '* Fluttering… (6m 29s · almost done thinking with medium effort)',
         '⎿ Tip: Try setting environment variable COLORTERM=truecolor for richer colors',
@@ -863,12 +877,38 @@ describe('ConversationPane live input bridge', () => {
 
   it('shows provider progress when only the status line is active', () => {
     renderPane({
+      sessionOverrides: { isWorking: true },
       screenStatus: '* still thinking with medium effort',
       screenStatusAnsi: '\u001b[33m* still thinking with medium effort\u001b[39m',
     });
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('still thinking with medium effort');
+  });
+
+  it.each([
+    ['codex', 'Enter to confirm · Esc to cancel'],
+    ['claude', 'Enter to confirm · Esc to cancel'],
+    ['codex', '/model choose a different model'],
+    ['claude', '/model choose a different model'],
+  ] as const)('keeps the completed %s answer in chat when it quotes %s', (provider, quotedControl) => {
+    const answer = `The preview is ready. For later changes:\n\n${quotedControl}`;
+    renderPane({
+      sessionOverrides: { provider, isWorking: false },
+      messages: [{ id: 'completed-answer', provider, role: 'assistant', lifecycle: 'durable',
+        text: answer, timestamp: baseTime, conversationRef: 'conversation-1', source: 'history-file' }],
+      screenContent: `${answer}\nBrewed for 10s · done 5:02 AM · 1 shell still running\nTry thinking about the next step.`,
+      screenStatus: '⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage',
+    });
+
+    expect(screen.getByText('The preview is ready. For later changes:')).toBeVisible();
+    expect(screen.getByText(quotedControl)).toBeVisible();
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
+  });
+
+  it('shows current working output without depending on provider-specific progress words', () => {
+    renderPane({ sessionOverrides: { isWorking: true }, screenContent: 'Inspecting the latest build results.' });
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('Inspecting the latest build results.');
   });
 
   it('mirrors text-bypass typing into the main transcript before submission', async () => {

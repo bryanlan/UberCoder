@@ -130,6 +130,11 @@ state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses 
 `apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,
 not raw screen content; `apps/web/src/features/conversation/useConversationData.ts` polls the
 screen route separately for the live terminal/status panel.
+That panel shows current output while the backend marks the bound session as working,
+and keeps interactive menus visible while idle only when the screen has no active composer.
+Quoted menu controls at a ready composer stay in the normal transcript.
+Idle terminal scrollback and permission
+footers do not count as active work; completed replies remain in the normal transcript.
 Codex's unboxed composer is bounded by its left-edge prompt, indented continuation rows and
 indented native model footer. Paragraph breaks, quoted prompts and bullets inside that region
 remain input. Earlier prompts followed by assistant output remain screen content. Recognizing the
@@ -170,6 +175,12 @@ The original notification remains available through the terminal screen and debu
 The web conversation pane may mirror local text-bypass typing
 optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
 pending user transcript row.
+
+Claude `api-request-blob` records are saved copies of model context, not new conversation
+turns. The adapter excludes them from parsed messages, active-branch selection and opening
+prompt matching. They cannot supply prompt hashes, excerpts or conversation activity dates.
+The parser version invalidates persisted transcript summaries and search entries after this
+filter changes; provider transcript files remain unchanged.
 
 Claude compaction summaries are provider bookkeeping, not submitted prompts. The Claude
 history parser follows `logicalParentUuid` at `compact_boundary` records to retain earlier

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { CodexProvider } from '../src/providers/codex-provider.js';
 import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
-import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
+import { claudeOpeningUserText, parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
@@ -393,6 +393,46 @@ describe('provider history discovery', () => {
       'Latest branch A reply',
     ]);
     expect(parsed.summary.updatedAt).toBe('2026-03-07T00:00:05.000Z');
+  });
+
+  it.each([false, true])('ignores Claude API request copies without changing the active branch (copy UUIDs: %s)', async (copyUuids) => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-request-copies-'));
+    const transcriptPath = path.join(tempDir, 'request-copies.jsonl');
+    const prompt = 'Tell me the progress.';
+    const answer = 'The preview is ready. Two fixes remain.';
+    const requestCopies = [
+      { role: 'user', content: '<system-reminder>Injected instructions</system-reminder>' },
+      { role: 'assistant', content: [{ type: 'text', text: 'An old answer copied into the API request.' }] },
+      { role: 'user', content: prompt },
+    ].map((message, index) => ({
+      type: 'api-request-blob', sessionId: 'request-copies', hash: `copy-${index}`, message,
+      ...(copyUuids ? { uuid: `copy-${index}`, parentUuid: null } : {}),
+    }));
+    try {
+      await fs.writeFile(transcriptPath, [
+        requestCopies[0],
+        { type: 'user', uuid: 'user', parentUuid: null, timestamp: '2026-10-15T11:58:00.000Z',
+          message: { role: 'user', content: prompt } },
+        { type: 'assistant', uuid: 'assistant', parentUuid: 'user', timestamp: '2026-10-15T12:02:00.000Z',
+          message: { role: 'assistant', content: [{ type: 'text', text: answer }], stop_reason: 'end_turn' } },
+        ...requestCopies.slice(1),
+      ].map((record) => JSON.stringify(record)).join('\n'));
+      await fs.utimes(transcriptPath, new Date('2026-10-15T12:03:00.000Z'), new Date('2026-10-15T12:03:00.000Z'));
+      const parsed = await parseClaudeConversationFile({
+        filePath: transcriptPath, provider: 'claude', projectSlug: 'demo', conversationRef: 'request-copies',
+      });
+      expect(parsed.displayMessages.map((message) => message.text)).toEqual([prompt, answer]);
+      expect(parsed.messages.map((message) => message.text)).toEqual([prompt, answer]);
+      expect(parsed.summary).toMatchObject({
+        title: prompt, excerpt: answer, updatedAt: '2026-10-15T12:02:00.000Z',
+        rawMetadata: { firstUserTextHash: stableTextHash(normalizeComparableText(prompt)), lastUserTextHash: stableTextHash(normalizeComparableText(prompt)),
+          lastUserAt: '2026-10-15T11:58:00.000Z' },
+      });
+      expect(claudeOpeningUserText(requestCopies[0]!)).toBeUndefined();
+      expect(claudeOpeningUserText(requestCopies[2]!)).toBeUndefined();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('parses complete large Claude transcripts instead of splicing head and tail windows', async () => {
