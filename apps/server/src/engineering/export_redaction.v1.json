@@ -1,7 +1,17 @@
 {
   "version": 1,
-  "sensitive_key": "^[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd|passphrase)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
+  "sensitive_key": "(?:^[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd|passphrase)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$|^SSHPASS$)",
   "rules": [
+    {
+      "pattern": "^.*(?:^|[ \\t/\"'])sshpass(?:\\.exe)?(?=[\"']?[ \\t]|$)[\"']?(?:[ \\t]+(?:-[ve]+|-[fd](?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)))*[ \\t]+-[pP](?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
+      "flags": "m",
+      "replacement": "[credential-bearing line omitted]"
+    },
+    {
+      "pattern": "^.*\\bSSHPASS(?:\\\\?[\"'])?\\s*[:=]\\s*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
+      "flags": "im",
+      "replacement": "[credential-bearing line omitted]"
+    },
     {
       "pattern": "^.*(?:^|[ \\t/\"'])sqlplus(?:\\.exe)?(?=[\"']?[ \\t]|$)[^\\r\\n]*[ \\t][\"']?(?:[A-Za-z0-9_$#][A-Za-z0-9_$#.-]*|\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\")/(?:\\\\?\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\\\\?\"|'(?:\\\\[^\\r\\n]|[^'\\\\\\r\\n])+'|[^\\s/@'\"<>\\\\]+)[^\\r\\n]*$",
       "flags": "im",
@@ -879,6 +889,143 @@
     {
       "input": "sqlplus https://docs.example.com/guide",
       "expected": "sqlplus [connection URL omitted]"
+    },
+    {
+      "input": "sshpass -p shortpass ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -pshortpass ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -p\"shortpass\" ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -p 'shortpass' ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -P shortpass ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -Pshortpass ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -P\"shortpass\" ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "'/usr/bin/sshpass' -v -P 'shortpass' ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -p \\\n  \"shortpass\" ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "SSHPASS=shortpass sshpass -e ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "export SSHPASS=\"shortpass\"",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "SSHPASS='shortpass'",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "{\"SSHPASS\": \"shortpass\"}",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "SSHPASS:\n  shortpass",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -px7q ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "x7q"
+    },
+    {
+      "input": "sshpass -f /private/credential-file ssh user@host",
+      "expected": "sshpass -f /private/credential-file ssh user@host"
+    },
+    {
+      "input": "sshpass -f/private/credential-file ssh user@host",
+      "expected": "sshpass -f/private/credential-file ssh user@host"
+    },
+    {
+      "input": "sshpass -d 3 ssh user@host",
+      "expected": "sshpass -d 3 ssh user@host"
+    },
+    {
+      "input": "sshpass -d3 ssh user@host",
+      "expected": "sshpass -d3 ssh user@host"
+    },
+    {
+      "input": "sshpass -e ssh user@host",
+      "expected": "sshpass -e ssh user@host"
+    },
+    {
+      "input": "sshpass ssh user@host",
+      "expected": "sshpass ssh user@host"
+    },
+    {
+      "input": "sshpass -h",
+      "expected": "sshpass -h"
+    },
+    {
+      "input": "sshpass -V",
+      "expected": "sshpass -V"
+    },
+    {
+      "input": "ssh -p 2222 user@host",
+      "expected": "ssh -p 2222 user@host"
+    },
+    {
+      "input": "other-sshpass -p example ssh user@host",
+      "expected": "other-sshpass -p example ssh user@host"
+    },
+    {
+      "input": "sshpass -f /private/credential-file ssh -p 2222 user@host",
+      "expected": "sshpass -f /private/credential-file ssh -p 2222 user@host"
+    },
+    {
+      "input": "sshpass -d3 ssh -p 2222 user@host",
+      "expected": "sshpass -d3 ssh -p 2222 user@host"
+    },
+    {
+      "input": "sshpass -e ssh -p 2222 user@host",
+      "expected": "sshpass -e ssh -p 2222 user@host"
+    },
+    {
+      "input": "sshpass -f /private/credential-file -P shortpass ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sshpass -d3 -P\"shortpass\" ssh user@host",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
     }
   ],
   "object_cases": [
@@ -1174,6 +1321,16 @@
           "subject": "[credential-bearing line omitted]"
         }
       ]
+    },
+    {
+      "input": {
+        "SSHPASS": "shortpass",
+        "total_tokens": 42
+      },
+      "expected": {
+        "SSHPASS": "[credential omitted]",
+        "total_tokens": 42
+      }
     }
   ],
   "public_fields": [
@@ -1432,6 +1589,12 @@
         "SQL*Plus CONNECT/CONN logon statement"
       ],
       "url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/sqpug/CONNECT.html"
+    },
+    {
+      "formats": [
+        "sshpass -p password, -P prompt (masked by export policy), SSHPASS environment; -f/-d/-e/stdin modes"
+      ],
+      "url": "https://github.com/kevinburke/sshpass/blob/master/sshpass.1"
     }
   ],
   "provider_source": {
