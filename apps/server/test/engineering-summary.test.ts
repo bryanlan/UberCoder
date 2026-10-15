@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it } from 'vitest';
-import { engineeringSummary, safeText } from '../src/engineering/summary.js';
+import { engineeringSummary, readProcessIdentity, safeText } from '../src/engineering/summary.js';
 
 const roots: string[] = [];
 const now = Date.parse('2026-10-15T06:00:00Z');
@@ -248,4 +249,19 @@ it('retains finished process ownership without a bound session and exposes unkno
   expect(result.status).toBe('partial');
   expect(result.sources.console.status).toBe('partial');
   expect(result.issues).toContainEqual(expect.objectContaining({ code: 'ownership:PROCESS_CHECKOUT_UNAVAILABLE' }));
+});
+
+
+it('resolves real live process subdirectories to their Git worktree root', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'engineering-process-root-')); roots.push(root);
+  const repo = path.join(root, 'repo'), subdir = path.join(repo, 'apps', 'server');
+  fs.mkdirSync(subdir, { recursive: true });
+  execFileSync('git', ['init', '-b', 'main', repo], { stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const [cwd, expected] of [[subdir, repo], [root, null]] as const) {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd, stdio: 'ignore' });
+    try {
+      await once(child, 'spawn');
+      expect(readProcessIdentity(child.pid!)?.cwd).toBe(expected);
+    } finally { child.kill(); await once(child, 'exit'); }
+  }
 });

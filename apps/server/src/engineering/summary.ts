@@ -40,7 +40,14 @@ export function readProcessIdentity(pid: number): ProcessIdentity | null {
     const tail = raw.slice(raw.lastIndexOf(')') + 2).split(' ');
     if (tail[0] === 'Z' || !tail[19]) return null;
     let cwd: string | null = null;
-    try { cwd = fs.readlinkSync(`/proc/${pid}/cwd`); } catch { /* Identity still proves assignment ownership. */ }
+    try {
+      const processDirectory = fs.readlinkSync(`/proc/${pid}/cwd`);
+      const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+      for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_NAMESPACE']) delete env[name];
+      cwd = fs.realpathSync(execFileSync('git', ['-C', processDirectory, 'rev-parse', '--show-toplevel'], {
+        env, encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim());
+    } catch { /* A live process without a proven Git checkout makes ownership partial. */ }
     return { start: tail[19], name: raw.slice(raw.indexOf('(') + 1, raw.lastIndexOf(')')), cwd };
   } catch (error) {
     if (error && typeof error === 'object' && 'code' in error && ['ENOENT', 'ESRCH'].includes(String(error.code))) return null;

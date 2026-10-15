@@ -59,8 +59,10 @@ When the invocation itself cannot be parsed, `sources` is empty and `agents` and
   including finished assignments. A finished assignment retains proven process or
   session ownership until that provider exits. Assignment completion alone does
   not release a checkout. A live process with unreadable cwd makes the Console
-  source partial while retaining available metadata. Live session paths come from
-  `/proc/<pid>/cwd`; a stale bound row or unrelated reused PID is insufficient.
+  source partial while retaining available metadata. Real process and session paths
+  resolve `/proc/<pid>/cwd` to the Git worktree root with read-only Git commands.
+  Unresolvable directories retain live process identity with unknown checkout; a
+  stale bound row or unrelated reused PID is insufficient.
 - `messages`: retained total, unsupplied, unacknowledged, pending to unfinished
   recipients, and a zero-filled 14 UTC calendar-day series including today so far.
   Unsupplied means never offered to the recipient; unacknowledged includes both
