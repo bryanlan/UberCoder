@@ -15,6 +15,8 @@ node apps/server/dist/engineering/summary-cli.js
 
 The default configuration path is `AGENT_CONSOLE_CONFIG`, or
 `~/.config/agent-console/config.json`. Only `databasePath`, `projectsRoot` and configured project `path` values are read.
+The pure backend configuration schema supplies the same omitted `databasePath` and
+`projects` defaults used by the application. No writable config service is constructed.
 No config profiles, auth settings, provider commands or project notes are exported.
 Explicit database paths remain available even if the project configuration is unreadable:
 
@@ -44,6 +46,12 @@ status and issues. Database locations stay private, including failed or malforme
 URL-like inputs.
 An unavailable section is `null`. Console sections are independent: a schema
 failure reading assignments does not hide working message, grant or wake counts.
+Malformed records are omitted individually with bounded `INVALID_ITEM` issues and
+a partial source. Valid records stay visible. A malformed assignment, scope, session
+or process lookup makes ownership evidence incomplete while retaining other proven
+live owners. Wiki pages with missing source revisions and malformed search topics
+are isolated rather than rejecting the full Wiki source. Invalid wake/grant JSON
+does not discard valid neighbouring records.
 When the invocation itself cannot be parsed, `sources.projects` reports unavailable
 configuration and `agents` and `wiki` are null.
 

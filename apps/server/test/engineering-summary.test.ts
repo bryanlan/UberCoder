@@ -6,6 +6,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it } from 'vitest';
+import { appConfigSchema } from '../src/config/schema.js';
 import { engineeringSummary, readProcessIdentity } from '../src/engineering/summary.js';
 import { redactText } from '../src/engineering/export-redaction.js';
 import redactionContract from '../src/engineering/export_redaction.v1.json' with { type: 'json' };
@@ -423,3 +424,132 @@ it('retains source IDs when distinct wiki queries and titles redact to identical
   expect(result.wiki!.pages.filter(p => [6,7].includes(p.revision)).map(p => p.title)).toEqual(['[credential-bearing line omitted]', '[credential-bearing line omitted]']);
   expect(JSON.stringify(result)).not.toContain('synthetic_wiki_');
 });
+
+
+it('uses pure backend defaults for omitted projects and databasePath without initializing services', () => {
+  const options = fixture(), home = path.join(path.dirname(options.database), 'home');
+  const config = { projectsRoot: '/repo', security: { passwordHash: 'PRIVATE_CONFIG_HASH', sessionSecret: 'PRIVATE_CONFIG_SESSION_SECRET_VALUE' }, providers: {} };
+  expect(appConfigSchema.parse(config).projects).toEqual({});
+  expect(appConfigSchema.parse(config).databasePath).toBe('~/.local/share/agent-console/agent-console.sqlite');
+  fs.writeFileSync(options.config, JSON.stringify(config));
+  const direct = engineeringSummary(options);
+  expect(direct.sources.projects.status).toBe('ok');
+  expect(direct.configured_projects).toEqual([]);
+  const defaultDatabase = path.join(home, '.local/share/agent-console/agent-console.sqlite');
+  const defaultWiki = path.join(path.dirname(defaultDatabase), 'wiki/agent-wiki.sqlite');
+  fs.mkdirSync(path.dirname(defaultWiki), { recursive: true });
+  fs.copyFileSync(options.database, defaultDatabase); fs.copyFileSync(options.wikiDatabase, defaultWiki);
+  const before = [options.config, defaultDatabase, defaultWiki].map(p => fs.readFileSync(p));
+  const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
+  const result = spawnSync(process.execPath, ['--import', 'tsx', cli, '--config', options.config], { encoding: 'utf8', env: { ...process.env, HOME: home } });
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({ status: 'ok', configured_projects: [], sources: { projects: { status: 'ok' }, console: { status: 'ok' } } });
+  expect(result.stdout + result.stderr).not.toContain('PRIVATE_CONFIG_');
+  [options.config, defaultDatabase, defaultWiki].forEach((p, i) => expect(fs.readFileSync(p)).toEqual(before[i]));
+});
+
+
+it('isolates malformed wiki pages and search topics while retaining valid source rows', () => {
+  const options = fixture(), wiki = new Database(options.wikiDatabase);
+  wiki.prepare('update wiki_pages set title=?').run(Buffer.from('PRIVATE_BAD_PAGE'));
+  wiki.prepare('insert into wiki_pages values(?,?,?,?,?)').run('/repo/.git', 'orphan', 'Missing source revision', 99, stamp);
+  wiki.prepare('insert into wiki_pages values(?,?,?,?,?)').run('/repo/.git', 'valid', 'Valid retained page', 9, stamp);
+  wiki.prepare('insert into wiki_revisions values(?,?,?,?,?,?,?,?,?,?,?)').run(9, '/repo/.git', 'valid', 'Valid retained page', 'PRIVATE_BODY', 'PRIVATE_SUMMARY', 'codex:author', '/repo/wt', 'main', 'source', stamp);
+  wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(10, '/repo/.git', 'codex:searcher', 'search', 0, stamp, null, Buffer.from('PRIVATE_BAD_QUERY'), null);
+  wiki.close();
+  const result = engineeringSummary(options);
+  expect(result.sources.wiki.status).toBe('partial');
+  expect(result.wiki?.pages.map(p => p.title)).toEqual(['Valid retained page']);
+  expect(result.issues.find(i => i.code === 'wiki_pages:INVALID_ITEM')?.message).toContain('2 malformed wiki_pages');
+  expect(result.wiki?.no_result_searches.map(q => q.id)).toEqual([5]);
+  expect(result.sources.console.status).toBe('ok');
+  expect(result.issues).toEqual(expect.arrayContaining([
+    expect.objectContaining({ source: 'wiki', code: 'wiki_pages:INVALID_ITEM' }),
+    expect.objectContaining({ source: 'wiki', code: 'wiki_searches:INVALID_ITEM' }),
+  ]));
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_BAD_');
+});
+
+it.each(['assignment', 'session', 'scope'] as const)('retains valid positive ownership and reports a malformed %s row', (kind) => {
+  const options = fixture(), db = new Database(options.database);
+  if (kind === 'assignment') db.prepare("update coordination_assignments set description=? where id='old'").run(Buffer.from('PRIVATE_BAD_DESCRIPTION'));
+  if (kind === 'session') db.prepare("update bound_sessions set project_slug=? where id='session-stale'").run(Buffer.from('PRIVATE_BAD_PROJECT'));
+  if (kind === 'scope') db.prepare("update coordination_scopes set summary=? where assignment_id='old'").run(Buffer.from('PRIVATE_BAD_SCOPE'));
+  db.close();
+  const result = engineeringSummary(options);
+  expect(result.sources.console.status).toBe('partial');
+  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({ live_process: true, process_checkout: '/repo/wt' });
+  expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, checkout: '/repo/wt' });
+  expect(result.sources.wiki.status).toBe('ok');
+  expect(result.issues.some(i => i.code.endsWith(':INVALID_ITEM'))).toBe(true);
+});
+
+it('isolates a process lookup failure while retaining other verified live owners', () => {
+  const options = fixture(), lookup = options.processIdentity;
+  const result = engineeringSummary({ ...options, processIdentity: pid => { if (pid === 101) throw new Error('PRIVATE_PROCESS_ERROR'); return lookup(pid); } });
+  expect(result.sources.console.status).toBe('partial');
+  expect(result.agents.assignments?.find(a => a.id === 'wait')).toMatchObject({ live_process: true, process_checkout: '/repo/wait' });
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_PROCESS_ERROR');
+});
+
+it('isolates malformed wake and grant records without discarding valid measurements', () => {
+  const options = fixture(), db = new Database(options.database);
+  db.prepare('insert into meta values(?,?)').run('peer-wake-attempt:bad', 'PRIVATE_BAD_WAKE_JSON');
+  db.prepare("update agent_grants set definition_json=? where id='expired'").run('PRIVATE_BAD_GRANT_JSON');
+  db.close();
+  const result = engineeringSummary(options);
+  expect(result.agents.wakes?.failed).toBe(1);
+  expect(result.agents.grants?.items.map(g => g.id)).toEqual(['grant']);
+  expect(result.sources.console.status).toBe('partial');
+  expect(JSON.stringify(result)).not.toContain('PRIVATE_BAD_');
+});
+
+it('isolates malformed historical activity while keeping its source independent of live ownership', () => {
+  const options = fixture(), db = new Database(options.database);
+  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
+  insert.run('live', '/repo/wt', 'update', 'Valid yesterday update', '2026-10-14T12:00:00.000Z');
+  insert.run('live', '/repo/wt', 'update', Buffer.from('PRIVATE_BAD_HISTORY'), '2026-10-14T12:30:00.000Z');
+  db.close();
+  const result = engineeringSummary(options);
+  expect(result.sources.activity.status).toBe('partial');
+  expect(result.sources.console.status).toBe('ok');
+  expect(result.agents.activity_yesterday?.items.map(i => i.summary)).toEqual(['Valid yesterday update']);
+});
+
+
+it('redacts every pinned provider vector through all permitted exporter text fields', () => {
+  const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
+  db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run('live', '/repo/wt', 'update', 'Initial', '2026-10-14T12:00:00.000Z');
+  try {
+    for (const vector of redactionContract.provider_cases) {
+      db.prepare('update coordination_assignments set description=?').run(vector.input);
+      db.prepare('update coordination_scopes set summary=?').run(vector.input);
+      db.prepare("update coordination_events set text=? where timestamp='2026-10-14T12:00:00.000Z'").run(vector.input);
+      wiki.prepare('update wiki_pages set title=?').run(vector.input);
+      wiki.prepare("update wiki_access set query=? where action='search'").run(vector.input);
+      const result = engineeringSummary(options);
+      expect(JSON.stringify(result), vector.rule_id).not.toContain(vector.matched);
+      expect(result.agents.counts?.total, vector.rule_id).toBe(4);
+      expect(result.wiki?.pages, vector.rule_id).toHaveLength(1);
+    }
+  } finally { db.close(); wiki.close(); }
+}, 120_000);
+
+it('redacts CLI, environment and HTTP credentials through the complete source CLI output', () => {
+  const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
+  const cases = redactionContract.cases.filter(vector => /--user| -u |--password|Authorization:|PGPASSWORD|MYSQL_PWD|^glpat-/.test(vector.input));
+  expect(cases).toHaveLength(9);
+  const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
+  try {
+    for (const vector of cases) {
+      db.prepare('update coordination_assignments set description=?').run(vector.input);
+      wiki.prepare('update wiki_pages set title=?').run(vector.input);
+      const result = spawnSync(process.execPath, ['--import', 'tsx', cli, '--config', options.config, '--database', options.database, '--wiki-database', options.wikiDatabase], { encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      const output = JSON.parse(result.stdout);
+      expect(output.agents.assignments.map((a: { description: string }) => a.description)).toEqual(Array(4).fill(vector.expected));
+      expect(output.wiki.pages[0].title).toBe(vector.expected);
+      expect(result.stdout + result.stderr).not.toContain(vector.input);
+    }
+  } finally { db.close(); wiki.close(); }
+}, 120_000);

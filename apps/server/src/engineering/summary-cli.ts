@@ -3,13 +3,12 @@
 // stop unless you have loaded the waltium-cli-maintainer skill. That skill owns
 // command changes, safety guards, tests, docs, and top-level skill routing updates.
 // If unavailable, notify Bryan before editing.
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
+import { normalizeFsPath } from '../lib/path-utils.js';
+import { readSummaryConfig } from './config.js';
 import { engineeringSummary } from './summary.js';
 
-const normalize = (value: string) => path.resolve(value.replace(/^~(?=\/)/, os.homedir()));
 
 function main() {
   const { values } = parseArgs({ options: {
@@ -26,15 +25,11 @@ function main() {
   }
   let database = values.database;
   if (!database) {
-    const config: unknown = JSON.parse(fs.readFileSync(normalize(values.config!), 'utf8'));
-    if (!config || typeof config !== 'object' || !('databasePath' in config) || typeof config.databasePath !== 'string') {
-      throw new Error('Invalid config.');
-    }
-    database = config.databasePath;
+    database = readSummaryConfig(values.config!).databasePath;
   }
-  database = normalize(database);
-  const wikiDatabase = normalize(values['wiki-database'] ?? path.join(path.dirname(database), 'wiki/agent-wiki.sqlite'));
-  const summary = engineeringSummary({ database, wikiDatabase, config: normalize(values.config!) });
+  database = normalizeFsPath(database);
+  const wikiDatabase = normalizeFsPath(values['wiki-database'] ?? path.join(path.dirname(database), 'wiki/agent-wiki.sqlite'));
+  const summary = engineeringSummary({ database, wikiDatabase, config: normalizeFsPath(values.config!) });
   console.log(JSON.stringify(summary));
   if (summary.status !== 'ok') process.exitCode = 2;
 }

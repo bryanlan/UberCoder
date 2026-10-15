@@ -3,6 +3,7 @@ import path from 'node:path';
 import { normalizeFsPath } from '../lib/path-utils.js';
 import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
+import { readSummaryConfig } from './config.js';
 import { sanitizeExport } from './export-redaction.js';
 
 type Status = 'ok' | 'partial' | 'error';
@@ -26,10 +27,22 @@ export interface SummaryOptions {
 
 const DAY = 86_400_000;
 const READ_ERROR_CODES = new Set(['SQLITE_ERROR', 'SQLITE_CANTOPEN', 'SQLITE_BUSY', 'SQLITE_LOCKED',
-  'SQLITE_NOTADB', 'SQLITE_CORRUPT', 'SQLITE_READONLY', 'ENOENT', 'EACCES', 'PROCESS_CHECKOUT_UNAVAILABLE']);
+  'SQLITE_NOTADB', 'SQLITE_CORRUPT', 'SQLITE_READONLY', 'ENOENT', 'EACCES', 'PROCESS_CHECKOUT_UNAVAILABLE', 'INVALID_ITEM']);
 const iso = (n: number) => new Date(n).toISOString();
 const count = (db: Database.Database, sql: string, ...args: string[]) =>
   (db.prepare(sql).get(...args) as { n: number }).n;
+
+type ReportInvalid = (stage: string, count: number) => void;
+const text = (value: unknown): value is string => typeof value === 'string';
+const nonempty = (value: unknown): value is string => text(value) && value.trim().length > 0;
+const nullableText = (value: unknown) => value === null || text(value);
+const timestamp = (value: unknown) => text(value) && Number.isFinite(Date.parse(value));
+const integer = (value: unknown, minimum = 0) => Number.isSafeInteger(value) && Number(value) >= minimum;
+function validRows<T>(rows: T[], valid: (row: T) => boolean, report: ReportInvalid, stage: string): T[] {
+  const retained = rows.filter(valid);
+  if (retained.length !== rows.length) report(stage, rows.length - retained.length);
+  return retained;
+}
 
 export function readProcessIdentity(pid: number): ProcessIdentity | null {
   try {
@@ -58,20 +71,37 @@ export function readProcessIdentity(pid: number): ProcessIdentity | null {
   }
 }
 
-function readAssignments(db: Database.Database, options: SummaryOptions, now: number) {
+function readAssignments(db: Database.Database, options: SummaryOptions, now: number, report: ReportInvalid) {
   const processIdentity = options.processIdentity ?? readProcessIdentity;
   const identities = new Map<number, ProcessIdentity | null>();
   const identity = (pid: number) => {
-    if (!identities.has(pid)) identities.set(pid, processIdentity(pid));
+    if (!identities.has(pid)) {
+      let value: ProcessIdentity | null = null;
+      try {
+        const candidate = processIdentity(pid);
+        if (candidate !== null && (!nonempty(candidate?.start) || !nonempty(candidate?.name)
+          || !(candidate.cwd === null || nonempty(candidate.cwd))
+          || !(candidate.unattributed === undefined || typeof candidate.unattributed === 'boolean'))) {
+          report('ownership', 1);
+        } else value = candidate;
+      } catch { report('ownership', 1); }
+      identities.set(pid, value);
+    }
     return identities.get(pid) ?? null;
   };
-  const rows = db.prepare(`select id,provider,description,status,native_session_id,pid,process_start,started_at,last_seen_at
-    from coordination_assignments order by started_at desc,id`).all() as AssignmentRow[];
-  const scopeRows = db.prepare(`select s.assignment_id,s.checkout,s.repository,s.summary,
+  const rows = validRows(db.prepare(`select id,provider,description,status,native_session_id,pid,process_start,started_at,last_seen_at
+    from coordination_assignments order by started_at desc,id`).all() as AssignmentRow[], row => nonempty(row.id)
+      && nonempty(row.provider) && text(row.description) && ['active', 'waiting', 'finished', 'disconnected'].includes(row.status)
+      && nonempty(row.native_session_id) && integer(row.pid, 1) && nonempty(row.process_start)
+      && timestamp(row.started_at) && timestamp(row.last_seen_at), report, 'assignments');
+  const scopeRows = validRows(db.prepare(`select s.assignment_id,s.checkout,s.repository,s.summary,
       (select max(e.timestamp) from coordination_events e where e.assignment_id=s.assignment_id and e.checkout=s.checkout
-        and e.kind='update') as updated_at from coordination_scopes s order by s.checkout`).all() as Array<Scope & { assignment_id: string }>;
-  const sessionRows = db.prepare(`select id,provider,project_slug,status,pid,conversation_ref,resume_conversation_ref
-    from bound_sessions where status='bound' order by id`).all() as SessionRow[];
+        and e.kind='update') as updated_at from coordination_scopes s order by s.checkout`).all() as Array<Scope & { assignment_id: string }>, row => nonempty(row.assignment_id) && nonempty(row.checkout)
+      && nonempty(row.repository) && text(row.summary) && (row.updated_at === null || timestamp(row.updated_at)), report, 'scopes');
+  const sessionRows = validRows(db.prepare(`select id,provider,project_slug,status,pid,conversation_ref,resume_conversation_ref
+    from bound_sessions where status='bound' order by id`).all() as SessionRow[], row => nonempty(row.id)
+      && nonempty(row.provider) && nonempty(row.project_slug) && row.status === 'bound' && (row.pid === null || integer(row.pid, 1))
+      && nonempty(row.conversation_ref) && nullableText(row.resume_conversation_ref), report, 'sessions');
   const scopes = new Map<string, Scope[]>();
   for (const row of scopeRows) scopes.set(row.assignment_id, [...scopes.get(row.assignment_id) ?? [], {
     checkout: row.checkout, repository: row.repository, summary: row.summary, updated_at: row.updated_at }]);
@@ -126,29 +156,21 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
 }
 
 function readConfiguredProjects(configPath: string): string[] {
-  const config: unknown = JSON.parse(fs.readFileSync(normalizeFsPath(configPath), 'utf8'));
-  if (!config || typeof config !== 'object' || !('projects' in config) || !config.projects
-    || typeof config.projects !== 'object' || Array.isArray(config.projects)) throw new Error('Invalid projects map.');
-  const paths = Object.entries(config.projects).map(([name, value]) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid project.');
-    if ('path' in value) {
-      if (typeof value.path !== 'string' || !value.path.trim()) throw new Error('Invalid project path.');
-      return normalizeFsPath(value.path);
-    }
-    if (!('projectsRoot' in config) || typeof config.projectsRoot !== 'string' || !config.projectsRoot.trim()) throw new Error('Invalid projects root.');
-    return normalizeFsPath(path.join(normalizeFsPath(config.projectsRoot), name));
-  });
+  const config = readSummaryConfig(configPath);
+  const paths = Object.entries(config.projects).map(([name, project]) =>
+    normalizeFsPath(project.path ?? path.join(normalizeFsPath(config.projectsRoot), name)));
   return [...new Set(paths)].sort();
 }
 
-function readYesterdayActivity(db: Database.Database, now: number) {
+function readYesterdayActivity(db: Database.Database, now: number, report: ReportInvalid) {
   const end = Date.parse(iso(now).slice(0, 10)), start = end - DAY;
   const total = count(db, "select count(*) as n from coordination_events where kind='update' and timestamp>=? and timestamp<?", iso(start), iso(end));
-  const items = db.prepare(`select e.seq as id,e.assignment_id,e.checkout,e.timestamp as at,
+  const items = validRows(db.prepare(`select e.seq as id,e.assignment_id,e.checkout,e.timestamp as at,
       coalesce(a.description,'Assignment metadata unavailable') as description,e.text as summary
     from coordination_events e left join coordination_assignments a on a.id=e.assignment_id
     where e.kind='update' and e.timestamp>=? and e.timestamp<? order by e.timestamp,e.seq limit 1000`)
-    .all(iso(start), iso(end)) as Array<{ id: number; assignment_id: string; checkout: string | null; at: string; description: string; summary: string }>;
+    .all(iso(start), iso(end)) as Array<{ id: number; assignment_id: string; checkout: string | null; at: string; description: string; summary: string }>, row => integer(row.id, 1) && nonempty(row.assignment_id) && nullableText(row.checkout)
+      && timestamp(row.at) && text(row.description) && text(row.summary), report, 'activity');
   return { date: iso(start).slice(0, 10), timezone: 'UTC' as const, total, sampled: total > items.length, items };
 }
 
@@ -169,52 +191,72 @@ function readMessages(db: Database.Database, now: number) {
   };
 }
 
-function readWakes(db: Database.Database, now: number) {
-  const rows = db.prepare(`select json_extract(value,'$.sessionId') as session_id,json_extract(value,'$.timestamp') as timestamp,
-      json_extract(value,'$.status') as status,json_extract(value,'$.block.code') as block_code,count(*) as message_count
+function readWakes(db: Database.Database, now: number, report: ReportInvalid) {
+  const json = "case when json_valid(value) then value else '{}' end";
+  const invalid = count(db, `select count(*) as n from meta where
+    (key like 'peer-wake-attempt:%' or key like 'peer-wake-followup:%' or key like 'assignment-continuation:%')
+    and (coalesce(json_valid(value),0)=0 or json_type(${json})!='object')`);
+  if (invalid) report('wakes', invalid);
+  const rows = validRows(db.prepare(`select json_extract(${json},'$.sessionId') as session_id,json_extract(${json},'$.timestamp') as timestamp,
+      json_extract(${json},'$.status') as status,json_extract(${json},'$.block.code') as block_code,count(*) as message_count
     from meta where (key like 'peer-wake-attempt:%' or key like 'peer-wake-followup:%')
-      and json_extract(value,'$.timestamp')>=? and json_extract(value,'$.timestamp')<=?
-    group by 1,2,3,4 order by timestamp desc,session_id`).all(iso(now - 14 * DAY), iso(now)) as Array<{ session_id: string; timestamp: string; status: string; block_code: string | null; message_count: number }>;
+      and json_extract(${json},'$.timestamp')>=? and json_extract(${json},'$.timestamp')<=?
+    group by 1,2,3,4 order by timestamp desc,session_id`).all(iso(now - 14 * DAY), iso(now)) as Array<{ session_id: string; timestamp: string; status: string; block_code: string | null; message_count: number }>, row => nonempty(row.session_id) && timestamp(row.timestamp)
+      && ['submitting', 'submitted', 'failed', 'deferred'].includes(row.status) && nullableText(row.block_code) && integer(row.message_count), report, 'wakes');
   const counts: Record<string, number> = {};
   for (const row of rows) counts[row.status] = (counts[row.status] ?? 0) + 1;
-  const continuation = db.prepare(`select json_extract(value,'$.recovery.status') as status,count(*) as count from meta
-    where key like 'assignment-continuation:%' and json_extract(value,'$.recovery.status') is not null group by 1`).all() as Array<{ status: string; count: number }>;
+  const continuation = validRows(db.prepare(`select json_extract(${json},'$.recovery.status') as status,count(*) as count from meta
+    where key like 'assignment-continuation:%' and json_extract(${json},'$.recovery.status') is not null group by 1`).all() as Array<{ status: string; count: number }>, row => ['scheduled', 'submitting', 'submitted', 'blocked', 'stalled'].includes(row.status) && integer(row.count), report, 'continuations');
   return { window_days: 14, counts_by_status: counts, failed: counts.failed ?? 0,
     blocked: rows.filter(r => r.block_code !== null || r.status === 'deferred').length,
     continuation_counts_by_status: Object.fromEntries(continuation.map(r => [r.status, r.count])), recent: rows.slice(0, 100) };
 }
 
-function readGrants(db: Database.Database, now: number) {
+function readGrants(db: Database.Database, now: number, report: ReportInvalid) {
+  const json = "case when json_valid(g.definition_json) then g.definition_json else '{}' end";
   // Scope, provenance, launch prompts and use details are deliberately not selected.
   const items = db.prepare(`select g.id,
-    case when g.status='active' and json_extract(g.definition_json,'$.expiry.kind')='assignment_finished'
+    case when g.status='active' and json_extract(${json},'$.expiry.kind')='assignment_finished'
       and (a.id is null or a.status='finished') then 'expired' else g.status end as status,
-    g.created_at,json_extract(g.definition_json,'$.grantee.kind') as grantee_kind,
-    json_extract(g.definition_json,'$.grantee.id') as grantee_id,json_extract(g.definition_json,'$.actions') as actions,
-    json_extract(g.definition_json,'$.projectSlugs') as projects,max(u.timestamp) as last_used_at,count(u.id) as use_count
+    g.created_at,json_extract(${json},'$.grantee.kind') as grantee_kind,
+    json_extract(${json},'$.grantee.id') as grantee_id,json_extract(${json},'$.actions') as actions,
+    json_extract(${json},'$.projectSlugs') as projects,max(u.timestamp) as last_used_at,count(u.id) as use_count
     from agent_grants g left join coordination_assignments a
-      on a.id=coalesce(json_extract(g.definition_json,'$.expiry.assignmentId'),g.created_by_assignment_id)
+      on a.id=coalesce(json_extract(${json},'$.expiry.assignmentId'),g.created_by_assignment_id)
     left join agent_grant_uses u on u.grant_id=g.id group by g.id order by g.created_at desc,g.id`).all() as Array<{ id: string; status: string; created_at: string; grantee_kind: string; grantee_id: string;
       actions: string; projects: string; last_used_at: string | null; use_count: number }>;
+  const parsed = items.flatMap(row => {
+    try {
+      const actions: unknown = JSON.parse(row.actions), projects: unknown = JSON.parse(row.projects);
+      if (!nonempty(row.id) || !['pending', 'active', 'denied', 'expired', 'revoked'].includes(row.status) || !timestamp(row.created_at)
+        || !nonempty(row.grantee_kind) || !nonempty(row.grantee_id) || !integer(row.use_count)
+        || !(row.last_used_at === null || timestamp(row.last_used_at))
+        || !Array.isArray(actions) || !actions.every(nonempty) || !Array.isArray(projects) || !projects.every(nonempty)) return [];
+      return [{ ...row, actions: actions as string[], projects: projects as string[] }];
+    } catch { return []; }
+  });
+  if (parsed.length !== items.length) report('grants', items.length - parsed.length);
   const countByStatus: Record<string, number> = {};
-  for (const row of items) countByStatus[row.status] = (countByStatus[row.status] ?? 0) + 1;
+  for (const row of parsed) countByStatus[row.status] = (countByStatus[row.status] ?? 0) + 1;
   return { active_count: countByStatus.active ?? 0,
-    in_use_count: items.filter(r => r.status === 'active' && r.last_used_at !== null
+    in_use_count: parsed.filter(r => r.status === 'active' && r.last_used_at !== null
       && r.last_used_at >= iso(now - 14 * DAY) && r.last_used_at <= iso(now)).length,
     uses_14d: count(db, 'select count(*) as n from agent_grant_uses where timestamp>=? and timestamp<=?', iso(now - 14 * DAY), iso(now)),
-    count_by_status: countByStatus, items: items.map(row => ({ ...row, actions: JSON.parse(row.actions) as string[], projects: JSON.parse(row.projects) as string[] })) };
+    count_by_status: countByStatus, items: parsed };
 }
 
 interface WikiPage {
-  repository: string; title: string; revision: number; author: string; updated_at: string;
-  source_checkout: string; source_branch: string | null; source_commit: string | null;
+  repository: string; title: string; revision: number; author: string | null; updated_at: string;
+  source_checkout: string | null; source_branch: string | null; source_commit: string | null;
 }
-function readWiki(db: Database.Database, options: SummaryOptions) {
+function readWiki(db: Database.Database, options: SummaryOptions, report: ReportInvalid) {
   const git = options.git ?? ((repository, args) => execFileSync('git', ['--git-dir', repository, ...args],
     { encoding: 'utf8', timeout: 1500, maxBuffer: 64 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).trim());
-  const rows = db.prepare(`select p.repository,p.title,p.current_revision as revision,r.author,p.updated_at,
+  const rows = validRows(db.prepare(`select p.repository,p.title,p.current_revision as revision,r.id as source_revision,r.author,p.updated_at,
       r.checkout as source_checkout,r.branch as source_branch,r.head_commit as source_commit
-    from wiki_pages p join wiki_revisions r on r.id=p.current_revision order by p.repository,p.title_key`).all() as WikiPage[];
+    from wiki_pages p left join wiki_revisions r on r.id=p.current_revision order by p.repository,p.title_key`).all() as Array<WikiPage & { source_revision: number | null }>, row => row.source_revision === row.revision && nonempty(row.repository) && text(row.title) && integer(row.revision, 1)
+      && nullableText(row.author) && timestamp(row.updated_at) && nullableText(row.source_checkout)
+      && nullableText(row.source_branch) && nullableText(row.source_commit), report, 'wiki_pages').map(({ source_revision: _sourceRevision, ...row }) => row);
   const readCounts = db.prepare(`select x.repository,count(*) as other_author_reads,count(distinct x.actor) as other_reader_assignments
     from wiki_access x join wiki_revisions r on r.id=x.revision and r.repository=x.repository
     where x.action='read' and x.result_count>0 and x.actor!=r.author and (x.actor like 'codex:%' or x.actor like 'claude:%')
@@ -223,9 +265,9 @@ function readWiki(db: Database.Database, options: SummaryOptions) {
     join (select repository,title_key,min(id) as first_id from wiki_revisions group by repository,title_key) f
       on f.repository=r.repository and f.title_key=r.title_key join wiki_revisions first on first.id=f.first_id
     where r.author!=first.author and (r.author like 'codex:%' or r.author like 'claude:%') group by r.repository`).all() as Array<{ repository: string; external_contributions: number }>;
-  const repos = db.prepare(`select p.repository,count(*) as pages,
+  const repos = validRows(db.prepare(`select p.repository,count(*) as pages,
     (select count(*) from wiki_revisions r where r.repository=p.repository) as revisions
-    from wiki_pages p group by p.repository order by p.repository`).all() as Array<{ repository: string; pages: number; revisions: number }>;
+    from wiki_pages p group by p.repository order by p.repository`).all() as Array<{ repository: string; pages: number; revisions: number }>, row => nonempty(row.repository) && integer(row.pages) && integer(row.revisions), report, 'wiki_repositories');
   const repositories = repos.map(r => ({ ...r,
     other_author_reads: readCounts.find(c => c.repository === r.repository)?.other_author_reads ?? 0,
     other_reader_assignments: readCounts.find(c => c.repository === r.repository)?.other_reader_assignments ?? 0,
@@ -266,8 +308,8 @@ function readWiki(db: Database.Database, options: SummaryOptions) {
     external_contributions: contributions.reduce((n, r) => n + r.external_contributions, 0),
     reads_without_revision: count(db, "select count(*) as n from wiki_access where action='read' and result_count>0 and revision is null"),
   };
-  const misses = db.prepare(`select min(id) as id,repository,query,count(*) as count,max(created_at) as last_at from wiki_access
-    where action='search' and result_count=0 and query is not null group by repository,query order by last_at desc,repository,query`).all() as Array<{ id: number; repository: string; query: string; count: number; last_at: string }>;
+  const misses = validRows(db.prepare(`select min(id) as id,repository,query,count(*) as count,max(created_at) as last_at from wiki_access
+    where action='search' and result_count=0 and query is not null group by repository,query order by last_at desc,repository,query`).all() as Array<{ id: number; repository: string; query: string; count: number; last_at: string }>, row => integer(row.id, 1) && nonempty(row.repository) && text(row.query) && integer(row.count, 1) && timestamp(row.last_at), report, 'wiki_searches');
   return { totals, repositories, no_result_searches: misses, pages,
     stale_after_commits: 20,
     adoption: { reassess_at: '2026-10-15', targets: { other_author_reads: 5, other_reader_assignments: 3, external_contributions: 1 },
@@ -291,10 +333,12 @@ export function engineeringSummary(options: SummaryOptions) {
     const rawCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'READ_FAILED';
     // Do not echo driver errors: malformed config/SQL can carry private values.
     const issue = { source, code: `${stage}:${READ_ERROR_CODES.has(rawCode) ? rawCode : 'READ_FAILED'}`,
-      message: stage === 'ownership' ? 'A verified live provider process has no readable checkout; ownership evidence is incomplete.'
+      message: rawCode === 'INVALID_ITEM' ? `${Number((error as { count: number }).count)} malformed ${stage} records were omitted; valid records remain visible${source === 'console' ? ' and ownership evidence is incomplete' : ''}.`
+        : stage === 'ownership' ? 'A verified live provider process has no readable checkout; ownership evidence is incomplete.'
         : `${stage} could not be read. Check the source path, permissions and schema; this section is unavailable.` };
     issues.push(issue); sources[source].issues.push(issue);
   };
+  const report = (source: keyof typeof sources): ReportInvalid => (stage, omitted) => failed(source, stage, { code: 'INVALID_ITEM', count: omitted });
   let configuredProjects: string[] = [];
   try { configuredProjects = readConfiguredProjects(options.config ?? process.env.AGENT_CONSOLE_CONFIG ?? '~/.config/agent-console/config.json'); }
   catch (error) { failed('projects', 'projects', error); sources.projects.status = 'error'; }
@@ -315,21 +359,21 @@ export function engineeringSummary(options: SummaryOptions) {
         for (const stage of ['assignments', 'messages', 'wakes', 'grants']) {
           try {
             if (stage === 'assignments') {
-              agents = readAssignments(db, options, now);
+              agents = readAssignments(db, options, now, report('console'));
               if (agents.assignments.some(a => a.live_process && !a.process_checkout && !a.process_unattributed)
                 || agents.sessions.some(s => s.live && !s.checkout && !s.unattributed)) {
                 failed(source, 'ownership', { code: 'PROCESS_CHECKOUT_UNAVAILABLE' });
               }
             }
             if (stage === 'messages') messages = readMessages(db, now);
-            if (stage === 'wakes') wakes = readWakes(db, now);
-            if (stage === 'grants') grants = readGrants(db, now);
+            if (stage === 'wakes') wakes = readWakes(db, now, report('console'));
+            if (stage === 'grants') grants = readGrants(db, now, report('console'));
             successes++;
           } catch (error) { failed(source, stage, error); }
         }
-        try { activity = readYesterdayActivity(db, now); }
+        try { activity = readYesterdayActivity(db, now, report('activity')); }
         catch (error) { failed('activity', 'activity', error); sources.activity.status = 'error'; }
-      } else { wiki = readWiki(db, options); successes++; }
+      } else { wiki = readWiki(db, options, report('wiki')); successes++; }
     } catch (error) {
       failed(source, source === 'console' ? 'open' : 'wiki', error);
       if (source === 'console') { failed('activity', 'open', error); sources.activity.status = 'error'; }
@@ -339,6 +383,7 @@ export function engineeringSummary(options: SummaryOptions) {
       sources[source].status = sources[source].issues.length ? (successes ? 'partial' : 'error') : 'ok';
     }
   }
+  if (activity && sources.activity.issues.length) sources.activity.status = 'partial';
   const status: Status = [sources.console, sources.wiki, sources.activity].every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
   const result = sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues, configured_projects: configuredProjects,
     agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null, unattributed_sessions: agents?.unattributed_sessions ?? null,
