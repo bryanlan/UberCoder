@@ -13,3 +13,4 @@ export function runSweep(options?: {
   onQuarantine?: (quarantinePath: string) => void;
 }): SweepReport;
 export function summarize(report: SweepReport): string;
+export function processStart(pid: number): string;

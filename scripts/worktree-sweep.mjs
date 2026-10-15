@@ -127,6 +127,7 @@ export function readConsoleSnapshot(databasePath) {
 }
 
 // Lists each announced checkout with its assignment and why that assignment may still use it.
+// `live` means its process runs now, or an open assignment recorded no process to check.
 function consoleOwners(snapshot) {
   const restorable = new Set();
   for (const binding of snapshot.bindings) {
@@ -136,12 +137,15 @@ function consoleOwners(snapshot) {
   const pending = new Map(snapshot.pendingBindings.map((row) => [row.assignmentId, row.bindingId]));
   const assignments = new Map(snapshot.assignments.map((assignment) => {
     const why = [];
-    if (assignment.status === 'active' || assignment.status === 'waiting') why.push(`assignment is ${assignment.status}`);
-    if (assignment.processStart && processStart(assignment.pid) === assignment.processStart) why.push('assignment process is running');
+    const open = assignment.status === 'active' || assignment.status === 'waiting';
+    const running = Boolean(assignment.processStart) && processStart(assignment.pid) === assignment.processStart;
+    if (open) why.push(`assignment is ${assignment.status}`);
+    if (running) why.push('assignment process is running');
     if (restorable.has(`${assignment.provider}:${assignment.nativeSessionId}`) || restorableIds.has(pending.get(assignment.id))) {
       why.push('Console can resume its session');
     }
-    return [assignment.id, { id: assignment.id, description: assignment.description, status: assignment.status, consumer: why }];
+    const live = running || (open && !assignment.processStart);
+    return [assignment.id, { id: assignment.id, description: assignment.description, status: assignment.status, consumer: why, live }];
   }));
   return snapshot.scopes.map((scope) => ({ checkout: realpathOrSelf(scope.checkout), assignment: assignments.get(scope.assignmentId) }))
     .filter((row) => row.assignment);
@@ -357,8 +361,11 @@ export function classify(facts, now, cooldownMs) {
   if (facts.locked) return { state: 'locked', action: 'none', reason: 'Parked with git worktree lock.' };
   if (QUARANTINE.test(path.basename(facts.path)) && !facts.ownQuarantine) return { state: 'quarantined', action: 'none', reason: 'Left by an interrupted sweep; the next applying sweep moves it back.' };
   if (facts.consumers.length) return { state: 'in-use', action: 'none', reason: facts.consumers.join('; ') };
-  if (now - facts.activityMs < cooldownMs) return { state: 'recent', action: 'none', reason: `Active within the last ${cooldownMs / HOUR}h.` };
+  const idle = now - facts.activityMs >= cooldownMs;
   const reclaim = facts.cacheRoots.length ? 'reclaim-cache' : 'none';
+  // A session Console could resume keeps its worktree; nothing runs there, so idle caches may go.
+  if (facts.resumers.length) return { state: 'resumable', action: idle ? reclaim : 'none', reason: `${facts.resumers.join('; ')}; no process runs in it.` };
+  if (!idle) return { state: 'recent', action: 'none', reason: `Active within the last ${cooldownMs / HOUR}h.` };
   if (facts.detached) return { state: 'detached', action: reclaim, reason: 'Detached HEAD; its commit may have no other reference.' };
   if (facts.operation) return { state: 'git-operation', action: reclaim, reason: `Git operation in progress (${facts.operation}).` };
   if (facts.privateState.length) return { state: 'private-git-state', action: reclaim, reason: `Worktree Git directory holds ${facts.privateState.join(', ')}.` };
@@ -387,12 +394,15 @@ function assess(options, repository, entry, signals, consolePath = entry.path) {
     return { path: entry.path, main: repository.main, branch: entry.branch, state: 'error', action: 'none', reason: String(error.stderr || error.message).trim().split('\n')[0] };
   }
   facts.consumers = [];
+  facts.resumers = [];
   facts.ownQuarantine = consolePath !== entry.path;
   const announced = signals.owners.filter((row) => row.worktree === consolePath);
   for (const row of announced) {
-    if (row.assignment.consumer.length) facts.consumers.push(`${row.assignment.consumer.join(', ')} (${row.assignment.id.slice(0, 8)} ${row.assignment.description.slice(0, 60)})`);
+    if (!row.assignment.consumer.length) continue;
+    (row.assignment.live ? facts.consumers : facts.resumers)
+      .push(`${row.assignment.consumer.join(', ')} (${row.assignment.id.slice(0, 8)} ${row.assignment.description.slice(0, 60)})`);
   }
-  facts.owner = !announced.length ? 'none' : facts.consumers.length ? 'consumer' : 'released';
+  facts.owner = !announced.length ? 'none' : facts.consumers.length || facts.resumers.length ? 'consumer' : 'released';
   facts.owners = announced.map((row) => ({ id: row.assignment.id, status: row.assignment.status, description: row.assignment.description }));
   const pids = [...new Set(signals.references.filter((ref) => ref.worktree === entry.path || ref.worktree === consolePath).map((ref) => ref.pid))];
   if (pids.length) facts.consumers.push(`process ${pids.slice(0, 5).join(', ')} references it`);

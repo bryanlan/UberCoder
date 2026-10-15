@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../src/db/schema.js';
-import { runSweep, SUPPORTED_SCHEMA_VERSIONS, type SweepReport, type WorktreeResult } from '../../../scripts/worktree-sweep.mjs';
+import { processStart, runSweep, SUPPORTED_SCHEMA_VERSIONS, type SweepReport, type WorktreeResult } from '../../../scripts/worktree-sweep.mjs';
 
 const HOUR = 3_600_000;
 const NOW = Date.now() + 48 * HOUR;
@@ -39,9 +39,9 @@ function cache(worktree: string, dir = 'target', tag = TAG) {
   write(path.join(worktree, dir, 'debug', 'big.bin'), 'b'.repeat(4096));
 }
 
-function announce(name: string, assignment: string, status: string, nativeSessionId = `native-${assignment}`) {
+function announce(name: string, assignment: string, status: string, nativeSessionId = `native-${assignment}`, pid = 0, start = '') {
   db.prepare('insert or ignore into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')
-    .run(assignment, 'codex', nativeSessionId, 'hash', `Lane ${name}`, status, 0, '', 'start', 'seen');
+    .run(assignment, 'codex', nativeSessionId, 'hash', `Lane ${name}`, status, pid, start, 'start', 'seen');
   db.prepare('insert into coordination_scopes values(?,?,?,?)').run(assignment, wt(name), path.join(repo, '.git'), 'work');
 }
 
@@ -87,9 +87,20 @@ beforeAll(() => {
   git(wt('hidden'), 'update-index', '--skip-worktree', 'a.txt');
 
   addWorktree('resumable', { commit: true }); announce('resumable', 'a-resumable', 'disconnected'); binding('b-resumable', 'old-ref', 'native-a-resumable');
+  cache(wt('resumable'));
   addWorktree('pending', { commit: true }); announce('pending', 'a-pending', 'disconnected', 'native-unknown');
   binding('b-pending', 'pending:b-pending', null, 'starting');
   db.prepare('insert into meta values(?,?)').run('console-session:a-pending', 'b-pending');
+  cache(wt('pending'));
+  fs.utimesSync(path.join(gitDir('pending'), 'index'), new Date(NOW - HOUR), new Date(NOW - HOUR));
+  // A running lane works from elsewhere; an open lane with no recorded process cannot be checked.
+  addWorktree('live-lane', { commit: true }); cache(wt('live-lane'));
+  const lanePid = sleeper!.pid!;
+  announce('live-lane', 'a-live-lane', 'active', 'native-a-live-lane', lanePid, processStart(lanePid));
+  binding('b-live-lane', 'native-a-live-lane', null);
+  addWorktree('open-unchecked', { commit: true }); cache(wt('open-unchecked'));
+  announce('open-unchecked', 'a-open-unchecked', 'waiting');
+  binding('b-open-unchecked', 'native-a-open-unchecked', null);
 
   addWorktree('dirty', { commit: true }); announce('dirty', 'a-dirty', 'finished');
   write(path.join(wt('dirty'), 'unsaved.rs'), 'fn main() {}');
@@ -152,7 +163,8 @@ describe('worktree sweep', () => {
     expect(states).toEqual({
       released: 'removable/remove', recent: 'recent/none', locked: 'locked/none', process: 'in-use/none',
       operation: 'git-operation/none', private: 'private-git-state/none', hidden: 'hidden-index/none',
-      resumable: 'in-use/none', pending: 'in-use/none', dirty: 'dirty/reclaim-cache', evidence: 'local-files/reclaim-cache',
+      resumable: 'resumable/reclaim-cache', pending: 'resumable/none', 'live-lane': 'in-use/none', 'open-unchecked': 'in-use/none',
+      dirty: 'dirty/reclaim-cache', evidence: 'local-files/reclaim-cache',
       badtag: 'local-files/none', 'tracked-cache': 'dirty/none', reflog: 'reflog-only-commits/none',
       'unannounced-unique': 'unreleased/none', 'unannounced-merged': 'removable/remove', detached: 'detached/none',
       elsewhere: 'unmanaged/none', 'cache-note': 'dirty/none', exe: 'in-use/none',
@@ -179,13 +191,18 @@ describe('worktree sweep', () => {
     expect(report.get('evidence')?.outcome).toBe('reclaimed target');
     expect(fs.readFileSync(path.join(wt('evidence'), 'var', 'review.txt'), 'utf8')).toBe('evidence');
 
+    expect(report.get('resumable')?.outcome).toBe('reclaimed target');
+    expect(fs.existsSync(path.join(wt('resumable'), 'target'))).toBe(false);
+    expect(fs.existsSync(path.join(wt('resumable'), 'resumable.txt'))).toBe(true);
+    for (const name of ['pending', 'live-lane', 'open-unchecked']) expect(fs.existsSync(path.join(wt(name), 'target', 'debug', 'big.bin')), name).toBe(true);
+
     expect(report.get('tracked-cache')?.outcome).toBeUndefined();
     expect(fs.readFileSync(path.join(wt('tracked-cache'), 'target', 'keep.txt'), 'utf8')).toBe('tracked');
     expect(fs.existsSync(path.join(wt('badtag'), 'target', 'debug', 'big.bin'))).toBe(true);
     expect(fs.readFileSync(path.join(wt('cache-note'), 'target', 'notes.txt'), 'utf8')).toBe('notes');
     expect(fs.existsSync(path.join(wt('exe'), 'target', 'debug', 'sleeper'))).toBe(true);
 
-    for (const name of ['recent', 'locked', 'process', 'operation', 'private', 'hidden', 'resumable', 'pending', 'reflog', 'unannounced-unique', 'detached']) {
+    for (const name of ['recent', 'locked', 'process', 'operation', 'private', 'hidden', 'pending', 'live-lane', 'open-unchecked', 'reflog', 'unannounced-unique', 'detached']) {
       expect(fs.existsSync(wt(name)), name).toBe(true);
       expect(report.get(name)?.outcome, name).toBeUndefined();
     }
