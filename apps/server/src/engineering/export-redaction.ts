@@ -24,12 +24,15 @@ export function isPathIdentifier(value: string, allowName = false): boolean {
     && fullMatch(pathIdentifier, value) && Array.from(value).length <= contract.max_export_text_length);
 }
 
-function isMetadata(value: string, field: string): boolean {
+function isMetadata(value: string, field: string, context?: Record<string, unknown>): boolean {
   if (freeTextFields.has(field)) return false;
   if (identifierFields.has(field) && (fullMatch(identifier, value) || fullMatch(uuid, value)
     || prefixedIdentifiers.some(pattern => fullMatch(pattern, value)))) return true;
   const fieldPattern = fieldIdentifiers.get(field);
   if (fieldPattern && fullMatch(fieldPattern, value)) return true;
+  if (context && contract.conditional_path_fields.some(rule => rule.field === field
+    && Object.entries(rule.when).every(([key, expected]) => context[key] === expected)
+    && (!rule.absolute || value.startsWith('/')) && isPathIdentifier(value))) return true;
   return pathFields.has(field) && isPathIdentifier(value, repoIdentifierFields.has(field));
 }
 
@@ -62,21 +65,21 @@ export function redactText(value: string, allowedIdentifiers: ReadonlySet<string
 /** Redact values only. Owners validate structural and identifier-map keys. */
 export function sanitizeExport<T>(value: T): T {
   const allowed = new Set<string>();
-  function collect(item: unknown, field = ''): void {
+  function collect(item: unknown, field = '', context?: Record<string, unknown>): void {
     if (typeof item === 'string') {
-      if (isMetadata(item, field)) {
+      if (isMetadata(item, field, context)) {
         allowed.add(item);
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }
     } else if (Array.isArray(item)) {
       for (const child of item) collect(child, field);
     } else if (item && typeof item === 'object') {
-      for (const [key, child] of Object.entries(item)) collect(child, key);
+      for (const [key, child] of Object.entries(item)) collect(child, key, item as Record<string, unknown>);
     }
   }
-  function walk(item: unknown, field = '', fieldPath: readonly string[] = []): unknown {
+  function walk(item: unknown, field = '', fieldPath: readonly string[] = [], context?: Record<string, unknown>): unknown {
     const publicValue = typeof item === 'string' && (publicValues[field] ?? []).includes(item);
-    if (typeof item === 'string' && (publicValue || isMetadata(item, field))) return item;
+    if (typeof item === 'string' && (publicValue || isMetadata(item, field, context))) return item;
     if (fullMatch(sensitiveKey, field) && !publicFields.has(field) && !publicValue) return '[credential omitted]';
     if (typeof item === 'string') {
       return Array.from(redactText(item, allowed)).slice(0, contract.max_export_text_length).join('');
@@ -87,7 +90,7 @@ export function sanitizeExport<T>(value: T): T {
         && path.every((part, index) => part === fieldPath[fieldPath.length - path.length + index]));
       return Object.fromEntries(Object.entries(item).map(([key, child]) => [key,
         countMap && typeof child === 'number' && Number.isSafeInteger(child) && child >= 0
-          ? child : walk(child, key, [...fieldPath, key])]),
+          ? child : walk(child, key, [...fieldPath, key], item as Record<string, unknown>)]),
       );
     }
     return item;

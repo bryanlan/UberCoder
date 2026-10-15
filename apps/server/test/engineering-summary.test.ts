@@ -563,7 +563,7 @@ it('redacts every pinned provider vector through all permitted exporter text fie
 
 it('redacts CLI, environment and HTTP credentials through the complete source CLI output', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
-  const cases = redactionContract.cases.filter(vector => vector.input.includes('shortpass') || vector.input.startsWith('glpat-'));
+  const cases = redactionContract.cases.filter(vector => vector.input.includes('shortpass') || vector.input.startsWith('glpat-') || ('matched' in vector && typeof vector.matched === 'string'));
   expect(cases.some(vector => vector.input.startsWith('redis-cli -a'))).toBe(true);
   expect(cases.some(vector => vector.input.startsWith('mysql -p'))).toBe(true);
   expect(cases.some(vector => vector.input.startsWith('machine '))).toBe(true);
