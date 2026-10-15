@@ -3,6 +3,16 @@
   "sensitive_key": "^[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd|passphrase)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
   "rules": [
     {
+      "pattern": "^.*(?:^|[ \\t/\"'])sqlplus(?:\\.exe)?(?=[\"']?[ \\t]|$)[^\\r\\n]*[ \\t][\"']?(?:[A-Za-z0-9_$#][A-Za-z0-9_$#.-]*|\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\")/(?:\\\\?\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\\\\?\"|'(?:\\\\[^\\r\\n]|[^'\\\\\\r\\n])+'|[^\\s/@'\"<>\\\\]+)[^\\r\\n]*$",
+      "flags": "im",
+      "replacement": "[credential-bearing line omitted]"
+    },
+    {
+      "pattern": "^[ \\t]*(?:SQL>[ \\t]*)?CONN(?:ECT)?[ \\t]+[\"']?(?:[A-Za-z0-9_$#][A-Za-z0-9_$#.-]*|\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\")/(?:\\\\?\"(?:\\\\[^\\r\\n]|[^\"\\\\\\r\\n])+\\\\?\"|'(?:\\\\[^\\r\\n]|[^'\\\\\\r\\n])+'|[^\\s/@'\"<>\\\\]+)[^\\r\\n]*$",
+      "flags": "im",
+      "replacement": "[credential-bearing line omitted]"
+    },
+    {
       "pattern": "^[ \\t]*(?:user|proxy\\-user|proxy\\-pass|pass|key|proxy\\-key|oauth2\\-bearer|tlsuser|tlspassword|proxy\\-tlsuser|proxy\\-tlspassword|ftp\\-account|login\\-options|mail\\-auth|cookie|cert|proxy\\-cert)[ \\t]*(?:[=:][ \\t]*|[ \\t]+)(?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[ \\t]*$",
       "flags": "im",
       "replacement": "[credential-bearing line omitted]"
@@ -782,6 +792,93 @@
     {
       "input": "mariadb-hotcopy -pshortpass appdb /backup",
       "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "sqlplus app/shortpass@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sqlplus -L -S 'app/shortpass@//db.example:1521/service' @report.sql",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sqlplus \"app/shortpass@DB\"",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "\"/opt/oracle/bin/sqlplus\" -S app/shortpass@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "SQLPLUS.EXE app/shortpass",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "CONNECT app/shortpass@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "SQL> conn app/shortpass@DB AS SYSDBA",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "connect app/\"shortpass@x\"@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "connect \"App User\"/\"shortpass\"@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sqlplus app/\\\"shortpass@x\\\"@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "shortpass"
+    },
+    {
+      "input": "sqlplus app/q7x@DB",
+      "expected": "[credential-bearing line omitted]",
+      "matched": "q7x"
+    },
+    {
+      "input": "sqlplus /nolog @scripts/report.sql",
+      "expected": "sqlplus /nolog @scripts/report.sql"
+    },
+    {
+      "input": "sqlplus / AS SYSDBA",
+      "expected": "sqlplus / AS SYSDBA"
+    },
+    {
+      "input": "CONNECT /@DB",
+      "expected": "CONNECT /@DB"
+    },
+    {
+      "input": "CONNECT /repo/ordinary.sql",
+      "expected": "CONNECT /repo/ordinary.sql"
+    },
+    {
+      "input": "Review /repo/user/example@archive",
+      "expected": "Review /repo/user/example@archive"
+    },
+    {
+      "input": "sqlplus-not app/example@DB",
+      "expected": "sqlplus-not app/example@DB"
+    },
+    {
+      "input": "CONNECT database schema",
+      "expected": "CONNECT database schema"
+    },
+    {
+      "input": "sqlplus https://docs.example.com/guide",
+      "expected": "sqlplus [connection URL omitted]"
     }
   ],
   "object_cases": [
@@ -1323,6 +1420,18 @@
         "MariaDB hotcopy attached password"
       ],
       "url": "https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-hotcopy"
+    },
+    {
+      "formats": [
+        "SQL*Plus username/password logon and shell quoting"
+      ],
+      "url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/sqpug/starting-SQL-Plus.html"
+    },
+    {
+      "formats": [
+        "SQL*Plus CONNECT/CONN logon statement"
+      ],
+      "url": "https://docs.oracle.com/en/database/oracle/oracle-database/19/sqpug/CONNECT.html"
     }
   ],
   "provider_source": {
