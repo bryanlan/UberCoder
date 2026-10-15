@@ -6,7 +6,9 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it } from 'vitest';
-import { engineeringSummary, readProcessIdentity, safeText } from '../src/engineering/summary.js';
+import { engineeringSummary, readProcessIdentity } from '../src/engineering/summary.js';
+import { redactText } from '../src/engineering/export-redaction.js';
+import redactionContract from '../src/engineering/export_redaction.v1.json' with { type: 'json' };
 
 const roots: string[] = [];
 const now = Date.parse('2026-10-15T06:00:00Z');
@@ -149,9 +151,8 @@ it('compares wiki provenance against the actual repository HEAD using read-only 
 });
 
 it('scrubs common credential forms without removing useful topic words', () => {
-  expect(safeText('postgresql://user:pass@host/db token=hidden missing docs')).toBe('[credential-bearing line omitted]');
-  expect(safeText('Bearer abcdefghijklmnopqrst ghp_abcdefghijklmnopqrst')).not.toContain('abcdefghijkl');
-  expect(safeText('x'.repeat(200))).toHaveLength(160);
+  expect(redactText('postgresql://user:pass@host/db token=hidden missing docs')).toBe('[credential-bearing line omitted]');
+  expect(redactText('Bearer abcdefghijklmnopqrst ghp_abcdefghijklmnopqrst')).not.toContain('abcdefghijkl');
 });
 
 it('runs the source CLI without a backend and returns structured failures for operators', () => {
@@ -190,7 +191,7 @@ it('keeps a finished assignment live while its verified bound session is running
   expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, checkout: '/repo/wt' });
 });
 
-it('sanitizes wiki titles, descriptions, activity, map keys and failed database paths', () => {
+it('sanitizes wiki titles, descriptions, activity and failed database paths', () => {
   const options = fixture();
   const marker = 'SYNTHETIC_EXPORT_CREDENTIAL';
   const secret = `RESEND_API_KEY="${marker}"`;
@@ -265,3 +266,23 @@ it('resolves real live process subdirectories to their Git worktree root', async
     } finally { child.kill(); await once(child, 'exit'); }
   }
 });
+
+it('redacts credential-key spelling, quoting, separators and line breaks through every permitted summary field', () => {
+  const options = fixture();
+  const db = new Database(options.database), wiki = new Database(options.wikiDatabase);
+  const keys = redactionContract.property_keys;
+  const marker = 'synthetic_matrix_private_value';
+  let checked = 0;
+  try {
+    for (const key of keys) for (const quote of ['', "'", '"']) for (const separator of [':', '=']) for (const gap of [' ', '\n  ']) {
+      const text = `${quote}${key}${quote}${separator}${gap}"${marker}"`;
+      db.prepare('update coordination_assignments set description=?').run(text);
+      db.prepare('update coordination_scopes set summary=?').run(text);
+      wiki.prepare('update wiki_pages set title=?').run(text);
+      expect(JSON.stringify(engineeringSummary(options)), `${key}/${quote}/${separator}/${gap.includes('\n') ? 'next' : 'same'}`)
+        .not.toContain(marker);
+      checked++;
+    }
+    expect(checked).toBe(keys.length * 3 * 2 * 2);
+  } finally { db.close(); wiki.close(); }
+}, 30_000);

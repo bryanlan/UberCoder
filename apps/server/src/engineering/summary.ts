@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { redactText, sanitizeExport } from './export-redaction.js';
+import { sanitizeExport } from './export-redaction.js';
 
 type Status = 'ok' | 'partial' | 'error';
 interface Issue { source: string; code: string; message: string }
@@ -28,11 +28,6 @@ const READ_ERROR_CODES = new Set(['SQLITE_ERROR', 'SQLITE_CANTOPEN', 'SQLITE_BUS
 const iso = (n: number) => new Date(n).toISOString();
 const count = (db: Database.Database, sql: string, ...args: string[]) =>
   (db.prepare(sql).get(...args) as { n: number }).n;
-
-/** Cap permitted human text after redaction; the complete export is sanitized too. */
-export function safeText(value: string, limit = 160): string {
-  return redactText(value).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, limit);
-}
 
 export function readProcessIdentity(pid: number): ProcessIdentity | null {
   try {
@@ -71,7 +66,7 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
     from bound_sessions where status='bound' order by id`).all() as SessionRow[];
   const scopes = new Map<string, Scope[]>();
   for (const row of scopeRows) scopes.set(row.assignment_id, [...scopes.get(row.assignment_id) ?? [], {
-    checkout: row.checkout, repository: row.repository, summary: safeText(row.summary, 2000), updated_at: row.updated_at }]);
+    checkout: row.checkout, repository: row.repository, summary: row.summary, updated_at: row.updated_at }]);
   const sessions = sessionRows.map(s => {
     const owner = rows.find(a => a.provider === s.provider
       && (a.native_session_id === s.conversation_ref || a.native_session_id === s.resume_conversation_ref));
@@ -95,7 +90,7 @@ function readAssignments(db: Database.Database, options: SummaryOptions, now: nu
     const latestScope = assignmentScopes.filter(s => s.updated_at !== null)
       .sort((a, b) => b.updated_at!.localeCompare(a.updated_at!))[0]
       ?? (assignmentScopes.length === 1 ? assignmentScopes[0] : undefined);
-    return { id: row.id, provider: row.provider, description: safeText(row.description, 1000),
+    return { id: row.id, provider: row.provider, description: row.description,
       status: state, recorded_status: row.status, started_at: row.started_at, last_seen_at: row.last_seen_at,
       live_process: live, process_checkout: live ? p!.cwd : null,
       live_session: live || sessionIds.length > 0, session_ids: sessionIds, started_never_finished: neverFinished,
@@ -220,7 +215,7 @@ function readWiki(db: Database.Database, options: SummaryOptions) {
   };
   const misses = db.prepare(`select repository,query,count(*) as count,max(created_at) as last_at from wiki_access
     where action='search' and result_count=0 and query is not null group by repository,query order by last_at desc,repository,query`).all() as Array<{ repository: string; query: string; count: number; last_at: string }>;
-  return { totals, repositories, no_result_searches: misses.map(r => ({ ...r, query: safeText(r.query) })), pages,
+  return { totals, repositories, no_result_searches: misses, pages,
     stale_after_commits: 20,
     adoption: { reassess_at: '2026-10-15', targets: { other_author_reads: 5, other_reader_assignments: 3, external_contributions: 1 },
       observed: { other_author_reads: totals.other_author_reads, other_reader_assignments: totals.other_reader_assignments,
@@ -281,7 +276,16 @@ export function engineeringSummary(options: SummaryOptions) {
     }
   }
   const status: Status = Object.values(sources).every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
-  return sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues,
+  const result = sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues,
     agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null,
       messages, wakes, grants }, wiki });
+  // Analyze complete values and typed identifiers before applying narrower display limits.
+  const bounded = (value: string, limit: number) => value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, limit);
+  for (const assignment of result.agents.assignments ?? []) {
+    assignment.description = bounded(assignment.description, 1000);
+    assignment.activity_summary = bounded(assignment.activity_summary, 2000);
+    for (const scope of assignment.scopes) scope.summary = bounded(scope.summary, 2000);
+  }
+  for (const query of result.wiki?.no_result_searches ?? []) query.query = bounded(query.query, 160);
+  return result;
 }

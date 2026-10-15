@@ -102,7 +102,9 @@ Queries name their selected columns. Message bodies, provider prompts, auth stat
 wiki bodies/revision summaries and arbitrary JSON payloads are excluded.
 Descriptions are capped at 1,000 characters, and search topics at 160;
 the shared `export_redaction.v1.json` rules redact credentials, database URLs and
-database paths recursively across every exported field and map key. Output
+database paths and high-entropy credential candidates across exported values.
+Structural keys and validated identifier-map keys remain unchanged. Typed metadata
+identifiers are collected before scrubbing to preserve commit and session identity. Output
 remains internal operational metadata.
 
 ## Verification

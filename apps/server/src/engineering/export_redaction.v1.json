@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "sensitive_key": "(?:^|[_-])(?:authorization|api[_-]?key|password|passwd|secret|token|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|client[_-]?secret)$",
+  "sensitive_key": "^[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
   "rules": [
     {
       "pattern": "-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
@@ -8,22 +8,32 @@
       "replacement": "[private key omitted]"
     },
     {
-      "pattern": "\\b(?:postgres(?:ql)?|mysql|mariadb|sqlite|sqlserver|mssql|mongodb|redis|db)(?:\\+[a-z0-9_-]+)?://[^\\s\\\"'<>]+",
+      "pattern": "\\b[a-z][a-z0-9+.-]{0,30}://[^\\s\"'<>]+",
       "flags": "i",
-      "replacement": "[database URL omitted]"
+      "replacement": "[connection URL omitted]"
     },
     {
-      "pattern": "\\b[a-z][a-z0-9+.-]{0,30}://[^\\s/@]+:[^\\s/@]+@[^\\s\\\"'<>]+",
+      "pattern": "\\b[^\\s/:@]+:[^\\s/@]+@[^\\s\"'<>]+",
       "flags": "i",
-      "replacement": "[authenticated URL omitted]"
+      "replacement": "[authenticated connection omitted]"
     },
     {
-      "pattern": "^.*\\b[a-z0-9_-]*(?:authorization|api[_-]?key|password|passwd|secret|token|private[_-]?key)[\\\"']?\\s*[:=].*$",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=]\\s*(?:[+-][ \\t]*)?(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*').*$",
       "flags": "im",
       "replacement": "[credential-bearing line omitted]"
     },
     {
-      "pattern": "\\b(?:Bearer\\s+|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_./+=-]{16,}",
+      "pattern": "^.*\\b(?!(?:admission_tokens|assessed_head|assignment_id|author|author_assignment_id|authored|authored_enabled|cache_creation_tokens|cache_read_tokens|cache_write_input_tokens|cached_input_tokens|changed_files|checkout|commit_sha|current_head|current_tokens|cwd|file_path|grant_id|head|head_commit|id|input_tokens|interactive_sessions|interactive_tokens|latest_run_id|live_session|llm_total_tokens|max_event_admission_tokens|max_event_tokens|max_stage_raw_tokens|other_author_reads|output_tokens|override_id|parent_run_id|path|per_task_raw_token_budget|previous_tokens|process_checkout|remaining_admission_tokens|repo|repo_key|repo_path|result_sha|review_token|root_run_id|root_runs|run_id|run_record_path|scheduled_tokens|session_count|session_id|session_ids|session_started_at|sessions|source_assignment_id|source_commit|source_commit_sha|source_file|source_head|summary_path|token_budget|tokens_used|total_sessions|total_tokens)(?:\\\\?[\"'])?\\s*[:=])[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:\\\\?[\"'])?\\s*[:=][ \\t]*(?:\\r?\\n[+-]?[ \\t]*)?[^\\r\\n]*$",
+      "flags": "im",
+      "replacement": "[credential-bearing line omitted]"
+    },
+    {
+      "pattern": "\\b(?:Bearer\\s+|sk-|gh[pousr]_|github_pat_)[A-Za-z0-9_./+=-]{12,}",
+      "flags": "i",
+      "replacement": "[credential omitted]"
+    },
+    {
+      "pattern": "\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b|\\bxox[abp]-[A-Za-z0-9-]{10,}|\\beyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+){2}\\b",
       "flags": "i",
       "replacement": "[credential omitted]"
     },
@@ -52,27 +62,27 @@
     },
     {
       "input": "postgresql://user:sentinel_url_password@private-host/secret_database",
-      "expected": "[database URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "postgres://private-host/secret_database",
-      "expected": "[database URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "mysql+pymysql://private-host/secret_database",
-      "expected": "[database URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "sqlite:///private/state/secret.sqlite3",
-      "expected": "[database URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "mongodb+srv://private-host/secret_database",
-      "expected": "[database URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "https://user:sentinel_web_password@private-host/path",
-      "expected": "[authenticated URL omitted]"
+      "expected": "[connection URL omitted]"
     },
     {
       "input": "failed opening /private/state/secret.sqlite3",
@@ -100,7 +110,7 @@
     },
     {
       "input": "Review /repo/worktree and https://docs.example.com/guide",
-      "expected": "Review /repo/worktree and https://docs.example.com/guide"
+      "expected": "Review /repo/worktree and [connection URL omitted]"
     },
     {
       "input": "authorization=sentinel_auth_header",
@@ -109,6 +119,266 @@
     {
       "input": "Bearer sentinel/long+bearer==credential",
       "expected": "[credential omitted]"
+    },
+    {
+      "input": "{\n  \"RESEND_API_KEY\":\n    \"multiline_credential_sentinel\"\n}",
+      "expected": "{\n[credential-bearing line omitted]\n}"
+    },
+    {
+      "input": "+ \"RESEND_API_KEY\":\n+   \"diff_credential_sentinel\",",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "{\\\"RESEND_API_KEY\\\": \\\"escaped_credential_sentinel\\\"}",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "AWS_SECRET_ACCESS_KEY=aws_property_sentinel",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "AKIA0123456789ABCDEF",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "xoxb-123456789012-synthetic-token",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.signature_sentinel",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "0123456789abcdef0123456789abcdef",
+      "expected": "[high-entropy value omitted]"
+    },
+    {
+      "input": "QnJ5YW5TeW50aGV0aWNCYXNlNjRFbnRyb3B5U2VudGluZWw=",
+      "expected": "[high-entropy value omitted]"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "input": "01a13e61-b44e-7292-aa58-3b429c5ed251",
+      "expected": "01a13e61-b44e-7292-aa58-3b429c5ed251"
+    },
+    {
+      "input": "AWS_SECRET_ACCESS_KEY=\n  unquoted_credential_sentinel",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "+ AUTH:\n+   unquoted_auth_sentinel",
+      "expected": "[credential-bearing line omitted]"
     }
+  ],
+  "object_cases": [
+    {
+      "input": {
+        "open_by": {
+          "repo": {
+            "/repo/access_token": 1,
+            "/repo/a.db": 2,
+            "/repo/b.db": 3
+          }
+        }
+      },
+      "expected": {
+        "open_by": {
+          "repo": {
+            "/repo/access_token": 1,
+            "/repo/a.db": 2,
+            "/repo/b.db": 3
+          }
+        }
+      }
+    },
+    {
+      "input": {
+        "AWS_SECRET_ACCESS_KEY": "structured_credential_sentinel",
+        "nested": {
+          "password": 123456,
+          "total_tokens": 42,
+          "session_id": "fixture-session"
+        }
+      },
+      "expected": {
+        "AWS_SECRET_ACCESS_KEY": "[credential omitted]",
+        "nested": {
+          "password": "[credential omitted]",
+          "total_tokens": 42,
+          "session_id": "fixture-session"
+        }
+      }
+    },
+    {
+      "input": {
+        "head": "0123456789abcdef0123456789abcdef01234567",
+        "summary": "commit 0123456789abcdef0123456789abcdef01234567",
+        "repo_path": "/repo/a.db"
+      },
+      "expected": {
+        "head": "0123456789abcdef0123456789abcdef01234567",
+        "summary": "commit 0123456789abcdef0123456789abcdef01234567",
+        "repo_path": "/repo/a.db"
+      }
+    },
+    {
+      "input": {
+        "head_commit": "0123456789abcdef0123456789abcdef01234567",
+        "summary": "Head 0123456789abcdef0123456789abcdef01234567",
+        "auth": "account_oauth"
+      },
+      "expected": {
+        "head_commit": "0123456789abcdef0123456789abcdef01234567",
+        "summary": "Head 0123456789abcdef0123456789abcdef01234567",
+        "auth": "account_oauth"
+      }
+    },
+    {
+      "input": {
+        "interactive_sessions": 2,
+        "session_started_at": "2026-10-15T00:00:00Z",
+        "author_assignment_id": "01a13e61-b44e-7292-aa58-3b429c5ed251"
+      },
+      "expected": {
+        "interactive_sessions": 2,
+        "session_started_at": "2026-10-15T00:00:00Z",
+        "author_assignment_id": "01a13e61-b44e-7292-aa58-3b429c5ed251"
+      }
+    }
+  ],
+  "public_fields": [
+    "admission_tokens",
+    "assessed_head",
+    "assignment_id",
+    "author",
+    "author_assignment_id",
+    "authored",
+    "authored_enabled",
+    "cache_creation_tokens",
+    "cache_read_tokens",
+    "cache_write_input_tokens",
+    "cached_input_tokens",
+    "changed_files",
+    "checkout",
+    "commit_sha",
+    "current_head",
+    "current_tokens",
+    "cwd",
+    "file_path",
+    "grant_id",
+    "head",
+    "head_commit",
+    "id",
+    "input_tokens",
+    "interactive_sessions",
+    "interactive_tokens",
+    "latest_run_id",
+    "live_session",
+    "llm_total_tokens",
+    "max_event_admission_tokens",
+    "max_event_tokens",
+    "max_stage_raw_tokens",
+    "other_author_reads",
+    "output_tokens",
+    "override_id",
+    "parent_run_id",
+    "path",
+    "per_task_raw_token_budget",
+    "previous_tokens",
+    "process_checkout",
+    "remaining_admission_tokens",
+    "repo",
+    "repo_key",
+    "repo_path",
+    "result_sha",
+    "review_token",
+    "root_run_id",
+    "root_runs",
+    "run_id",
+    "run_record_path",
+    "scheduled_tokens",
+    "session_count",
+    "session_id",
+    "session_ids",
+    "session_started_at",
+    "sessions",
+    "source_assignment_id",
+    "source_commit",
+    "source_commit_sha",
+    "source_file",
+    "source_head",
+    "summary_path",
+    "token_budget",
+    "tokens_used",
+    "total_sessions",
+    "total_tokens"
+  ],
+  "public_values": {
+    "auth": [
+      "account_oauth"
+    ]
+  },
+  "identifier_fields": [
+    "id",
+    "assignment_id",
+    "session_id",
+    "session_ids",
+    "run_id",
+    "root_run_id",
+    "parent_run_id",
+    "latest_run_id",
+    "override_id",
+    "grant_id",
+    "author_assignment_id",
+    "source_assignment_id",
+    "head",
+    "assessed_head",
+    "current_head",
+    "result_sha",
+    "source_commit",
+    "source_head",
+    "head_commit",
+    "commit_sha",
+    "source_commit_sha"
+  ],
+  "path_fields": [
+    "path",
+    "repo",
+    "repo_path",
+    "checkout",
+    "process_checkout",
+    "changed_files",
+    "run_record_path",
+    "summary_path",
+    "file_path",
+    "repo_key",
+    "source_file",
+    "cwd"
+  ],
+  "entropy": {
+    "pattern": "(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])",
+    "minimum_bits_per_character": 3.5,
+    "replacement": "[high-entropy value omitted]"
+  },
+  "max_export_text_length": 4096,
+  "property_keys": [
+    "PASSWORD",
+    "PASSWD",
+    "DB_PASSWORD",
+    "API_KEY",
+    "api-key",
+    "RESEND_API_KEY",
+    "AWS_SECRET_ACCESS_KEY",
+    "ACCESS_KEY",
+    "CLIENT_SECRET",
+    "PRIVATE_KEY",
+    "CREDENTIAL",
+    "AUTH",
+    "SESSION",
+    "COOKIE",
+    "TOKEN"
   ]
 }

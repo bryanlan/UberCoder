@@ -5,8 +5,11 @@ import { redactText, sanitizeExport } from '../src/engineering/export-redaction.
 it.each(contract.cases)('applies shared export redaction: $input', ({ input, expected }) => {
   expect(redactText(input)).toBe(expected);
 });
-it('sanitizes nested objects, arrays, sensitive field values and free-text map keys', () => {
+it.each(contract.object_cases)('preserves identifiers and counts while masking structured credentials', ({ input, expected }) => {
+  expect(sanitizeExport(input)).toEqual(expected);
+});
+it('sanitizes arrays and nested sensitive fields while preserving public token counts', () => {
   expect(sanitizeExport({ title: 'postgres://private-host/db', nested: [{ RESEND_API_KEY: 'synthetic',
-    total_tokens: 4200, 'password=synthetic': 'safe' }] })).toEqual({ title: '[database URL omitted]',
-    nested: [{ RESEND_API_KEY: '[credential omitted]', total_tokens: 4200, '[credential-bearing line omitted]': 'safe' }] });
+    total_tokens: 4200 }] })).toEqual({ title: '[connection URL omitted]',
+    nested: [{ RESEND_API_KEY: '[credential omitted]', total_tokens: 4200 }] });
 });
