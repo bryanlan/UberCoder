@@ -189,6 +189,7 @@ type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
 
 const MIN_BRIDGE_HEIGHT_PX = 96;
 const MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.6;
+const MAX_MOBILE_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.3;
 const BRIDGE_HEIGHT_STORAGE_KEY = 'agent-console:live-bridge-height';
 
 function readStoredBridgeHeight(): number {
@@ -277,6 +278,7 @@ function LiveSessionInputBridge({
   visibleModel,
   modelProfileRequest,
   hasQueuedInput,
+  nativeSelectionActive,
 }: {
   csrfToken?: string;
   sessionId: string;
@@ -303,6 +305,7 @@ function LiveSessionInputBridge({
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
   hasQueuedInput: boolean;
+  nativeSelectionActive: boolean;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftText ?? '');
@@ -333,6 +336,7 @@ function LiveSessionInputBridge({
   const [imageSubmitError, setImageSubmitError] = useState<string>();
   const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
   const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  const hasNumericMenuDraft = nativeSelectionActive && /^\d{1,8}$/.test(draftText.trim());
 
   async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
     const targetSessionId = sessionId;
@@ -388,10 +392,15 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     resizeCleanupRef.current?.();
-    const nextHeight = clampBridgeHeight(bridgeHeightRef.current);
-    setBridgeHeight(nextHeight);
-    storeBridgeHeight(nextHeight);
-  }, [compact, sessionId]);
+    const updateViewportHeight = () => updateBridgeHeight(bridgeHeightRef.current);
+    updateViewportHeight();
+    window.addEventListener('resize', updateViewportHeight);
+    window.visualViewport?.addEventListener('resize', updateViewportHeight);
+    return () => {
+      window.removeEventListener('resize', updateViewportHeight);
+      window.visualViewport?.removeEventListener('resize', updateViewportHeight);
+    };
+  }, [compact, mobileCollapsible, sessionId]);
 
   useEffect(() => {
     if (!bridgeOpen) {
@@ -449,8 +458,8 @@ function LiveSessionInputBridge({
     }
   }, [bridgeText, textBypassEnabled]);
 
-  function queueKeystrokes(payload: SessionKeystrokeRequest): Promise<boolean> {
-    const withImages = payload.keys?.includes('Enter') && clipboardImages.items.length > 0;
+  function queueKeystrokes(payload: SessionKeystrokeRequest, attachImages = true): Promise<boolean> {
+    const withImages = attachImages && payload.keys?.includes('Enter') && clipboardImages.items.length > 0;
     if (withImages && !clipboardImages.ready) {
       setImageSubmitError('Wait for the images to upload, or retry/remove failed images before sending.');
       return Promise.resolve(false);
@@ -645,7 +654,7 @@ function LiveSessionInputBridge({
         ...(appendedText ? { text: appendedText } : {}),
         ...(extraKeys.length > 0 ? { keys: extraKeys } : {}),
         ...(submittedText ? { submittedText } : {}),
-      });
+      }, !hasNumericMenuDraft);
       if (!ok) {
         if (clearImmediately) {
           restoreDraftSubmitPreview(nextText);
@@ -745,7 +754,8 @@ function LiveSessionInputBridge({
       const submittedText = (bypassPreviewTextRef.current ?? '').trim();
       keepBypassSelectionPinnedRef.current = true;
       const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
-      const optimisticMessage = submittedText && !submittedText.startsWith('/') ? onLocalSubmittedText(sessionId, submittedText) : undefined;
+      const optimisticMessage = !nativeSelectionActive && submittedText && !submittedText.startsWith('/')
+        ? onLocalSubmittedText(sessionId, submittedText) : undefined;
       const restore = () => {
         restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
         if (optimisticMessage) {
@@ -764,7 +774,7 @@ function LiveSessionInputBridge({
           submittedText,
           ...(optimisticMessage ? { clientOptimisticMessageId: optimisticMessage.id } : {}),
         } : {}),
-      });
+      }, !nativeSelectionActive);
       if (!submitted) {
         restore();
       }
@@ -772,6 +782,18 @@ function LiveSessionInputBridge({
   }
 
   async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
+    // Keep held chat drafts separate from explicit numeric menu choices.
+    // Text Bypass retains its ordered flush and consumed-preview handling below.
+    if (source === 'button' && nativeSelectionActive && !textBypassEnabled) {
+      await runBridgeAction(async () => {
+        if (specialKey === 'Enter' && hasNumericMenuDraft) {
+          await syncDraftToRemote(['Enter'], { clearAfterSend: true });
+        } else {
+          await queueKeystrokes({ keys: [specialKey] }, false);
+        }
+      });
+      return;
+    }
     if (source === 'button') {
       if (specialKey === 'Enter') {
         if (textBypassEnabled) {
@@ -888,12 +910,15 @@ function LiveSessionInputBridge({
   }
 
   function clampBridgeHeight(nextHeight: number): number {
-    const viewportCap = Math.floor(window.innerHeight * MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO);
+    const viewportHeight = mobileCollapsible ? (window.visualViewport?.height ?? window.innerHeight) : window.innerHeight;
+    const viewportCap = Math.floor(viewportHeight * (mobileCollapsible
+      ? MAX_MOBILE_BRIDGE_HEIGHT_VIEWPORT_RATIO : MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO));
     return Math.max(MIN_BRIDGE_HEIGHT_PX, Math.min(viewportCap, Math.round(nextHeight)));
   }
 
   function updateBridgeHeight(nextHeight: number): void {
     const clampedHeight = clampBridgeHeight(nextHeight);
+    bridgeHeightRef.current = clampedHeight;
     setBridgeHeight(clampedHeight);
     storeBridgeHeight(clampedHeight);
   }
@@ -1007,19 +1032,30 @@ function LiveSessionInputBridge({
       {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', { showControlsToggle: true })}
       {bridgeOpen && (
         <div className={bridgeBodyClassName}>
-          <button
-            type="button"
-            aria-label="Resize live input bridge"
-            title="Drag to resize live input bridge"
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.currentTarget.setPointerCapture(event.pointerId);
-              beginBridgeResize(event.clientY);
-            }}
-            className="mb-3 flex h-4 w-full touch-none cursor-row-resize items-center justify-center rounded-xl text-slate-500 transition hover:text-slate-300"
-          >
-            <span className="h-1.5 w-16 rounded-full bg-slate-700/90" />
-          </button>
+          <div className="mb-3 flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Resize live input bridge"
+              title="Drag to resize live input bridge"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                beginBridgeResize(event.clientY);
+              }}
+              className="flex h-11 flex-1 touch-none cursor-row-resize items-center justify-center rounded-xl text-slate-500 transition hover:text-slate-300"
+            >
+              <span className="h-1.5 w-16 rounded-full bg-slate-700/90" />
+            </button>
+            <button
+              type="button"
+              aria-label="Reset input height"
+              disabled={bridgeHeight <= MIN_BRIDGE_HEIGHT_PX}
+              onClick={() => updateBridgeHeight(MIN_BRIDGE_HEIGHT_PX)}
+              className="h-11 touch-manipulation rounded-xl border border-slate-700 px-3 text-xs text-slate-300 disabled:opacity-50"
+            >
+              Smaller
+            </button>
+          </div>
           {(
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
               <div>
@@ -1222,7 +1258,7 @@ function LiveSessionInputBridge({
               'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
             )}
           />
-          {!mobileControlsHidden && (
+          {(!mobileControlsHidden || nativeSelectionActive) && (
             <div className="mt-3 flex flex-wrap gap-2">
               {specialKeyButtons.map((button) => (
                 <button
@@ -1370,11 +1406,12 @@ function screenHasInteractiveControlText(text: string): boolean {
     .filter(Boolean)
     .join('\n');
   return /Enter (?:select|default) · (?:s session · )?Esc back/i.test(normalized)
-    || /Enter to confirm · Esc to exit/i.test(normalized)
+    || /Enter to confirm · Esc to (?:exit|cancel)/i.test(normalized)
     || /Press enter to confirm or esc to go back/i.test(normalized)
     || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
     || /Esc to cancel · Tab to amend/i.test(normalized)
     || /Enter to select · .*Esc to cancel/i.test(normalized)
+    || /^Enter continue · Esc skip$/im.test(normalized)
     || /^\/[a-z][\w-]*\s+.+/im.test(normalized);
 }
 
@@ -1942,6 +1979,8 @@ export function ConversationPane({
           activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}
+          nativeSelectionActive={liveScreen?.inputActive === false
+            && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`)}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">

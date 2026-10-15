@@ -3,7 +3,7 @@ import type { BoundSession, ConversationSummary, ProjectSummary, ProviderId, Ses
 
 const rejection = 'Live session did not accept the typed text into its input buffer. The draft was not submitted.';
 
-async function openConversation(page: Page, provider: ProviderId, delivery: 'reject' | 'queue' = 'reject') {
+async function openConversation(page: Page, provider: ProviderId, delivery: 'reject' | 'queue' = 'reject', nativeMenu = false) {
   const stamp = new Date().toISOString();
   let session: BoundSession = {
     id: 'original-session', provider, projectSlug: 'demo', conversationRef: 'c1',
@@ -36,14 +36,15 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
   await page.route('**/api/sessions/*/screen**', route => {
     screenSessions.push(session.id);
     return route.fulfill({ json: { session, screen: {
-      content: 'Three background agents are building.', inputText: '', capturedAt: stamp,
+      content: nativeMenu ? 'Select model\n❯ 2. Opus 5.5\nEnter to confirm · Esc to cancel' : 'Three background agents are building.',
+      inputText: '', inputActive: !nativeMenu, capturedAt: stamp,
       status: provider === 'claude' ? '⏵⏵ bypass permissions on (shift+tab to cycle)' : 'gpt-6.1-sol · 80% left',
     } } });
   });
   await page.route('**/api/sessions/*/keys', async route => {
-    inputCalls.push({ sessionId: route.request().url().split('/').at(-2)!, body: route.request().postDataJSON() });
+    const body = route.request().postDataJSON() as SessionKeystrokeRequest;
+    inputCalls.push({ sessionId: route.request().url().split('/').at(-2)!, body });
     if (delivery === 'queue') {
-      const body = route.request().postDataJSON() as SessionKeystrokeRequest;
       if (!body.keys?.includes('Enter')) {
         await route.fulfill({ json: { session } });
         return;
@@ -53,6 +54,9 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
       session = { ...session, queuedInputs: [...session.queuedInputs ?? [], queuedInput], updatedAt: new Date(Date.now() + 1).toISOString() };
       await route.fulfill({ json: { session, queuedInput } });
       return;
+    }
+    if (nativeMenu && !body.text && !body.submittedText && !body.imageIds) {
+      return route.fulfill({ json: { session } });
     }
     await route.fulfill({ status: 409, json: { error: rejection } });
   });
@@ -167,4 +171,52 @@ test('Codex Rebind still replaces the session only when explicitly selected', as
   await expect.poll(() => calls.bindCalls).toEqual([{ force: true }]);
   await expect.poll(() => calls.screenSessions).toContain('replacement-session');
   expect(calls.inputCalls).toEqual([]);
+});
+
+test.describe('mobile live input', () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+
+  test('native menu buttons preserve a draft, and oversized input can shrink by touch', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('agent-console:live-bridge-height', '600'));
+    const calls = await openConversation(page, 'claude', 'reject', true);
+    await page.locator('aside').getByRole('link', { name: /Background build/ }).tap();
+    const textbox = page.getByRole('textbox');
+    const draft = 'Switching to Fable for the plan review';
+    await textbox.fill(draft);
+    const initialHeight = await textbox.evaluate(node => node.getBoundingClientRect().height);
+    expect(initialHeight).toBeLessThanOrEqual(844 * 0.3);
+    await page.getByRole('button', { name: '↓', exact: true }).tap();
+    await expect.poll(() => calls.inputCalls).toEqual([{ sessionId: 'original-session', body: { keys: ['Down'] } }]);
+    await page.getByRole('button', { name: 'Enter', exact: true }).tap();
+    await expect.poll(() => calls.inputCalls).toHaveLength(2);
+    expect(calls.inputCalls[1].body).toEqual({ keys: ['Enter'] });
+    await page.getByRole('button', { name: 'Esc', exact: true }).tap();
+    await expect.poll(() => calls.inputCalls).toHaveLength(3);
+    expect(calls.inputCalls[2].body).toEqual({ keys: ['Escape'] });
+    await expect(textbox).toHaveValue(draft);
+    await page.getByRole('button', { name: 'Reset input height' }).tap();
+    await expect(textbox).toHaveCSS('height', '96px');
+    await expect(textbox).toHaveValue(draft);
+    // Raw CDP touch drags suppress the next synthesized compatibility click
+    // even on plain HTML buttons. Verify the native reset tap before dragging.
+    const handle = page.getByRole('button', { name: 'Resize live input bridge' });
+    await handle.scrollIntoViewIfNeeded();
+    const handleBox = await handle.boundingBox();
+    expect(handleBox!.height).toBeGreaterThanOrEqual(44);
+    const cdp = await page.context().newCDPSession(page);
+    const point = { x: handleBox!.x + handleBox!.width / 2, y: handleBox!.y + handleBox!.height / 2 };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y - 80 }] });
+    await expect.poll(() => textbox.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(96);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y + 60 }] });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect.poll(() => page.evaluate(() => document.body.style.cursor)).toBe('');
+    await expect(textbox).toHaveCSS('height', '96px');
+    await cdp.detach();
+    await expect(textbox).toHaveValue(draft);
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('agent-console:live-bridge-height'))).toBe('96');
+    expect(calls.bindCalls).toEqual([]);
+    expect(calls.releaseCalls).toEqual([]);
+    await page.screenshot({ path: '/tmp/console-input-mobile-20261013.png', fullPage: true });
+  });
 });
