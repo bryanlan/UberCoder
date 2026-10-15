@@ -11,11 +11,12 @@ const pathIdentifier = /[a-z0-9_./ +@()\[\]-]+/i;
 const publicFields = new Set<string>(contract.public_fields);
 const identifierFields = new Set<string>(contract.identifier_fields);
 const pathFields = new Set<string>(contract.path_fields);
+const repoIdentifierFields = new Set<string>(contract.repo_identifier_fields);
 const publicValues: Record<string, readonly string[]> = contract.public_values;
 const fullMatch = (pattern: RegExp, value: string) => pattern.exec(value)?.[0] === value;
 
-export function isPathIdentifier(value: string): boolean {
-  return (value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value)) && fullMatch(pathIdentifier, value)
+export function isPathIdentifier(value: string, allowName = false): boolean {
+  return (allowName || value.includes('/') || /\.[a-z0-9]{1,8}$/i.test(value)) && fullMatch(pathIdentifier, value)
     && value.length <= contract.max_export_text_length;
 }
 
@@ -46,7 +47,7 @@ export function sanitizeExport<T>(value: T): T {
         allowed.add(item);
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }
-      if (pathFields.has(field) && isPathIdentifier(item)) {
+      if (pathFields.has(field) && isPathIdentifier(item, repoIdentifierFields.has(field))) {
         for (const match of item.matchAll(entropyPattern)) allowed.add(match[0]);
       }
     } else if (Array.isArray(item)) {
@@ -59,7 +60,7 @@ export function sanitizeExport<T>(value: T): T {
     const publicValue = typeof item === 'string' && (publicValues[field] ?? []).includes(item);
     if (fullMatch(sensitiveKey, field) && !publicFields.has(field) && !publicValue) return '[credential omitted]';
     if (typeof item === 'string') {
-      if (pathFields.has(field) && isPathIdentifier(item)) return item;
+      if (pathFields.has(field) && isPathIdentifier(item, repoIdentifierFields.has(field))) return item;
       return Array.from(redactText(item, allowed)).slice(0, contract.max_export_text_length).join('');
     }
     if (Array.isArray(item)) return item.map(child => walk(child, field));

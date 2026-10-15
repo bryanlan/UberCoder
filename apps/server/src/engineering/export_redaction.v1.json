@@ -3,6 +3,16 @@
   "sensitive_key": "^[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
   "rules": [
     {
+      "pattern": "^([ \\t]*)(?:[+-][ \\t]*)?(?:[\"'])?[a-z0-9_-]*(?:secret|token|passw(?:or)?d|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*(?:[\"'])?[ \\t]*[:=][ \\t]*[|>](?:[-+]?[1-9]?[-+]?)[ \\t]*(?:\\#[^\\r\\n]*)?(?:\\r?\\n(?:[+-]?\\1[ \\t]+[^\\r\\n]*|[ \\t]*(?=\\r?$)))*",
+      "flags": "im",
+      "replacement": "[credential block omitted]"
+    },
+    {
+      "pattern": "(?<![A-Za-z0-9_-])(?:AIza[A-Za-z0-9_-]{35}|ya29\\.[A-Za-z0-9._-]{12,}|SG\\.[A-Za-z0-9_-]{16,}\\.[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}|re_[A-Za-z0-9]{20,})(?![A-Za-z0-9_-])",
+      "flags": "i",
+      "replacement": "[credential omitted]"
+    },
+    {
       "pattern": "-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
       "flags": "is",
       "replacement": "[private key omitted]"
@@ -171,6 +181,62 @@
     {
       "input": "+ AUTH:\n+   unquoted_auth_sentinel",
       "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "password: |\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: |-\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: |+\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: |2-\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: >\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: >-\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: >+\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "password: >2-\n  short_scalar_sentinel\n  second_scalar_sentinel\nother: ordinary",
+      "expected": "[credential block omitted]\nother: ordinary"
+    },
+    {
+      "input": "outer:\n  PASSWORD: |-\n    short_scalar_sentinel\n\n    second_scalar_sentinel\n  other: ordinary",
+      "expected": "outer:\n[credential block omitted]\n  other: ordinary"
+    },
+    {
+      "input": "AIzaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbb-",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "ya29.aaaaaaaaaaaaaaaaaaaa",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "SG.aaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbb",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "sk_live_aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "[credential omitted]"
+    },
+    {
+      "input": "re_aaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "[credential omitted]"
     }
   ],
   "object_cases": [
@@ -257,6 +323,24 @@
         "run_id": "run_0123456789abcdef0123456789abcdef",
         "summary": "Run run_0123456789abcdef0123456789abcdef"
       }
+    },
+    {
+      "input": {
+        "repos": [
+          "waltium",
+          "path/name",
+          "/repo/a.db",
+          "/repo/b.db"
+        ]
+      },
+      "expected": {
+        "repos": [
+          "waltium",
+          "path/name",
+          "/repo/a.db",
+          "/repo/b.db"
+        ]
+      }
     }
   ],
   "public_fields": [
@@ -274,6 +358,8 @@
     "changed_files",
     "checkout",
     "commit_sha",
+    "common_dir",
+    "configured_projects",
     "current_head",
     "current_tokens",
     "cwd",
@@ -303,6 +389,7 @@
     "repo",
     "repo_key",
     "repo_path",
+    "repos",
     "result_sha",
     "review_token",
     "root_run_id",
@@ -368,10 +455,13 @@
     "file_path",
     "repo_key",
     "source_file",
-    "cwd"
+    "cwd",
+    "repos",
+    "configured_projects",
+    "common_dir"
   ],
   "entropy": {
-    "pattern": "(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])",
+    "pattern": "(?<![A-Za-z0-9_+/=-])[A-Za-z0-9_+/-]{32,}={0,2}(?![A-Za-z0-9_+/=-])",
     "minimum_bits_per_character": 3.5,
     "replacement": "[high-entropy value omitted]"
   },
@@ -395,5 +485,8 @@
   ],
   "identifier_patterns": [
     "run_[a-f0-9]{32}"
+  ],
+  "repo_identifier_fields": [
+    "repos"
   ]
 }
