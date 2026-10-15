@@ -329,7 +329,8 @@ export function inspectWorktree(repository, entry) {
   }
   facts.disposableRoots = [...roots.keys()];
   facts.cacheRoots = [...roots.values()].filter((root) => root.tagged).map((root) => root.path);
-  let activity = Math.max(mtimeMs(worktree), ...['HEAD', 'index', 'logs/HEAD'].map((name) => mtimeMs(path.join(gitDir, name))));
+  // The worktree root's own mtime is not a signal: deleting a top-level cache changes it.
+  let activity = Math.max(...['HEAD', 'index', 'logs/HEAD'].map((name) => mtimeMs(path.join(gitDir, name))));
   try { activity = Math.max(activity, Number(git(worktree, ['log', '-1', '--format=%ct', 'HEAD']).trim()) * 1000); } catch { /* unborn */ }
   for (const change of status.changed) activity = Math.max(activity, mtimeMs(path.join(worktree, change.file)));
   for (const cacheRoot of facts.cacheRoots) {

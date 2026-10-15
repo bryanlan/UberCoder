@@ -231,6 +231,27 @@ describe('worktree sweep', () => {
     expect(byName(sweep(false)).get('old-reflog')?.state).toBe('reflog-only-commits');
   });
 
+  it('reclaims every cache in a worktree at the real clock, ignoring its own deletions', () => {
+    const target = addWorktree('two-caches');
+    const old = new Date(Date.now() - 72 * HOUR);
+    write(path.join(target, '.gitignore'), 'target/\nvar/\n__pycache__/\n.tool-cache/\n');
+    execFileSync('git', ['-C', target, 'commit', '-qam', 'ignore tool cache'], { env: { ...gitEnv, GIT_COMMITTER_DATE: old.toISOString(), GIT_AUTHOR_DATE: old.toISOString() } });
+    write(path.join(target, 'unsaved.txt'));
+    cache(target, '.tool-cache');
+    cache(target);
+    const backdate = (entry: string) => {
+      const stat = fs.lstatSync(entry);
+      if (stat.isDirectory() && path.basename(entry) !== '.git') for (const child of fs.readdirSync(entry)) backdate(path.join(entry, child));
+      if (!stat.isSymbolicLink()) fs.utimesSync(entry, old, old);
+    };
+    backdate(target);
+    const gitDirectory = git(target, 'rev-parse', '--absolute-git-dir').trim();
+    for (const name of ['HEAD', 'index', 'logs/HEAD']) fs.utimesSync(path.join(gitDirectory, name), old, old);
+    const report = byName(runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, repoFilter: [repo] }));
+    expect(report.get('two-caches')?.outcome).toMatch(/^reclaimed (\.tool-cache, target|target, \.tool-cache)$/);
+    expect(fs.existsSync(path.join(target, 'unsaved.txt'))).toBe(true);
+  });
+
   it('moves a worktree stranded in quarantine by an interrupted sweep back to its path', () => {
     const target = addWorktree('stranded', { commit: true });
     // A live process now holds the recorded PID, but its start time differs: still stranded.
