@@ -98,9 +98,10 @@ configuration and `agents` and `wiki` are null.
   provenance, launch input or use-detail payload is selected.
 
 `wiki` contains page/revision/access totals, repository counts, cross-author reads,
-no-result search topics, page source provenance, and adoption targets from
+no-result search topics (with `id` from the minimum retained source access ID in each repository/query group), page source provenance, and adoption targets from
 [the wiki pilot](agent-wiki.md). Read comparisons join the exact returned revision
 to its author. Historical reads without revision remain an explicit unknown.
+Page `revision` is the actual current revision ID. Consumers identify rows by retained IDs rather than redacted titles or queries.
 Reader counts include Codex/Claude assignments, and global distinct reader counts
 are deduplicated across repositories. `external_contributions` counts revisions
 by an assignment other than the page's original author. These counts identify

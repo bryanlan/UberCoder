@@ -402,3 +402,24 @@ it('redacts a bare Google API key containing both URL-safe punctuation character
   expect(result).not.toContain('AbCdEfGhIjKlMnOpQ');
   expect(result).not.toContain('rStUvWxYz0123456');
 });
+
+
+it('retains source IDs when distinct wiki queries and titles redact to identical labels', () => {
+  const options = fixture(), wiki = new Database(options.wikiDatabase);
+  for (const [id, secret] of [[6, 'synthetic_wiki_first'], [7, 'synthetic_wiki_second']] as const) {
+    const title = `TOKEN="${secret}"`;
+    wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(id, '/repo/.git', 'codex:searcher', 'search', 0, stamp, null, title, null);
+    wiki.prepare('insert into wiki_pages values(?,?,?,?,?)').run('/repo/.git', `page-${id}`, title, id, stamp);
+    wiki.prepare('insert into wiki_revisions values(?,?,?,?,?,?,?,?,?,?,?)').run(id, '/repo/.git', `page-${id}`, title, 'PRIVATE_BODY', 'PRIVATE_SUMMARY', 'codex:author', '/repo/wt', 'main', 'source', stamp);
+  }
+  wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(8, '/repo/.git', 'codex:searcher', 'search', 0, stamp, null, 'TOKEN="synthetic_wiki_first"', null);
+  wiki.close();
+  const result = engineeringSummary(options), searches = result.wiki!.no_result_searches;
+  expect(searches.filter(s => [6, 7].includes(s.id)).map(s => s.id).sort()).toEqual([6, 7]);
+  expect(searches.find(s => s.id === 6)?.count).toBe(2);
+  expect(searches.find(s => s.id === 7)?.count).toBe(1);
+  expect(new Set(searches.map(s => s.id)).size).toBe(searches.length);
+  expect(new Set(result.wiki!.pages.map(p => p.revision)).size).toBe(3);
+  expect(result.wiki!.pages.filter(p => [6,7].includes(p.revision)).map(p => p.title)).toEqual(['[credential-bearing line omitted]', '[credential-bearing line omitted]']);
+  expect(JSON.stringify(result)).not.toContain('synthetic_wiki_');
+});

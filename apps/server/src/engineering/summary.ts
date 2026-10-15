@@ -266,8 +266,8 @@ function readWiki(db: Database.Database, options: SummaryOptions) {
     external_contributions: contributions.reduce((n, r) => n + r.external_contributions, 0),
     reads_without_revision: count(db, "select count(*) as n from wiki_access where action='read' and result_count>0 and revision is null"),
   };
-  const misses = db.prepare(`select repository,query,count(*) as count,max(created_at) as last_at from wiki_access
-    where action='search' and result_count=0 and query is not null group by repository,query order by last_at desc,repository,query`).all() as Array<{ repository: string; query: string; count: number; last_at: string }>;
+  const misses = db.prepare(`select min(id) as id,repository,query,count(*) as count,max(created_at) as last_at from wiki_access
+    where action='search' and result_count=0 and query is not null group by repository,query order by last_at desc,repository,query`).all() as Array<{ id: number; repository: string; query: string; count: number; last_at: string }>;
   return { totals, repositories, no_result_searches: misses, pages,
     stale_after_commits: 20,
     adoption: { reassess_at: '2026-10-15', targets: { other_author_reads: 5, other_reader_assignments: 3, external_contributions: 1 },
