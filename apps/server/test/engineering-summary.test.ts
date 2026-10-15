@@ -561,6 +561,10 @@ it('isolates malformed wake and grant records without discarding valid measureme
   expect(result.agents.wakes?.failed).toBe(1);
   expect(result.agents.grants?.items.map(g => g.id)).toEqual(['grant']);
   expect(result.sources.console.status).toBe('partial');
+  expect(result.sources.console.issues.filter(i => /^(wakes|grants):/.test(i.code))).toHaveLength(2);
+  expect(result.sources.console.issues.every(i => !i.message.includes('ownership evidence is incomplete'))).toBe(true);
+  expect(result.agents.assignments?.find(a => a.id === 'live')).toMatchObject({ live_process: true, process_checkout: '/repo/wt' });
+  expect(result.agents.sessions?.find(s => s.id === 'session-live')).toMatchObject({ live: true, checkout: '/repo/wt' });
   expect(JSON.stringify(result)).not.toContain('PRIVATE_BAD_');
 });
 

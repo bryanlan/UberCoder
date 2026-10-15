@@ -337,7 +337,7 @@ export function engineeringSummary(options: SummaryOptions) {
     const rawCode = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'READ_FAILED';
     // Do not echo driver errors: malformed config/SQL can carry private values.
     const issue = { source, code: `${stage}:${READ_ERROR_CODES.has(rawCode) ? rawCode : 'READ_FAILED'}`,
-      message: rawCode === 'INVALID_ITEM' ? `${Number((error as { count: number }).count)} malformed ${stage} records were omitted; valid records remain visible${source === 'console' ? ' and ownership evidence is incomplete' : ''}.`
+      message: rawCode === 'INVALID_ITEM' ? `${Number((error as { count: number }).count)} malformed ${stage} records were omitted; valid records remain visible${source === 'console' && ['assignments', 'sessions', 'scopes', 'ownership'].includes(stage) ? ' and ownership evidence is incomplete' : ''}.`
         : stage === 'ownership' ? 'A verified live provider process has no readable checkout; ownership evidence is incomplete.'
         : `${stage} could not be read. Check the source path, permissions and schema; this section is unavailable.` };
     issues.push(issue); sources[source].issues.push(issue);
