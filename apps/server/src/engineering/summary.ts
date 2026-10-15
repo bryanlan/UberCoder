@@ -190,7 +190,7 @@ function readWiki(db: Database.Database, options: SummaryOptions) {
       else if (!head) distance = { commits_behind: null, source_status: 'unavailable' };
       else {
         try {
-          const numbers = git(row.repository, ['rev-list', '--left-right', '--count', `${row.source_commit}...${head}`]).split(/\s+/).map(Number);
+          const numbers = git(row.repository, ['rev-list', '--left-right', '--count', '--end-of-options', `${row.source_commit}...${head}`]).split(/\s+/).map(Number);
           if (numbers.length !== 2 || numbers.some(n => !Number.isInteger(n) || n < 0)) throw new Error('Invalid Git distance.');
           distance = numbers[0]! > 0 ? { commits_behind: null, source_status: 'diverged' }
             : { commits_behind: numbers[1]!, source_status: numbers[1]! > 0 ? 'behind' : 'current' };
