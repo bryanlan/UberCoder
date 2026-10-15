@@ -1,5 +1,10 @@
 # Architecture
 ## System Overview
+Waltium Control reads assignment, messaging, grant and wiki metadata through the
+standalone [engineering summary](engineering-summary.md). It opens the existing
+SQLite files read-only and never starts or migrates the live backend. Source
+failures and unknown wiki provenance remain visible in its versioned JSON.
+
 Standing grants let agents launch and restart real Console sessions under Bryan's recorded authority.
 See [Agent grants](agent-grants.md) for creation, inheritance, the durable launch queue and native context.
 

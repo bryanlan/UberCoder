@@ -29,6 +29,12 @@
 
 ## Key Files
 
+- `apps/server/src/engineering/summary.ts` and `summary-cli.ts` — read-only Console
+  and wiki engineering metadata projection and standalone JSON CLI.
+- `apps/server/test/engineering-summary.test.ts` — private SQLite, privacy,
+  ownership, partial-source and real Git provenance checks.
+- `docs/engineering-summary.md` — invocation, version 1 output and metric limits.
+
 - `apps/server/src/grants/` — standing grants, human-message provenance, browser push,
   authenticated transport and durable launch/restart/owned-close actions.
 - `apps/web/src/pages/GrantsPage.tsx` and `apps/web/public/grant-push-sw.js` — grants,
