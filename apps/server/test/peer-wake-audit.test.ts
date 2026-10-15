@@ -2,11 +2,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { auditPeerWakes } from '../src/coordination/audit.js';
-import { peerWakeAttemptKey, peerWakeFollowupKey } from '../src/coordination/wake.js';
+import { peerWakeAttemptKey, peerWakeFollowupKey, setPeerWakePaused } from '../src/coordination/wake.js';
+import { WakeAlerts } from '../src/coordination/wake-alerts.js';
+import { GrantPushService } from '../src/grants/push.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 const now = Date.parse('2026-10-11T04:30:00Z');
@@ -41,6 +43,105 @@ async function fixture() {
   return { db, manager, service, session, sender, recipient, root, add };
 }
 describe('Peer wake audit', () => {
+  it('warns on a failed wake even when no native response turn ever started', async () => {
+    const f = await fixture(); f.add(now - 3 * minute, { failed: true });
+    const report = await auditPeerWakes(f.db.sqlite, { now });
+    expect(report.warnings).toMatchObject([{ kind: 'delivery', title: 'Peer wake is blocked', summary: expect.stringContaining('queue rejected') }]);
+    expect(report.counts.submittedWakes).toBe(0);
+  });
+
+  it('allows a fresh submission of an old queued message to finish before warning', async () => {
+    const f = await fixture(); f.add(now - 130 * minute);
+    const message = f.db.sqlite.prepare('select id from coordination_messages').get() as { id: string };
+    f.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({ sessionId: f.session.id, timestamp: new Date(now - 10_000).toISOString(), status: 'submitting' }));
+    expect((await auditPeerWakes(f.db.sqlite, { now })).warnings).toEqual([]);
+    expect((await auditPeerWakes(f.db.sqlite, { now: now + 21_000 })).warnings).toMatchObject([{ title: 'Peer wake is blocked' }]);
+  });
+
+  it('sends one browser alert for a failed message batch while retaining each audit warning', async () => {
+    const f = await fixture(); f.add(now - 3 * minute, { failed: true, batch: 8 });
+    const notify = vi.fn(async () => ({ subscriptions: 1, accepted: 1, failed: 0, acceptedEndpoints: ['desktop'] }));
+    const alerts = new WakeAlerts(f.db, notify);
+    await alerts.check(now);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect((await auditPeerWakes(f.db.sqlite, { now })).warnings).toHaveLength(8);
+    await new WakeAlerts(f.db, notify).check(now + minute);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains unread supervisor results and the exact pause reason after continuation changes and restart', async () => {
+    const f = await fixture();
+    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true });
+    const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
+    const handoff = JSON.parse(row.value);
+    const timestamp = new Date(now - 6 * minute).toISOString();
+    f.db.meta.set(row.key, JSON.stringify({ ...handoff, timestamp }));
+    f.db.sqlite.prepare('update coordination_messages set created_at=? where id=?').run(timestamp, handoff.messageId);
+    setPeerWakePaused(f.db, f.recipient, true, { sessionId: f.session.id, timestamp, code: 'native_cancellation', reason: 'The native provider cancelled turn proof-turn.' });
+    expect(f.service.send(f.sender, { id: handoff.messageId, recipientId: f.recipient,
+      text: 'A supervised worker has a result ready for review. Worker ' + f.sender + ': Assignment not yet described' }).note).toContain('cancelled turn proof-turn');
+    f.service.update(f.recipient, { continuation: 'waiting_for_input', status: 'waiting' });
+    f.db.sqlite.pragma('query_only=ON');
+    const report = await auditPeerWakes(f.db.sqlite, { now, hours: 1 });
+    expect(report.warnings).toMatchObject([{ key: `supervisor-results:${f.recipient}`, title: 'Supervisor has unread worker results',
+      summary: expect.stringContaining('cancelled turn proof-turn') }]);
+    expect(report.pauses).toMatchObject([{ assignmentId: f.recipient, code: 'native_cancellation', sessionId: f.session.id }]);
+    expect(JSON.stringify(report)).not.toContain('PRIVATE_PEER_TEXT');
+    f.db.sqlite.pragma('query_only=OFF');
+    const resumed = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    const inbox = resumed.poll(f.recipient, 0);
+    expect(inbox.messages.map(message => message.id)).toContain(handoff.messageId);
+    resumed.acknowledge(f.recipient, [handoff.messageId]);
+    expect((await auditPeerWakes(f.db.sqlite, { now })).warnings).toEqual([]);
+  });
+
+  it('pushes an overdue result once across backend restart, records delivery and retries an unavailable push', async () => {
+    const f = await fixture();
+    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true });
+    const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
+    f.db.meta.set(row.key, JSON.stringify({ ...JSON.parse(row.value), timestamp: new Date(now - 6 * minute).toISOString() }));
+    const send = vi.fn(async (_subscription: unknown, _payload?: string | Buffer | null) => ({ statusCode: 201, body: '', headers: {} }));
+    const push = new GrantPushService(f.db, 'https://console.example.test', send);
+    const alerts = () => new WakeAlerts(f.db, (warning, delivered) => push.wakeWarning(warning, delivered));
+    await alerts().check(now); // No subscription: retained audit, no claimed delivery.
+    expect(send).not.toHaveBeenCalled();
+    push.subscribe({ endpoint: 'https://push.example.test/fixture', keys: { auth: 'auth', p256dh: 'key' } });
+    await alerts().check(now + minute); expect(send).not.toHaveBeenCalled();
+    await alerts().check(now + 5 * minute); expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(send.mock.calls[0]![1]))).toMatchObject({ warningKey: `supervisor-results:${f.recipient}`, title: 'Supervisor has unread worker results' });
+    expect(JSON.parse(f.db.meta.get(`wake-push-delivery:supervisor-results:${f.recipient}`)!)).toMatchObject({ subscriptions: 1, accepted: 1, failed: 0 });
+    await alerts().check(now + 6 * minute); expect(send).toHaveBeenCalledTimes(1);
+    const inbox = f.service.poll(f.recipient, 0);
+    f.service.acknowledge(f.recipient, inbox.messages.map(message => message.id));
+    await alerts().check(now + 7 * minute);
+    expect(JSON.parse(f.db.meta.get(`wake-alert:supervisor-results:${f.recipient}`)!)).toMatchObject({ active: false });
+  });
+  it('retries failed devices across restart without repeating accepted pushes and forgets delivery after resolution', async () => {
+    const f = await fixture(); f.add(now - 3 * minute, { failed: true });
+    let phoneAvailable = false;
+    const send = vi.fn(async (subscription: { endpoint: string }) => {
+      if (subscription.endpoint.endsWith('/phone') && !phoneAvailable) throw { statusCode: 503 };
+      if (subscription.endpoint.endsWith('/expired')) throw { statusCode: 410 };
+      return { statusCode: 201, body: '', headers: {} };
+    });
+    const push = new GrantPushService(f.db, 'https://console.example.test', send);
+    for (const device of ['desktop', 'phone', 'expired']) push.subscribe({ endpoint: `https://push.example.test/${device}`, keys: { auth: 'auth', p256dh: 'key' } });
+    const check = (at: number) => new WakeAlerts(f.db, (warning, delivered) => push.wakeWarning(warning, delivered)).check(at);
+    await check(now);
+    await check(now + minute);
+    await check(now + 6 * minute);
+    expect(send.mock.calls.map(([sub]) => sub.endpoint.split('/').at(-1))).toEqual(['desktop', 'phone', 'expired', 'phone']);
+    phoneAvailable = true;
+    await check(now + 12 * minute);
+    await check(now + 18 * minute);
+    expect(send.mock.calls.map(([sub]) => sub.endpoint.split('/').at(-1))).toEqual(['desktop', 'phone', 'expired', 'phone', 'phone']);
+    const inbox = f.service.poll(f.recipient, 0);
+    f.service.acknowledge(f.recipient, inbox.messages.map(message => message.id));
+    await check(now + 19 * minute);
+    f.add(now + 17 * minute, { failed: true });
+    await check(now + 20 * minute);
+    expect(send.mock.calls.slice(-2).map(([sub]) => sub.endpoint.split('/').at(-1))).toEqual(['desktop', 'phone']);
+  });
   it('keeps both attempts and counts the acknowledgement once', async () => {
     const f = await fixture(); f.add(now - 5 * minute, { acknowledged: true });
     const message = f.db.sqlite.prepare('select id from coordination_messages').get() as { id: string };

@@ -105,6 +105,22 @@ describe('Explicit unattended continuation contract', () => {
     expect(continuationControl(f.db, f.worker.id).continuation).toBe('waiting_for_input');
   });
 
+  it('retains a supervisor handoff behind a full inbox and queues it when acknowledgements open space', () => {
+    const f = fixture();
+    for (let i = 0; i < 100; i++) f.service.send(f.worker.id, { id: randomUUID(), recipientId: f.parent.id, text: 'Existing peer result.' });
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, notifySupervisor: true });
+    const saved = f.db.sqlite.prepare("select value from meta where key like 'supervisor-handoff:%'").get() as { value: string };
+    const handoff = JSON.parse(saved.value);
+    expect(handoff.blockedReason).toContain('inbox is full');
+    expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(handoff.messageId)).toBeUndefined();
+    const inbox = f.service.poll(f.parent.id, 0);
+    f.service.acknowledge(f.parent.id, inbox.messages.map(message => message.id));
+    expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(handoff.messageId)).toEqual({ id: handoff.messageId });
+    f.service.reconcileProcesses();
+    expect(f.db.sqlite.prepare('select count(*) as n from coordination_messages where id=?').get(handoff.messageId)).toEqual({ n: 1 });
+    expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
+  });
+
   it('notifies the supervisor when the native SessionEnd hook disconnects an unattended worker', () => {
     const f = fixture(); f.service.update(f.parent.id, { continuation: 'unattended' });
     f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id });

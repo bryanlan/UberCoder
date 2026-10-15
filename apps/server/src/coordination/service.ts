@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
-import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, type PeerWakeAttempt } from './wake.js';
+import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
 import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { GRANT_POLICY } from '../grants/schema.js';
@@ -125,6 +125,7 @@ export class CoordinationService {
         if (continuationControl(this.db, row.id).continuation === 'unattended') this.notifySupervisor(row.id, 'An unattended supervised worker disconnected.');
       }
     })();
+    this.flushSupervisorHandoffs();
   }
 
   update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
@@ -220,15 +221,20 @@ export class CoordinationService {
     const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
-    if (peerWakePaused(this.db, assignment.id) && status !== 'working') return { id: message.id, queued: true, recipient, delivery: 'on_resume',
-      note: 'Queued, not received. Automatic input was paused by a human; peer wake resumes after the next accepted human turn.' };
+    if (peerWakePaused(this.db, assignment.id) && status !== 'working') {
+      const details = this.db.meta.get(peerWakePauseDetailsKey(assignment.id));
+      const reason = details ? (JSON.parse(details) as AutomaticInputPause).reason : 'The original pause reason was not captured.';
+      return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+        note: `Queued, not received. Automatic input is paused: ${reason} Peer wake resumes after the next accepted human turn.` };
+    }
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
     const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
     if (attemptText) {
       const attempt = JSON.parse(attemptText) as PeerWakeAttempt;
       return { id: message.id, queued: true, recipient,
-        delivery: attempt.status === 'submitted' ? 'wake_started' : 'wake_blocked',
+        delivery: attempt.status === 'submitted' ? 'wake_started' : attempt.status === 'deferred' ? 'wake_pending' : 'wake_blocked',
         note: attempt.status === 'submitted' ? 'A coordination response turn was started; receipt still requires acknowledgement.'
+          : attempt.status === 'deferred' ? `Wake deferred before submission: ${attempt.reason}. Console will recheck the delivery guards; the message remains queued.`
           : `Automatic wake was not confirmed and will not be replayed: ${attempt.reason ?? 'submission was interrupted'}. The message remains in the inbox.` };
     }
     if (this.requestWake && session && status !== 'working') {
@@ -270,6 +276,7 @@ export class CoordinationService {
         if (!result.changes) throw new Error('Only the recipient can acknowledge a supplied message.');
       }
     })();
+    this.flushSupervisorHandoffs();
     return { acknowledged: messages };
   }
 
@@ -386,8 +393,44 @@ export class CoordinationService {
     if (!control.supervisorId) return;
     const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')
       .get(id) as { seq: number };
-    signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id,
-      timestamp: new Date().toISOString(), reason: `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}` });
+    const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(control.supervisorId) as { status: string } | undefined;
+    if (!parent || parent.status === 'finished') return;
+    const key = `supervisor-handoff:${id}:${event.seq}:${reason}`;
+    if (!this.db.meta.get(key)) {
+      const messageId = randomUUID(), timestamp = new Date().toISOString();
+      const text = `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}`;
+      // A handoff needs an acknowledged inbox identity even when its parent is
+      // waiting_for_input. Continuation signals alone disappear on a pause.
+      const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null')
+        .get(control.supervisorId) as { n: number };
+      const blocked = count.n >= 100;
+      this.db.meta.set(key, JSON.stringify({ messageId, recipientId: control.supervisorId, workerId: id, timestamp, text,
+        ...(blocked ? { blockedReason: 'The supervisor inbox is full.' } : {}) }));
+      if (!blocked) {
+        this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
+          .run(messageId, id, control.supervisorId, text, timestamp);
+      }
+      signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: text });
+    }
     this.requestWake?.();
+  }
+
+  private flushSupervisorHandoffs(): void {
+    const rows = this.db.sqlite.prepare("select key,value from meta where key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null")
+      .all() as Array<{ key: string; value: string }>;
+    for (const row of rows) {
+      const handoff = JSON.parse(row.value) as { messageId: string; recipientId: string; workerId: string; timestamp: string; text: string; blockedReason?: string };
+      const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(handoff.recipientId) as { status: string } | undefined;
+      if (!parent || parent.status === 'finished') continue;
+      const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(handoff.recipientId) as { n: number };
+      if (count.n >= 100) continue;
+      this.db.sqlite.transaction(() => {
+        this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
+          .run(handoff.messageId, handoff.workerId, handoff.recipientId, handoff.text, handoff.timestamp);
+        delete handoff.blockedReason;
+        this.db.meta.set(row.key, JSON.stringify(handoff));
+      })();
+      this.requestWake?.();
+    }
   }
 }

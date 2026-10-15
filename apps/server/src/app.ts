@@ -26,6 +26,7 @@ import { SessionManager } from './sessions/session-manager.js';
 import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { GrantService } from './grants/service.js';
 import { GrantPushService } from './grants/push.js';
+import { WakeAlerts } from './coordination/wake-alerts.js';
 import { registerGrantRoutes } from './grants/transport.js';
 import { AgentSessionLaunches } from './grants/session-launches.js';
 import { LiveOutputReader } from './sessions/live-output/reader.js';
@@ -86,6 +87,7 @@ export async function buildApp(options: AppOptions = {}) {
   const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));
   const wakeAssignments = () => { void sessions.wakePendingAssignments().catch((error: unknown) => app.log.warn({ err: error }, 'Assignment continuation failed.')); };
   const grantPush = new GrantPushService(db, config.server.publicBaseUrl ?? `http://127.0.0.1:${config.server.port}`);
+  const wakeAlerts = new WakeAlerts(db, (warning, delivered) => grantPush.wakeWarning(warning, delivered));
   grants = new GrantService(db, eventBus, wakeAssignments, grant => grantPush.request(grant),
     (sessionId, provider, nativeSessionId) => { void sessions.adoptRegisteredSession(sessionId, provider, nativeSessionId).catch(error => app.log.warn({ err: error }, 'Registered session adoption deferred.')); },
     cwd => Object.entries(config.projects).filter(([, project]) => project.active)
@@ -180,7 +182,10 @@ export async function buildApp(options: AppOptions = {}) {
   const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki, grants, agentLaunches) : undefined;
   if (config.coordination.enabled) agentLaunches.start();
   const stopTelemetry = config.coordination.enabled ? startCoordinationTelemetry(config.runtimeDir) : undefined;
-  const coordinationTimer = config.coordination.enabled ? setInterval(() => { coordination.reconcileProcesses(); wakeAssignments(); }, 15_000) : undefined;
+  const coordinationTimer = config.coordination.enabled ? setInterval(() => {
+    coordination.reconcileProcesses(); wakeAssignments();
+    void wakeAlerts.check().catch(error => app.log.warn({ err: error }, 'Wake alert check failed; delivery guards remain unchanged.'));
+  }, 15_000) : undefined;
   coordinationTimer?.unref();
   const wikiBackupTimer = setInterval(() => { wiki.backup().catch((error) => app.log.warn({ err: error }, 'Wiki backup failed.')); }, 60 * 60 * 1000);
   wikiBackupTimer.unref();
@@ -202,6 +207,7 @@ export async function buildApp(options: AppOptions = {}) {
     await workers.stop();
     stopTelemetry?.();
     if (coordinationTimer) clearInterval(coordinationTimer);
+    await wakeAlerts.stop();
     clearInterval(wikiBackupTimer);
     await coordinationSocket?.close();
     await indexing.stop();

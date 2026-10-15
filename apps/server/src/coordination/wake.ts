@@ -13,20 +13,51 @@ export const UNATTENDED_CONTINUATION_PROMPT = '[Agent Console unattended continu
 export const peerWakeAttemptKey = (messageId: string) => `peer-wake-attempt:${messageId}`;
 export const peerWakeFollowupKey = (messageId: string) => `peer-wake-followup:${messageId}`;
 export const peerWakeRestoreKey = (sessionId: string) => `peer-wake-restore:${sessionId}`;
+export const peerWakeComposerKey = (sessionId: string) => `peer-wake-composer:${sessionId}`;
+export const peerWakePauseDetailsKey = (assignmentId: string) => `peer-wake-pause-details:${assignmentId}`;
+export interface AutomaticInputPause {
+  sessionId: string;
+  timestamp: string;
+  code: 'human_input' | 'human_keys' | 'human_stop' | 'native_cancellation' | 'manual_suspend' | 'release' | 'owned_close';
+  reason: string;
+}
+export interface WakeBlock {
+  code: string;
+  reason: string;
+  availableBytes?: number;
+  thresholdBytes?: number;
+}
+export interface PeerWakeComposer {
+  assignmentId: string;
+  pid: number;
+  startedAt: string;
+  timestamp: string;
+  status: 'staged' | 'submitting';
+  notice: 'peer' | 'unattended';
+  continuationRevision?: number;
+  messages: Array<{ id: string; key: string }>;
+}
 const peerWakePausedKey = (assignmentId: string) => `peer-wake-paused:${assignmentId}`;
 export const peerWakePaused = (db: AppDatabase, assignmentId: string): boolean => db.meta.get(peerWakePausedKey(assignmentId)) === 'true';
-export function setPeerWakePaused(db: AppDatabase, assignmentId: string, paused: boolean): void {
+export function setPeerWakePaused(db: AppDatabase, assignmentId: string, paused: boolean, details?: AutomaticInputPause): void {
   db.meta.set(peerWakePausedKey(assignmentId), String(paused));
+  if (paused && details) {
+    db.meta.set(peerWakePauseDetailsKey(assignmentId), JSON.stringify(details));
+    db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,null,?,?,?)')
+      .run(assignmentId, 'automatic-input-paused', JSON.stringify(details), details.timestamp);
+  }
 }
 export const peerResumeAttemptKey = (session: Pick<BoundSession, 'id' | 'pid' | 'startedAt'>) =>
   `peer-resume-attempt:${session.id}:${session.pid}:${session.startedAt}`;
 
 export interface PeerWakeAttempt {
-  status: 'submitting' | 'submitted' | 'failed';
+  status: 'submitting' | 'submitted' | 'failed' | 'deferred';
   sessionId: string;
   timestamp: string;
   reason?: string;
   restoration?: 'already_loaded' | 'restored';
+  block?: WakeBlock;
+  nextAttemptAt?: string;
 }
 
 // Immutable transcript text from earlier Console runs; never submitted by the controller.

@@ -126,5 +126,17 @@ decision and continuation permission, and respect a subsequent manual Stop.
 `PROOF_PROVIDERS=codex` or `claude` narrows the run. The fixtures are released and
 private `proof.json` evidence remains in the printed temporary directory.
 
+Wake refusal and supervisor alerts (#86): run `NODE_ENV=test npm run test -w
+@agent-console/server -- peer-message-wake peer-wake-audit assignment-continuation
+agent-session-launches agent-grant-push`. Disposable fixtures cover granted worker launches,
+ordinary lead turn completion, result acknowledgement, full-inbox retention, memory pressure
+between paste and Enter, same-owner staged submission across restart, work-permission changes,
+human text appended during ownership checks, Stop/shutdown during the final screen capture,
+uncertain Enter, and the two-response ceiling through a deferred follow-up. Unsent work
+notices retain their original permission revision and attempt count when later results arrive.
+Browser-push transport is mocked; tests verify payloads, deep links, no approval actions,
+per-device retry after partial success, expired subscriptions, and deduplication across restart and message batches.
+These tests do not establish production adoption or delivery to Bryan's browser.
+
 
 Coordination delivery under load: `NODE_ENV=test npm run test -w @agent-console/server -- coordination peer-message-wake transcript-responsiveness`. These cover partial composer repaints, Stop during a slow inbox poll, deferred duplicate polls without false outage/acknowledgement, mixed human/control input and CPU-heavy transcript discovery. For the private real-provider proof, `PROOF_METADATA_LOAD=/absolute/path/to/a/large/claude.jsonl` runs read-only metadata load alongside inbox traffic; the proof requires zero native hook failures. `PROOF_CLAUDE_EXECUTABLE=/absolute/path/to/installed/version` tests an older native binary using a private executable copy named claude and private hook settings, preserving production processes and configuration.

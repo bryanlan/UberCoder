@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 function worker(authenticated = true, decisionOk = true) {
   const handlers = new Map<string, (event: Record<string, unknown>) => void>();
-  const showNotification = vi.fn(async () => {}), openWindow = vi.fn(async () => {});
+  const showNotification = vi.fn(async (_title: string, _options: unknown) => {}), openWindow = vi.fn(async () => {});
   const fetch = vi.fn(async (url: string) => url === '/api/auth/me'
     ? { json: async () => ({ authenticated, csrfToken: authenticated ? 'current-csrf' : undefined }) }
     : { ok: decisionOk });
@@ -21,6 +21,17 @@ function worker(authenticated = true, decisionOk = true) {
 }
 
 describe('Grant notification actions', () => {
+  it('shows an operator wake alert without grant approval actions and opens Console on click', async () => {
+    const w = worker();
+    await w.run('push', { data: { json: () => ({ title: 'Supervisor has unread worker results', body: 'The supervisor is idle.', warningKey: 'supervisor-results:lead', url: '/' }) } });
+    expect(w.showNotification).toHaveBeenCalledWith('Supervisor has unread worker results', expect.objectContaining({
+      tag: 'agent-wake-supervisor-results:lead', data: { url: '/' }, body: 'The supervisor is idle.',
+    }));
+    expect(w.showNotification.mock.calls[0]![1]).not.toHaveProperty('actions');
+    await w.run('notificationclick', { action: '', notification: { close: vi.fn(), data: { url: '/' } } });
+    expect(w.openWindow).toHaveBeenCalledWith('/');
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
   it('shows plain scope and the Approve, Edit and Deny actions from a push event', async () => {
     const w = worker(); await w.run('push', { data: { json: () => ({ title: 'Agent permission request', body: 'Complete the planner overnight', grantId: 'grant-id', url: '/grants?request=grant-id' }) } });
     expect(w.showNotification).toHaveBeenCalledWith('Agent permission request', expect.objectContaining({ body: 'Complete the planner overnight',

@@ -56,7 +56,7 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, queueCodexNotice, type PeerWakeAttempt } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
 import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
@@ -404,7 +404,7 @@ export class SessionManager {
       onRunState: (id, run) => {
         const session = this.db.boundSessions.getById(id);
         if (session && run.status === 'cancelled') {
-          if (run.timestamp >= (session.lastActivityAt ?? session.startedAt)) this.pauseAutomaticInput(id);
+          if (run.timestamp >= (session.lastActivityAt ?? session.startedAt)) this.pauseAutomaticInput(id, 'native_cancellation', `The native provider cancelled turn ${run.turnId} at ${run.timestamp}.`);
         }
         if (session && run.status === 'failed') {
           const assignment = this.assignmentForSession(session);
@@ -483,11 +483,11 @@ export class SessionManager {
     return assignment && assignment.status !== 'finished' && continuationControl(this.db, assignment.id).continuation === 'unattended' ? assignment : undefined;
   }
 
-  private pauseAutomaticInput(sessionId: string): void {
+  private pauseAutomaticInput(sessionId: string, code: AutomaticInputPause['code'], reason: string): void {
     const session = this.db.boundSessions.getById(sessionId);
     const assignment = session && this.assignmentForSession(session);
     if (assignment && assignment.status !== 'finished') {
-      setPeerWakePaused(this.db, assignment.id, true);
+      setPeerWakePaused(this.db, assignment.id, true, { sessionId, code, reason, timestamp: nowIso() });
       setContinuation(this.db, assignment.id, 'waiting_for_input');
     }
   }
@@ -528,16 +528,28 @@ export class SessionManager {
       await this.runtimes.run(session.id, 'assignmentWake', async () => {
         const pending = () => {
           const state = this.db.boundSessions.getById(session.id);
+          const stagedText = this.db.meta.get(peerWakeComposerKey(session.id));
+          const staged = stagedText ? JSON.parse(stagedText) as PeerWakeComposer : undefined;
+          const stagedKeys = new Set(staged?.status === 'staged' && staged.assignmentId === recipient.id
+            && staged.pid === state?.pid && staged.startedAt === state?.startedAt ? staged.messages.map(message => message.key) : []);
+          const retryable = (attempt: PeerWakeAttempt, key: string) => attempt.sessionId === state?.id
+            && ((attempt.status === 'deferred' && attempt.nextAttemptAt && Date.now() >= Date.parse(attempt.nextAttemptAt))
+              || (stagedKeys.has(key) && ['deferred', 'submitting'].includes(attempt.status)));
           const messages = this.db.sqlite.prepare(`select id, supplied_at as suppliedAt from coordination_messages
             where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string; suppliedAt: string | null }>;
           return messages.flatMap((message) => {
             const initialKey = peerWakeAttemptKey(message.id), stored = this.db.meta.get(initialKey);
             if (!stored) return [{ id: message.id, key: initialKey }];
             const initial = JSON.parse(stored) as PeerWakeAttempt, key = peerWakeFollowupKey(message.id);
+            if (retryable(initial, initialKey)) return [{ id: message.id, key: initialKey }];
+            const followupText = this.db.meta.get(key);
+            if (initial.status === 'submitted' && followupText) {
+              return retryable(JSON.parse(followupText) as PeerWakeAttempt, key) ? [{ id: message.id, key }] : [];
+            }
             // Wait for a completed turn and for any previous offer's cooldown.
             // Failed/submitting input is ambiguous and is not eligible. The
             // separate durable follow-up record preserves the initial attempt.
-            if (!state || initial.status !== 'submitted' || initial.sessionId !== state.id || this.db.meta.get(key)
+            if (!state || initial.status !== 'submitted' || initial.sessionId !== state.id
               || !Number.isFinite(Date.parse(initial.timestamp))
               || !state.lastCompletedAt || state.lastCompletedAt <= initial.timestamp
               || Date.now() - Date.parse(initial.timestamp) < 90_000
@@ -567,7 +579,16 @@ export class SessionManager {
           || current.isWorking || current.modelProfileRequest || current.manualSuspendedAt
           || current.conversationRef.startsWith('pending:')) return;
         if (current.runFailure) return; // Typed provider failures use the single RunRecovery budget.
-        let control = prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
+        const stagedText = this.db.meta.get(peerWakeComposerKey(session.id));
+        const stagedComposer = stagedText ? JSON.parse(stagedText) as PeerWakeComposer : undefined;
+        const stagedWork = current.provider === 'claude' && stagedComposer?.status === 'staged'
+          && stagedComposer.notice === 'unattended' && stagedComposer.assignmentId === recipient.id
+          && stagedComposer.pid === current.pid && stagedComposer.startedAt === current.startedAt
+          && priorControl.continuation === 'unattended' && stagedComposer.continuationRevision === priorControl.revision
+          && priorControl.recovery && ['scheduled', 'submitting'].includes(priorControl.recovery.status);
+        // A confirmed unsent work notice finishes its original attempt, even
+        // after restart or when that attempt is the last one in the budget.
+        let control = stagedWork ? priorControl : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
         if (control.recovery?.status === 'stalled' && control.supervisorId) {
           const signalled = signalContinuation(this.db, control.supervisorId, {
             key: `worker-stalled:${recipient.id}:${control.revision}:${control.recovery.startedAt}`,
@@ -576,11 +597,12 @@ export class SessionManager {
           if (signalled) this.requestAssignmentWake();
         }
         const peerResponse = pending().length > 0;
-        if ((!peerResponse && !pendingContinuation(control)) || this.stopped) return;
+        const workResponse = !peerResponse || !!stagedWork;
+        if ((!peerResponse && !stagedWork && !pendingContinuation(control)) || this.stopped) return;
         const revision = control.revision;
         const allowed = () => !this.stopped && !peerWakePaused(this.db, recipient.id)
-          && (peerResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
-          && continuationControl(this.db, recipient.id).revision === revision;
+          && (!workResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
+          && (!workResponse || continuationControl(this.db, recipient.id).revision === revision);
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
         if (!project) return;
         const providerSettings = this.recoveryDependencies!.projectService.getMergedProviderSettings(project, current.provider);
@@ -639,26 +661,54 @@ export class SessionManager {
         }
         current = this.db.boundSessions.getById(current.id);
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
+        const composerText = this.db.meta.get(peerWakeComposerKey(session.id));
+        const composer = composerText ? JSON.parse(composerText) as PeerWakeComposer : undefined;
+        const prompt = workResponse ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT;
+        const ownsStagedNotice = current?.provider === 'claude' && composer?.status === 'staged'
+          && composer.assignmentId === recipient.id && composer.pid === current.pid && composer.startedAt === current.startedAt
+          && (workResponse ? stagedWork && composer.notice === 'unattended' && composer.continuationRevision === revision : composer.notice === 'peer')
+          && screenInputMatchesText(screen, prompt);
         if (!allowed() || !current || this.getCurrentRestorableSession(current)?.id !== current.id
           || !assignment || assignment.status === 'finished' || current.status !== 'bound'
           || current.isWorking || this.providerTurnIsWorking(current.id) === true
           || current.modelProfileRequest || current.manualSuspendedAt || current.pressureSuspendedAt
-          || !screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+          || (composer?.status === 'staged' && !ownsStagedNotice)
+          || !screen.inputActive || (screen.inputText.trim() && !ownsStagedNotice) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
           || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
           || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
-        const maySubmit = () => {
+        const submissionBlock = (): WakeBlock | undefined => {
           const latest = this.db.boundSessions.getById(session.id);
-          const availableNow = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
-          return allowed() && latest?.status === 'bound' && this.getCurrentRestorableSession(latest)?.id === latest.id
-            && !latest.manualSuspendedAt && !latest.pressureSuspendedAt && !latest.modelProfileRequest
-            && (this.pressureSuspendAvailableBytes === undefined || (availableNow !== undefined && availableNow >= this.pressureSuspendAvailableBytes));
+          if (this.stopped) return { code: 'shutdown', reason: 'The Console backend is stopping.' };
+          if (peerWakePaused(this.db, recipient.id)) {
+            const details = this.db.meta.get(peerWakePauseDetailsKey(recipient.id));
+            const pause = details ? JSON.parse(details) as AutomaticInputPause : undefined;
+            return { code: pause?.code ?? 'paused_without_reason', reason: pause?.reason ?? 'Automatic input is paused; the existing record predates pause-reason capture.' };
+          }
+          const permission = continuationControl(this.db, recipient.id);
+          if (workResponse && (permission.continuation !== 'unattended' || permission.revision !== revision))
+            return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
+          const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
+          if (!state || state.status === 'finished') return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
+          if (latest?.status !== 'bound' || this.getCurrentRestorableSession(latest)?.id !== latest.id
+            || latest.pid !== current!.pid || latest.startedAt !== current!.startedAt)
+            return { code: 'binding_changed', reason: 'The current provider binding changed during submission.' };
+          if (latest.manualSuspendedAt) return { code: 'manual_suspend', reason: 'The session was manually suspended.' };
+          if (latest.pressureSuspendedAt) return { code: 'pressure_suspend', reason: 'The session was suspended for memory pressure.' };
+          if (latest.modelProfileRequest) return { code: 'model_change', reason: 'A model change is queued.' };
+          if (this.pressureSuspendAvailableBytes !== undefined) {
+            const availableNow = this.availableMemoryBytes();
+            if (availableNow === undefined || availableNow < this.pressureSuspendAvailableBytes) return {
+              code: 'memory_pressure', reason: `Available memory ${availableNow === undefined ? 'is unknown' : `is ${availableNow} bytes`}; automatic input requires ${this.pressureSuspendAvailableBytes} bytes.`,
+              availableBytes: availableNow, thresholdBytes: this.pressureSuspendAvailableBytes,
+            };
+          }
+          return undefined;
         };
         const messages = pending();
         control = continuationControl(this.db, recipient.id);
         const automatic = pendingContinuation(control);
-        if (peerResponse ? !messages.length : !automatic) return;
-        if (!peerResponse && !control.signals.length && screenShowsBackgroundWork(screen)) return;
-        const prompt = peerResponse ? PEER_WAKE_PROMPT : UNATTENDED_CONTINUATION_PROMPT;
+        if ((peerResponse && !messages.length) || (workResponse && !stagedWork && !automatic)) return;
+        if (workResponse && !control.signals.length && screenShowsBackgroundWork(screen)) return;
         const timestamp = nowIso();
         const restoreRecord = this.db.meta.get(peerWakeRestoreKey(current.id));
         const restore = restoreRecord ? JSON.parse(restoreRecord) as { pid: number; restoredAt: string } : undefined;
@@ -666,14 +716,15 @@ export class SessionManager {
           && (!current.lastResponseAt || current.lastResponseAt < restore.restoredAt) ? 'restored' : 'already_loaded';
         // Persist before touching the terminal. An interrupted or ambiguous submission
         // is never automatically repeated, including after a backend restart.
-        const saveAttempt = (status: PeerWakeAttempt['status'], reason?: string) => {
+        const saveAttempt = (status: PeerWakeAttempt['status'], reason?: string, block?: WakeBlock) => {
           for (const message of messages) this.db.meta.set(message.key,
-            JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration } satisfies PeerWakeAttempt));
+            JSON.stringify({ status, sessionId: current!.id, timestamp, reason, restoration, block,
+              ...(status === 'deferred' ? { nextAttemptAt: new Date(Date.now() + 15_000).toISOString() } : {}) } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');
         const consumedSignals = new Set(control.signals.map(signal => signal.key));
-        if (!peerResponse) {
-          const attempts = (control.recovery?.attempts ?? 0) + 1;
+        if (workResponse) {
+          const attempts = (control.recovery?.attempts ?? 0) + (stagedWork ? 0 : 1);
           control.recovery = { status: 'submitting', attempts,
             reason: control.signals.slice(-3).map(signal => signal.reason).join(' ') || control.recovery!.reason,
             startedAt: timestamp,
@@ -683,20 +734,62 @@ export class SessionManager {
         const runtime = this.runtimeState(current.id);
         const previousSubmittedTurnAt = runtime.submittedTurnAt;
         runtime.submittedTurnAt = timestamp;
+        let submissionInvoked = false, pasteStarted = false, composerConfirmed = ownsStagedNotice;
+        let block: WakeBlock | undefined;
+        const requireSubmissionGuard = async () => {
+          const owner = await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id');
+          block = owner !== current!.id ? { code: 'ownership_changed', reason: 'The tmux session no longer belongs to this Console binding.' } : submissionBlock();
+          if (block) throw new Error(block.reason);
+        };
         try {
-          if (await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id || !maySubmit()) throw new Error('Unattended continuation paused or ownership changed before submission.');
-          if (current.provider === 'codex') await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
+          await requireSubmissionGuard();
+          if (current.provider === 'codex') {
+            submissionInvoked = true;
+            await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
+          }
           else await this.runInputTmuxAction(current, async () => {
-            await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
-            const entered = await this.waitForScreenMatch(current!, hashScreen(screen), combinedTextKeySettleWaitMs(prompt),
-              candidate => candidate.inputActive && screenInputMatchesText(candidate, prompt));
+            let entered = await this.captureSessionScreen(current!, false);
+            block = submissionBlock();
+            if (block) throw new Error(block.reason);
+            if (!ownsStagedNotice) {
+              if (!entered.inputActive || entered.inputText.trim() || sessionScreenShowsWorking(entered)
+                || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered))
+                throw new Error('The provider composer changed before paste; existing text remains unsent.');
+              pasteStarted = true;
+              await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
+              entered = await this.waitForScreenMatch(current!, hashScreen(screen), combinedTextKeySettleWaitMs(prompt),
+                candidate => candidate.inputActive && screenInputMatchesText(candidate, prompt)) ?? screen;
+            }
             if (!entered || !screenInputMatchesText(entered, prompt) || !entered.inputActive || sessionScreenShowsWorking(entered)
               || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered)) throw new Error('The provider did not confirm a ready continuation composer; text remains unsent.');
-            if (await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id') !== current!.id || !maySubmit()) throw new Error('Continuation paused or ownership changed before Enter.');
+            composerConfirmed = true;
+            const saveComposer = (status: PeerWakeComposer['status']) => {
+              if (typeof current!.pid === 'number') this.db.meta.set(peerWakeComposerKey(current!.id), JSON.stringify({
+                assignmentId: recipient.id, pid: current!.pid, startedAt: current!.startedAt, timestamp, status, messages,
+                notice: workResponse ? 'unattended' : 'peer', ...(workResponse ? { continuationRevision: revision } : {}),
+              } satisfies PeerWakeComposer));
+            };
+            saveComposer('staged');
+            await requireSubmissionGuard();
+            // Ownership checks await tmux and can overlap native typing. Read
+            // the actual composer after them, then recheck synchronous guards
+            // with no further await before invoking Enter.
+            entered = await this.captureSessionScreen(current!, false);
+            block = submissionBlock();
+            if (block) throw new Error(block.reason);
+            if (!entered.inputActive || !screenInputMatchesText(entered, prompt) || sessionScreenShowsWorking(entered)
+              || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered))
+              throw new Error('The provider composer changed before Enter; existing text remains unsent.');
+            // From this point an interrupted Enter is ambiguous and cannot be
+            // replayed. A refusal before this point leaves a confirmed unsent
+            // notice that the same owner may submit once after guards clear.
+            saveComposer('submitting');
+            submissionInvoked = true;
             await this.tmuxClient.sendKeys(current!.tmuxSessionName, ['Enter']);
           });
           saveAttempt('submitted');
-          if (!peerResponse && allowed()) {
+          this.db.meta.set(peerWakeComposerKey(current.id), '');
+          if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: 'submitted' };
             control.signals = control.signals.filter(signal => !consumedSignals.has(signal.key));
@@ -710,13 +803,17 @@ export class SessionManager {
           // The durable attempt still prevents replay. A transport rejection
           // must not make the previous completed provider turn look running.
           if (runtime.submittedTurnAt === timestamp) runtime.submittedTurnAt = previousSubmittedTurnAt;
-          saveAttempt('failed', error instanceof Error ? error.message : 'Provider input failed.');
-          if (!peerResponse && allowed()) {
+          const deferred = !submissionInvoked && (!pasteStarted || composerConfirmed);
+          const reason = error instanceof Error ? error.message : 'Provider input failed.';
+          saveAttempt(deferred ? 'deferred' : 'failed', reason, block);
+          this.appendEvent(current, { type: 'status', text: `Automatic ${peerResponse ? 'inbox' : 'work'} input ${deferred ? 'deferred before submission' : 'failed with uncertain delivery'}: ${reason}`, timestamp: nowIso() });
+          if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
-            control.recovery = { ...control.recovery!, status: 'blocked', reason: 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
+            control.recovery = { ...control.recovery!, status: deferred ? 'scheduled' : 'blocked',
+              reason: deferred ? `Continuation deferred before submission: ${reason}` : 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
             saveContinuation(this.db, recipient.id, control);
           }
-          this.logger?.warn({ err: error, sessionId: current.id }, 'Assignment continuation failed; ambiguous input will not be replayed.');
+          this.logger?.warn({ err: error, sessionId: current.id, block, deferred }, 'Assignment input did not complete; uncertain submissions will not be replayed.');
         }
       }).catch((error: unknown) => this.logger?.warn({ err: error, sessionId: session.id }, 'Assignment continuation deferred.'));
     }
@@ -1679,7 +1776,7 @@ export class SessionManager {
       if (current.launchContext?.launchedBy !== launchedBy || current.projectSlug !== session.projectSlug || !authorized()) {
         throw new Error('Session ownership or close authority changed.');
       }
-      this.pauseAutomaticInput(sessionId);
+      this.pauseAutomaticInput(sessionId, 'owned_close', 'The launching assignment requested closing its helper.');
       this.runRecovery.cancel(sessionId);
       await this.releaseSessionInternal(sessionId);
     });
@@ -1932,7 +2029,7 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
-    this.pauseAutomaticInput(sessionId);
+    this.pauseAutomaticInput(sessionId, 'human_input', 'A human conversation input was requested.');
     this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendInput', () => this.sendInputInternal(sessionId, text));
   }
@@ -1984,7 +2081,9 @@ export class SessionManager {
   }
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
-    if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId);
+    if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId,
+      payload.keys?.includes('Escape') ? 'human_stop' : 'human_keys',
+      payload.keys?.includes('Escape') ? 'A human requested Stop.' : 'A human requested native input.');
     if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
     return await this.runtimes.run(sessionId, 'sendKeystrokes', () => this.sendKeystrokesInternal(sessionId, payload));
   }
@@ -2680,7 +2779,7 @@ export class SessionManager {
   }
 
   async releaseSession(sessionId: string): Promise<void> {
-    this.pauseAutomaticInput(sessionId);
+    this.pauseAutomaticInput(sessionId, 'release', 'The session was released.');
     this.runRecovery.cancel(sessionId);
     await this.runtimes.run(sessionId, 'releaseSession', () => this.releaseSessionInternal(sessionId));
   }
@@ -2741,7 +2840,7 @@ export class SessionManager {
   }
 
   async suspendSession(sessionId: string): Promise<BoundSession> {
-    this.pauseAutomaticInput(sessionId);
+    this.pauseAutomaticInput(sessionId, 'manual_suspend', 'The session was manually suspended.');
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;
@@ -3067,6 +3166,7 @@ export class SessionManager {
     if (event.type === 'user-input') {
       const assignment = this.assignmentForSession(session);
       if (assignment) setPeerWakePaused(this.db, assignment.id, false);
+      this.db.meta.set(peerWakeComposerKey(session.id), '');
       this.db.meta.set(`human-input:${session.id}`, JSON.stringify({ id: messageId, text: event.text, timestamp: event.timestamp }));
       (this.runtimeState(session.id).lastUserInput ??= new LastUserInputCache(this.readLastUserInput)).record(session.eventLogPath, event.text);
       this.eventBus.emit({

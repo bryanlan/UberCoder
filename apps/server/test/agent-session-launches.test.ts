@@ -9,6 +9,7 @@ import { CoordinationService } from '../src/coordination/service.js';
 import { GrantService } from '../src/grants/service.js';
 import { AgentSessionLaunches } from '../src/grants/session-launches.js';
 import { continuationControl } from '../src/coordination/continuation.js';
+import { PEER_WAKE_PROMPT, peerWakePaused } from '../src/coordination/wake.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 import type { BoundSession } from '@agent-console/shared';
 
@@ -19,7 +20,8 @@ async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
   const events = new RealtimeEventBus(), tmux = new FakeTmux(); tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-6-luna xhigh · 90% left · ~/demo';
   const adapter = { ...provider, getLaunchCommand: (_project: unknown, ref: string | null, _settings: unknown, options?: { model?: string; effort?: string; flags?: string[]; initialPrompt?: string }) =>
     ({ cwd: root, argv: ['codex', '--model', options?.model ?? 'gpt-6.1-sol', ...(ref ? ['resume',ref] : []), ...(options?.flags ?? []), ...(options?.initialPrompt ? [options.initialPrompt] : [])], env: {} }) };
-  const manager = createRecoveryManager(db, tmux, root, events, adapter);
+  const manager = createRecoveryManager(db, tmux, root, events, adapter, providerSettings,
+    { queueCodexNotice: async (_id, _settings, _cwd, prompt) => { tmux.sent.push(prompt); } });
   const grants = new GrantService(db, events);
   const coordination = new CoordinationService(db, { enabled: true, pilotPaths: [] }, undefined, grants);
   const native = randomUUID(), actor = coordination.register({ provider: 'codex', nativeSessionId: native, token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
@@ -53,6 +55,31 @@ function indexHistory(db: AppDatabase, session: BoundSession): string {
 }
 
 describe('Granted real-session launch pipeline',()=>{
+  it('wakes a supervisor after granted worker launches, an ordinary turn end and notifySupervisor', async () => {
+    const f = await fixture();
+    await f.launch({ title: 'Lane one', supervisorId: f.actor }); await f.launch({ title: 'Lane two', supervisorId: f.actor });
+    const sessions = f.launches.status(f.actor).requests.map(request => request.session!);
+    const worker = f.child(sessions[0]!.id);
+    expect(continuationControl(f.db, worker).supervisorId).toBe(f.actor);
+    f.child(sessions[1]!.id);
+    const lead = f.grants.sessionFor(f.actor)!;
+    f.db.boundSessions.upsert({ ...lead, pid: await f.tmux.getPanePid() });
+    f.tmux.alive.add(lead.tmuxSessionName);
+    await f.tmux.setOption(lead.tmuxSessionName, '@agent_console_session_id', lead.id);
+    f.coordination.update(f.actor, { status: 'waiting' }); // Ordinary native Stop.
+    expect(continuationControl(f.db, f.actor).continuation).toBe('unattended');
+    expect(peerWakePaused(f.db, f.actor)).toBe(false);
+    f.tmux.sent.length = 0;
+    f.tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
+    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', notifySupervisor: true });
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(continuationControl(f.db, f.actor).continuation).toBe('unattended');
+    const inbox = f.coordination.poll(f.actor, 0);
+    expect(inbox.messages).toHaveLength(1);
+    expect(inbox.messages[0]).toMatchObject({ senderId: worker, recipientId: f.actor });
+    f.coordination.acknowledge(f.actor, [inbox.messages[0]!.id]);
+  });
   it('closes its own helper under low memory, retains history and deduplicates close across controller restart', async () => {
     const f = await fixture(); await f.launch();
     const session = f.launches.status(f.actor).requests[0]!.session!;

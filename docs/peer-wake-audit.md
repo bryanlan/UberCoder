@@ -36,11 +36,31 @@ normal groups only. Their initial conditions are:
 | One pair has at least 6 alternating wake submissions in 10 minutes | Review a possible loop |
 | A client timeout, failed hook, abandoned RPC or event-loop delay of at least 1 second in the preceding 10 minutes | Investigate message transport |
 | A successfully submitted peer turn completed but its message is still unacknowledged after 2 minutes | Investigate receipt and follow-up guards |
+| A failed, uncertain or deferred wake has an unread message at least 2 minutes old | Investigate the recorded submission guard or transport failure |
+| A declared supervisor handoff remains unacknowledged for 5 minutes while its supervisor is idle or paused | Supervisor has unread worker results |
 | Transport measurements are unavailable, malformed or capped | Audit coverage is incomplete |
 
 Initial and follow-up attempts remain separate, with their ordinal in each message entry.
 A message can contribute two attempts and only one acknowledgement. A follow-up remains
 subject to the delivery guards in the coordination contract; warnings never bypass them.
+
+The audit includes durable pause history with the source, reason, session and timestamp.
+Non-human cancellation is identified separately from human Stop, native input, manual
+suspension, release and owned helper closure. A confirmed refusal before input submission is
+`deferred`; once native queue or Enter transport has been invoked, failed or interrupted input
+is uncertain and cannot be replayed automatically.
+
+Console checks delivery conditions every 15 seconds and sends browser push notifications through
+the existing subscription used for permission requests. A notification opens the affected
+conversation and has no approval actions. An accepted push suppresses repeats on that device
+for that condition, including across backend restart; acknowledgement or assignment closeout clears it.
+Message batches produce one browser delivery alert per recipient while the audit retains
+each message's condition. With no
+subscription or a failed push, the audit warning remains available and push is rechecked after
+five minutes. Partial success retains each accepted device and retries the remaining devices;
+expired subscriptions are removed. Newly subscribed devices are also checked on that interval.
+Push delivery counts mean acceptance by the push service, not proof Bryan saw it.
+The existing Waltium five-minute observer publishes these same warnings as operator items.
 
 Native clients and the backend append whitelisted measurements to daily JSONL files under
 `runtimeDir/coordination/telemetry`. The directory is private (0700), files are 0600,

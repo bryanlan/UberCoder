@@ -1,6 +1,13 @@
 /* Imported by the generated PWA service worker. */
 self.addEventListener('push', event => {
   const message = event.data?.json();
+  if (message?.warningKey) {
+    event.waitUntil(self.registration.showNotification(message.title, {
+      body: message.body, tag: `agent-wake-${message.warningKey}`, requireInteraction: true,
+      data: { url: message.url },
+    }));
+    return;
+  }
   if (!message?.grantId) return;
   event.waitUntil(self.registration.showNotification(message.title, {
     body: message.body, tag: `agent-grant-${message.grantId}`, requireInteraction: true,
@@ -12,7 +19,7 @@ self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil((async () => {
     const { grantId, url } = event.notification.data;
-    if (event.action === 'approve' || event.action === 'deny') {
+    if (grantId && (event.action === 'approve' || event.action === 'deny')) {
       try {
         const auth = await fetch('/api/auth/me', { credentials: 'include' }).then(response => response.json());
         if (auth.authenticated && auth.csrfToken) {

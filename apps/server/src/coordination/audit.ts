@@ -1,12 +1,13 @@
 import type Database from 'better-sqlite3';
 import { readNativeWakeTurns, type NativeWakeTurn, type WakeTokens } from '../providers/transcripts/peer-wake-usage.js';
 import type { ProviderId } from '@agent-console/shared';
-import { peerWakeAttemptKey, peerWakeFollowupKey, type PeerWakeAttempt } from './wake.js';
+import type { PeerWakeAttempt } from './wake.js';
 import { readCoordinationTelemetry, summarizeCoordinationTelemetry } from './telemetry.js';
+import { deliveryWarnings } from './delivery-warnings.js';
 
 const MINUTE = 60_000;
 export const WAKE_AUDIT_POLICY = { wakesInTenMinutes: 5, wakesInHour: 20, pairAlternationsInTenMinutes: 6,
-  backlogAgeMinutes: 60, calibrationDays: 7, mode: 'warnings_only' } as const;
+  backlogAgeMinutes: 60, supervisorResultAgeMinutes: 5, calibrationDays: 7, mode: 'warnings_only' } as const;
 interface Message {
   id: string; senderId: string; recipientId: string; createdAt: string; acknowledgedAt: string | null;
   fixture: boolean;
@@ -108,7 +109,7 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
   const paths = new Map<string, string>();
   for (const r of rows) {
     const a = JSON.parse(r.value) as PeerWakeAttempt;
-    if (!['submitting', 'submitted', 'failed'].includes(a.status) || !Number.isFinite(Date.parse(a.timestamp))) throw new Error('Invalid stored peer wake attempt.');
+    if (!['submitting', 'submitted', 'failed', 'deferred'].includes(a.status) || !Number.isFinite(Date.parse(a.timestamp))) throw new Error('Invalid stored peer wake attempt.');
     if (Date.parse(a.timestamp) > now) continue;
     const key = `${a.sessionId}:${a.timestamp}:${a.status}`;
     let w = groups.get(key);
@@ -189,27 +190,7 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       summary: telemetry.issues.join(' ') || 'No measurements exist in the requested audit window.' });
     return warnings;
   };
-  const deliveryWarnings: WakeWarning[] = [];
-  for (const m of pending.filter((m) => !fixture(m.sender_description, m.recipient_description))) {
-    // Pending conditions persist until receipt or assignment closeout. Do not
-    // age their wake evidence out with the frequency/usage reporting window.
-    const attempts = [peerWakeAttemptKey(m.id), peerWakeFollowupKey(m.id)].flatMap((key) => {
-      const stored = db.prepare('select value from meta where key=?').get(key) as { value: string } | undefined;
-      if (!stored) return [];
-      const attempt = JSON.parse(stored.value) as PeerWakeAttempt;
-      if (!['submitting', 'submitted', 'failed'].includes(attempt.status) || !Number.isFinite(Date.parse(attempt.timestamp))) throw new Error('Invalid stored peer wake attempt.');
-      return [attempt];
-    });
-    const ended = attempts.some((attempt) => {
-      if (attempt.status !== 'submitted' || now - Date.parse(attempt.timestamp) < 2 * MINUTE) return false;
-      const session = db.prepare('select last_completed_at from bound_sessions where id=?').get(attempt.sessionId) as { last_completed_at: string | null } | undefined;
-      return Boolean(session?.last_completed_at && session.last_completed_at > attempt.timestamp);
-    });
-    if (ended) deliveryWarnings.push({
-      key: `delivery:${m.id}`, kind: 'delivery', title: 'Peer response ended without acknowledging its message', observedAt: iso(now),
-      summary: `The ${m.provider} response turn ended but message ${m.id} remains unacknowledged. ${attempts.length > 1 ? `The follow-up is ${attempts[1]!.status}; no further automatic attempts are permitted.` : 'One guarded follow-up is permitted.'} Inspect hook failures and draft/resource guards.`,
-    });
-  }
+  const delivery = deliveryWarnings(db, now);
   const offers = new Map<string, { firstAttempt: number; firstFinished: number | null; abandoned: number }>();
   for (const r of (telemetry?.offers ?? []).filter((r) => r.messageId && Number.isFinite(r.offeredAt))) {
     const prior = offers.get(r.messageId!) ?? { firstAttempt: r.offeredAt!, firstFinished: null, abandoned: 0 };
@@ -242,6 +223,10 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       alreadyLoadedWakes: submitted.filter((w) => w.restoration === 'already_loaded').length,
       unknownRestorationWakes: submitted.filter((w) => w.restoration === 'unknown').length,
       managedPendingMessages: pending.filter((m) => !fixture(m.sender_description, m.recipient_description)).length },
+    pauses: (db.prepare("select assignment_id as assignmentId,timestamp,text from coordination_events where kind='automatic-input-paused' and timestamp>=? and timestamp<=? order by seq")
+      .all(iso(from), iso(now)) as Array<{ assignmentId: string; timestamp: string; text: string }>).map(row => ({
+        assignmentId: row.assignmentId, ...JSON.parse(row.text) as Record<string, unknown>,
+      })),
     acknowledgementDelayMs: { median: percentile(delays, .5), p95: percentile(delays, .95) },
     transport: { available: telemetry?.available ?? false, issues: telemetry?.issues ?? [],
       firstRecordedAt: telemetry?.firstRecordedAt == null ? null : iso(telemetry.firstRecordedAt),
@@ -258,6 +243,6 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       normalWakes: entries.filter((w) => w.category === 'normal').length })).sort((a, b) => b.wakes - a.wakes),
     pending: pending.filter((m) => !fixture(m.sender_description, m.recipient_description)).map((m) => ({
       messageId: m.id, recipientId: m.recipient_id, provider: m.provider, ageMinutes: Math.max(0, (now - Date.parse(m.created_at)) / MINUTE) })),
-    usage, warnings: [...wakeWarnings(allWakes, now), ...transportWarnings(now - 10 * MINUTE), ...deliveryWarnings],
-    observedWarnings: [...observedWarnings(allWakes, from, now), ...transportWarnings(from), ...deliveryWarnings], wakes };
+    usage, warnings: [...wakeWarnings(allWakes, now), ...transportWarnings(now - 10 * MINUTE), ...delivery],
+    observedWarnings: [...observedWarnings(allWakes, from, now), ...transportWarnings(from), ...delivery], wakes };
 }
