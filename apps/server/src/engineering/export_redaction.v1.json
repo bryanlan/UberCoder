@@ -3,8 +3,13 @@
   "sensitive_key": "^[a-z0-9_-]*(?:secret|token|(?:passw(?:or)?d|pwd|passphrase)|api[-_]?key|access[-_]?key|private[-_]?key|credential|auth(?:orization)?|session|cookie)[a-z0-9_-]*$",
   "rules": [
     {
-      "pattern": "^[ \\t]*(?:proxy-user|user)[ \\t]*(?:[=:][ \\t]*|[ \\t]+)(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*?:(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*?:(?:\\\\[\\s\\S]|[^'\\\\])*'|[^\\s\"']+:[^\\s\"']+)[^\\r\\n]*$",
+      "pattern": "^[ \\t]*(?:user|proxy\\-user|proxy\\-pass|pass|key|proxy\\-key|oauth2\\-bearer|tlsuser|tlspassword|proxy\\-tlsuser|proxy\\-tlspassword|ftp\\-account|login\\-options|mail\\-auth|cookie|cert|proxy\\-cert)[ \\t]*(?:[=:][ \\t]*|[ \\t]+)(?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[ \\t]*$",
       "flags": "im",
+      "replacement": "[credential-bearing line omitted]"
+    },
+    {
+      "pattern": "^.*(?:^|[ \\t/\"'])curl(?:\\.exe)?(?=[\"']?[ \\t]|$)[^\\r\\n]*[ \\t]-(?:[uU]|b|E)(?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
+      "flags": "m",
       "replacement": "[credential-bearing line omitted]"
     },
     {
@@ -33,12 +38,12 @@
       "replacement": "[credential-bearing line omitted]"
     },
     {
-      "pattern": "^.*(?:^|[ \\t])(?:--(?:user|pass[a-z0-9_-]*|secret|token|api[-_]key|access[-_]key|client[-_]secret|private[-_]key|credential|auth(?:orization)?)|-u)[= \\t](?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
+      "pattern": "^.*(?:^|[ \\t])(?:--(?:user|proxy\\-user|proxy\\-pass|pass|key|proxy\\-key|oauth2\\-bearer|tlsuser|tlspassword|proxy\\-tlsuser|proxy\\-tlspassword|ftp\\-account|login\\-options|mail\\-auth|cookie|pass[a-z0-9_-]*|secret|token|api[-_]key|access[-_]key|client[-_]secret|private[-_]key|credential|auth(?:orization)?)|-u)[= \\t](?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
       "flags": "im",
       "replacement": "[credential-bearing line omitted]"
     },
     {
-      "pattern": "^.*\\b(?:mysql|mariadb)\\b[^\\r\\n]*[ \\t]-p(?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
+      "pattern": "^.*(?:^|[ \\t/\"'])(?:mysql[A-Za-z0-9_-]*|mariadb(?:-[A-Za-z0-9_-]+)?)(?:\\.exe)?(?=[\"']?[ \\t]|$)[^\\r\\n]*[ \\t]-p(?:[ \\t]|\\\\\\r?\\n)*(?:\"(?:\\\\[\\s\\S]|[^\"\\\\])*\"|'(?:\\\\[\\s\\S]|[^'\\\\])*'|(?:\\\\(?:\\r?\\n|[^\\r\\n])|[^\\s\\\\\"'])+)[^\\r\\n]*$",
       "flags": "m",
       "replacement": "[credential-bearing line omitted]"
     },
@@ -433,6 +438,350 @@
     {
       "input": "<input value=\"shortpass > tail\" type=\"password\">",
       "expected": "[credential element omitted]"
+    },
+    {
+      "input": "curl --user username:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-user username:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-pass shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "proxy-pass = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --pass shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "pass = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --key shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "key = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-key shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "proxy-key = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --oauth2-bearer shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "oauth2-bearer = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --tlsuser shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "tlsuser = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --tlspassword shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "tlspassword = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-tlsuser shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "proxy-tlsuser = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-tlspassword shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "proxy-tlspassword = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --ftp-account shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "ftp-account = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --login-options shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "login-options = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --mail-auth shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mail-auth = \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --cookie x=shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "cookie = \"x=shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -U username:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -Uusername:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -uusername:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -b x=shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl -bx=shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-user=\"username:shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-pass \"shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-pass \\\n  shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-cert client.pem:shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --key client.key --pass shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --proxy-key client.key --proxy-pass shortpass",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "curl --aws-sigv4 \"aws:amz:region:service\" --user \"key:shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "cert = \"client.pem:shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "proxy-cert = \"client.pem:shortpass\"",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysql -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysql -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqldump -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqldump -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqladmin -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqladmin -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlimport -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlimport -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlcheck -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlcheck -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlshow -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlshow -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlbinlog -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlbinlog -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlslap -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqlslap -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-dump -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-dump -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-admin -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-admin -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-import -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-import -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-check -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-check -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-show -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-show -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-binlog -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-binlog -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-slap -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-slap -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-upgrade -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-upgrade -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-backup -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-backup -p shortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "/usr/bin/mysqldump -uroot -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-dump.exe -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mysqldump -P 3306 appdb",
+      "expected": "mysqldump -P 3306 appdb"
+    },
+    {
+      "input": "mariadb-dump -P 3306 appdb",
+      "expected": "mariadb-dump -P 3306 appdb"
+    },
+    {
+      "input": "postgres -p 3306",
+      "expected": "postgres -p 3306"
+    },
+    {
+      "input": "custom-mysql -p 3306",
+      "expected": "custom-mysql -p 3306"
+    },
+    {
+      "input": "mysqlpump -pshortpass appdb",
+      "expected": "[credential-bearing line omitted]"
+    },
+    {
+      "input": "mariadb-hotcopy -pshortpass appdb /backup",
+      "expected": "[credential-bearing line omitted]"
     }
   ],
   "object_cases": [
@@ -944,6 +1293,36 @@
         "HTML password input"
       ],
       "url": "https://html.spec.whatwg.org/multipage/input.html#password-state-(type=password)"
+    },
+    {
+      "formats": [
+        "MySQL client utility attached and spaced password arguments"
+      ],
+      "url": "https://dev.mysql.com/doc/refman/8.4/en/programs.html"
+    },
+    {
+      "formats": [
+        "mysqldump password"
+      ],
+      "url": "https://dev.mysql.com/doc/refman/8.4/en/mysqldump.html#option_mysqldump_password"
+    },
+    {
+      "formats": [
+        "MariaDB client utilities"
+      ],
+      "url": "https://mariadb.com/docs/server/clients-and-utilities"
+    },
+    {
+      "formats": [
+        "mysqlpump attached password"
+      ],
+      "url": "https://dev.mysql.com/doc/refman/8.0/en/mysqlpump.html"
+    },
+    {
+      "formats": [
+        "MariaDB hotcopy attached password"
+      ],
+      "url": "https://mariadb.com/docs/server/clients-and-utilities/backup-restore-and-import-clients/mariadb-hotcopy"
     }
   ],
   "provider_source": {
