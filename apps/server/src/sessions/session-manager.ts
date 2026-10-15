@@ -2370,7 +2370,7 @@ export class SessionManager {
 
   private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen): boolean {
     if (record.state !== 'awaiting_input' || screen.inputText === record.baselineInput) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
+    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?:\s+paste again to expand)?$/is);
     return Boolean(placeholder && placeholder[1]?.trim() === (record.baselineInput ?? '').trim());
   }
 
@@ -2378,7 +2378,7 @@ export class SessionManager {
     if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen)) return true;
     const staged = this.inputQueue.staged(sessionId);
     if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim()) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
+    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?:\s+paste again to expand)?$/is);
     return Boolean(placeholder && placeholder[1]?.trim() === staged.prefix.trim());
   }
 

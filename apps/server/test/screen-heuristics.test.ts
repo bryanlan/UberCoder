@@ -87,6 +87,42 @@ describe('screen heuristics', () => {
     expect(screenInputMatchesText(draft, `${text}\n${text}`)).toBe(false);
   });
 
+  it('keeps the visible text of Codex hyperlinks that wrap across composer rows', () => {
+    const url = 'https://console.example.test/projects/demo--app/claude/2fee7569-0c8d-4fc9-9b1a-8f00fd8899ea';
+    const link = (label: string) => `\u001b]8;;${url}\u001b\\${label}\u001b]8;;\u001b\\`;
+    const draft = parseSessionScreenSnapshot([
+      '• Done.',
+      '',
+      `\u001b[1m›\u001b[0m this session ${link('https://console.example.test/projects/')}`,
+      `  ${link('demo--app/claude/2fee7569-0c8d-4fc9-9b1a-8f00fd8899ea')} has the`,
+      '  same problem.',
+      '',
+      '  GPT-6.1-Sol xhigh · ~/code/demo',
+    ].join('\n'));
+    const text = `this session ${url} has the same problem.`;
+    expect(draft.inputText).toContain('https://console.example.test/projects/\ndemo--app/claude/');
+    expect(screenInputMatchesText(draft, text)).toBe(true);
+    expect(screenInputMatchesText(draft, 'this session has the same problem.')).toBe(false);
+  });
+
+  it('matches a boxed Claude composer that wraps inside a URL', () => {
+    const draft = parseSessionScreenSnapshot([
+      '✻ Sautéed for 2m 0s · done 7:37 AM',
+      '',
+      '────────────────────────────────────────',
+      '❯ please read this session:',
+      '  https://console.example.test/projects/',
+      '  demo--app/codex/01a13d78-77d6-7663-aabc  the',
+      '  slide.  then fix it',
+      '────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    const text = 'please read this session: https://console.example.test/projects/demo--app/codex/01a13d78-77d6-7663-aabc  the slide.  then fix it';
+    expect(draft.inputText).toContain('projects/\ndemo--app');
+    expect(screenInputMatchesText(draft, text)).toBe(true);
+    expect(screenInputMatchesText(draft, `${text}${text}`)).toBe(false);
+  });
+
   it('recognizes a real Claude composer without requiring the permissions footer', () => {
     const ready = parseSessionScreenSnapshot('Claude Code\nThe answer is ready.\n────────────────────\n❯ ');
     expect(ready.inputActive).toBe(true);

@@ -445,7 +445,9 @@ function extractActiveInput(contentLines: ScreenLine[], footer: ScreenLine | und
 
     return {
       contentLines: trimBlankEdges(contentLines.slice(0, index)),
-      inputText: inputParts.join(codexInput ? '\n' : ' ').trim(),
+      // Keep rendered row boundaries: a native composer may wrap inside a
+      // word or URL, and only the matcher can tell a wrap from a space.
+      inputText: inputParts.join('\n').trim(),
       inputActive: true,
       footerLines,
     };
