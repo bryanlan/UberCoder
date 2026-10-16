@@ -433,6 +433,8 @@ function reassess(options, repository, entry, consolePath = entry.path) {
 // `uid` refuses entries another user owns; `writtenBefore` skips a cache with any entry written later.
 function verifyDisposable(directory, rootDevice, { uid, writtenBefore } = {}) {
   assertNoMountsWithin(directory);
+  // uv tags virtual environments with CACHEDIR.TAG too.
+  if (fs.existsSync(path.join(directory, 'pyvenv.cfg'))) throw new Refusal(`virtual environment at ${directory}`);
   let bytes = 0;
   const pending = [directory];
   while (pending.length) {
@@ -479,7 +481,7 @@ function findScratchCaches(root) {
     let items = [];
     try { items = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
     for (const item of items) {
-      if (!item.isDirectory() || item.name === '.git' || item.name === 'node_modules') continue;
+      if (!item.isDirectory() || item.name === '.git' || item.name === 'node_modules' || PROTECTED_DIR_NAMES.has(item.name) || item.name.startsWith('.env')) continue;
       const full = path.join(directory, item.name);
       let stat;
       try { stat = fs.lstatSync(full); } catch { continue; }
@@ -510,7 +512,8 @@ function reclaimScratchCache(cache, root, writtenBefore) {
   for (let current = path.dirname(cache); current !== root && isWithin(current, root); current = path.dirname(current)) {
     if (mounts.includes(current)) throw new Refusal(`mount point at ${current}`);
   }
-  // The scratch root itself may sit inside a checkout (for example TMPDIR in a repository).
+  // Every enclosing checkout, up to the filesystem root: the scratch root may sit inside one (TMPDIR
+  // in a repository), and an outer repository can track files a nested one ignores.
   for (let current = path.dirname(cache); ; current = path.dirname(current)) {
     let marker;
     try { marker = fs.lstatSync(path.join(current, '.git')); } catch (error) {
@@ -523,7 +526,6 @@ function reclaimScratchCache(cache, root, writtenBefore) {
         held = git(current, ['ls-files', '-z', '--', relative]).length || git(current, ['ls-files', '-z', '--others', '--exclude-standard', '--', relative]).length;
       } catch { throw new Refusal(`its checkout ${current} could not be read`); }
       if (held) throw new Refusal(`holds tracked or untracked files of ${current}`);
-      break;
     }
     if (current === path.dirname(current)) break;
   }
