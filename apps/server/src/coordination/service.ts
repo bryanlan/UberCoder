@@ -82,8 +82,15 @@ export class CoordinationService {
       throw new Error('This chat has no connected agent. Open it and resume its agent before referencing it.');
     }
     const nativeRef = session.resumeConversationRef ?? session.conversationRef;
-    const assignment = this.db.sqlite.prepare(`select id, status from coordination_assignments
-      where provider=? and native_session_id=?`).get(input.provider, nativeRef) as { id: string; status: string } | undefined;
+    // Before transcript adoption, native registration already identifies the exact
+    // Console binding. Require a unique registration rather than guessing a peer.
+    const assignments = (nativeRef.startsWith('pending:')
+      ? this.db.sqlite.prepare(`select a.id, a.status from coordination_assignments a
+          join meta m on m.key='console-session:' || a.id
+          where m.value=? and a.provider=? limit 2`).all(session.id, input.provider)
+      : this.db.sqlite.prepare(`select id, status from coordination_assignments
+          where provider=? and native_session_id=?`).all(input.provider, nativeRef)) as { id: string; status: string }[];
+    const assignment = assignments.length === 1 ? assignments[0] : undefined;
     if (!assignment || assignment.status === 'finished') {
       throw new Error('This chat has no available coordinating agent. Resume its agent before referencing it.');
     }

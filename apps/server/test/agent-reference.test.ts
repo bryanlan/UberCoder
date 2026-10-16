@@ -8,6 +8,8 @@ import type { BoundSession, ProviderId } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { registerCoordinationRoutes } from '../src/coordination/transport.js';
+import { GrantService } from '../src/grants/service.js';
+import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 
 let root: string;
 let db: AppDatabase;
@@ -15,19 +17,21 @@ let service: CoordinationService;
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-reference-'));
   db = new AppDatabase(path.join(root, 'state.sqlite'));
-  service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
+  service = new CoordinationService(db, { enabled: true, pilotPaths: [] }, undefined,
+    new GrantService(db, new RealtimeEventBus()));
 });
 afterEach(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
 
 function bind(provider: ProviderId, overrides: Partial<BoundSession> = {}) {
   const nativeSessionId = randomUUID();
-  const { assignmentId } = service.register({ provider, nativeSessionId, token: randomUUID(), pid: process.pid, cwd: root });
   const session: BoundSession = {
     id: randomUUID(), projectSlug: 'other-project', provider, conversationRef: nativeSessionId,
     title: 'Review the console', tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true,
     startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...overrides,
   };
   db.boundSessions.upsert(session);
+  const { assignmentId } = service.register({ provider, nativeSessionId, token: randomUUID(), pid: process.pid, cwd: root,
+    consoleSessionId: session.id });
   return { session, assignmentId: assignmentId!, nativeSessionId };
 }
 
@@ -49,6 +53,23 @@ it('resolves a pending binding by its native resume identity and retains a sleep
     pid: null, idleSuspendedAt: new Date().toISOString() });
   db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(assignmentId);
   expect(service.conversationReference({ ...session, conversationRef: 'pending:first' }).recipientId).toBe(assignmentId);
+});
+
+it.each(['codex', 'claude'] as const)('resolves a registered %s agent before its pending chat has a native resume identity', provider => {
+  const { session, assignmentId } = bind(provider, { conversationRef: `pending:${provider}` });
+  expect(db.boundSessions.getById(session.id)?.resumeConversationRef).toBeUndefined();
+  expect(db.meta.get(`console-session:${assignmentId}`)).toBe(session.id);
+  expect(service.conversationReference(session)).toMatchObject({ recipientId: assignmentId, provider,
+    projectSlug: session.projectSlug, conversationRef: session.conversationRef });
+  db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(assignmentId);
+  expect(() => service.conversationReference(session)).toThrow('no available coordinating agent');
+});
+
+it('rejects ambiguous pending registrations instead of choosing an agent', () => {
+  const { session } = bind('codex', { conversationRef: 'pending:ambiguous' });
+  service.register({ provider: 'codex', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid,
+    cwd: root, consoleSessionId: session.id });
+  expect(() => service.conversationReference(session)).toThrow('no available coordinating agent');
 });
 
 it('resolves adopted pending aliases only within their own project and provider', () => {
