@@ -1,5 +1,5 @@
 import type {
-  AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot,
+  AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot, AgentReference,
   AuthState,
   ImageAttachment,
   BoundSession,
@@ -135,6 +135,8 @@ export const api = {
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),
+  agentReference: (reference: { projectSlug: string; provider: string; conversationRef: string }) =>
+    request<AgentReference>(`/api/agent-reference?${new URLSearchParams(reference)}`),
   wikiList: (projectSlug: string, offset = 0) => request<WikiListResponse>(
     `/api/wiki/${encodeURIComponent(projectSlug)}/pages?offset=${offset}`,
   ),

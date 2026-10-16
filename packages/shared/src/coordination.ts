@@ -1,5 +1,13 @@
 export type AssignmentStatus = 'active' | 'waiting' | 'finished' | 'disconnected';
 export type AssignmentContinuation = 'unattended' | 'waiting_for_input';
+/** Resolved by the backend from a Console conversation's current binding. */
+export interface AgentReference {
+  recipientId: string;
+  provider: string;
+  projectSlug: string;
+  conversationRef: string;
+  title: string;
+}
 export interface AssignmentRecovery {
   status: 'scheduled' | 'submitting' | 'submitted' | 'blocked' | 'stalled';
   attempts: number;

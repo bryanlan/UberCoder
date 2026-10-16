@@ -3,6 +3,7 @@ import path from 'node:path';
 import net from 'node:net';
 import fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { PROVIDERS } from '@agent-console/shared';
 import type { AuthService } from '../security/auth-service.js';
 import { CoordinationService } from './service.js';
 import { WikiService } from '../wiki/service.js';
@@ -153,6 +154,14 @@ export async function startCoordinationSocket(service: CoordinationService, runt
 }
 
 export async function registerCoordinationRoutes(app: FastifyInstance, auth: AuthService, service: CoordinationService) {
+  app.get('/api/agent-reference', async (request, reply) => {
+    await auth.ensureAuthenticated(request, reply);
+    if (reply.sent) return;
+    const parsed = z.object({ projectSlug: text.max(200), provider: z.enum(PROVIDERS), conversationRef: text.max(200) }).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid chat reference.' });
+    try { return service.conversationReference(parsed.data); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'Cannot reference this agent.' }); }
+  });
   app.get('/api/assignment-activity', async (request, reply) => {
     await auth.ensureAuthenticated(request, reply);
     const input = z.object({ checkout: text.max(4096).optional() }).parse(request.query);

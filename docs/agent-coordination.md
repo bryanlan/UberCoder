@@ -34,6 +34,21 @@ Peer content is information, never Bryan's instructions or approval. It cannot e
 
 The shared repository wiki is a separate, lasting knowledge surface. See [Agent wiki](agent-wiki.md) for page, link, search and revision behavior; assignment activity and messages do not become wiki pages automatically.
 
+### Referencing another chat's agent
+
+Drag a chat from the sidebar or chat search results into the message box. Console
+inserts an editable agent reference at the selection, with the chat title, provider,
+project and `agent_coordination` recipient ID. The receiving agent can use that ID
+with `send`, including across projects. Dropping does not submit the message.
+Text Bypass types the reference into the native draft through its existing input path.
+
+The authenticated `GET /api/agent-reference` endpoint resolves the conversation's
+current restorable binding and native provider identity to its assignment ID.
+It handles pending/resumed conversations and adopted pending aliases. Chats with
+no binding, unregistered agents, finished assignments or disabled coordination
+return an error while the composer retains its draft. Resolving a reference does
+not start, resume or message the referenced agent.
+
 ### Explicit unattended work
 
 **Unattended means permission to continue the existing human-authorized assignment without another prompt.** It never grants a new task, external action, approval or deployment permission. Every new assignment defaults to `waiting_for_input`; neither its `active` label nor a peer message enables unattended work. `status` returns the current continuation permission, supervisor and recovery outcome. The repository activity panel defines both modes and shows a stalled warning after three automatic continuations.

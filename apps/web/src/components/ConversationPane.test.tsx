@@ -5,6 +5,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane } from './ConversationPane';
 import { api } from '../lib/api';
+import { CONVERSATION_DRAG_TYPE } from '../features/conversation/agent-reference';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
 
@@ -417,6 +418,74 @@ it('cancels the exact server-owned queued profile request', async () => {
 });
 
 describe('ConversationPane live input bridge', () => {
+  it.each(['codex', 'claude'] as const)('inserts a dropped agent into the %s draft at the selection without sending', async provider => {
+    const resolved = { recipientId: 'peer-assignment', title: 'Review agent', provider: 'claude', projectSlug: 'another-project', conversationRef: 'peer-chat' };
+    const lookup = vi.spyOn(api, 'agentReference').mockResolvedValue(resolved);
+    const { onSendKeystrokes } = renderPane({ sessionOverrides: { provider } });
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'Before REPLACE after' } });
+    textbox.setSelectionRange(7, 14);
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'another-project', provider: 'claude', conversationRef: 'peer-chat' }) } });
+    await waitFor(() => expect(textbox.value).toContain('recipientId=peer-assignment'));
+    expect(textbox.value).toMatch(/^Before \[Agent "Review agent"/);
+    expect(textbox.value).toMatch(/\n after$/);
+    expect(textbox.value).not.toContain('REPLACE');
+    expect(lookup).toHaveBeenCalledWith({ projectSlug: 'another-project', provider: 'claude', conversationRef: 'peer-chat' });
+    expect(onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('retains the draft when the dropped chat has no available agent or a malformed payload', async () => {
+    const lookup = vi.spyOn(api, 'agentReference').mockRejectedValue(new Error('This chat has no connected agent.'));
+    const { onSendKeystrokes } = renderPane();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'Keep this draft' } });
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'peer' }) } });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no connected agent'));
+    expect(textbox).toHaveValue('Keep this draft');
+    lookup.mockClear();
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => 'not json' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('invalid');
+    expect(textbox).toHaveValue('Keep this draft');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('discards a reference lookup when its composer is replaced during the request', async () => {
+    const result = deferred<Awaited<ReturnType<typeof api.agentReference>>>();
+    const lookup = vi.spyOn(api, 'agentReference').mockReturnValue(result.promise);
+    const first = renderPane();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Original draft' } });
+    fireEvent.drop(screen.getByRole('textbox'), { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'peer' }) } });
+    first.unmount();
+    const second = renderPane({ sessionOverrides: { id: 'replacement-session' } });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'New composer draft' } });
+    await act(async () => result.resolve({ recipientId: 'stale-peer', title: 'Old reference', provider: 'codex', projectSlug: 'demo', conversationRef: 'peer' }));
+    expect(textbox).toHaveValue('New composer draft');
+    expect(first.onSendKeystrokes).not.toHaveBeenCalled();
+    expect(second.onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('types a dropped reference through Text Bypass without submitting Enter', async () => {
+    const lookup = vi.spyOn(api, 'agentReference').mockResolvedValue({ recipientId: 'bypass-peer', title: 'Helper', provider: 'codex', projectSlug: 'demo', conversationRef: 'helper' });
+    const { onSendKeystrokes } = renderPane();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'helper' }) } });
+    await waitFor(() => expect((textbox as HTMLTextAreaElement).value).toContain('recipientId=bypass-peer'));
+    await waitFor(() => expect(onSendKeystrokes).toHaveBeenCalled());
+    expect(onSendKeystrokes).toHaveBeenLastCalledWith('session-1', { text: expect.stringContaining('recipientId=bypass-peer'), deferScreenUpdate: true });
+    expect(vi.mocked(onSendKeystrokes).mock.calls.every(([, payload]) => !payload.keys?.includes('Enter'))).toBe(true);
+    lookup.mockRestore();
+  });
+
   it('stops Text Bypass after queue acceptance and keeps the next message local until Enter', async () => {
     const queuedInput = { requestId: 'queued-1', text: 'first message', requestedAt: baseTime,
       state: 'queued' as const, reason: 'Waiting for the session to accept input.' };

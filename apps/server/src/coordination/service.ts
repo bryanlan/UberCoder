@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
+import type { AgentReference, AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
@@ -69,6 +69,27 @@ export class CoordinationService {
 
   eligible(directory: string): boolean {
     try { this.identity(directory); return true; } catch { return false; }
+  }
+
+  conversationReference(input: { projectSlug: string; provider: string; conversationRef: string }): AgentReference {
+    if (!this.settings.enabled) throw new Error('Agent coordination is disabled.');
+    const candidate = this.db.pendingConversations.get(input.conversationRef);
+    const pending = candidate?.projectSlug === input.projectSlug && candidate.provider === input.provider ? candidate : undefined;
+    const adopted = pending?.rawMetadata?.adoptedConversationRef;
+    const conversationRef = typeof adopted === 'string' ? adopted : input.conversationRef;
+    const session = this.db.boundSessions.getRestorableByConversation(input.projectSlug, input.provider, conversationRef);
+    if (!session || !['starting', 'bound'].includes(session.status)) {
+      throw new Error('This chat has no connected agent. Open it and resume its agent before referencing it.');
+    }
+    const nativeRef = session.resumeConversationRef ?? session.conversationRef;
+    const assignment = this.db.sqlite.prepare(`select id, status from coordination_assignments
+      where provider=? and native_session_id=?`).get(input.provider, nativeRef) as { id: string; status: string } | undefined;
+    if (!assignment || assignment.status === 'finished') {
+      throw new Error('This chat has no available coordinating agent. Resume its agent before referencing it.');
+    }
+    const summary = this.db.conversationIndex.get(input.projectSlug, input.provider, conversationRef);
+    return { recipientId: assignment.id, provider: input.provider, projectSlug: input.projectSlug,
+      conversationRef, title: summary?.title ?? session.title ?? pending?.title ?? conversationRef };
   }
 
   register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string }): { enabled: boolean; assignmentId?: string } {

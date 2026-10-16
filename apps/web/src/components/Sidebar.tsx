@@ -10,6 +10,7 @@ import { deriveSidebarProjects, type SidebarProject } from '../features/navigati
 import { getConversationStatusClass } from '../features/navigation/work-status';
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { TitleTooltip } from './TitleTooltip';
+import { startConversationDrag } from '../features/conversation/agent-reference';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
@@ -170,6 +171,9 @@ function SearchResultsPanel({
               <div className="ml-7 border-l border-slate-800 pl-3">
                 <Link
                   to={`/projects/${encodeURIComponent(result.projectSlug)}/${result.provider}/${encodeURIComponent(result.conversationRef)}`}
+                  draggable
+                  onDragStart={(event) => startConversationDrag(event, { projectSlug: result.projectSlug, provider: result.provider, conversationRef: result.conversationRef })}
+                  title="Drag into a message to reference this agent"
                   onClick={onClose}
                   className="block rounded-xl px-3 py-2 text-sm text-slate-300 transition hover:bg-slate-800/70 hover:text-white"
                 >
@@ -327,6 +331,9 @@ function ConversationLink({
       <Link
         to={href}
         onClick={onClose}
+        draggable
+        onDragStart={(event) => startConversationDrag(event, { projectSlug: project.slug, provider, conversationRef })}
+        title="Drag into a message to reference this agent"
         className={clsx(
           'flex min-w-0 flex-1 items-center gap-2 rounded-xl px-3 py-2 text-sm transition',
           active ? 'bg-sky-500/15 text-sky-100' : 'text-slate-300 hover:bg-slate-800/70 hover:text-white',

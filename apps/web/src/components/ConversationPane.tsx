@@ -4,10 +4,11 @@ import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, Pause, P
 import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
+import { CONVERSATION_DRAG_TYPE, formatAgentReference, readConversationDrag } from '../features/conversation/agent-reference';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { ExplorerPane, NavigationCrumbs } from '../features/conversation/ExplorerPane';
 import { groupTranscriptTurns, shouldShowInMainTranscript, TranscriptDocumentTurn } from '../features/conversation/transcript-turns';
@@ -334,6 +335,8 @@ function LiveSessionInputBridge({
   const [profileError, setProfileError] = useState<string>();
   const clipboardImages = useClipboardImages(conversationKey, sessionId, csrfToken);
   const [imageSubmitError, setImageSubmitError] = useState<string>();
+  const [agentReferenceError, setAgentReferenceError] = useState<string>();
+  const [agentDragOver, setAgentDragOver] = useState(false);
   const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
   const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
   const hasNumericMenuDraft = nativeSelectionActive && /^\d{1,8}$/.test(draftText.trim());
@@ -616,11 +619,49 @@ function LiveSessionInputBridge({
     setBridgeTextareaValue(text);
   }
 
-  function replaceDraftText(text: string): void {
+  function replaceDraftText(text: string, cursor = text.length): void {
     setDraftDirty(true);
     setDraftText(text);
     window.requestAnimationFrame(() => {
-      captureRef.current?.setSelectionRange(text.length, text.length);
+      captureRef.current?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  function dropAgentReference(event: DragEvent<HTMLTextAreaElement>): void {
+    if (!event.dataTransfer.types.includes(CONVERSATION_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setAgentDragOver(false);
+    if (bridgeBusyRef.current) return;
+    const reference = readConversationDrag(event.dataTransfer);
+    if (!reference) {
+      setAgentReferenceError('This chat reference is invalid. Drag the chat again.');
+      return;
+    }
+    const targetSessionId = sessionId;
+    const input = event.currentTarget;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    setAgentReferenceError(undefined);
+    void runBridgeAction(async () => {
+      try {
+        const resolved = await api.agentReference(reference);
+        if (activeSessionIdRef.current !== targetSessionId || captureRef.current !== input) return;
+        const text = formatAgentReference(resolved);
+        if (textBypassEnabled) {
+          appendLiteralText(`${bypassPreviewTextRef.current ? '\n' : ''}${text}\n`);
+        } else {
+          const before = draftText.slice(0, start);
+          const after = draftText.slice(end);
+          const inserted = `${before && !/\s$/.test(before) ? '\n' : ''}${text}\n`;
+          replaceDraftText(before + inserted + after, before.length + inserted.length);
+        }
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        if (activeSessionIdRef.current === targetSessionId && captureRef.current === input) {
+          setAgentReferenceError(error instanceof Error ? error.message : 'Cannot reference this agent.');
+        }
+      }
     });
   }
 
@@ -1115,6 +1156,7 @@ function LiveSessionInputBridge({
             </div>
           )}
           {(clipboardImages.error || imageSubmitError) && <div role="alert" className="mb-2 text-xs text-red-300">{clipboardImages.error ?? imageSubmitError}</div>}
+          {agentReferenceError && <div role="alert" className="mb-2 text-xs text-red-300">{agentReferenceError}</div>}
           <textarea
             ref={captureRef}
             readOnly={bridgeBusy}
@@ -1122,6 +1164,15 @@ function LiveSessionInputBridge({
             autoCorrect="off"
             spellCheck={false}
             enterKeyHint="send"
+            onDragOver={(event) => {
+              if (!event.dataTransfer.types.includes(CONVERSATION_DRAG_TYPE)) return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = bridgeBusy ? 'none' : 'copy';
+              setAgentDragOver(!bridgeBusy);
+            }}
+            onDragLeave={() => setAgentDragOver(false)}
+            onDrop={dropAgentReference}
             onFocus={(event) => {
               if (textBypassEnabled) {
                 keepBypassSelectionPinnedRef.current = true;
@@ -1256,6 +1307,7 @@ function LiveSessionInputBridge({
             style={{ height: `${bridgeHeight}px` }}
             className={clsx(
               'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
+              agentDragOver && 'ring-2 ring-sky-400',
             )}
           />
           {(!mobileControlsHidden || nativeSelectionActive) && (
