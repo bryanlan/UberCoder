@@ -27,7 +27,7 @@ A `resumable` worktree therefore keeps its directory but loses its build caches 
 
 Removal first renames the worktree to `.retiring-<name>-<pid>-<start>` beside it, so no agent can open it by its known path. Then it checks again and lets `git worktree remove` delete it. If anything changed, the worktree moves back. A sweep interrupted after the rename leaves a `.retiring-*` worktree; the next applying sweep moves it back.
 
-Cache deletion refuses links, mounts, other devices, tracked or untracked files and protected names (`.git`, `.env*`, `.venv`, `venv`) anywhere below the cache.
+Cache deletion refuses links, mounts, other devices, tracked or untracked files and protected names (`.git`, `.env*`, `.venv`, `venv`) anywhere below the cache, and any cache holding `pyvenv.cfg`. Its final walk also skips a cache when anything inside was written in the last 24 hours, which catches rewrites that leave directory times unchanged.
 
 Check-then-act is not atomic. A process would have to enter a worktree idle for 24 hours with no resumable owner, during the seconds of a sweep, and evade the process scan. Even then Git still refuses to delete tracked or untracked changes, so only ignored files or cache output could be lost. Likewise, a session resumed during those seconds could start a build while its cache is being deleted; that build fails and the next one rebuilds. We accept that risk; closing it would need a lock shared by every launcher.
 
@@ -41,7 +41,7 @@ To recover a removed worktree, run the `recovery` command recorded in the report
 
 | What | Removed when |
 |---|---|
-| Build caches in `/tmp` (and `$TMPDIR`) up to four levels down: directories this user owns with a valid `CACHEDIR.TAG` | No process references anything inside, nothing below it was written in 24 hours, and the same disposable checks as worktree caches pass. A cache inside a Git checkout must hold no tracked or untracked files. |
+| Build caches in `/tmp` (and `$TMPDIR`) up to four levels down: directories this user owns with a valid `CACHEDIR.TAG` | No process references anything inside, nothing in it was written in 24 hours, every entry is this user's, no mount point lies on its path, and the same disposable checks as worktree caches pass. Every enclosing Git checkout must report no tracked or untracked files in it. Protected names (`.venv`, `venv`, `var`, `dist`, `build`, `.env*`) are never searched, and any directory holding `pyvenv.cfg` is refused, because `uv` tags virtual environments with `CACHEDIR.TAG` too. |
 | Docker volumes | Anonymous (Docker created it for a container), no container uses it, and created over 24 hours ago. Docker itself refuses a volume in use. Named volumes are never removed. |
 | Docker build cache | Unused for 7 days (`docker builder prune --filter until=168h`). |
 

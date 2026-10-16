@@ -441,7 +441,7 @@ function verifyDisposable(directory, rootDevice, { uid, writtenBefore } = {}) {
     const current = pending.pop();
     for (const item of fs.readdirSync(current, { withFileTypes: true })) {
       const full = path.join(current, item.name);
-      if (item.name === '.git' || item.name === '.venv' || item.name === 'venv' || item.name.startsWith('.env')) throw new Refusal(`protected entry at ${full}`);
+      if (item.name === '.git' || item.name === '.venv' || item.name === 'venv' || item.name === 'pyvenv.cfg' || item.name.startsWith('.env')) throw new Refusal(`protected entry at ${full}`);
       const stat = fs.lstatSync(full);
       if (stat.dev !== rootDevice) throw new Refusal(`device boundary at ${full}`);
       if (uid !== undefined && stat.uid !== uid) throw new Refusal(`another user's entry at ${full}`);

@@ -353,6 +353,8 @@ describe('scratch and Docker sweep', () => {
     write(path.join(scratch, 'job', '.venv', 'pyvenv.cfg'), 'home = /usr/bin\n');
     cache(scratch, 'uv-env');
     write(path.join(scratch, 'uv-env', 'pyvenv.cfg'), 'home = /usr/bin\n');
+    cache(scratch, 'job/target');
+    write(path.join(scratch, 'job', 'target', 'test-env', 'pyvenv.cfg'), 'home = /usr/bin\n');
     const outer = path.join(scratch, 'outer');
     write(path.join(outer, 'component', 'target', 'valuable.txt'), 'tracked by the outer repository');
     git(scratch, 'init', '-q', outer);
@@ -364,9 +366,10 @@ describe('scratch and Docker sweep', () => {
     const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [repo], scratchRoots: [scratch] });
     expect(Object.fromEntries(report.scratch.map((item) => [path.relative(scratch, item.path), item.outcome]))).toEqual({
       'outer/component/target': expect.stringMatching(/^refused: holds tracked or untracked files of .*\/outer$/),
+      'job/target': expect.stringMatching(/^refused: protected entry at .*test-env\/pyvenv\.cfg$/),
       'uv-env': expect.stringMatching(/^refused: virtual environment at .*uv-env$/),
     });
-    for (const kept of ['job/.venv/pyvenv.cfg', 'uv-env/debug/big.bin', 'outer/component/target/valuable.txt']) expect(fs.existsSync(path.join(scratch, kept)), kept).toBe(true);
+    for (const kept of ['job/.venv/pyvenv.cfg', 'job/target/test-env/pyvenv.cfg', 'uv-env/debug/big.bin', 'outer/component/target/valuable.txt']) expect(fs.existsSync(path.join(scratch, kept)), kept).toBe(true);
   });
 
   it('removes only old anonymous Docker volumes no container uses, and prunes old build cache', () => {
