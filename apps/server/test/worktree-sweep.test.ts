@@ -315,23 +315,40 @@ describe('scratch and Docker sweep', () => {
     fs.symlinkSync(path.join(root, 'elsewhere-cache', 'target'), path.join(scratch, 'link-target'));
     write(path.join(scratch, 'plain', 'keep.txt'), 'not a cache');
     cache(scratch, 'a/b/c/d/deep-target');
+    // Rewriting an existing file deep inside changes no directory time; the final walk still sees it.
+    cache(scratch, 'rewritten-target');
+    write(path.join(scratch, 'rewritten-target', 'debug', '.fingerprint', 'pkg-1', 'out'), 'fresh');
+    fs.utimesSync(path.join(scratch, 'rewritten-target', 'debug', '.fingerprint', 'pkg-1', 'out'), new Date(NOW - HOUR), new Date(NOW - HOUR));
     try {
       const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [repo], scratchRoots: [scratch] });
       const outcomes = Object.fromEntries(report.scratch.map((item) => [path.relative(scratch, item.path), `${item.state}/${item.outcome ?? '-'}`]));
       expect(outcomes).toEqual({
         'busy/target': 'in-use/-', 'checkout/target': expect.stringMatching(/^idle\/refused: holds tracked or untracked files/),
         'fresh-target': 'recent/-', 'idle-target': 'idle/reclaimed', 'secret-target': expect.stringMatching(/^idle\/refused: protected entry at .*\.env$/),
+        'rewritten-target': expect.stringMatching(/^idle\/skipped: written within the cooldown at .*\/out$/),
       });
       expect(fs.existsSync(path.join(scratch, 'idle-target'))).toBe(false);
-      for (const kept of ['fresh-target/debug/big.bin', 'busy/target/debug/big.bin', 'secret-target/debug/.env', 'checkout/target/debug/big.bin', 'plain/keep.txt', 'a/b/c/d/deep-target/debug/big.bin']) {
+      for (const kept of ['rewritten-target/debug/.fingerprint/pkg-1/out', 'fresh-target/debug/big.bin', 'busy/target/debug/big.bin', 'secret-target/debug/.env', 'checkout/target/debug/big.bin', 'plain/keep.txt', 'a/b/c/d/deep-target/debug/big.bin']) {
         expect(fs.existsSync(path.join(scratch, kept)), kept).toBe(true);
       }
       expect(fs.existsSync(path.join(root, 'elsewhere-cache', 'target', 'debug', 'big.bin'))).toBe(true);
     } finally { busy.kill(); }
   });
 
+  it('checks the repository around a scratch root, such as TMPDIR inside a checkout', () => {
+    const holder = path.join(root, 'tmpdir-repo');
+    fs.mkdirSync(holder);
+    git(holder, 'init', '-q');
+    cache(path.join(holder, 'tmp'), 'build-target');
+    git(holder, 'add', '-f', 'tmp/build-target/debug/big.bin');
+    git(holder, 'commit', '-qm', 'tracked under the scratch root');
+    const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [repo], scratchRoots: [path.join(holder, 'tmp')] });
+    expect(report.scratch.map((item) => item.outcome)).toEqual([expect.stringMatching(/^refused: holds tracked or untracked files of .*tmpdir-repo$/)]);
+    expect(fs.existsSync(path.join(holder, 'tmp', 'build-target', 'debug', 'big.bin'))).toBe(true);
+  });
+
   it('removes only old anonymous Docker volumes no container uses, and prunes old build cache', () => {
-    const created = { 'anon-old': NOW - 48 * HOUR, 'anon-new': NOW - HOUR, 'named-old': NOW - 48 * HOUR, 'anon-raced': NOW - 48 * HOUR };
+    const created = { 'anon-old': NOW - 48 * HOUR, 'anon-new': NOW - HOUR, 'named-old': NOW - 48 * HOUR, 'anon-raced': NOW - 48 * HOUR, 'anon-gone': NOW - 48 * HOUR };
     const calls: string[][] = [];
     let listed = 0;
     const docker = (args: string[]) => {
@@ -339,6 +356,7 @@ describe('scratch and Docker sweep', () => {
       if (args[0] === 'version') return '27.0\n';
       if (args[0] === 'volume' && args[1] === 'ls') return (listed++ === 0 ? Object.keys(created) : ['anon-old', 'anon-new', 'named-old']).join('\n');
       if (args[0] === 'volume' && args[1] === 'inspect') {
+        if (args[2] === 'anon-gone') throw new Error('Error: No such volume: anon-gone');
         const name = args[2] as keyof typeof created;
         return JSON.stringify([{ Name: name, CreatedAt: new Date(created[name]).toISOString(), Labels: name.startsWith('anon') ? { 'com.docker.volume.anonymous': '' } : { project: 'x' } }]);
       }
@@ -349,13 +367,14 @@ describe('scratch and Docker sweep', () => {
     const options = { configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), now: NOW, repoFilter: [repo], docker };
 
     const dry = runSweep(options).docker;
-    expect(dry.volumes.map((item) => `${item.name}:${item.action}`)).toEqual(['anon-new:none', 'anon-old:remove', 'anon-raced:remove', 'named-old:none']);
+    expect(dry.volumes.map((item) => `${item.name}:${item.action}`)).toEqual(['anon-gone:none', 'anon-new:none', 'anon-old:remove', 'anon-raced:remove', 'named-old:none']);
+    expect(dry.volumes[0]?.reason).toBe('Could not be inspected: Error: No such volume: anon-gone');
     expect(calls.some((args) => args[1] === 'rm' || args[0] === 'builder')).toBe(false);
 
     calls.length = 0; listed = 0;
     const applied = runSweep({ ...options, apply: true }).docker;
     expect(Object.fromEntries(applied.volumes.map((item) => [item.name, item.outcome ?? '-']))).toEqual({
-      'anon-new': '-', 'anon-old': 'removed', 'anon-raced': 'skipped: now in use', 'named-old': '-',
+      'anon-gone': '-', 'anon-new': '-', 'anon-old': 'removed', 'anon-raced': 'skipped: now in use', 'named-old': '-',
     });
     expect(calls.filter((args) => args[1] === 'rm')).toEqual([['volume', 'rm', 'anon-old']]);
     expect(calls.find((args) => args[0] === 'builder')).toEqual(['builder', 'prune', '--force', '--filter', 'until=168h']);
@@ -363,5 +382,9 @@ describe('scratch and Docker sweep', () => {
 
     const unavailable = runSweep({ ...options, apply: true, docker: () => { throw new Error('Cannot connect to the Docker daemon'); } }).docker;
     expect(unavailable).toEqual({ available: false, reason: 'Cannot connect to the Docker daemon', volumes: [] });
+
+    const listingFails = runSweep({ ...options, apply: true, docker: (args: string[]) => { if (args[0] === 'version') return '27.0'; throw new Error('daemon restarting'); } });
+    expect(listingFails.docker).toEqual({ available: false, reason: 'volume listing failed: daemon restarting', volumes: [] });
+    expect(fs.existsSync(listingFails.file)).toBe(true);
   });
 });

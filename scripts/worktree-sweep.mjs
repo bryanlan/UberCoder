@@ -49,6 +49,10 @@ const isWithin = (target, root) => target === root || target.startsWith(`${root}
 
 // A safety check declined to delete something. Reported as `refused`, not as a failed run.
 class Refusal extends Error {}
+// A final check found recent use; the next run looks again. Reported as `skipped`.
+class Skip extends Error {}
+
+const outcomeOf = (error) => `${error instanceof Refusal ? 'refused' : error instanceof Skip ? 'skipped' : 'failed'}: ${String(error.stderr || error.message).trim().split('\n')[0]}`;
 
 export function processStart(pid) {
   try {
@@ -426,7 +430,8 @@ function reassess(options, repository, entry, consolePath = entry.path) {
 
 // Walks a disposable directory without following links; refuses Git data, secrets, environments
 // and device or mount boundaries anywhere below it. Returns its size in bytes.
-function verifyDisposable(directory, rootDevice) {
+// `uid` refuses entries another user owns; `writtenBefore` skips a cache with any entry written later.
+function verifyDisposable(directory, rootDevice, { uid, writtenBefore } = {}) {
   assertNoMountsWithin(directory);
   let bytes = 0;
   const pending = [directory];
@@ -437,6 +442,8 @@ function verifyDisposable(directory, rootDevice) {
       if (item.name === '.git' || item.name === '.venv' || item.name === 'venv' || item.name.startsWith('.env')) throw new Refusal(`protected entry at ${full}`);
       const stat = fs.lstatSync(full);
       if (stat.dev !== rootDevice) throw new Refusal(`device boundary at ${full}`);
+      if (uid !== undefined && stat.uid !== uid) throw new Refusal(`another user's entry at ${full}`);
+      if (writtenBefore !== undefined && stat.mtimeMs > writtenBefore) throw new Skip(`written within the cooldown at ${full}`);
       bytes += stat.blocks * 512;
       if (stat.isDirectory()) pending.push(full);
     }
@@ -444,7 +451,7 @@ function verifyDisposable(directory, rootDevice) {
   return bytes;
 }
 
-function reclaimCache(worktree, relative) {
+function reclaimCache(worktree, relative, writtenBefore) {
   const absolute = path.join(worktree, relative);
   const stat = fs.lstatSync(absolute);
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Refusal(`${relative} is not a plain directory`);
@@ -452,7 +459,7 @@ function reclaimCache(worktree, relative) {
   if (!validCacheDirTag(absolute)) throw new Refusal(`${relative} lost its CACHEDIR.TAG`);
   if (git(worktree, ['ls-files', '-z', '--', relative]).length) throw new Refusal(`${relative} contains tracked files`);
   if (git(worktree, ['ls-files', '-z', '--others', '--exclude-standard', '--', relative]).length) throw new Refusal(`${relative} contains untracked files`);
-  const bytes = verifyDisposable(absolute, stat.dev);
+  const bytes = verifyDisposable(absolute, stat.dev, { writtenBefore });
   fs.rmSync(absolute, { recursive: true });
   return bytes;
 }
@@ -461,6 +468,9 @@ function reclaimCache(worktree, relative) {
 // CACHEDIR.TAG, up to SCRATCH_DEPTH levels down, on the scratch root's device. Never follows links.
 function findScratchCaches(root) {
   const found = [];
+  const table = mountPoints();
+  if (!table) return found;
+  const mounts = new Set(table);
   let device;
   try { device = fs.lstatSync(root).dev; } catch { return found; }
   const pending = [{ directory: root, depth: 0 }];
@@ -473,7 +483,7 @@ function findScratchCaches(root) {
       const full = path.join(directory, item.name);
       let stat;
       try { stat = fs.lstatSync(full); } catch { continue; }
-      if (stat.uid !== process.getuid() || stat.dev !== device) continue;
+      if (stat.uid !== process.getuid() || stat.dev !== device || mounts.has(full)) continue;
       if (validCacheDirTag(full)) found.push(full);
       else if (depth + 1 < SCRATCH_DEPTH) pending.push({ directory: full, depth: depth + 1 });
     }
@@ -490,22 +500,34 @@ function assessScratch(cache, scan, now, cooldownMs) {
 }
 
 // A scratch cache inside a Git checkout gets the same tracked and untracked checks as a worktree cache.
-function reclaimScratchCache(cache, root) {
+function reclaimScratchCache(cache, root, writtenBefore) {
   const stat = fs.lstatSync(cache);
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Refusal('not a plain directory');
   if (stat.uid !== process.getuid()) throw new Refusal('owned by another user');
   if (!validCacheDirTag(cache)) throw new Refusal('lost its CACHEDIR.TAG');
-  for (let current = path.dirname(cache); isWithin(current, root); current = path.dirname(current)) {
-    if (!fs.existsSync(path.join(current, '.git'))) continue;
-    const relative = path.relative(current, cache);
-    let held;
-    try {
-      held = git(current, ['ls-files', '-z', '--', relative]).length || git(current, ['ls-files', '-z', '--others', '--exclude-standard', '--', relative]).length;
-    } catch { throw new Refusal(`its checkout ${current} could not be read`); }
-    if (held) throw new Refusal(`holds tracked or untracked files of ${current}`);
-    break;
+  const mounts = mountPoints();
+  if (!mounts) throw new Refusal('mount table is unreadable');
+  for (let current = path.dirname(cache); current !== root && isWithin(current, root); current = path.dirname(current)) {
+    if (mounts.includes(current)) throw new Refusal(`mount point at ${current}`);
   }
-  const bytes = verifyDisposable(cache, stat.dev);
+  // The scratch root itself may sit inside a checkout (for example TMPDIR in a repository).
+  for (let current = path.dirname(cache); ; current = path.dirname(current)) {
+    let marker;
+    try { marker = fs.lstatSync(path.join(current, '.git')); } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw new Refusal(`cannot check ${current} for a checkout`);
+    }
+    if (marker) {
+      const relative = path.relative(current, cache);
+      let held;
+      try {
+        held = git(current, ['ls-files', '-z', '--', relative]).length || git(current, ['ls-files', '-z', '--others', '--exclude-standard', '--', relative]).length;
+      } catch { throw new Refusal(`its checkout ${current} could not be read`); }
+      if (held) throw new Refusal(`holds tracked or untracked files of ${current}`);
+      break;
+    }
+    if (current === path.dirname(current)) break;
+  }
+  const bytes = verifyDisposable(cache, stat.dev, { uid: process.getuid(), writtenBefore });
   fs.rmSync(cache, { recursive: true });
   return bytes;
 }
@@ -518,10 +540,10 @@ function sweepScratch(candidates, scan, options, apply) {
     try {
       const current = assessScratch(result.path, scanProcesses(), options.now, options.cooldownMs);
       if (current.action !== 'reclaim-cache') { result.outcome = `skipped: now ${current.state} (${current.reason})`; continue; }
-      result.reclaimedBytes = reclaimScratchCache(result.path, result.root);
+      result.reclaimedBytes = reclaimScratchCache(result.path, result.root, options.now - options.cooldownMs);
       result.outcome = 'reclaimed';
     } catch (error) {
-      result.outcome = `${error instanceof Refusal ? 'refused' : 'failed'}: ${String(error.stderr || error.message).trim().split('\n')[0]}`;
+      result.outcome = outcomeOf(error);
     }
   }
   return results;
@@ -538,12 +560,18 @@ const firstLine = (error) => String(error.stderr || error.message).trim().split(
 function sweepDocker(docker, options, apply) {
   try { docker(['version', '--format', '{{.Server.Version}}']); } catch (error) { return { available: false, reason: firstLine(error), volumes: [] }; }
   const dangling = () => new Set(docker(['volume', 'ls', '-q', '--filter', 'dangling=true']).split('\n').filter(Boolean));
-  const volumes = [...dangling()].sort().map((name) => {
-    const info = JSON.parse(docker(['volume', 'inspect', name]))[0];
-    const anonymous = Object.hasOwn(info.Labels ?? {}, 'com.docker.volume.anonymous');
-    const old = options.now - Date.parse(info.CreatedAt) >= options.cooldownMs;
-    const reason = !anonymous ? 'Named volume; kept.' : old ? 'Anonymous volume no container uses.' : `Created within the last ${options.cooldownMs / HOUR}h.`;
-    return { name, createdAt: info.CreatedAt, action: anonymous && old ? 'remove' : 'none', reason };
+  let names;
+  try { names = [...dangling()].sort(); } catch (error) { return { available: false, reason: `volume listing failed: ${firstLine(error)}`, volumes: [] }; }
+  const volumes = names.map((name) => {
+    try {
+      const info = JSON.parse(docker(['volume', 'inspect', name]))[0];
+      const anonymous = Object.hasOwn(info.Labels ?? {}, 'com.docker.volume.anonymous');
+      const old = options.now - Date.parse(info.CreatedAt) >= options.cooldownMs;
+      const reason = !anonymous ? 'Named volume; kept.' : old ? 'Anonymous volume no container uses.' : `Created within the last ${options.cooldownMs / HOUR}h.`;
+      return { name, createdAt: info.CreatedAt, action: anonymous && old ? 'remove' : 'none', reason };
+    } catch (error) {
+      return { name, createdAt: '', action: 'none', reason: `Could not be inspected: ${firstLine(error)}` };
+    }
   });
   const state = { available: true, volumes, buildCache: { action: `prune unused for ${BUILD_CACHE_HOURS}h` } };
   if (!apply) return state;
@@ -623,13 +651,13 @@ function applyActions(options, repositories, results) {
         for (const root of current.cacheRoots) {
           const again = reassess(options, repository, entry);
           if (again.action !== 'reclaim-cache' || !again.cacheRoots.includes(root)) break;
-          result.reclaimedBytes += reclaimCache(result.path, root);
+          result.reclaimedBytes += reclaimCache(result.path, root, options.now - options.cooldownMs);
           done.push(root);
         }
         result.outcome = done.length === current.cacheRoots.length ? `reclaimed ${done.join(', ')}` : `skipped: changed after reclaiming ${done.join(', ') || 'nothing'}`;
       }
     } catch (error) {
-      result.outcome = `${error instanceof Refusal ? 'refused' : 'failed'}: ${String(error.stderr || error.message).trim().split('\n')[0]}`;
+      result.outcome = outcomeOf(error);
     }
   }
 }
