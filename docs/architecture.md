@@ -510,6 +510,8 @@ appears before or after the permissions footer. Neither the roster nor a paragra
 break proves that text was rejected. Submitted prompts followed by assistant output
 and interactive choices still remain outside the composer. A draft already visible
 in the input box is submitted without pasting it a second time.
+Text beginning with `?` uses bracketed paste for queued, combined and Text Bypass
+entry, so the native shortcut-help key cannot consume the message's first character.
 
 Codex `task_complete.error` records and Claude main-session assistant records marked
 `isApiErrorMessage` are authoritative failed-turn outcomes. The

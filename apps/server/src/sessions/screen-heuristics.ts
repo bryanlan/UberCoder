@@ -227,5 +227,6 @@ export function combinedTextKeySettleWaitMs(text: string): number {
 }
 
 export function shouldUseBracketedPasteTransport(text: string): boolean {
-  return text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
+  // Typing a leading '?' opens native shortcut help instead of entering text.
+  return text.startsWith('?') || text.length > TMUX_LITERAL_TEXT_CHUNK_SIZE || /[\r\n]/.test(text);
 }

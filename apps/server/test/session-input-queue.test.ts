@@ -45,14 +45,24 @@ class InputTmux extends FakeTmux {
   }
 }
 
+/** Claude consumes a leading typed question mark as its shortcuts toggle. */
+class QuestionShortcutTmux extends InputTmux {
+  override async sendLiteralText(name: string, text: string): Promise<void> {
+    await super.sendLiteralText(name, text.startsWith('?') ? text.slice(1) : text);
+  }
+  override async pasteText(name: string, text: string): Promise<void> {
+    this.pasted.push(text);
+    await super.sendLiteralText(name, text);
+  }
+}
+
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(providerId: 'codex' | 'claude' = 'codex', recovery = false) {
+async function fixture(providerId: 'codex' | 'claude' = 'codex', recovery = false, tmux = new InputTmux()) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'console-input-queue-'));
   const databasePath = path.join(directory, 'console.sqlite');
   let db = new AppDatabase(databasePath);
-  const tmux = new InputTmux();
   const eventBus = new RealtimeEventBus();
   const runtimeDir = path.join(directory, 'runtime');
   const createManager = () => recovery ? createRecoveryManager(db, tmux, runtimeDir, eventBus)
@@ -67,6 +77,37 @@ async function fixture(providerId: 'codex' | 'claude' = 'codex', recovery = fals
 }
 
 describe('durable human input queue', () => {
+  it.each([
+    ['queued', '?'], ['queued', '? are you there'], ['combined', '?'], ['bypass', '?'],
+  ] as const)('delivers leading question marks through %s input: %s', async (mode, text) => {
+    const f = await fixture('claude', false, new QuestionShortcutTmux());
+    let result;
+    if (mode === 'queued') {
+      result = await f.submit(text);
+    } else {
+      if (mode === 'bypass') await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+      result = await f.manager.sendKeystrokes(f.session.id, {
+        text: mode === 'combined' ? text : undefined, submittedText: text, keys: ['Enter'],
+      });
+    }
+    expect(result.recordedUserInput?.text).toBe(text);
+    expect(result.queuedInput).toBeUndefined();
+    expect(f.tmux.pasted).toEqual([text]);
+    expect(f.tmux.sent).toEqual([text]);
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+
+    await f.submit('are you there');
+    f.tmux.paneText = ready();
+    // This fake has no provider lifecycle watcher to finish the first turn.
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    await vi.waitFor(() => {
+      expect(f.tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
+      expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
+    }, { timeout: 4000 });
+    const entries = (await fs.readFile(f.session.eventLogPath!, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+    expect(entries.filter(entry => entry.type === 'user-input').map(entry => entry.text)).toEqual([text, 'are you there']);
+  });
+
   it.each(['codex', 'claude'] as const)('submits confirmed %s input once and deduplicates the same request', async (providerId) => {
     const f = await fixture(providerId);
     const id = randomUUID();
