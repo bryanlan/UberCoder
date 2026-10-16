@@ -296,3 +296,72 @@ describe('worktree sweep', () => {
     expect(fs.existsSync(target)).toBe(true);
   });
 });
+
+describe('scratch and Docker sweep', () => {
+  it('reclaims only idle, unused, verified build caches in scratch space', () => {
+    const scratch = path.join(root, 'scratch-tmp');
+    cache(scratch, 'idle-target');
+    cache(scratch, 'fresh-target');
+    fs.utimesSync(path.join(scratch, 'fresh-target', 'debug'), new Date(NOW - HOUR), new Date(NOW - HOUR));
+    cache(scratch, 'busy/target');
+    const busy = spawn('sleep', ['120'], { cwd: path.join(scratch, 'busy', 'target'), stdio: 'ignore' });
+    cache(scratch, 'secret-target');
+    write(path.join(scratch, 'secret-target', 'debug', '.env'), 'TOKEN=1');
+    const checkout = path.join(scratch, 'checkout');
+    fs.mkdirSync(checkout, { recursive: true });
+    git(checkout, 'init', '-q');
+    cache(checkout, 'target');
+    cache(path.join(root, 'elsewhere-cache'), 'target');
+    fs.symlinkSync(path.join(root, 'elsewhere-cache', 'target'), path.join(scratch, 'link-target'));
+    write(path.join(scratch, 'plain', 'keep.txt'), 'not a cache');
+    cache(scratch, 'a/b/c/d/deep-target');
+    try {
+      const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [repo], scratchRoots: [scratch] });
+      const outcomes = Object.fromEntries(report.scratch.map((item) => [path.relative(scratch, item.path), `${item.state}/${item.outcome ?? '-'}`]));
+      expect(outcomes).toEqual({
+        'busy/target': 'in-use/-', 'checkout/target': expect.stringMatching(/^idle\/refused: holds tracked or untracked files/),
+        'fresh-target': 'recent/-', 'idle-target': 'idle/reclaimed', 'secret-target': expect.stringMatching(/^idle\/refused: protected entry at .*\.env$/),
+      });
+      expect(fs.existsSync(path.join(scratch, 'idle-target'))).toBe(false);
+      for (const kept of ['fresh-target/debug/big.bin', 'busy/target/debug/big.bin', 'secret-target/debug/.env', 'checkout/target/debug/big.bin', 'plain/keep.txt', 'a/b/c/d/deep-target/debug/big.bin']) {
+        expect(fs.existsSync(path.join(scratch, kept)), kept).toBe(true);
+      }
+      expect(fs.existsSync(path.join(root, 'elsewhere-cache', 'target', 'debug', 'big.bin'))).toBe(true);
+    } finally { busy.kill(); }
+  });
+
+  it('removes only old anonymous Docker volumes no container uses, and prunes old build cache', () => {
+    const created = { 'anon-old': NOW - 48 * HOUR, 'anon-new': NOW - HOUR, 'named-old': NOW - 48 * HOUR, 'anon-raced': NOW - 48 * HOUR };
+    const calls: string[][] = [];
+    let listed = 0;
+    const docker = (args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'version') return '27.0\n';
+      if (args[0] === 'volume' && args[1] === 'ls') return (listed++ === 0 ? Object.keys(created) : ['anon-old', 'anon-new', 'named-old']).join('\n');
+      if (args[0] === 'volume' && args[1] === 'inspect') {
+        const name = args[2] as keyof typeof created;
+        return JSON.stringify([{ Name: name, CreatedAt: new Date(created[name]).toISOString(), Labels: name.startsWith('anon') ? { 'com.docker.volume.anonymous': '' } : { project: 'x' } }]);
+      }
+      if (args[0] === 'volume' && args[1] === 'rm') return `${args[2]}\n`;
+      if (args[0] === 'builder') return 'ID\tRECLAIMABLE\nabc\ttrue\nTotal:\t1.5GB\n';
+      throw new Error(`unexpected docker ${args.join(' ')}`);
+    };
+    const options = { configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), now: NOW, repoFilter: [repo], docker };
+
+    const dry = runSweep(options).docker;
+    expect(dry.volumes.map((item) => `${item.name}:${item.action}`)).toEqual(['anon-new:none', 'anon-old:remove', 'anon-raced:remove', 'named-old:none']);
+    expect(calls.some((args) => args[1] === 'rm' || args[0] === 'builder')).toBe(false);
+
+    calls.length = 0; listed = 0;
+    const applied = runSweep({ ...options, apply: true }).docker;
+    expect(Object.fromEntries(applied.volumes.map((item) => [item.name, item.outcome ?? '-']))).toEqual({
+      'anon-new': '-', 'anon-old': 'removed', 'anon-raced': 'skipped: now in use', 'named-old': '-',
+    });
+    expect(calls.filter((args) => args[1] === 'rm')).toEqual([['volume', 'rm', 'anon-old']]);
+    expect(calls.find((args) => args[0] === 'builder')).toEqual(['builder', 'prune', '--force', '--filter', 'until=168h']);
+    expect(applied.buildCache?.outcome).toBe('pruned 1.5GB');
+
+    const unavailable = runSweep({ ...options, apply: true, docker: () => { throw new Error('Cannot connect to the Docker daemon'); } }).docker;
+    expect(unavailable).toEqual({ available: false, reason: 'Cannot connect to the Docker daemon', volumes: [] });
+  });
+});

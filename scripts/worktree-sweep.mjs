@@ -23,6 +23,10 @@ const OPAQUE_DAEMONS = new Set(['systemd', '(sd-pam)', 'gpg-agent', 'ssh-agent',
 const QUARANTINE = /^\.retiring-(.+)-(\d+)-(\d+)$/;
 const REPORTS_KEPT = 72;
 const HOUR = 3_600_000;
+// How far below a scratch root (such as /tmp) to look for build caches, and how long Docker build
+// cache may sit unused before it goes.
+const SCRATCH_DEPTH = 4;
+const BUILD_CACHE_HOURS = 168;
 
 const expandHome = (value) => value.replace(/^~(?=\/|$)/, os.homedir());
 
@@ -286,6 +290,16 @@ function safeDirectories(directory) {
   } catch { return []; }
 }
 
+// Latest write to a build cache: the cache directory and two levels below it, where Cargo writes.
+function cacheActivity(absolute) {
+  let activity = mtimeMs(absolute);
+  for (const child of safeDirectories(absolute)) {
+    activity = Math.max(activity, mtimeMs(child));
+    for (const grandchild of safeDirectories(child)) activity = Math.max(activity, mtimeMs(grandchild));
+  }
+  return activity;
+}
+
 // Commits reachable only from this worktree's HEAD reflog or ORIG_HEAD.
 function readIfPresent(file) {
   try { return fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
@@ -337,14 +351,7 @@ export function inspectWorktree(repository, entry) {
   let activity = Math.max(...['HEAD', 'index', 'logs/HEAD'].map((name) => mtimeMs(path.join(gitDir, name))));
   try { activity = Math.max(activity, Number(git(worktree, ['log', '-1', '--format=%ct', 'HEAD']).trim()) * 1000); } catch { /* unborn */ }
   for (const change of status.changed) activity = Math.max(activity, mtimeMs(path.join(worktree, change.file)));
-  for (const cacheRoot of facts.cacheRoots) {
-    const absolute = path.join(worktree, cacheRoot);
-    activity = Math.max(activity, mtimeMs(absolute));
-    for (const child of safeDirectories(absolute)) {
-      activity = Math.max(activity, mtimeMs(child));
-      for (const grandchild of safeDirectories(child)) activity = Math.max(activity, mtimeMs(grandchild));
-    }
-  }
+  for (const cacheRoot of facts.cacheRoots) activity = Math.max(activity, cacheActivity(path.join(worktree, cacheRoot)));
   facts.activityMs = activity;
   facts.containedIn = [];
   if (!facts.detached && facts.head) {
@@ -450,6 +457,112 @@ function reclaimCache(worktree, relative) {
   return bytes;
 }
 
+// Build caches agents leave in scratch space such as /tmp: directories this user owns with a valid
+// CACHEDIR.TAG, up to SCRATCH_DEPTH levels down, on the scratch root's device. Never follows links.
+function findScratchCaches(root) {
+  const found = [];
+  let device;
+  try { device = fs.lstatSync(root).dev; } catch { return found; }
+  const pending = [{ directory: root, depth: 0 }];
+  while (pending.length) {
+    const { directory, depth } = pending.pop();
+    let items = [];
+    try { items = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    for (const item of items) {
+      if (!item.isDirectory() || item.name === '.git' || item.name === 'node_modules') continue;
+      const full = path.join(directory, item.name);
+      let stat;
+      try { stat = fs.lstatSync(full); } catch { continue; }
+      if (stat.uid !== process.getuid() || stat.dev !== device) continue;
+      if (validCacheDirTag(full)) found.push(full);
+      else if (depth + 1 < SCRATCH_DEPTH) pending.push({ directory: full, depth: depth + 1 });
+    }
+  }
+  return found.sort();
+}
+
+function assessScratch(cache, scan, now, cooldownMs) {
+  const pids = [...new Set(scan.references.filter((ref) => isWithin(ref.path, cache)).map((ref) => ref.pid))];
+  if (pids.length) return { path: cache, state: 'in-use', action: 'none', reason: `process ${pids.slice(0, 5).join(', ')} references it` };
+  if (!scan.complete) return { path: cache, state: 'in-use', action: 'none', reason: 'process visibility is incomplete' };
+  if (now - cacheActivity(cache) < cooldownMs) return { path: cache, state: 'recent', action: 'none', reason: `Written within the last ${cooldownMs / HOUR}h.` };
+  return { path: cache, state: 'idle', action: 'reclaim-cache', reason: 'Idle build cache in scratch space.' };
+}
+
+// A scratch cache inside a Git checkout gets the same tracked and untracked checks as a worktree cache.
+function reclaimScratchCache(cache, root) {
+  const stat = fs.lstatSync(cache);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Refusal('not a plain directory');
+  if (stat.uid !== process.getuid()) throw new Refusal('owned by another user');
+  if (!validCacheDirTag(cache)) throw new Refusal('lost its CACHEDIR.TAG');
+  for (let current = path.dirname(cache); isWithin(current, root); current = path.dirname(current)) {
+    if (!fs.existsSync(path.join(current, '.git'))) continue;
+    const relative = path.relative(current, cache);
+    let held;
+    try {
+      held = git(current, ['ls-files', '-z', '--', relative]).length || git(current, ['ls-files', '-z', '--others', '--exclude-standard', '--', relative]).length;
+    } catch { throw new Refusal(`its checkout ${current} could not be read`); }
+    if (held) throw new Refusal(`holds tracked or untracked files of ${current}`);
+    break;
+  }
+  const bytes = verifyDisposable(cache, stat.dev);
+  fs.rmSync(cache, { recursive: true });
+  return bytes;
+}
+
+function sweepScratch(candidates, scan, options, apply) {
+  const roots = [...new Set(candidates)].filter((root, _, all) => !all.some((other) => other !== root && isWithin(root, other)));
+  const results = roots.flatMap((root) => findScratchCaches(root).map((cache) => ({ ...assessScratch(cache, scan, options.now, options.cooldownMs), root })));
+  if (!apply) return results;
+  for (const result of results.filter((item) => item.action === 'reclaim-cache')) {
+    try {
+      const current = assessScratch(result.path, scanProcesses(), options.now, options.cooldownMs);
+      if (current.action !== 'reclaim-cache') { result.outcome = `skipped: now ${current.state} (${current.reason})`; continue; }
+      result.reclaimedBytes = reclaimScratchCache(result.path, result.root);
+      result.outcome = 'reclaimed';
+    } catch (error) {
+      result.outcome = `${error instanceof Refusal ? 'refused' : 'failed'}: ${String(error.stderr || error.message).trim().split('\n')[0]}`;
+    }
+  }
+  return results;
+}
+
+export function realDocker(args) {
+  return execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 600_000 });
+}
+
+const firstLine = (error) => String(error.stderr || error.message).trim().split('\n')[0];
+
+// Docker storage nothing can use again: anonymous volumes no container references, once older than
+// the cooldown, and build cache unused for BUILD_CACHE_HOURS. Named volumes are never touched.
+function sweepDocker(docker, options, apply) {
+  try { docker(['version', '--format', '{{.Server.Version}}']); } catch (error) { return { available: false, reason: firstLine(error), volumes: [] }; }
+  const dangling = () => new Set(docker(['volume', 'ls', '-q', '--filter', 'dangling=true']).split('\n').filter(Boolean));
+  const volumes = [...dangling()].sort().map((name) => {
+    const info = JSON.parse(docker(['volume', 'inspect', name]))[0];
+    const anonymous = Object.hasOwn(info.Labels ?? {}, 'com.docker.volume.anonymous');
+    const old = options.now - Date.parse(info.CreatedAt) >= options.cooldownMs;
+    const reason = !anonymous ? 'Named volume; kept.' : old ? 'Anonymous volume no container uses.' : `Created within the last ${options.cooldownMs / HOUR}h.`;
+    return { name, createdAt: info.CreatedAt, action: anonymous && old ? 'remove' : 'none', reason };
+  });
+  const state = { available: true, volumes, buildCache: { action: `prune unused for ${BUILD_CACHE_HOURS}h` } };
+  if (!apply) return state;
+  for (const volume of volumes.filter((item) => item.action === 'remove')) {
+    try {
+      if (!dangling().has(volume.name)) { volume.outcome = 'skipped: now in use'; continue; }
+      docker(['volume', 'rm', volume.name]);
+      volume.outcome = 'removed';
+    } catch (error) {
+      volume.outcome = /in use/i.test(firstLine(error)) ? 'skipped: now in use' : `failed: ${firstLine(error)}`;
+    }
+  }
+  try {
+    const output = docker(['builder', 'prune', '--force', '--filter', `until=${BUILD_CACHE_HOURS}h`]);
+    state.buildCache.outcome = `pruned ${/Total[^:\n]*:\s*(\S+)/.exec(output)?.[1] ?? 'nothing'}`;
+  } catch (error) { state.buildCache.outcome = `failed: ${firstLine(error)}`; }
+  return state;
+}
+
 // Moves the worktree out of its known path first, so no agent can adopt or write to it,
 // then re-verifies it there before Git deletes it. Anything unexpected moves it back.
 function removeWorktree(options, repository, entry) {
@@ -550,7 +663,8 @@ function writeReport(reportDir, report) {
 }
 
 // `onQuarantine` lets tests act inside the window between quarantine and the final check.
-export function runSweep({ configPath, reportDir, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine } = {}) {
+// Scratch roots and Docker are opt-in, so a library caller never touches the host's /tmp or Docker by default.
+export function runSweep({ configPath, reportDir, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine, scratchRoots = [], docker } = {}) {
   const config = loadConsoleConfig(configPath);
   const directory = expandHome(reportDir ?? '~/.local/share/agent-console/worktree-sweep');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -567,11 +681,13 @@ export function runSweep({ configPath, reportDir, apply = false, repoFilter = []
     const results = repositories.flatMap((repository) => repository.linked.map((entry) => assess(options, repository, entry, signals)));
     const usable = signals.snapshot.ok && signals.scan.complete;
     if (apply && usable) applyActions(options, repositories, results);
+    const scratch = sweepScratch(scratchRoots.map((root) => realpathOrSelf(expandHome(root))), signals.scan, options, apply && usable);
     const report = {
       startedAt: new Date(now).toISOString(), apply, cooldownHours, usable,
       consoleState: signals.snapshot.ok ? `schema ${signals.snapshot.version}` : signals.snapshot.reason,
       processVisibility: signals.scan.complete ? 'complete' : `incomplete: ${signals.scan.hidden.slice(0, 5).join(', ')}`,
-      restored, worktrees: results,
+      restored, worktrees: results, scratch,
+      docker: docker ? sweepDocker(docker, options, apply && usable) : { available: false, reason: 'not requested', volumes: [] },
     };
     report.file = writeReport(directory, report);
     return report;
@@ -585,12 +701,18 @@ export function summarize(report) {
   lines.push(`${report.worktrees.length} linked worktrees: ${[...counts].map(([state, count]) => `${state} ${count}`).join(', ')}`);
   const planned = report.worktrees.filter((item) => item.action !== 'none');
   lines.push(`Planned: remove ${planned.filter((item) => item.action === 'remove').length}, reclaim caches in ${planned.filter((item) => item.action === 'reclaim-cache').length}`);
+  lines.push(`Scratch build caches: ${report.scratch.length}, idle ${report.scratch.filter((item) => item.action === 'reclaim-cache').length}`);
+  lines.push(report.docker.available
+    ? `Docker: ${report.docker.volumes.filter((item) => item.action === 'remove').length} orphaned anonymous volumes of ${report.docker.volumes.length} unused; build cache: ${report.docker.buildCache.outcome ?? report.docker.buildCache.action}`
+    : `Docker: skipped (${report.docker.reason})`);
   if (report.apply) {
     const bytes = report.worktrees.reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0);
-    const failed = report.worktrees.filter((item) => item.outcome?.startsWith('failed'));
-    lines.push(`Done: removed ${report.worktrees.filter((item) => item.outcome === 'removed').length}, cache GB freed ${(bytes / 1e9).toFixed(1)}, skipped on recheck ${report.worktrees.filter((item) => item.outcome?.startsWith('skipped')).length}, failed ${failed.length}`);
-    for (const item of failed) lines.push(`  FAILED ${item.path}: ${item.outcome}`);
-    for (const item of report.worktrees.filter((entry) => entry.outcome?.startsWith('refused'))) lines.push(`  REFUSED ${item.path}: ${item.outcome}`);
+    const scratchBytes = report.scratch.reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0);
+    const items = allItems(report);
+    const failed = items.filter((item) => item.outcome?.startsWith('failed'));
+    lines.push(`Done: removed ${report.worktrees.filter((item) => item.outcome === 'removed').length}, cache GB freed ${(bytes / 1e9).toFixed(1)} in worktrees and ${(scratchBytes / 1e9).toFixed(1)} in scratch, Docker volumes removed ${report.docker.volumes.filter((item) => item.outcome === 'removed').length}, skipped on recheck ${items.filter((item) => item.outcome?.startsWith('skipped')).length}, failed ${failed.length}`);
+    for (const item of failed) lines.push(`  FAILED ${item.path ?? item.name}: ${item.outcome}`);
+    for (const item of items.filter((entry) => entry.outcome?.startsWith('refused'))) lines.push(`  REFUSED ${item.path}: ${item.outcome}`);
     for (const item of report.restored) lines.push(`  QUARANTINE ${item.path}: ${item.outcome}`);
   }
   if (!report.usable) lines.push('No changes are allowed while Console state or process visibility is unavailable.');
@@ -598,25 +720,31 @@ export function summarize(report) {
   return lines.join('\n');
 }
 
+// Every acted-on item: worktrees, quarantine restorations, scratch caches, Docker volumes and build cache.
+const allItems = (report) => [...report.worktrees, ...report.restored, ...report.scratch, ...report.docker.volumes,
+  ...(report.docker.buildCache?.outcome ? [{ name: 'Docker build cache', ...report.docker.buildCache }] : [])];
+
 // Scheduler summary: one JSON object for Waltium Control.
 function writeSummary(file, report, startedAt) {
   const items = report.worktrees;
   const removed = items.filter((item) => item.outcome === 'removed').length;
-  const gb = (items.reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0) / 1e9).toFixed(1);
-  const failed = [...items, ...report.restored].filter((item) => item.outcome?.startsWith('failed'));
-  const refused = items.filter((item) => item.outcome?.startsWith('refused'));
+  const reclaimed = [...items, ...report.scratch].reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0);
+  const gb = (reclaimed / 1e9).toFixed(1);
+  const volumes = report.docker.volumes.filter((item) => item.outcome === 'removed').length;
+  const failed = allItems(report).filter((item) => item.outcome?.startsWith('failed'));
+  const refused = [...items, ...report.scratch].filter((item) => item.outcome?.startsWith('refused'));
   const kept = items.filter((item) => ['dirty', 'local-files', 'unreleased', 'detached', 'git-operation', 'private-git-state', 'reflog-only-commits', 'hidden-index'].includes(item.state)).length;
   const status = !report.usable || failed.length ? 'failed' : 'updated';
   const dashboard = report.usable
-    ? `Removed ${removed} idle worktrees and freed ${gb} GB of build caches; ${kept} kept for unsaved or unique content${failed.length ? `; ${failed.length} failed` : ''}.`
+    ? `Removed ${removed} idle worktrees and ${volumes} orphaned Docker volumes and freed ${gb} GB of build caches; ${kept} worktrees kept for unsaved or unique content${failed.length ? `; ${failed.length} failed` : ''}.`
     : `Changed nothing: ${report.consoleState.startsWith('schema') ? `process visibility ${report.processVisibility}` : report.consoleState}`;
   const summary = {
     job_key: process.env.WALTIUM_JOB_KEY ?? null, run_id: process.env.WALTIUM_RUN_ID ?? null,
     started_at: startedAt, finished_at: new Date().toISOString(), status, dashboard_summary: dashboard,
-    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories. It keeps every branch and never deletes uncommitted work, ignored local files or a worktree a session can still resume. ${refused.length ? `${refused.length} cache deletions were refused by a safety check and need a look. ` : ''}The full per-worktree report is ${report.file}.`,
+    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories and ${report.scratch.length} build caches in scratch space such as /tmp. It keeps every branch and never deletes uncommitted work, ignored local files or a worktree a session can still resume. Docker: ${report.docker.available ? `${volumes} anonymous volumes no container used were removed and build cache unused for a week was ${report.docker.buildCache.outcome ?? 'left'}` : `skipped (${report.docker.reason})`}. ${refused.length ? `${refused.length} cache deletions were refused by a safety check and need a look. ` : ''}The full report is ${report.file}.`,
     llm_usage: { provider: null, models: [], input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-    targets: [...failed, ...refused].map((item) => ({ path: item.path, status: 'failed', plain_english_summary: item.outcome })),
-    issues: failed.map((item) => `${item.path}: ${item.outcome}`), follow_up: refused.map((item) => `${item.path}: ${item.outcome}`),
+    targets: [...failed, ...refused].map((item) => ({ path: item.path ?? item.name, status: 'failed', plain_english_summary: item.outcome })),
+    issues: failed.map((item) => `${item.path ?? item.name}: ${item.outcome}`), follow_up: refused.map((item) => `${item.path}: ${item.outcome}`),
     report_file: report.file,
   };
   fs.writeFileSync(file, `${JSON.stringify(summary, null, 1)}\n`);
@@ -642,11 +770,11 @@ function main(argv) {
     else if (flag === '--summary-path') summaryPath = rest[++index];
     else { process.stderr.write(`Unknown option ${flag}\n`); return 64; }
   }
-  const report = runSweep(options);
+  const report = runSweep({ ...options, scratchRoots: [...new Set([os.tmpdir(), '/tmp'].map(realpathOrSelf))], docker: realDocker });
   process.stdout.write(`${json ? JSON.stringify(report, null, 1) : summarize(report)}\n`);
   if (summaryPath) writeSummary(summaryPath, report, startedAt);
   if (!report.usable) return 2;
-  return [...report.worktrees, ...report.restored].some((item) => item.outcome?.startsWith('failed')) ? 1 : 0;
+  return allItems(report).some((item) => item.outcome?.startsWith('failed')) ? 1 : 0;
 }
 
 if (process.argv[1] && realpathOrSelf(process.argv[1]) === fileURLToPath(import.meta.url)) {

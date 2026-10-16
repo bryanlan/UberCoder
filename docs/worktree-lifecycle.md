@@ -2,7 +2,7 @@
 
 Agents create Git worktrees for isolated edits. Before October 15, 2026 nothing removed them when a session ended early, so 243 linked worktrees and about 53 GB accumulated in one week. Most of the space was Rust build output (`target/`) repeated in every worktree.
 
-`scripts/worktree-sweep.mjs` takes inventory of every linked worktree in the repositories that Console knows about. It also removes the ones nobody can still use. It reads Console state read-only and changes nothing in Console.
+`scripts/worktree-sweep.mjs` takes inventory of every linked worktree in the repositories that Console knows about. It also removes the ones nobody can still use, and clears agents' leftover build caches and Docker storage (see [Scratch space and Docker](#scratch-space-and-docker)). It reads Console state read-only and changes nothing in Console.
 
 ## What the sweep protects
 
@@ -35,6 +35,18 @@ The sweep does nothing when Console's schema version is not one it was reviewed 
 
 To recover a removed worktree, run the `recovery` command recorded in the report: `git -C <repo> worktree add <path> <branch>`.
 
+## Scratch space and Docker
+
+`/tmp` shares a disk pool with `/home`, and it is emptied only at reboot. By October 15, 2026 agents had left about 134 GB there, 81 GB of it Rust build output from `CARGO_TARGET_DIR` settings, plus about 55 GB of Docker volumes from deleted temporary Postgres containers. The command-line sweep therefore also covers:
+
+| What | Removed when |
+|---|---|
+| Build caches in `/tmp` (and `$TMPDIR`) up to four levels down: directories this user owns with a valid `CACHEDIR.TAG` | No process references anything inside, nothing below it was written in 24 hours, and the same disposable checks as worktree caches pass. A cache inside a Git checkout must hold no tracked or untracked files. |
+| Docker volumes | Anonymous (Docker created it for a container), no container uses it, and created over 24 hours ago. Docker itself refuses a volume in use. Named volumes are never removed. |
+| Docker build cache | Unused for 7 days (`docker builder prune --filter until=168h`). |
+
+Everything else in `/tmp` is left alone, including agents' notes and logs. If Docker is unavailable, that part is skipped and reported. `runSweep` touches scratch space and Docker only when its caller passes `scratchRoots` and `docker`; the command line passes both.
+
 ## Running it
 
 ```bash
@@ -56,6 +68,8 @@ The Waltium scheduler runs `sweep --apply` hourly. It uses the main checkout so 
 - Commit before stopping, even as a WIP commit. Uncommitted work keeps a worktree forever and is lost if the machine fails.
 - Never delete a worktree with `rm -rf`. Use `git worktree remove <path>` (without `--force`) for your own finished worktree, or leave it for the sweep.
 - Park a worktree that must stay with `git worktree lock --reason`.
+- Build in the worktree's own `target/`, not a `CARGO_TARGET_DIR` under `/tmp`. Keep nothing you need in `/tmp`: it is scratch, cleared at reboot.
+- Remove a temporary container with `docker rm -v` (or run it with `--rm`), so its anonymous volume goes with it.
 
 ## Changing Console's schema
 
