@@ -33,9 +33,12 @@ it does not query the live Console database.
 - Live session recovery and route handling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-routes tmux-health`.
 - Pending Codex progress or stale bound timeline polling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- providers && npm run test -w @agent-console/web -- useConversationData transcript-turns`.
 - Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
-- Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`.
+- Project/settings browser flow: `npm run test:e2e -- apps/web/e2e/settings.spec.ts` (builds the shared package first).
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.
 - Visible live-console UX check: `npm run verify:live-console -- --base-url http://127.0.0.1:4317 --cdp-url http://127.0.0.1:9222 --password '<login-password>' --claude-url <conversation-route> --codex-url <conversation-route>` only when a backend and visible Chrome CDP endpoint are already running and the Claude/Codex live sessions are deliberately chosen. The verifier attaches to visible Chrome, sends `/model` plus model-selection input, and submits `Reply exactly ...` marker prompts through Text Bypass, so it changes real model, session, and transcript state. Omitted route defaults are Bryan-specific hard-coded pending sessions and should not be used unless that is the intended target.
+
+- Worktree cleanup guards: `NODE_ENV=test npm run test -w @agent-console/server -- worktree-sweep`. These fixtures create private repositories and SQLite state; do not run the host sweep in apply mode as a test.
+- Shared wiki storage/search and API: `NODE_ENV=test npm run test -w @agent-console/server -- wiki`. Fixtures use temporary Git repositories and SQLite files.
 
 ## Environment and Fixtures
 - Install with `npm install`.

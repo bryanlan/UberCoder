@@ -39,7 +39,6 @@
 
 - `README.md` - key tracked file or entrypoint for this repo.
 - `AGENTS.md` - key tracked file or entrypoint for this repo.
-- `CLAUDE.md` - key tracked file or entrypoint for this repo.
 - `package.json` - key tracked file or entrypoint for this repo.
 - `requirements.txt` - key tracked file or entrypoint for this repo.
 - `package-lock.json` - key tracked file or entrypoint for this repo.
