@@ -19,6 +19,8 @@ export interface SessionRuntimeState {
   claudeFolderTrustPending?: boolean;
   /** Native process whose hidden pane already has the Console minimum size. */
   paneSizedPid?: number;
+  /** Verified live writer's epoch; historical transcript turns cannot own it. */
+  nativeProcess?: { pid: number; startedAt: string };
 }
 
 interface SessionRuntime {
@@ -98,6 +100,7 @@ export class SessionRuntimeRegistry {
     state.claudeProfile = undefined;
     state.submittedTurnAt = undefined;
     state.claudeFolderTrustPending = undefined;
+    state.nativeProcess = undefined;
   }
 
   delete(sessionId: string): void {

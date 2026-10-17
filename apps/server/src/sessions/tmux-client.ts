@@ -124,6 +124,8 @@ export interface TmuxClient {
   killSession(sessionName: string): Promise<void>;
   hasSession(sessionName: string): Promise<boolean>;
   getPanePid(sessionName: string): Promise<number | undefined>;
+  /** Creation of the current hidden session, independent of backend restarts. */
+  getSessionCreatedAt(sessionName: string): Promise<string>;
   /** Grows a smaller window to at least this size; returns whether it resized. */
   ensureMinimumWindowSize(sessionName: string, columns: number, rows: number): Promise<boolean>;
   getOption(sessionName: string, name: string): Promise<string | undefined>;
@@ -236,6 +238,13 @@ export class ShellTmuxClient implements TmuxClient {
     // Never shrink a window someone attached and enlarged.
     await runTmux(['resize-window', '-t', sessionName, '-x', String(Math.max(width!, columns)), '-y', String(Math.max(height!, rows))]);
     return true;
+  }
+
+  async getSessionCreatedAt(sessionName: string): Promise<string> {
+    const output = await runTmux(['display-message', '-p', '-t', sessionName, '#{session_created}']);
+    const seconds = Number(output);
+    if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('Could not verify tmux session creation time.');
+    return new Date(seconds * 1000).toISOString();
   }
 
   async getOption(sessionName: string, name: string): Promise<string | undefined> {

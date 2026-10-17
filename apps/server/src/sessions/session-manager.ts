@@ -934,6 +934,25 @@ export class SessionManager {
     return this.runtimes.state(sessionId);
   }
 
+  private async verifyNativeProcessEpoch(session: BoundSession): Promise<void> {
+    const state = this.runtimeState(session.id);
+    if (!session.pid || state.nativeProcess?.pid === session.pid) return;
+    const [owner, pid, startedAt] = await Promise.all([
+      this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id'),
+      this.tmuxClient.getPanePid(session.tmuxSessionName),
+      this.tmuxClient.getSessionCreatedAt(session.tmuxSessionName),
+    ]);
+    if (owner === session.id && pid === session.pid) {
+      state.nativeProcess = { pid, startedAt };
+      if (state.submittedTurnAt && state.submittedTurnAt < startedAt) state.submittedTurnAt = undefined;
+    }
+  }
+
+  private runPredatesNativeProcess(session: BoundSession, run: ProviderRunState): boolean {
+    const native = this.runtimeState(session.id).nativeProcess;
+    return native !== undefined && native.pid === session.pid && run.timestamp < native.startedAt;
+  }
+
   private providerTurnIsWorking(sessionId: string): boolean | undefined {
     const run = this.runRecovery.getRunState(sessionId);
     const state = this.runtimeState(sessionId);
@@ -941,9 +960,10 @@ export class SessionManager {
     // A previous completion cannot acknowledge a newly submitted turn.
     if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
     const session = this.db.boundSessions.getById(sessionId);
-    const restoreText = this.db.meta.get(peerWakeRestoreKey(sessionId));
-    const restore = restoreText ? JSON.parse(restoreText) as { pid: number; restoredAt: string } : undefined;
-    if (restore && restore.pid === session?.pid && run.timestamp < restore.restoredAt) return undefined;
+    // Resuming history does not resume its unfinished native request. This also
+    // applies to ordinary restores and survives a backend-only restart because
+    // the epoch comes from the existing tmux writer, not backend attachment time.
+    if (session && this.runPredatesNativeProcess(session, run)) return undefined;
     // Claude can emit end_turn before another Stop hook continues the turn.
     // A completed record only clears working after the input prompt is visible.
     if (session?.provider === 'claude' && run.status === 'completed'
@@ -954,6 +974,7 @@ export class SessionManager {
 
   private recordProviderResponse(session: BoundSession, run: ProviderRunState): void {
     if (run.status !== 'completed' || !session.shouldRestore || session.status !== 'bound') return;
+    if (this.runPredatesNativeProcess(session, run)) return;
     const submittedAt = this.runtimeState(session.id).submittedTurnAt;
     if (submittedAt && run.timestamp < submittedAt) return;
     const completedMs = Date.parse(run.timestamp);
@@ -1653,6 +1674,7 @@ export class SessionManager {
     try {
       await this.tmuxClient.newDetachedSession(restoring.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
+      this.runtimes.clearEphemeral(restoring.id);
       await this.tmuxClient.pipePaneToFile(restoring.tmuxSessionName, restoring.rawLogPath!);
       await this.configureTmuxSessionOptions(restoring.tmuxSessionName, {
         sessionId: restoring.id,
@@ -3582,6 +3604,7 @@ export class SessionManager {
     }
     await this.tryEnsureRawLogPipe(refreshed);
     await this.tryEnsurePaneSize(refreshed);
+    await this.verifyNativeProcessEpoch(refreshed);
     this.watchSessionOutput(refreshed);
     if (!this.runtimeState(refreshed.id).lastScreenHash) {
       await this.emitScreenUpdate(refreshed);
@@ -4285,6 +4308,7 @@ export class SessionManager {
         ? 'Provider session exited during startup.'
         : 'Could not verify provider session startup.');
     }
+    await this.verifyNativeProcessEpoch(session);
   }
 
   private decorateScreenForSession(session: BoundSession, screen: SessionScreen): SessionScreen {
