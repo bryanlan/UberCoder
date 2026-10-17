@@ -256,8 +256,12 @@ stuck composer.
 
 Complete chat drafts carry a UUID `submissionId` on `/keys`. The backend journals
 each request in SQLite metadata and delivers messages in order under the existing
-session command lock. Busy sessions, startup, approvals, menus and unrelated native
-drafts defer delivery. The browser shows the queued message separately from the
+session command lock. An active native composer accepts human messages even while
+the provider is working: normal text plus Enter lets Codex steer the running turn
+and Claude deliver the message after its running tool calls. Console does not wait
+for the whole turn to finish or interrupt it. Startup, approvals, menus and unrelated
+native drafts defer delivery. Automatic input still requires an idle provider.
+The browser shows the queued message separately from the
 transcript and clears the submitted local draft after the server accepts the request.
 Acceptance of a queued Text Bypass message returns the composer to local drafting,
 so later typing cannot append to the queued native text. Text Bypass stays disabled

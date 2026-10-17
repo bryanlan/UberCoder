@@ -36,6 +36,7 @@ import {
   screenInputMatchesText,
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
+  screenAcceptsHumanPrompt,
   screenShowsClaudeResumeSessionChoice,
   claudeFullSessionResumeSelection,
   screenShowsQueuedMessageHint,
@@ -2237,7 +2238,10 @@ export class SessionManager {
     if (session.pid !== remnant.panePid) { this.inputQueue.setRemnant(sessionId, undefined); return false; }
     if (session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
     const screen = await this.captureSessionScreen(session, false);
-    if (!screenLooksReadyForLiteralPrompt(screen)) return false;
+    // Claude's clear-input key interrupts a running turn. Cancellation may
+    // now happen after human text was staged during that turn; leave it intact.
+    if (!screenLooksReadyForLiteralPrompt(screen)
+      || (this.providerTurnIsWorking(sessionId) ?? this.mustGetSession(sessionId).isWorking)) return false;
     if (!screen.inputText.trim()) { this.inputQueue.setRemnant(sessionId, undefined); return true; }
     if (!screenInputMatchesText(screen, remnant.text)) return false;
     // Journal before transport: an uncertain clear is never repeated, because
@@ -2347,9 +2351,9 @@ export class SessionManager {
     };
     if (!await stillOwned()) { defer('Waiting to verify the original live session.'); return; }
     let screen = await this.captureSessionScreen(session, false);
-    const turnWorking = this.providerTurnIsWorking(sessionId);
-    if (!screenLooksReadyForLiteralPrompt(screen)
-      || turnWorking === true || (turnWorking === undefined && session.isWorking)) {
+    // Human Enter steers/queues within the native active turn. Working state
+    // blocks automatic input, not an explicitly submitted human message.
+    if (!screenAcceptsHumanPrompt(screen)) {
       defer(screenShowsInteractiveSelectionHint(screen)
         ? 'Waiting for you to finish the approval or menu.' : 'Waiting for the session to accept input.');
       return;
@@ -2375,6 +2379,7 @@ export class SessionManager {
       const canRetire = () => {
         const latest = this.db.boundSessions.getById(sessionId);
         return !this.stopped && latest?.status === 'bound' && !latest.manualSuspendedAt && !latest.pressureSuspendedAt
+          && !(this.providerTurnIsWorking(sessionId) ?? latest.isWorking)
           && latest.pid === session.pid && latest.startedAt === session.startedAt
           && this.getCurrentRestorableSession(latest)?.id === sessionId
           && this.inputQueue.revision(sessionId) === attemptRevision
@@ -2438,9 +2443,9 @@ export class SessionManager {
     } else if (record.state === 'awaiting_input') {
       confirmed ||= this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     }
-    if (!confirmed || !screenLooksReadyForLiteralPrompt(screen) || !await stillOwned()) return;
+    if (!confirmed || !screenAcceptsHumanPrompt(screen) || !await stillOwned()) return;
     screen = await this.captureSessionScreen(session, false);
-    if (!screenLooksReadyForLiteralPrompt(screen)
+    if (!screenAcceptsHumanPrompt(screen)
       || !this.queuedInputConfirmed(sessionId, record, screen, session.pid) || !await stillOwned()) return;
     const observedInput = record;
     record = { ...record, state: 'submitting', nativeRevision: this.inputQueue.revision(sessionId),
@@ -2456,9 +2461,8 @@ export class SessionManager {
       // Ownership reads can yield while the native composer changes. Observe it
       // last, then perform synchronous queue/revision checks before sending Enter.
       const finalScreen = await this.captureSessionScreen(session, false);
-      if (!screenLooksReadyForLiteralPrompt(finalScreen)
+      if (!screenAcceptsHumanPrompt(finalScreen)
         || !this.queuedInputConfirmed(sessionId, observedInput, finalScreen, session.pid)
-        || this.providerTurnIsWorking(sessionId) === true
         || this.inputQueue.revision(sessionId) !== attemptRevision
         || this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') {
         if (this.inputQueue.get(sessionId, record.requestId)?.state === 'submitting') {

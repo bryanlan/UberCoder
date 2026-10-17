@@ -74,10 +74,12 @@ describe('Claude work readiness', () => {
     await expect.poll(() => f.db.boundSessions.getById(f.session.id)?.isWorking).toBe(true);
     const runtime = (f.manager as unknown as { runtimeState(id: string): { submittedTurnAt?: string } }).runtimeState(f.session.id);
     runtime.submittedTurnAt = new Date(Date.now() - 90_000).toISOString();
+    f.tmux.paneText = 'Claude Code\n✶ Thinking... (esc to interrupt)';
     expect((await f.submit()).queuedInput?.state).toBe('queued');
     f.tmux.alive.clear();
     f.tmux.pid++;
     f.tmux.sessionCreatedAt = new Date().toISOString();
+    f.tmux.paneText = ready();
     await f.manager.ensureSession(f.session.id);
     await expect.poll(() => f.tmux.sentKeys).toEqual([['Enter']]);
     expect(f.tmux.sent).toEqual(['We are back, please continue']);
@@ -101,16 +103,19 @@ describe('Claude work readiness', () => {
     expect(events.filter(event => event.type === 'user-input')).toHaveLength(1);
   });
 
-  it('keeps an actual current turn busy across backend restart until its reply completes', async () => {
+  it('keeps an actual current turn busy across restart while accepting human follow-ups', async () => {
     const f = await restoredFixture(true);
     await expect.poll(() => f.db.boundSessions.getById(f.session.id)?.isWorking).toBe(true);
-    expect((await f.submit()).queuedInput?.state).toBe('queued');
     await f.reopen();
     await expect.poll(() => f.db.boundSessions.getById(f.session.id)?.isWorking).toBe(true);
-    expect(f.tmux.sent).toEqual([]);
+    expect((await f.submit()).recordedUserInput?.text).toBe('We are back, please continue');
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+    expect(f.db.boundSessions.getById(f.session.id)?.isWorking).toBe(true);
+    f.tmux.paneText = ready();
     const completedAt = new Date().toISOString();
     await fs.appendFile(f.transcript, record('assistant', completedAt, 'end_turn'));
-    await expect.poll(() => f.tmux.sentKeys).toEqual([['Enter']]);
+    await expect.poll(async () => { await f.manager.getSessionScreen(f.session.id);
+      return f.db.boundSessions.getById(f.session.id)?.isWorking; }).toBe(false);
     expect(f.tmux.sent).toEqual(['We are back, please continue']);
     expect(f.db.boundSessions.getById(f.session.id)?.lastResponseAt).toBe(completedAt);
   });

@@ -26,6 +26,14 @@ it does not query the live Console database.
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Durable queued chat submission: `NODE_ENV=test npm run test -w @agent-console/server -- session-input-queue session-routes session-interactive-input`. These fixtures use disposable SQLite databases and fake tmux transports to verify delayed repaint, database reopen, FIFO, matching drafts, cancellation before/during Enter, failed suspension, model-switch deferral, ownership and uncertain Enter. `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane` covers the queued Text Bypass handoff and sending-state controls. Browser coverage in `apps/web/e2e/input-rejection.spec.ts` verifies separate consecutive messages, pending-message display, refresh without resubmission, cancellation and preservation of genuine rejection behavior. Use isolated E2E ports; browser fixtures intercept provider input.
+- Real active-turn delivery: after `npm run build`, run `node scripts/prove-active-input.mjs --run`.
+  This opt-in proof uses installed Codex/Claude terminals and model calls in a private project,
+  database, runtime and tmux server. It sends a human follow-up through authenticated `/keys`
+  while a real foreground tool runs, then checks the provider transcript for delivery within
+  the original turn, exactly once, with the same native process and uninterrupted tool completion.
+  Claude's native `absorbed_mid_turn` record is checked explicitly. It releases its own sessions
+  and retains receipts, transcript copies and captures under the printed private directory in
+  `~/.local/state/agent-console-diagnostics/`. `PROOF_PROVIDERS=claude` or `codex` selects one provider.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
 - Large event-log prompt restoration and cache races: `NODE_ENV=test npm run test -w @agent-console/server -- last-user-input session-output-restoration session-recency session-runtime`.
 - Timeline merge, transcript catch-up, stale transcript cache, or duplicated bubble fixes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- timeline-merge transcript-watcher conversation-routes provider-conversation-cache`.

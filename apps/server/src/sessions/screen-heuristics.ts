@@ -181,20 +181,25 @@ export function claudeFolderTrustSelection(screen: SessionScreen): 'accept' | 'e
   return undefined;
 }
 
-export function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
+/** Human Enter may steer a running turn through the provider's own composer. */
+export function screenAcceptsHumanPrompt(screen: SessionScreen): boolean {
   // Claude can omit its permissions footer when notifications fill the pane.
   // The parsed composer is the readiness evidence; a footer alone is not.
   if (
     !screen.inputActive
     || screenShowsClaudeResumeSessionChoice(screen)
-    || sessionScreenShowsWorking(screen)
-    || screenShowsQueuedMessageHint(screen)
   ) {
     return false;
   }
 
   const normalized = normalizeWhitespace(`${screen.content}\n${screen.status}`);
   return !/starting mcp servers/i.test(normalized);
+}
+
+export function screenLooksReadyForLiteralPrompt(screen: SessionScreen): boolean {
+  return screenAcceptsHumanPrompt(screen)
+    && !sessionScreenShowsWorking(screen)
+    && !screenShowsQueuedMessageHint(screen);
 }
 
 export function screenAllowsLiteralSelectionTokenWithoutInput(screen: SessionScreen, text: string | undefined): boolean {

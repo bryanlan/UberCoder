@@ -8,6 +8,7 @@ import {
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenAllowsLiteralSelectionWithoutInput,
   screenLooksReadyForLiteralPrompt,
+  screenAcceptsHumanPrompt,
   screenShowsClaudeResumeSessionChoice,
   claudeFullSessionResumeSelection,
   screenShowsInteractiveSelectionHint,
@@ -48,6 +49,28 @@ describe('Native background work indicators', () => {
 });
 
 describe('screen heuristics', () => {
+  it.each([
+    'OpenAI Codex\n• Working (1s • esc to interrupt)\n› \n  GPT-6.1-Sol xhigh · ~/demo',
+    'OpenAI Codex\n• Working (1s • esc to interrupt)\n› \n  tab to queue message',
+  ])('accepts human input while keeping automatic input blocked during native work', (snapshot) => {
+    const parsed = parseSessionScreenSnapshot(snapshot);
+    expect(screenAcceptsHumanPrompt(parsed)).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(parsed)).toBe(false);
+  });
+
+  it('accepts a human message at Claude\'s composer while tools run', () => {
+    const parsed = parseSessionScreenSnapshot('Claude Code\n✻ Thinking… (1s · esc to interrupt)\n────────────────────\n❯ \n────────────────────\n⏵⏵ bypass permissions on');
+    expect(screenAcceptsHumanPrompt(parsed)).toBe(true);
+  });
+
+  it.each([
+    'Starting MCP servers\n› \n  GPT-6.1-Sol xhigh · ~/demo',
+    'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend',
+    'OpenAI Codex\n• Working (1s • esc to interrupt)',
+  ])('does not treat startup, approval or a missing composer as human input', (snapshot) => {
+    expect(screenAcceptsHumanPrompt(parseSessionScreenSnapshot(snapshot))).toBe(false);
+  });
+
   it('treats a number in a real composer as chat when older output contains menu controls', () => {
     const ready = parseSessionScreenSnapshot([
       'The startup menu used these controls:', 'Enter to confirm · Esc to cancel',
