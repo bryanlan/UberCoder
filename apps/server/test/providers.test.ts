@@ -40,7 +40,7 @@ describe('provider history discovery', () => {
       expect(argv).toContain('custom-model'); expect(argv).not.toContain('configured-model');
       expect(argv).toContain('--add-dir'); expect(argv.join(' ')).toContain('/tmp/agent-coord.mjs');
       expect(argv.join(' ')).toContain('AGENT_CONSOLE_SESSION_ID'); expect(argv.join(' ')).toContain('console-session');
-      if (id === 'claude' && !ref) expect(argv.slice(-2)).toEqual(['--', 'Complete the delegated task.']);
+      if (id === 'claude') expect(argv.slice(-2)).toEqual(['--', 'Complete the delegated task.']);
       if (id === 'claude') expect(argv).toContain('--append-system-prompt');
       if (ref) expect(argv).toContain(ref);
       if (id === 'codex' && ref) expect(argv.indexOf('resume')).toBeLessThan(argv.indexOf('--model'));

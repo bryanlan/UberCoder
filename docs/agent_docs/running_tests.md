@@ -130,6 +130,21 @@ decision and continuation permission, and respect a subsequent manual Stop.
 `PROOF_PROVIDERS=codex` or `claude` narrows the run. The fixtures are released and
 private `proof.json` evidence remains in the printed temporary directory.
 
+Unattended peer wake and explicit restart (#89): the `peer-message-wake`,
+`agent-session-launches` and `providers` suites cover same-turn unattended work
+instructions for warm and idle-suspended Codex/Claude sessions, continuation
+budget preservation, assignment-addressed restarts, finished/waiting assignments,
+resume prompts and Stop/grant changes during restart. Existing wake fixtures
+continue to cover drafts, approvals, memory pressure and uncertain input.
+After building, `PROOF_UNATTENDED=1 node scripts/prove-peer-message-wake.mjs --run`
+uses disposable real conversations to verify an assigned file write and result
+handoff in the peer-wake turn, without a restart or second human input. It then
+finishes that private assignment and verifies a granted restart addressed by
+assignment ID starts another native turn in the same conversation. A message
+reports facts only; the pending task comes from the original test prompt. Each
+provider must also respect a later Stop. Evidence is retained under
+`~/.local/state/agent-console-diagnostics/peer-wake-*`.
+
 Wake refusal and supervisor alerts (#86): run `NODE_ENV=test npm run test -w
 @agent-console/server -- peer-message-wake peer-wake-audit assignment-continuation
 agent-session-launches agent-grant-push`. Disposable fixtures cover granted worker launches,

@@ -9,7 +9,8 @@ import { CoordinationService } from '../src/coordination/service.js';
 import { GrantService } from '../src/grants/service.js';
 import { AgentSessionLaunches } from '../src/grants/session-launches.js';
 import { continuationControl } from '../src/coordination/continuation.js';
-import { PEER_WAKE_PROMPT, peerWakePaused } from '../src/coordination/wake.js';
+import { GRANTED_RESTART_PROMPT, PEER_WAKE_PROMPT, peerWakePaused, setPeerWakePaused } from '../src/coordination/wake.js';
+import { dispatchGrants } from '../src/grants/transport.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 import type { BoundSession } from '@agent-console/shared';
 
@@ -17,14 +18,14 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'granted-launches-')), db = new AppDatabase(path.join(root, 'fixture.sqlite'));
-  const events = new RealtimeEventBus(), tmux = new FakeTmux(); tmux.paneText = 'OpenAI Codex\n› Ask Codex to do anything\ngpt-6-luna xhigh · 90% left · ~/demo';
+  const events = new RealtimeEventBus(), tmux = new FakeTmux(); tmux.paneText = 'OpenAI Codex\nCompleted response.\n› Ask Codex to do anything\ngpt-6-luna xhigh · 90% left · ~/demo';
   const adapter = { ...provider, getLaunchCommand: (_project: unknown, ref: string | null, _settings: unknown, options?: { model?: string; effort?: string; flags?: string[]; initialPrompt?: string }) =>
     ({ cwd: root, argv: ['codex', '--model', options?.model ?? 'gpt-6.1-sol', ...(ref ? ['resume',ref] : []), ...(options?.flags ?? []), ...(options?.initialPrompt ? [options.initialPrompt] : [])], env: {} }) };
   const manager = createRecoveryManager(db, tmux, root, events, adapter, providerSettings,
     { queueCodexNotice: async (_id, _settings, _cwd, prompt) => { tmux.sent.push(prompt); } });
   const grants = new GrantService(db, events);
   const coordination = new CoordinationService(db, { enabled: true, pilotPaths: [] }, undefined, grants);
-  const native = randomUUID(), actor = coordination.register({ provider: 'codex', nativeSessionId: native, token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
+  const native = randomUUID(), token = randomUUID(), actor = coordination.register({ provider: 'codex', nativeSessionId: native, token, pid: process.pid, cwd: root }).assignmentId!;
   coordination.update(actor, { description: 'Planner lead', continuation: 'unattended' });
   const lead = randomUUID(), log = path.join(root,'lead.jsonl'), words = 'I authorize all planner demo work, including launch, restart and helper delegation.';
   fs.writeFileSync(log, JSON.stringify({ type: 'user-input', text: words, timestamp: new Date().toISOString() })+'\n');
@@ -38,11 +39,12 @@ async function fixture(maxConcurrentSessions = 2, models: string[] = []) {
   let launches = queue();
   const launch = async (input = {}) => { const result = await launches.request(actor,'launch_session',{ projectSlug:project.slug,provider:'codex',model:'gpt-6-luna',effort:'medium',flags:['--no-alt-screen'],prompt:'Complete the planner lane.',title:'Planner lane',...input }); await launches.drain(); return result; };
   const child = (sessionId: string) => {
-    const id = coordination.register({ provider:'codex',nativeSessionId:randomUUID(),token:randomUUID(),pid:process.pid,cwd:root,consoleSessionId:sessionId }).assignmentId!;
+    const session = db.boundSessions.getById(sessionId)!;
+    const id = coordination.register({ provider:'codex',nativeSessionId:session.conversationRef.startsWith('pending:') ? randomUUID() : session.conversationRef,token:randomUUID(),pid:process.pid,cwd:root,consoleSessionId:sessionId }).assignmentId!;
     return id;
   };
   cleanups.push(async()=>{await launches.stop();await manager.stop();db.close();fs.rmSync(root,{recursive:true,force:true});});
-  return {db,tmux,grants,coordination,manager,actor,grant,get launches(){return launches;},launch,child,setMemory:(value:string)=>{memory=value;},
+  return {db,tmux,adapter,grants,coordination,manager,actor,token,grant,get launches(){return launches;},launch,child,setMemory:(value:string)=>{memory=value;},
     onProjectRead: (hook: () => Promise<void>) => { projectRead = hook; },
     restartQueue:async()=>{await launches.stop(); launches=queue();}};
 }
@@ -258,6 +260,92 @@ describe('Granted real-session launch pipeline',()=>{
     expect(f.launches.status(f.actor,result.requests[0]!.id).requests[0]).toMatchObject({status:'queued'});expect(f.tmux.created).toHaveLength(1);
     f.db.boundSessions.setManualSuspendedAt(session.id,new Date().toISOString());await f.launches.drain();
     expect(f.tmux.created).toHaveLength(1);expect(f.launches.status(f.actor,result.requests[0]!.id).requests[0]?.status).toBe('failed');
+  });
+
+  it.each(['unattended', 'waiting_for_input', 'finished'] as const)('starts a new turn on a granted restart of an idle %s assignment', async state => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    indexHistory(f.db, session);
+    const worker = f.child(session.id);
+    if (state === 'finished') f.coordination.finish(worker, 'Previous assignment completed.');
+    else f.coordination.update(worker, { continuation: state, status: 'waiting' });
+    const before = continuationControl(f.db, worker);
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(session.id)!, isWorking: false });
+    const requestId = randomUUID();
+    await dispatchGrants(f.coordination, f.grants, { action: 'restart', assignmentId: f.actor, token: f.token,
+      targetAssignmentId: worker, requestId }, f.launches);
+    await f.launches.drain();
+    expect(f.launches.status(f.actor, requestId).requests[0]).toMatchObject({ status: 'completed', sessionId: session.id });
+    expect(f.tmux.created).toHaveLength(2);
+    expect(f.tmux.createdCommands.at(-1)).toContain(GRANTED_RESTART_PROMPT);
+    expect(f.tmux.createdCommands.at(-1)).toContain(f.db.boundSessions.getById(session.id)!.conversationRef);
+    expect(f.db.boundSessions.getById(session.id)?.runFailure).toBeUndefined();
+    expect(continuationControl(f.db, worker)).toEqual(before);
+    await f.restartQueue();
+    await f.launches.request(f.actor, 'restart_session', { targetAssignmentId: worker, requestId }); await f.launches.drain();
+    expect(f.tmux.created).toHaveLength(2);
+    await expect(f.launches.request(f.actor, 'restart_session', { sessionId: randomUUID(), requestId })).rejects.toThrow('different restart target');
+  });
+
+  it('passes the requested restart task to the original conversation and rejects ambiguous or missing targets', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    indexHistory(f.db, session); const worker = f.child(session.id);
+    await expect(f.launches.request(f.actor, 'restart_session', { targetAssignmentId: randomUUID() })).rejects.toThrow('no restorable Console session');
+    await expect(f.launches.request(f.actor, 'restart_session', { sessionId: session.id, targetAssignmentId: worker })).rejects.toThrow('either');
+    await f.launches.request(f.actor, 'restart_session', { sessionId: session.id, prompt: 'Reconcile the remaining comparison work.' });
+    await f.launches.drain();
+    expect(f.tmux.createdCommands.at(-1)).toContain('Reconcile the remaining comparison work.');
+    expect(f.tmux.createdCommands.at(-1)).not.toContain(GRANTED_RESTART_PROMPT);
+  });
+
+  it.each(['stop', 'revoked'] as const)('preserves %s during a granted restart', async boundary => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    indexHistory(f.db, session); f.child(session.id);
+    const capture = f.tmux.capturePane.bind(f.tmux);
+    let stop: Promise<unknown> | undefined, checked = false;
+    f.tmux.capturePane = async (...args) => {
+      if (!checked) {
+        checked = true;
+        if (boundary === 'stop') stop = f.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+        else f.grants.revoke(f.grant.id);
+      }
+      return capture(...args);
+    };
+    await f.launches.request(f.actor, 'restart_session', { sessionId: session.id });
+    await f.launches.drain();
+    await stop;
+    expect(f.tmux.created).toHaveLength(1);
+    expect(f.tmux.alive.has(session.tmuxSessionName)).toBe(true);
+  });
+
+  it('does not restart a provider still owned outside the recorded tmux binding', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    indexHistory(f.db, session); f.child(session.id);
+    f.tmux.alive.clear();
+    await f.launches.request(f.actor, 'restart_session', { sessionId: session.id }); await f.launches.drain();
+    expect(f.launches.status(f.actor).requests[0]).toMatchObject({ status: 'queued', reason: expect.stringContaining('live owner outside') });
+    expect(f.tmux.created).toHaveLength(1);
+  });
+
+  it('rechecks Stop after asynchronous restore preparation before starting the replacement', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!;
+    indexHistory(f.db, session); const worker = f.child(session.id);
+    const kill = f.tmux.killSession.bind(f.tmux);
+    const command = f.adapter.getLaunchCommand;
+    f.tmux.killSession = async name => {
+      await kill(name);
+      f.adapter.getLaunchCommand = (...args) => {
+        setPeerWakePaused(f.db, worker, true);
+        return command(...args);
+      };
+    };
+    await f.launches.request(f.actor, 'restart_session', { sessionId: session.id }); await f.launches.drain();
+    expect(f.tmux.created).toHaveLength(1);
+    expect(f.launches.status(f.actor).requests[0]).toMatchObject({ status: 'queued', reason: expect.stringContaining('session pause') });
   });
 
   it('attaches shared active grants to peer messages and drops revoked authority immediately',async()=>{

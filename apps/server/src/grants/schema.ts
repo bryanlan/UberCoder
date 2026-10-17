@@ -16,7 +16,7 @@ export const grantAgentSchema = z.object({
   consoleSessionId: z.string().uuid().optional(),
   definition: grantDefinitionSchema.optional(), humanMessageId: z.string().min(1).optional(),
   reason: z.string().trim().min(1).max(2000).optional(), grantId: z.string().uuid().optional(),
-  sessionId: z.string().uuid().optional(), requestId: z.string().uuid().optional(),
+  sessionId: z.string().uuid().optional(), targetAssignmentId: z.string().uuid().optional(), requestId: z.string().uuid().optional(),
   projectSlug: z.string().min(1).optional(), provider: z.enum(['codex', 'claude']).optional(),
   model: z.string().min(1).max(160).optional(), effort: z.string().min(1).max(40).optional(),
   flags: z.array(z.string().max(4096)).max(100).default([]),

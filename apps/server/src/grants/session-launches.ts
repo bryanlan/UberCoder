@@ -11,7 +11,7 @@ import { AGENT_LAUNCH_PREFIX } from './authority.js';
 const SESSION_MEMORY_BYTES = 250 * 1024 * 1024;
 interface LaunchInput {
   projectSlug?: string; provider?: ProviderId; model?: string; effort?: string; flags?: string[];
-  prompt?: string; title?: string; supervisorId?: string; grantId?: string; sessionId?: string; requestId?: string;
+  prompt?: string; title?: string; supervisorId?: string; grantId?: string; sessionId?: string; targetAssignmentId?: string; requestId?: string;
   previousPid?: number;
 }
 interface RequestRow { id: string; assignment_id: string; grant_id: string; action: AgentGrantAction;
@@ -77,13 +77,23 @@ export class AgentSessionLaunches {
   async request(assignmentId: string, action: AgentGrantAction, raw: LaunchInput) {
     const input: LaunchInput = { projectSlug: raw.projectSlug, provider: raw.provider, model: raw.model, effort: raw.effort,
       flags: raw.flags ?? [], prompt: raw.prompt, title: raw.title, supervisorId: raw.supervisorId,
-      grantId: raw.grantId, sessionId: raw.sessionId, requestId: raw.requestId };
+      grantId: raw.grantId, sessionId: raw.sessionId, targetAssignmentId: raw.targetAssignmentId, requestId: raw.requestId };
+    if (input.targetAssignmentId && (action !== 'restart_session' || input.sessionId))
+      throw new Error('For restart choose either sessionId or targetAssignmentId.');
     const id = input.requestId ?? randomUUID();
     const prior = this.row(id);
     if (prior) {
       if (prior.assignment_id !== assignmentId || prior.action !== action) throw new Error('Request ID is already used by a different action.');
       if (action === 'close_session' && prior.session_id !== input.sessionId) throw new Error('Request ID is already used for a different session.');
+      if (action === 'restart_session' && ((input.sessionId && prior.session_id !== input.sessionId)
+        || (input.targetAssignmentId && (JSON.parse(prior.input_json) as LaunchInput).targetAssignmentId !== input.targetAssignmentId)))
+        throw new Error('Request ID is already used for a different restart target.');
       return this.status(assignmentId, id);
+    }
+    if (input.targetAssignmentId) {
+      const target = this.grants.sessionFor(input.targetAssignmentId);
+      if (!target) throw new Error('That assignment has no restorable Console session.');
+      input.sessionId = target.id;
     }
     const actor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(assignmentId) as { status: string } | undefined;
     if (!actor || actor.status === 'finished') throw new Error('A finished assignment cannot launch work.');
@@ -104,7 +114,7 @@ export class AgentSessionLaunches {
     }
     let target: BoundSession | undefined;
     if (action === 'restart_session') {
-      if (!input.sessionId) throw new Error('sessionId is required.');
+      if (!input.sessionId) throw new Error('sessionId or targetAssignmentId is required.');
       target = this.db.boundSessions.getById(input.sessionId);
       if (!target?.shouldRestore || target.status === 'ended') throw new Error('This session is released or finished.');
       input.projectSlug = target.projectSlug; input.provider = target.provider;
@@ -240,7 +250,9 @@ export class AgentSessionLaunches {
       if (!this.grants.grantsFor(row.assignment_id).some(candidate => candidate.id === grant.id)) {
         this.update(row, 'cancelled', 'The grant was revoked or expired before launch.'); return;
       }
-      if (row.action === 'restart_session') await this.sessions.restartGrantedSession(row.session_id);
+      if (row.action === 'restart_session') await this.sessions.restartGrantedSession(row.session_id, input.prompt,
+        () => this.grants.grantsFor(row.assignment_id).some(candidate => candidate.id === grant.id && candidate.actions.includes('restart_session')
+          && (!candidate.projectSlugs.length || candidate.projectSlugs.includes(project.slug))));
       else {
         const actor = this.db.sqlite.prepare('select description from coordination_assignments where id=?').get(row.assignment_id) as { description: string };
         const inherited = this.grants.grantsFor(row.assignment_id);

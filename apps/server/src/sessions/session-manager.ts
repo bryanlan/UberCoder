@@ -57,7 +57,7 @@ import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
 import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
@@ -1506,11 +1506,13 @@ export class SessionManager {
     project: ActiveProject,
     provider: ProviderAdapter,
     providerSettings: MergedProviderSettings,
+    initialPrompt?: string,
   ): { cwd: string; argv: string[]; env: Record<string, string> } | undefined {
     const resumeConversationRef = session.resumeConversationRef
       ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
     if (resumeConversationRef) {
       return provider.getLaunchCommand(project, resumeConversationRef, providerSettings, {
+        initialPrompt,
         codexProfile: session.provider === 'codex' ? session.codexProfile : undefined,
         claudeProfile: session.provider === 'claude' ? session.claudeProfile : undefined,
         model: activeModelProfile(session) ? undefined : session.launchContext?.model,
@@ -1595,7 +1597,7 @@ export class SessionManager {
     }
   }
 
-  private async restoreSession(requestedSession: BoundSession, explicitResume = false): Promise<BoundSession | undefined> {
+  private async restoreSession(requestedSession: BoundSession, explicitResume = false, initialPrompt?: string, beforeStart?: () => void): Promise<BoundSession | undefined> {
     let session = this.getCurrentRestorableSession(requestedSession);
     if (!session) {
       return undefined;
@@ -1631,7 +1633,7 @@ export class SessionManager {
     if (!session) {
       return undefined;
     }
-    const launch = this.buildRecoveryLaunchCommand(session, project, provider, providerSettings);
+    const launch = this.buildRecoveryLaunchCommand(session, project, provider, providerSettings, initialPrompt);
     if (!launch) {
       const pending = session.conversationRef.startsWith('pending:')
         ? this.db.pendingConversations.get(session.conversationRef)
@@ -1655,6 +1657,7 @@ export class SessionManager {
     }
 
     launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: session.id };
+    beforeStart?.();
     const prepared = this.ensureSessionLogPaths(session);
     const shouldEmitRestoreAttempt = prepared.status !== 'error';
     const restoring = {
@@ -1785,27 +1788,41 @@ export class SessionManager {
     });
   }
 
-  /** Grant actions use the existing session queue and recovery transport. */
-  async restartGrantedSession(sessionId: string): Promise<BoundSession> {
+  /** An explicit granted restart starts one turn, independently of automatic recovery. */
+  async restartGrantedSession(sessionId: string, prompt: string | undefined, authorized: () => boolean): Promise<BoundSession> {
     return this.runtimes.run(sessionId, 'restartGrantedSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (!session.shouldRestore || session.status === 'ended' || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest)
         throw new Error('This session is finished or paused.');
-      if (!this.unattendedAssignment(session)) throw new SessionInputRejectedError('This session is waiting for human input or has been stopped.');
+      const assignment = this.assignmentForSession(session);
+      const requireRestartAuthority = () => {
+        const latest = this.mustGetSession(sessionId);
+        if (!authorized()) throw new Error('The grant no longer covers restarting this session.');
+        if (this.stopped || this.getCurrentRestorableSession(latest)?.id !== sessionId
+          || latest.manualSuspendedAt || latest.pressureSuspendedAt || latest.modelProfileRequest || latest.queuedInputs?.length
+          || (assignment && peerWakePaused(this.db, assignment.id)))
+          throw new SessionInputRejectedError('Restart is waiting for human input or a session pause to clear.');
+      };
+      requireRestartAuthority();
       const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
       if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
+      if (liveness === 'dead' && assignment && processStart(assignment.pid) === assignment.processStart)
+        throw new SessionInputRejectedError('The original provider still has a live owner outside this binding.');
       if (liveness === 'alive') {
-        const screen = await this.captureSessionScreen(session, false);
-        if (session.isWorking || this.providerTurnIsWorking(sessionId) === true || !screen.inputActive || screen.inputText.trim()
-          || sessionScreenShowsWorking(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
-          throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) throw new Error('Session ownership changed.');
+        const screen = await this.captureSessionScreen(session, false);
+        requireRestartAuthority();
+        if (this.mustGetSession(sessionId).isWorking || this.providerTurnIsWorking(sessionId) === true || !screen.inputActive || screen.inputText.trim()
+          || sessionScreenShowsWorking(screen) || screenShowsBackgroundWork(screen) || screenIsStartingUp(screen)
+          || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
+          throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
         await this.tmuxClient.killSession(session.tmuxSessionName);
       }
+      requireRestartAuthority();
+      this.runRecovery.stopWatching(sessionId);
       this.db.boundSessions.setRunFailure(sessionId, undefined);
       this.db.meta.set(`run-recovery-budget:${sessionId}`, '');
-      await this.runRecovery.processExited(sessionId);
-      const restored = await this.restoreSession(session);
+      const restored = await this.restoreSession(session, true, prompt ?? GRANTED_RESTART_PROMPT, requireRestartAuthority);
       if (!restored) throw new Error('The original conversation could not be restored.');
       return restored;
     });

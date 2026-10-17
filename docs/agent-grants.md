@@ -72,8 +72,19 @@ Providers are `codex` and `claude`. The backend uses the same session manager an
 The session appears in the list as **Launched by** its launcher.
 Use `launch_status` with the returned request ID to obtain the native assignment after registration.
 
-`restart` takes the original `sessionId`. It preserves the native conversation, assignment and inbox.
-Current work, drafts and provider choices defer restart. Finished or manually paused sessions cannot restart automatically.
+`restart` takes either the original `sessionId` or `targetAssignmentId`, the lane's coordination assignment ID.
+It preserves the native conversation, assignment and inbox. The assignment ID resolves to the stored Console binding before queueing.
+It starts one new turn through the provider's resume command, even if the previous assignment finished or its continuation is `waiting_for_input`.
+An optional `prompt` supplies that turn's task; without it, a fixed notice asks the agent to reconcile and continue existing authorized work or report its completed outcome.
+Restart does not enable unattended permission or resolve a pending human decision.
+Current work, drafts, queued human input and provider choices defer restart. Manual Stop, manual suspension, memory pressure and released bindings remain protected.
+The queue rechecks the current grant before restart and before starting the replacement process. This explicit action uses no automatic provider-failure retry.
+
+```json
+{ "action": "restart", "targetAssignmentId": "<lane-assignment-id>", "requestId": "<unique-request-id>" }
+```
+
+An existing MCP connection may not expose `targetAssignmentId` yet. Use the canonical grants helper with the same JSON until it reconnects.
 
 `close` takes a `sessionId` and an optional `requestId`/`grantId`. It requires an active grant with `close_session` and a session whose stored `launchedBy` is the calling assignment. Sharing a grant or supervising another agent does not permit closing that agent's other sessions. Human-created sessions are outside this agent action.
 

@@ -564,7 +564,14 @@ text-plus-Enter submissions. Claude recovery verifies the exact entered composer
 before sending Enter. Automatic text entry checks cancellation and tmux ownership again before Enter.
 A Stop received while entering text leaves that text unsent and retains the
 cancellation reason. An Enter already handed to tmux cannot be recalled. These
-guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status, continuation permission and peer-message wake remain independent. Human Stop, cancellation and manual pause disable peer wake until an accepted human conversation turn; agent waiting updates do not. Inbox turns preserve pending human decisions and neither spend nor reset the continuation budget. Worker facts never grant permission or reset a spent continuation budget.
+guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status, continuation permission and peer-message wake remain independent. Human Stop, cancellation and manual pause disable peer wake until an accepted human conversation turn; agent waiting updates do not. After handling its inbox, an unattended assignment continues authorized work in that same turn unless recovery is blocked or stalled. A waiting assignment returns to waiting. Inbox turns preserve pending human decisions and neither spend nor reset the continuation budget. Worker facts never grant permission or reset a spent continuation budget.
+
+A granted restart is an explicit one-turn action, independent of automatic recovery.
+It resolves either a session ID or a target assignment ID to the original binding,
+checks grant and pause guards, then resumes the native conversation with an opening
+prompt. A finished assignment or waiting continuation does not block that turn.
+It preserves continuation permission, pending human decisions and the existing
+conversation. Released bindings and manual pauses remain protected.
 
 
 An unexpected provider exit with unattended work remaining uses this same durable

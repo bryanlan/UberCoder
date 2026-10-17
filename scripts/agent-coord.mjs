@@ -319,6 +319,7 @@ async function serveMcp() {
       expiry: { type: 'object', properties: { kind: { type: 'string', enum: ['until_revoked','assignment_finished'] }, assignmentId: { type: 'string' } } },
     }, required: ['grantee','scope'] },
     humanMessageId: { type: 'string' }, reason: { type: 'string' }, grantId: { type: 'string' }, requestId: { type: 'string' }, sessionId: { type: 'string' },
+    targetAssignmentId: { type: 'string', description: 'For restart, the recipient assignment ID instead of sessionId.' },
     projectSlug: { type: 'string' }, provider: { type: 'string', enum: ['codex','claude'] }, model: { type: 'string' }, effort: { type: 'string' },
     flags: { type: 'array', items: { type: 'string' } }, prompt: { type: 'string' }, title: { type: 'string' }, supervisorId: { type: 'string' },
   };
