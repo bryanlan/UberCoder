@@ -62,7 +62,7 @@ it.each(['codex', 'claude'] as const)('resolves a registered %s agent before its
   expect(service.conversationReference(session)).toMatchObject({ recipientId: assignmentId, provider,
     projectSlug: session.projectSlug, conversationRef: session.conversationRef });
   db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(assignmentId);
-  expect(() => service.conversationReference(session)).toThrow('no available coordinating agent');
+  expect(service.conversationReference(session).recipientId).toBe(assignmentId);
 });
 
 it('rejects ambiguous pending registrations instead of choosing an agent', () => {
@@ -81,15 +81,46 @@ it('resolves adopted pending aliases only within their own project and provider'
   expect(() => service.conversationReference({ ...session, projectSlug: 'wrong', conversationRef: 'pending:old' })).toThrow('no connected agent');
 });
 
-it('rejects finished, closed, unregistered and disabled agents', () => {
+it('retains finished references and rejects closed, unregistered and disabled agents', () => {
   const { session, assignmentId } = bind('codex');
   db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(assignmentId);
-  expect(() => service.conversationReference(session)).toThrow('no available coordinating agent');
+  expect(service.conversationReference(session).recipientId).toBe(assignmentId);
   db.boundSessions.upsert({ ...session, resumeConversationRef: randomUUID() });
   expect(() => service.conversationReference(session)).toThrow('no available coordinating agent');
   db.boundSessions.upsert({ ...session, shouldRestore: false });
   expect(() => service.conversationReference(session)).toThrow('no connected agent');
   expect(() => new CoordinationService(db, { enabled: false, pilotPaths: [] }).conversationReference(session)).toThrow('disabled');
+});
+
+it.each(['codex', 'claude'] as const)('keeps a finished %s chat reference inert and reopens only its inbox on a new message', provider => {
+  const { session, assignmentId } = bind(provider);
+  const sender = service.register({ provider, nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
+  service.update(assignmentId, { continuation: 'unattended' });
+  service.finish(assignmentId, 'Prior human task complete.');
+  expect(service.conversationReference(session).recipientId).toBe(assignmentId);
+  expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
+  const message = { id: randomUUID(), recipientId: assignmentId, text: 'A new peer question, not a new work grant.' };
+  expect(service.send(sender, message).queued).toBe(true);
+  expect(service.agentStatus(assignmentId).assignment).toMatchObject({ status: 'waiting', continuation: 'waiting_for_input' });
+  expect(service.poll(assignmentId, 0).messages).toEqual([expect.objectContaining({ id: message.id, text: message.text })]);
+  service.finish(assignmentId, 'Peer response is complete.');
+  service.send(sender, message);
+  expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
+});
+
+it.each(['closed', 'dead', 'full'] as const)('does not reopen a %s finished recipient', condition => {
+  const { session, assignmentId } = bind('codex');
+  const sender = service.register({ provider: 'codex', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
+  service.finish(assignmentId, 'Prior task complete.');
+  if (condition === 'closed') db.boundSessions.upsert({ ...session, shouldRestore: false });
+  if (condition === 'dead') db.sqlite.prepare("update coordination_assignments set process_start='not-the-current-process' where id=?").run(assignmentId);
+  if (condition === 'full') db.sqlite.transaction(() => {
+    for (let i = 0; i < 100; i++) db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
+      .run(randomUUID(), sender, assignmentId, 'Existing inbox entry', new Date().toISOString());
+  })();
+  expect(() => service.send(sender, { id: randomUUID(), recipientId: assignmentId, text: 'New peer question' }))
+    .toThrow(condition === 'full' ? 'inbox is full' : 'finished');
+  expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
 });
 
 it('requires browser authentication and validates the reference before resolving it', async () => {

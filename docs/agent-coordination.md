@@ -45,9 +45,13 @@ Text Bypass types the reference into the native draft through its existing input
 The authenticated `GET /api/agent-reference` endpoint resolves the conversation's
 current restorable binding and native provider identity to its assignment ID.
 It handles pending/resumed conversations and adopted pending aliases. Chats with
-no binding, unregistered agents, finished assignments or disabled coordination
-return an error while the composer retains its draft. Resolving a reference does
-not start, resume or message the referenced agent.
+no binding, unregistered agents or disabled coordination return an error while
+the composer retains its draft. A finished assignment remains referenceable.
+Resolving a reference does not start, resume or message the referenced agent.
+A new peer message reopens a finished assignment's inbox only when its original
+registered process is alive and its current Console binding is unique. This keeps
+work continuation off and does not restore expired grants. Stopped or closed
+finished agents still require an explicit resume before a new message.
 
 ### Explicit unattended work
 

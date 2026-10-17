@@ -58,6 +58,10 @@ const wait = async (label, predicate, timeout = 180_000) => {
 const capture = session => execFileSync('tmux', ['-L', socket, 'capture-pane', '-p', '-t', session.tmuxSessionName], { encoding: 'utf8' });
 const textOf = message => typeof message?.content === 'string' ? message.content
   : (message?.content ?? []).map(part => part.text ?? '').join('\n');
+// Claude wraps a large native queue entry with its matching paste element ID.
+const queuedText = content => typeof content === 'string'
+  ? content.match(/^<pasted_content id="([^"\r\n]+)">\n([\s\S]*)\n<\/pasted_content id="\1">$/)?.[2] ?? content
+  : undefined;
 const evidence = [];
 const save = () => fs.writeFileSync(path.join(root, 'proof.json'), JSON.stringify(evidence, null, 2));
 console.log(JSON.stringify({ evidence: root, socket }));
@@ -71,7 +75,7 @@ try {
     const original = `ORIGINAL_COMPLETE_${label}`;
     const token = `MIDTURN_RECEIVED_${label}`;
     const initial = `Run python3 ${toolFile} once with your shell tool in the foreground, timeout 60000ms (yield_time_ms=30000 if supported). Wait for completion. Then reply exactly ${original}. Do not edit files, run other work, or launch agents.`;
-    const followup = `Acknowledge this message in your next visible reply with ${token}. Let the existing foreground tool finish normally, then make your final reply exactly ${token}. Do not restart it or start other work.`;
+    const followup = `Acknowledge this message in your next visible reply with ${token}. Let the existing foreground tool finish normally, then make your final reply exactly ${token}. Do not restart it or start other work. ${'Synthetic long-message coverage 🧭. '.repeat(45)}`.trim();
     const bound = await api('POST', `/api/conversations/demo/${provider}/new/bind`, {});
     let session = bound.session;
     await wait(`${provider} native startup`, async () => {
@@ -80,6 +84,12 @@ try {
         if (screen.includes('Folder access') && screen.includes(project)
           && screen.includes('1. Trust and continue') && screen.includes('2. Quit')) {
           await api('POST', `/api/sessions/${session.id}/keys`, { keys: ['Enter'] });
+        }
+      } else {
+        const screen = capture(session);
+        if (screen.includes(project) && screen.includes('❯ No, exit') && screen.includes('Yes, I trust this folder')) {
+          // The disposable directory above is created and owned by this proof.
+          execFileSync('tmux', ['-L', socket, 'send-keys', '-t', session.tmuxSessionName, 'Down', 'Enter']);
         }
       }
       const state = await api('GET', `/api/sessions/${session.id}/screen?lines=120`);
@@ -90,7 +100,9 @@ try {
       const state = await api('GET', `/api/sessions/${session.id}/screen?lines=120`);
       return !state.session.modelProfileRequest && state.screen?.inputActive && !state.screen.inputText.trim();
     }, 60_000);
-    const submitted = await api('POST', `/api/sessions/${session.id}/input`, { text: initial });
+    const submitted = await api('POST', `/api/sessions/${session.id}/keys`, {
+      text: initial, submittedText: initial, keys: ['Enter'], submissionId: randomUUID(),
+    });
     session = submitted.session;
     await wait(`${provider} real foreground tool started`, () => fs.existsSync(startedFile));
     const before = await api('GET', `/api/sessions/${session.id}/screen?lines=120`);
@@ -105,7 +117,7 @@ try {
     });
     evidence.push({ provider, status: 'injected', sessionId: session.id, panePid: before.session.pid,
       requestId, injectedAt, toolWasRunning: true, requestSubmitted: !receipt.queuedInput,
-      recordedInput: receipt.recordedUserInput?.text === followup });
+      recordedInput: receipt.recordedUserInput?.text === followup, followupChars: [...followup].length });
     save();
     assert.equal(receipt.queuedInput, undefined, 'Human input must submit while the original turn is running.');
     assert.equal(receipt.recordedUserInput?.text, followup);
@@ -129,11 +141,11 @@ try {
     assert.ok(!assistant.includes(original), 'The original final answer must be replaced before that turn ends.');
     const inputs = rows.filter(row => provider === 'codex'
       ? row.type === 'response_item' && row.payload?.role === 'user' && textOf(row.payload).includes(token)
-      : row.type === 'queue-operation' && row.operation === 'enqueue' && row.content === followup);
+      : row.type === 'queue-operation' && row.operation === 'enqueue' && queuedText(row.content) === followup);
     assert.equal(inputs.length, 1, 'The real provider must receive the follow-up exactly once.');
     if (provider === 'claude') {
       const absorbed = rows.filter(row => row.type === 'queue-operation' && row.operation === 'remove'
-        && row.reason === 'absorbed_mid_turn' && row.content === followup);
+        && row.reason === 'absorbed_mid_turn' && queuedText(row.content) === followup);
       assert.equal(absorbed.length, 1, 'Claude must absorb the follow-up within its original running turn.');
       assert.ok(absorbed[0].timestamp < rows[finishIndex].timestamp);
     }

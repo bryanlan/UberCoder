@@ -10,20 +10,26 @@ export interface QueuedInputRecord {
   state: 'queued' | 'awaiting_input' | 'submitting' | 'submitted' | 'failed' | 'cancelled';
   reason: string;
   baselineInput?: string;
+  typedAt?: string;
   panePid?: number;
   nativeRevision?: number;
   recordedUserInput?: RecordedUserInput;
 }
 
+/** The same delta is used for transport and native paste confirmation. */
+export function queuedTransportText(record: QueuedInputRecord): string {
+  return record.baselineInput?.trim() ? record.initialText ?? record.text : record.text;
+}
+
 const prefix = (sessionId: string) => `session-input:${sessionId}:`;
 const remnantKey = (sessionId: string) => `session-input-remnant:${sessionId}`;
 const pendingKey = (sessionId: string) => `session-input-pending:${sessionId}`;
-export interface QueuedInputRemnant { requestId: string; text: string; panePid: number }
+export interface QueuedInputRemnant { requestId: string; text: string; panePid: number; nativeRevision?: number }
 
 /** Only text typed by the queue into an empty composer is Console-owned after cancellation. */
 export function cancelledRemnant(record: QueuedInputRecord): QueuedInputRemnant | undefined {
   if (!['awaiting_input', 'failed'].includes(record.state) || record.panePid === undefined || record.baselineInput?.trim()) return undefined;
-  return { requestId: record.requestId, text: record.text, panePid: record.panePid };
+  return { requestId: record.requestId, text: record.text, panePid: record.panePid, nativeRevision: record.nativeRevision };
 }
 
 const pending = (record: QueuedInputRecord) => !['submitted', 'cancelled'].includes(record.state);

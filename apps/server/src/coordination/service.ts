@@ -91,7 +91,7 @@ export class CoordinationService {
       : this.db.sqlite.prepare(`select id, status from coordination_assignments
           where provider=? and native_session_id=?`).all(input.provider, nativeRef)) as { id: string; status: string }[];
     const assignment = assignments.length === 1 ? assignments[0] : undefined;
-    if (!assignment || assignment.status === 'finished') {
+    if (!assignment) {
       throw new Error('This chat has no available coordinating agent. Resume its agent before referencing it.');
     }
     const summary = this.db.conversationIndex.get(input.projectSlug, input.provider, conversationRef);
@@ -280,9 +280,23 @@ export class CoordinationService {
     return { id: message.id, queued: true, recipient, delivery, note };
   }
 
+  /** Completion ends work authority, not the inbox of a still-connected Console agent. */
+  private hasLiveConsoleRecipient(id: string): boolean {
+    const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
+      .get(id) as { pid: number; process_start: string };
+    if (!owner.process_start || processStart(owner.pid) !== owner.process_start) return false;
+    const sessions = this.db.sqlite.prepare(`select s.project_slug as projectSlug, s.provider, s.conversation_ref as conversationRef
+      from bound_sessions s join coordination_assignments a on a.id=? and a.provider=s.provider
+      where s.should_restore=1 and s.status in ('starting','bound') and
+        (s.conversation_ref=a.native_session_id or s.resume_conversation_ref=a.native_session_id
+          or (s.conversation_ref like 'pending:%' and s.id=(select value from meta where key='console-session:' || a.id)))
+      limit 2`).all(id) as Array<{ projectSlug: string; provider: string; conversationRef: string }>;
+    if (sessions.length !== 1) return false;
+    try { return this.conversationReference(sessions[0]!).recipientId === id; } catch { return false; }
+  }
+
   send(id: string, input: { id: string; recipientId: string; text: string }): CoordinationSendReceipt {
-    this.assignment(input.recipientId);
-    if (this.assignment(input.recipientId).status === 'finished') throw new Error('Recipient assignment is finished.');
+    const recipient = this.assignment(input.recipientId);
     const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
       .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
     if (existing) {
@@ -290,9 +304,14 @@ export class CoordinationService {
       this.requestWake?.();
       return this.sendReceipt(existing);
     }
+    if (recipient.status === 'finished' && !this.hasLiveConsoleRecipient(input.recipientId)) throw new Error('Recipient assignment is finished; resume its agent before messaging it.');
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
     this.db.sqlite.transaction(() => {
+      if (recipient.status === 'finished') {
+        setContinuation(this.db, input.recipientId, 'waiting_for_input');
+        this.db.sqlite.prepare("update coordination_assignments set status='waiting' where id=? and status='finished'").run(input.recipientId);
+      }
       this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
       endAwaiting(this.db, input.recipientId);
     })();

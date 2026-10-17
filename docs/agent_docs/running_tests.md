@@ -29,7 +29,8 @@ it does not query the live Console database.
 - Real active-turn delivery: after `npm run build`, run `node scripts/prove-active-input.mjs --run`.
   This opt-in proof uses installed Codex/Claude terminals and model calls in a private project,
   database, runtime and tmux server. It sends a human follow-up through authenticated `/keys`
-  while a real foreground tool runs, then checks the provider transcript for delivery within
+  longer than 1,000 characters, including Unicode, while a real foreground tool runs. It
+  checks the provider transcript for delivery within
   the original turn, exactly once, with the same native process and uninterrupted tool completion.
   Claude's native `absorbed_mid_turn` record is checked explicitly. It releases its own sessions
   and retains receipts, transcript copies and captures under the printed private directory in
@@ -128,6 +129,16 @@ must not recover them. Pending helpers retry transcript adoption using their exa
 registered native identity. Evidence remains under `/tmp/console-close-proof-*`.
 `PROOF_PROVIDERS=codex` or `claude` limits the run; provider authentication and
 tmux are required. The fixture releases only its own sessions during cleanup.
+
+Finished-agent inboxes: after building, run
+`PROOF_FINISHED_INBOX=1 node scripts/prove-peer-message-wake.mjs --run`.
+The private Codex/Claude fixtures finish their assignment, resolve its inert drag
+reference, keep historical unread messages asleep, and receive a fresh peer
+message. After finishing again, a second message must be acknowledged while the
+completed marker action stays completed. The proof preserves waiting permission,
+the native PID and a later manual Stop. Run each provider separately with
+`PROOF_PROVIDERS=codex` or `claude` on a memory-constrained host. This variant is
+separate from `PROOF_UNATTENDED=1`.
 
 Waiting-agent peer wake (#84): after `npm run build`, run
 `node scripts/prove-peer-message-wake.mjs --run`. This opt-in proof uses real Codex

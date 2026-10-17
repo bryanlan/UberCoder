@@ -34,6 +34,7 @@ import {
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenInputChanged,
   screenInputMatchesText,
+  screenInputMatchesPaste,
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
   screenAcceptsHumanPrompt,
@@ -53,7 +54,7 @@ import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
-import { cancelledRemnant, InputQueue, queuedInputSummary, type QueuedInputRecord } from './input-queue.js';
+import { cancelledRemnant, InputQueue, queuedInputSummary, queuedTransportText, type QueuedInputRecord } from './input-queue.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -62,6 +63,7 @@ import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMP
 import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
+const QUEUED_PASTE_CONFIRMATION_MS = 30_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
 const CLAUDE_FOLDER_TRUST_WAIT_MS = 15_000;
@@ -2204,7 +2206,7 @@ export class SessionManager {
       // The human's own Stop key reaches the provider; clear our typed text
       // before the next queued message instead of racing a repeated Escape.
       const remnant = cancelledRemnant(record);
-      if (remnant) this.inputQueue.setRemnant(sessionId, remnant);
+      if (remnant) this.inputQueue.setRemnant(sessionId, { ...remnant, nativeRevision: this.inputQueue.revision(sessionId) });
       this.inputQueue.put(sessionId, record.state === 'submitting'
         ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
         : { ...record, state: 'cancelled' });
@@ -2235,7 +2237,9 @@ export class SessionManager {
     const remnant = this.inputQueue.remnant(sessionId);
     const session = this.db.boundSessions.getById(sessionId);
     if (!remnant || !session || this.stopped) return false;
-    if (session.pid !== remnant.panePid) { this.inputQueue.setRemnant(sessionId, undefined); return false; }
+    if (session.pid !== remnant.panePid) {
+      this.inputQueue.setRemnant(sessionId, undefined); return false;
+    }
     if (session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
     const screen = await this.captureSessionScreen(session, false);
     // Claude's clear-input key interrupts a running turn. Cancellation may
@@ -2243,11 +2247,14 @@ export class SessionManager {
     if (!screenLooksReadyForLiteralPrompt(screen)
       || (this.providerTurnIsWorking(sessionId) ?? this.mustGetSession(sessionId).isWorking)) return false;
     if (!screen.inputText.trim()) { this.inputQueue.setRemnant(sessionId, undefined); return true; }
-    if (!screenInputMatchesText(screen, remnant.text)) return false;
+    const revision = this.inputQueue.revision(sessionId);
+    if (!screenInputMatchesText(screen, remnant.text)
+      && !(remnant.nativeRevision === revision && screenInputMatchesPaste(screen, remnant.text, session.provider))) return false;
     // Journal before transport: an uncertain clear is never repeated, because
     // a second clear key on an empty composer can arm the provider's exit.
     this.inputQueue.setRemnant(sessionId, undefined);
-    await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']));
+    await this.runInputTmuxAction(session, () => revision === this.inputQueue.revision(sessionId)
+      ? this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']) : Promise.resolve());
     const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(remnant.text),
       candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
     if (!cleared) return false;
@@ -2342,6 +2349,13 @@ export class SessionManager {
       if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== sessionId) return false;
       const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName);
       const latest = this.db.boundSessions.getById(sessionId);
+      if (pid !== undefined && record.panePid !== undefined && pid !== record.panePid
+        && this.inputQueue.get(sessionId, record.requestId)?.state === record.state
+        && this.inputQueue.revision(sessionId) === attemptRevision) {
+        this.saveQueuedInput(sessionId, { ...record, state: 'failed',
+          reason: 'The native session changed after text entry. Check the conversation before sending again.' });
+        return false;
+      }
       return !this.stopped && latest?.status === 'bound' && !latest.manualSuspendedAt && !latest.pressureSuspendedAt
         && this.getCurrentRestorableSession(latest)?.id === sessionId
         && this.inputQueue.get(sessionId, record.requestId)?.state === record.state
@@ -2412,20 +2426,19 @@ export class SessionManager {
     }
     let confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     if (record.state === 'queued' && !confirmed) {
-      let transportText = record.text;
       if (screen.inputText.trim()) {
         const delta = record.initialText?.trimEnd();
         const prefix = delta && record.text.endsWith(delta) ? record.text.slice(0, -delta.length).trim() : '';
         if (!prefix || !this.queuedInputConfirmed(sessionId, { ...record, text: prefix }, screen, session.pid)) {
           defer('Waiting for the existing terminal draft to be sent or cleared.'); return;
         }
-        transportText = record.initialText!;
       }
       if (!await stillOwned()) return;
       // Persist before transport: after a crash, observe this paste, never repeat it.
-      record = { ...record, state: 'awaiting_input', baselineInput: screen.inputText,
+      record = { ...record, state: 'awaiting_input', baselineInput: screen.inputText, typedAt: nowIso(),
         panePid: session.pid ?? undefined, nativeRevision: this.inputQueue.revision(sessionId), reason: 'Waiting for the typed message to appear.' };
       this.saveQueuedInput(sessionId, record);
+      const transportText = queuedTransportText(record);
       try {
         await this.runInputTmuxAction(session, () => shouldUseBracketedPasteTransport(transportText)
           ? this.tmuxClient.pasteText(session.tmuxSessionName, transportText)
@@ -2442,6 +2455,11 @@ export class SessionManager {
       confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     } else if (record.state === 'awaiting_input') {
       confirmed ||= this.queuedInputConfirmed(sessionId, record, screen, session.pid);
+      if (!confirmed && Date.now() - Date.parse(record.typedAt ?? record.requestedAt) >= QUEUED_PASTE_CONFIRMATION_MS) {
+        this.saveQueuedInput(sessionId, { ...record, state: 'failed',
+          reason: 'The typed message could not be confirmed within 30 seconds. Check the live draft before sending again.' });
+        return;
+      }
     }
     if (!confirmed || !screenAcceptsHumanPrompt(screen) || !await stillOwned()) return;
     screen = await this.captureSessionScreen(session, false);
@@ -2488,18 +2506,17 @@ export class SessionManager {
     }
   }
 
-  private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen): boolean {
+  private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen, provider: ProviderId): boolean {
     if (record.state !== 'awaiting_input' || screen.inputText === record.baselineInput) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?:\s+paste again to expand)?$/is);
-    return Boolean(placeholder && placeholder[1]?.trim() === (record.baselineInput ?? '').trim());
+    return screenInputMatchesPaste(screen, queuedTransportText(record), provider, record.baselineInput ?? '');
   }
 
   private queuedInputConfirmed(sessionId: string, record: QueuedInputRecord, screen: SessionScreen, pid: number | null | undefined): boolean {
-    if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen)) return true;
+    const provider = this.mustGetSession(sessionId).provider;
+    if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen, provider)) return true;
     const staged = this.inputQueue.staged(sessionId);
-    if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim()) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?:\s+paste again to expand)?$/is);
-    return Boolean(placeholder && placeholder[1]?.trim() === staged.prefix.trim());
+    if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim() || !staged.hasPaste) return false;
+    return screenInputMatchesPaste(screen, staged.text.slice(staged.prefix.length), provider, staged.prefix);
   }
 
   private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {

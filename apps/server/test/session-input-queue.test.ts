@@ -216,10 +216,147 @@ describe('durable human input queue', () => {
     expect(entries.filter(entry => entry.type === 'user-input')).toHaveLength(1);
   });
 
-  it('recognizes a persisted collapsed draft already entered through Text Bypass', async () => {
+  it.each(['a'.repeat(1265), '🧭é'.repeat(600)])('delivers a collapsed Codex paste exactly once (%#. Unicode scalar count)', async text => {
     const f = await fixture();
-    const text = 'A long multiline draft\n'.repeat(30).trim();
-    f.tmux.onText = async () => { f.tmux.paneText = ready('[Pasted text #1 +30 lines]'); };
+    f.tmux.onText = async () => { f.tmux.paneText = ready(`[Pasted Content ${[...text].length} chars]`); };
+    const requestId = randomUUID();
+    const result = await f.submit(text, requestId);
+    expect(result.recordedUserInput?.text).toBe(text);
+    expect(result.queuedInput).toBeUndefined();
+    await f.restart();
+    expect((await f.submit(text, requestId)).recordedUserInput?.id).toBe(result.recordedUserInput?.id);
+    expect(f.tmux.pasted).toEqual([text]);
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+  });
+
+  it('waits for the correct collapsed paste after a partial repaint and backend restart', async () => {
+    const f = await fixture();
+    const text = 'long queued input '.repeat(80).trim();
+    const requestId = randomUUID();
+    f.tmux.onText = async () => { f.tmux.paneText = ready(`[Pasted Content ${text.length - 1} chars]`); };
+    const result = await f.submit(text, requestId);
+    expect(result.queuedInput?.state).toBe('waiting_for_input');
+    expect(f.tmux.sentKeys).toEqual([]);
+    await f.restart();
+    f.tmux.paneText = ready(`[Pasted Content ${text.length} chars] #2`);
+    expect((await f.submit(text, requestId)).recordedUserInput?.text).toBe(text);
+    expect(f.tmux.pasted).toEqual([text]);
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+  });
+
+  it('confirms the pasted delta after an existing visible prefix, including wrapped placeholder rows', async () => {
+    const f = await fixture();
+    const delta = 'a'.repeat(1265), prefix = 'existing prefix ';
+    f.tmux.paneText = ready(prefix);
+    f.tmux.onText = async () => { f.tmux.paneText = ready(`${prefix}[Pasted Con\ntent ${delta.length} chars]\n#2`); };
+    const result = await f.manager.sendKeystrokes(f.session.id, {
+      text: delta, submittedText: prefix + delta, keys: ['Enter'], submissionId: randomUUID(),
+    });
+    expect(result.recordedUserInput?.text).toBe(prefix + delta);
+    expect(f.tmux.pasted).toEqual([delta]);
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+  });
+
+  it.each(['codex', 'claude'] as const)('refuses the other provider paste display in %s', async providerId => {
+    const f = await fixture(providerId);
+    const text = 'a'.repeat(1265);
+    f.tmux.onText = async () => { f.tmux.paneText = ready(providerId === 'codex' ? '[Pasted text #1 +1 lines]' : `[Pasted Content ${text.length} chars]`); };
+    expect((await f.submit(text)).queuedInput?.state).toBe('waiting_for_input');
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
+  it('requires review for an unconfirmed paste after 30 seconds and never replays it after restart', async () => {
+    const f = await fixture();
+    const text = 'a'.repeat(1265), requestId = randomUUID();
+    f.tmux.onText = async () => { f.tmux.paneText = ready('[Unrecognized native paste display]'); };
+    await f.submit(text, requestId);
+    const key = `session-input:${f.session.id}:${requestId}`;
+    const record = JSON.parse(f.db.meta.get(key)!);
+    f.db.meta.set(key, JSON.stringify({ ...record, typedAt: new Date(Date.now() - 31_000).toISOString() }));
+    await vi.waitFor(() => expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs?.[0]?.state).toBe('needs_review'), { timeout: 4000 });
+    await f.restart();
+    expect((await f.submit(text, requestId)).queuedInput?.state).toBe('needs_review');
+    expect(f.tmux.pasted).toEqual([text]);
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
+  it.each(['restart', 'approval'] as const)('submits a freshly confirmed paste after a long %s wait', async waitKind => {
+    const f = await fixture();
+    const text = 'a'.repeat(1265), requestId = randomUUID();
+    f.tmux.acceptText = false;
+    await f.submit(text, requestId);
+    const key = `session-input:${f.session.id}:${requestId}`;
+    const record = JSON.parse(f.db.meta.get(key)!);
+    f.db.meta.set(key, JSON.stringify({ ...record, typedAt: new Date(Date.now() - 31_000).toISOString() }));
+    if (waitKind === 'restart') await f.restart();
+    else {
+      f.tmux.paneText = approval;
+      await new Promise(resolve => setTimeout(resolve, 1100));
+      expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs?.[0]?.state).toBe('waiting_for_input');
+      expect(f.tmux.sentKeys).toEqual([]);
+    }
+    f.tmux.paneText = ready(`[Pasted Content ${text.length} chars]`);
+    expect((await f.submit(text, requestId)).recordedUserInput?.text).toBe(text);
+    expect(f.tmux.pasted).toEqual([text]);
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+  });
+
+  it('requires review when the native process changes after its paste was entered', async () => {
+    const f = await fixture();
+    f.tmux.acceptText = false;
+    await f.submit('unconfirmed text');
+    f.tmux.pid++;
+    await vi.waitFor(() => expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs?.[0]?.state).toBe('needs_review'), { timeout: 4000 });
+    expect(f.tmux.sent).toEqual(['unconfirmed text']);
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
+  it('preserves a human Claude paste entered after cancelling our active-turn paste', async () => {
+    const f = await fixture('claude');
+    const requestId = randomUUID(), text = 'cancelled long input '.repeat(70).trim();
+    f.tmux.onText = async () => {
+      f.tmux.paneText = 'Claude Code\n✻ Thinking… (1s · esc to interrupt)\n────────────────────\n❯ [Pasted text #1 +1 lines]\n────────────────────\n⏵⏵ bypass permissions on';
+      f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: true });
+      await f.manager.cancelQueuedInput(f.session.id, requestId);
+    };
+    await f.submit(text, requestId);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    f.tmux.paneText = ready();
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    f.tmux.onText = async () => { f.tmux.paneText = ready('[Pasted text #2 +1 lines]'); };
+    await f.manager.sendKeystrokes(f.session.id, { text: 'human foreign paste '.repeat(70), deferScreenUpdate: true });
+    expect((await f.submit('next intended message')).queuedInput).toBeDefined();
+    expect(f.tmux.paneText).toContain('[Pasted text #2');
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
+  it('clears only its cancelled collapsed paste before the next queued message', async () => {
+    const f = await fixture();
+    const text = 'cancelled long input '.repeat(70).trim();
+    const requestId = randomUUID();
+    f.tmux.onText = async () => {
+      f.tmux.paneText = ready(`[Pasted Content ${text.length} chars]`);
+      await f.manager.cancelQueuedInput(f.session.id, requestId);
+    };
+    await f.submit(text, requestId);
+    await vi.waitFor(() => expect(f.tmux.sentKeys).toEqual([['C-c']]));
+    f.tmux.onText = undefined;
+    expect((await f.submit('next actual message')).recordedUserInput?.text).toBe('next actual message');
+    expect(f.tmux.sentKeys).toEqual([['C-c'], ['Enter']]);
+  });
+
+  it('does not accept a collapsed paste with extra native draft text', async () => {
+    const f = await fixture();
+    const text = 'long queued input '.repeat(80).trim();
+    f.tmux.onText = async () => { f.tmux.paneText = ready(`foreign [Pasted Content ${text.length} chars]`); };
+    expect((await f.submit(text)).queuedInput?.state).toBe('waiting_for_input');
+    expect(f.tmux.sentKeys).toEqual([]);
+  });
+
+  it.each(['claude', 'codex'] as const)('recognizes a persisted %s collapsed draft already entered through Text Bypass', async providerId => {
+    const f = await fixture(providerId);
+    const text = 'A long multiline draft\n'.repeat(70).trim();
+    f.tmux.onText = async () => { f.tmux.paneText = ready(providerId === 'codex' ? `[Pasted Content ${text.length} chars]` : '[Pasted text #1 +70 lines]'); };
     await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
     await f.restart();
     const result = await f.manager.sendKeystrokes(f.session.id, { submittedText: text, keys: ['Enter'], submissionId: randomUUID() });
@@ -306,7 +443,7 @@ describe('durable human input queue', () => {
     expect(f.tmux.paneText).toContain('my own words cancel me');
   });
 
-  it('after Stop, clears the stranded queued text once before typing the next message', async () => {
+  it.each([false, true])('after Stop, clears unchanged queued text even after a navigation key (%s)', async navigate => {
     const f = await fixture();
     let stop: Promise<unknown> | undefined;
     f.tmux.onText = async () => { f.tmux.onText = undefined; stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
@@ -314,9 +451,10 @@ describe('durable human input queue', () => {
     await stop;
     expect(f.tmux.paneText).toContain('stranded by Stop');
     expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    if (navigate) await f.manager.sendKeystrokes(f.session.id, { keys: ['Left'] });
     const result = await f.submit('the next message');
     expect(result.recordedUserInput?.text).toBe('the next message');
-    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c'], ['Enter']]);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ...(navigate ? [['Left']] : []), ['C-c'], ['Enter']]);
     expect(f.tmux.sent).toEqual(['stranded by Stop', 'the next message']);
   });
 

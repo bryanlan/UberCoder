@@ -1,4 +1,4 @@
-import type { SessionScreen } from '@agent-console/shared';
+import type { ProviderId, SessionScreen } from '@agent-console/shared';
 import { normalizeComparableText, normalizeWhitespace, stableTextHash, stripAnsiAndControl } from '../lib/text.js';
 import { isWorkingStatusLine } from './session-screen.js';
 
@@ -40,6 +40,21 @@ export function screenInputMatchesText(screen: SessionScreen, text: string | und
   const rows = screen.inputText.split('\n').map((row) => normalizeComparableText(row)).filter(Boolean);
   const pattern = rows.map((row) => row.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join(' ?');
   return Boolean(pattern) && new RegExp(`^${pattern}$`, 'u').test(normalizeComparableText(text));
+}
+
+/** Matches one Console-owned paste, including the native collapsed display. */
+export function screenInputMatchesPaste(screen: SessionScreen, text: string, provider: ProviderId, prefix = ''): boolean {
+  if (provider === 'codex') {
+    const suffix = screen.inputText.replace(/\n/g, '').match(/#(\d+)$/)?.[1];
+    // Codex counts Unicode scalars. The ordinary matcher tolerates native row wraps.
+    const placeholder = `[Pasted Content ${[...text].length} chars]${suffix ? ` #${suffix}` : ''}`;
+    return screenInputMatchesText(screen, prefix + placeholder)
+      || Boolean(prefix.trim() && screenInputMatchesText(screen, `${prefix} ${placeholder}`));
+  }
+  const placeholder = screen.inputText.match(/^(.*?)\[Pasted\s+text\s+#\d+(?:\s+\+\d+\s+lines)?\](?:\s+paste\s+again\s+to\s+expand)?$/is);
+  if (!placeholder) return false;
+  const visiblePrefix = placeholder[1] ?? '';
+  return prefix.trim() ? screenInputMatchesText({ ...screen, inputText: visiblePrefix }, prefix) : !visiblePrefix.trim();
 }
 
 export function screenShowsQueuedMessageHint(screen: SessionScreen): boolean {

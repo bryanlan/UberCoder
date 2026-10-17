@@ -275,7 +275,17 @@ reads, with synchronous input-revision and queue-state checks before Enter.
 It reuses matching text; after a paste, it waits for
 the full message or its newly rendered native paste placeholder without pasting
 again. A journal transition precedes each transport action. Collapsed Text Bypass
-drafts are recognized using their persisted text and pane PID.
+drafts are recognized using their persisted text and pane PID. Codex displays large
+pastes as `[Pasted Content N chars]`, with a Unicode scalar count and an optional
+`#N` suffix. Claude uses `[Pasted text #N +N lines]`. One shared matcher checks the
+owned prefix and, for Codex, the expected pasted character count. Queue delivery,
+persisted Text Bypass drafts and idle cancellation cleanup use that same matcher.
+Cancellation remnants retain the input revision, so later human typing removes
+Console's permission to clear them. An unconfirmed paste becomes `needs_review`
+after 30 seconds on a ready composer if a fresh capture still cannot confirm it;
+a changed native PID also requires review. Confirmed text remains eligible after
+a restart or an approval wait. Neither case replays
+the paste or Enter. The browser shows the existing Check delivery action.
 Raw typing or controls invalidate the previous native input revision before entering
 the session command queue, so a later paste cannot acknowledge an older message.
 Restart may resume observation of typed text, but an interrupted or uncertain Enter requires reviewing
