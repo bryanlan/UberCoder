@@ -24,6 +24,8 @@ function fixture() {
   const config = path.join(root, 'config.json');
   fs.writeFileSync(config, JSON.stringify({ projectsRoot: '/repo', projects: {} }));
   const db = new Database(database), wiki = new Database(wikiDatabase);
+  // One commit per database: each autocommitted write waits for a disk sync.
+  db.exec('begin'); wiki.exec('begin');
   db.exec(`
     create table coordination_assignments(id,provider,native_session_id,description,status,pid,process_start,started_at,last_seen_at,token_hash);
     create table coordination_scopes(assignment_id,checkout,repository,summary);
@@ -72,6 +74,7 @@ function fixture() {
     [3, 'claude:reader2', 2, 'read', 1, null], [4, 'codex:unknown', null, 'read', 1, null],
     [5, 'codex:searcher', null, 'search', 0, 'token=SECRETVALUE missing docs'],
   ]) wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(id, '/repo/.git', actor, action, results, stamp, 'Page', query, revision);
+  db.exec('commit'); wiki.exec('commit');
   db.close(); wiki.close();
   return { database, wikiDatabase, config, now,
     processIdentity: (pid: number) => pid === 101 ? { start: 'native-start', name: 'codex', cwd: '/repo/wt' }
@@ -312,21 +315,25 @@ it('redacts credential-key spelling, quoting, separators and line breaks through
   const options = fixture();
   const db = new Database(options.database), wiki = new Database(options.wikiDatabase);
   const keys = redactionContract.property_keys;
-  const marker = 'synthetic_matrix_private_value';
-  let checked = 0;
+  const marker = 'synthetic_matrix_private_value', labels: string[] = [];
   try {
+    db.exec('begin'); wiki.exec('begin');
     for (const key of keys) for (const quote of ['', "'", '"']) for (const separator of [':', '=']) for (const gap of [' ', '\n  ']) {
-      const text = `${quote}${key}${quote}${separator}${gap}"${marker}"`;
-      db.prepare('update coordination_assignments set description=?').run(text);
-      db.prepare('update coordination_scopes set summary=?').run(text);
-      wiki.prepare('update wiki_pages set title=?').run(text);
-      expect(JSON.stringify(engineeringSummary(options)), `${key}/${quote}/${separator}/${gap.includes('\n') ? 'next' : 'same'}`)
-        .not.toContain(marker);
-      checked++;
+      const i = labels.length, id = `key-${i}`, text = `${quote}${key}${quote}${separator}${gap}"${marker}_${i}_end"`;
+      addCaseRows(db, wiki, id, 100 + i, text);
+      db.prepare('insert into coordination_scopes values(?,?,?,?)').run(id, `/repo/${id}`, '/repo/.git', text);
+      labels.push(`${key}/${quote}/${separator}/${gap.includes('\n') ? 'next' : 'same'}`);
     }
-    expect(checked).toBe(keys.length * 3 * 2 * 2);
+    db.exec('commit'); wiki.exec('commit');
   } finally { db.close(); wiki.close(); }
-}, 30_000);
+  expect(labels).toHaveLength(keys.length * 3 * 2 * 2);
+  const result = engineeringSummary(options), output = JSON.stringify(result);
+  labels.forEach((label, i) => expect(output, label).not.toContain(`${marker}_${i}_end`));
+  expect(output).not.toContain(marker);
+  expect(result.agents.counts?.total).toBe(4 + labels.length);
+  expect(result.agents.assignments?.flatMap(a => a.scopes)).toHaveLength(2 + labels.length);
+  expect(result.wiki?.pages).toHaveLength(1 + labels.length);
+});
 
 it('publishes a real readable non-Git process as one unattributed session without a source fault', async () => {
   const options = fixture(), cwd = path.dirname(options.database);
@@ -581,23 +588,36 @@ it('isolates malformed historical activity while keeping its source independent 
 });
 
 
+// Each case gets its own rows so one export covers the corpus. A synchronous per-case loop of
+// exports or CLI launches blocks the worker past Vitest's 60-second RPC timeout and fails the run.
+function addCaseRows(db: Database.Database, wiki: Database.Database, id: string, revision: number, input: string) {
+  db.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)').run(id, 'codex', `native-${id}`, input, 'finished', 104, 'ended-start', stamp, stamp, 'PRIVATE_TOKEN');
+  wiki.prepare('insert into wiki_pages values(?,?,?,?,?)').run('/repo/.git', id, input, revision, stamp);
+  wiki.prepare('insert into wiki_revisions values(?,?,?,?,?,?,?,?,?,?,?)').run(revision, '/repo/.git', id, input, 'PRIVATE_WIKI_BODY', 'PRIVATE_WIKI_SUMMARY', 'codex:first', '/repo/wt', 'work/topic', 'source', stamp);
+}
+
 it('redacts every pinned provider vector through all permitted exporter text fields', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
-  db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run('live', '/repo/wt', 'update', 'Initial', '2026-10-14T12:00:00.000Z');
+  const vectors = redactionContract.provider_cases, yesterday = Date.parse('2026-10-14T12:00:00.000Z');
   try {
-    for (const vector of redactionContract.provider_cases) {
-      db.prepare('update coordination_assignments set description=?').run(vector.input);
-      db.prepare('update coordination_scopes set summary=?').run(vector.input);
-      db.prepare("update coordination_events set text=? where timestamp='2026-10-14T12:00:00.000Z'").run(vector.input);
-      wiki.prepare('update wiki_pages set title=?').run(vector.input);
-      wiki.prepare("update wiki_access set query=? where action='search'").run(vector.input);
-      const result = engineeringSummary(options);
-      expect(JSON.stringify(result), vector.rule_id).not.toContain(vector.matched);
-      expect(result.agents.counts?.total, vector.rule_id).toBe(4);
-      expect(result.wiki?.pages, vector.rule_id).toHaveLength(1);
-    }
+    db.exec('begin'); wiki.exec('begin');
+    vectors.forEach((vector, i) => {
+      const id = `vector-${i}`, revision = 100 + i;
+      addCaseRows(db, wiki, id, revision, vector.input);
+      db.prepare('insert into coordination_scopes values(?,?,?,?)').run(id, `/repo/${id}`, '/repo/.git', vector.input);
+      db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run(id, `/repo/${id}`, 'update', vector.input, new Date(yesterday + i * 1000).toISOString());
+      wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(revision, '/repo/.git', 'codex:searcher', 'search', 0, stamp, null, vector.input, null);
+    });
+    db.exec('commit'); wiki.exec('commit');
   } finally { db.close(); wiki.close(); }
-}, 120_000);
+  const result = engineeringSummary(options), output = JSON.stringify(result);
+  for (const vector of vectors) expect(output, vector.rule_id).not.toContain(vector.matched);
+  expect(result.agents.counts?.total).toBe(4 + vectors.length);
+  expect(result.agents.assignments?.flatMap(a => a.scopes)).toHaveLength(2 + vectors.length);
+  expect(result.agents.activity_yesterday?.items).toHaveLength(vectors.length);
+  expect(result.wiki?.pages).toHaveLength(1 + vectors.length);
+  expect(result.wiki?.no_result_searches).toHaveLength(1 + vectors.length);
+});
 
 it('redacts CLI, environment and HTTP credentials through the complete source CLI output', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
@@ -606,17 +626,18 @@ it('redacts CLI, environment and HTTP credentials through the complete source CL
   expect(cases.some(vector => vector.input.startsWith('mysql -p'))).toBe(true);
   expect(cases.some(vector => vector.input.startsWith('machine '))).toBe(true);
   expect(cases.some(vector => vector.input.startsWith('db.example:5432:'))).toBe(true);
-  const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
   try {
-    for (const vector of cases) {
-      db.prepare('update coordination_assignments set description=?').run(vector.input);
-      wiki.prepare('update wiki_pages set title=?').run(vector.input);
-      const result = spawnSync(process.execPath, ['--import', 'tsx', cli, '--config', options.config, '--database', options.database, '--wiki-database', options.wikiDatabase], { encoding: 'utf8' });
-      expect(result.status).toBe(0);
-      const output = JSON.parse(result.stdout);
-      expect(output.agents.assignments.map((a: { description: string }) => a.description)).toEqual(Array(4).fill(vector.expected));
-      expect(output.wiki.pages[0].title).toBe(vector.expected);
-      expect(result.stdout + result.stderr).not.toContain(vector.input);
-    }
+    db.exec('begin'); wiki.exec('begin');
+    cases.forEach((vector, i) => addCaseRows(db, wiki, `case-${i}`, 100 + i, vector.input));
+    db.exec('commit'); wiki.exec('commit');
   } finally { db.close(); wiki.close(); }
-}, 120_000);
+  const cli = fileURLToPath(new URL('../src/engineering/summary-cli.ts', import.meta.url));
+  const result = spawnSync(process.execPath, ['--import', 'tsx', cli, '--config', options.config, '--database', options.database, '--wiki-database', options.wikiDatabase], { encoding: 'utf8' });
+  expect(result.status).toBe(0);
+  const output = JSON.parse(result.stdout) as { agents: { assignments: Array<{ id: string; description: string }> }; wiki: { pages: Array<{ revision: number; title: string }> } };
+  cases.forEach((vector, i) => {
+    expect(output.agents.assignments.find(a => a.id === `case-${i}`)?.description, `case ${i}`).toBe(vector.expected);
+    expect(output.wiki.pages.find(p => p.revision === 100 + i)?.title, `case ${i}`).toBe(vector.expected);
+    expect(result.stdout + result.stderr, `case ${i}`).not.toContain(vector.input);
+  });
+});
