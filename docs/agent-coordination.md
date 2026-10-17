@@ -57,6 +57,24 @@ Set `continuation: "unattended"` through `update` when the assignment is authori
 
 After actual progress, an agent may explicitly renew `unattended` for the remaining authorized work. Renewal starts a new three-attempt continuation budget. Do not renew just to suppress a stall warning. Descriptions, status updates, new messages, worker facts, supervisor edits and backend restarts cannot reset the budget. Interrupted or unacknowledged submission requires conversation review before renewal. A stopped provider-failure retry needs a new manual provider turn; permission renewal alone does not replay that failure.
 
+For an external job that will take time, keep unattended permission and declare
+`awaiting: "Desktop workflow <id> result"` through `update`, then end the turn.
+While awaiting, Console sends no automatic work nudges, spends no continuation
+attempts and does not mark the lane stalled. Awaiting is scheduling state and
+does not renew the budget. The next **new** peer message from any sender clears
+the await; its inbox wake continues the authorized work in the same turn. Message
+retries do not clear a later wait. Reconcile the notice and re-declare awaiting if
+the result is still pending. Use `awaiting: null` to cancel a wait explicitly.
+`status` and `update` show the current description. Existing blocked or stalled
+recovery remains blocked or stalled; awaiting does not repair uncertain input.
+
+After four hours awaiting, Console queues one durable supervisor inbox alert.
+The alert does not end the worker's await or change permission. A full supervisor
+inbox defers the alert until space opens. Await state and alert deduplication
+survive backend restarts. Console Stop, native cancellation, manual pause and
+human input clear the await and keep their existing automatic-input guards.
+Drafts, interactive prompts and memory limits still defer a result wake.
+
 Declare `supervisorId` on a separately registered worker. A worker's `finish`, native provider failure, exhausted continuation budget, unattended disconnect or explicit `notifySupervisor: true` handoff signals its parent. A native child completion in the parent's Codex `SubAgentActivity` or Claude `<task-notification>` stream also signals that parent. Only actual native envelopes count; quoted assistant prose does not. Links reject unknown, finished, self and cyclic supervisors. Signals cannot enable a waiting parent, change its authority or replenish its recovery budget. A long-running worker can hand off a reviewable result without declaring its assignment finished.
 
 The backend checks every 15 seconds. A ready unattended lead with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Fresh worker signals use that same first delay. Pending peer messages request a wake immediately when ready; an unattended recipient handles the inbox and continues its authorized assignment in that same turn. Later continuations wait at least 45 and 120 seconds. Each permission generation permits three automatic continuation attempts. Active foreground turns and visible background work defer silent-idle continuation; a result signal can request reconciliation while other workers remain active. Typed transient failures use the separate bounded provider-failure controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery), never an additional generic retry budget.

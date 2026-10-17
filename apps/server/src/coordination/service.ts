@@ -4,7 +4,7 @@ import type { AgentReference, AssignmentContinuation, CoordinationAssignment, Co
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
-import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
+import { CONTINUATION_POLICY, continuationControl, endAwaiting, setAwaiting, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { GRANT_POLICY } from '../grants/schema.js';
 
@@ -40,7 +40,7 @@ export class CoordinationService {
     const row = this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments where id=?`).get(id) as CoordinationAssignment | undefined;
     if (!row) throw new Error('Unknown assignment.');
     const control = continuationControl(this.db, id);
-    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, recovery: control.recovery };
+    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, awaiting: control.awaiting?.description ?? null, recovery: control.recovery };
   }
 
   private pilotCache: { key: string; repositories: Set<string> } | null = null;
@@ -157,7 +157,7 @@ export class CoordinationService {
   }
 
   update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
-    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean }) {
+    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean; awaiting?: string | null }) {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
@@ -181,6 +181,7 @@ export class CoordinationService {
         }
         this.event(id, null, 'continuation', `Continuation: ${input.continuation ?? current.continuation}; supervisor: ${input.supervisorId === undefined ? current.supervisorId ?? 'none' : input.supervisorId ?? 'none'}.`);
       }
+      if (input.awaiting !== undefined) setAwaiting(this.db, id, input.awaiting);
       this.db.sqlite.prepare('update coordination_assignments set description=?, status=?, last_seen_at=? where id=?')
         .run(input.description ?? current.description, input.status ?? current.status, new Date().toISOString(), id);
       if (identity) this.db.sqlite.prepare(`insert into coordination_scopes values(?,?,?,?) on conflict(assignment_id,checkout) do update set summary=excluded.summary`)
@@ -203,7 +204,7 @@ export class CoordinationService {
     const current = this.assignment(id);
     const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
     const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160),
-      continuation: current.continuation, supervisorId: current.supervisorId, recovery: current.recovery };
+      continuation: current.continuation, supervisorId: current.supervisorId, awaiting: current.awaiting, recovery: current.recovery };
     // A checkout outside the pilot has no activity view, but the assignment and direct messages
     // still work. Say so explicitly; an empty "disabled" reply reads as "messaging is unavailable".
     if (directory && !this.eligible(directory)) {
@@ -291,7 +292,10 @@ export class CoordinationService {
     }
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
-    this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+    this.db.sqlite.transaction(() => {
+      this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+      endAwaiting(this.db, input.recipientId);
+    })();
     this.requestWake?.();
     return this.sendReceipt({ id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
   }
@@ -437,6 +441,7 @@ export class CoordinationService {
       if (!blocked) {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(messageId, id, control.supervisorId, text, timestamp);
+        endAwaiting(this.db, control.supervisorId);
       }
       signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: text });
     }
@@ -455,6 +460,7 @@ export class CoordinationService {
       this.db.sqlite.transaction(() => {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(handoff.messageId, handoff.workerId, handoff.recipientId, handoff.text, handoff.timestamp);
+        endAwaiting(this.db, handoff.recipientId);
         delete handoff.blockedReason;
         this.db.meta.set(row.key, JSON.stringify(handoff));
       })();

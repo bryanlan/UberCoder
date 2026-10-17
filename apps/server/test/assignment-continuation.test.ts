@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { dispatchCoordination } from '../src/coordination/transport.js';
-import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation, UNATTENDED_IDLE_MS } from '../src/coordination/continuation.js';
+import { alertOverdueAwait, AWAIT_ALERT_MS, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation, UNATTENDED_IDLE_MS } from '../src/coordination/continuation.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const fn of cleanups.splice(0)) fn(); vi.useRealTimers(); });
@@ -126,6 +126,79 @@ describe('Explicit unattended continuation contract', () => {
     f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id });
     f.service.disconnect(f.worker.id);
     expect(continuationControl(f.db, f.parent.id).signals[0]).toMatchObject({ source: f.worker.id, reason: expect.stringContaining('disconnected') });
+  });
+
+  it('accepts await through RPC, freezes a spent budget across restart, then clears it for a new peer notice', async () => {
+    const f = fixture(); f.service.update(f.worker.id, { continuation: 'unattended' });
+    const control = continuationControl(f.db, f.worker.id);
+    control.recovery = { status: 'submitted', attempts: 3, reason: 'Existing attempt', startedAt: new Date().toISOString(), nextAttemptAt: new Date().toISOString() };
+    saveContinuation(f.db, f.worker.id, control);
+    const request = { action: 'update', assignmentId: f.worker.id, token: f.worker.token, awaiting: 'Desktop workflow result' };
+    await dispatchCoordination(f.service, request);
+    f.service.update(f.worker.id, { status: 'waiting' });
+    vi.setSystemTime(Date.now() + AWAIT_ALERT_MS);
+    const frozen = prepareContinuation(f.db, f.worker.id, undefined);
+    expect(frozen.recovery).toMatchObject({ attempts: 3, status: 'scheduled' });
+    expect(pendingContinuation(frozen)).toBe(false);
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    expect(restarted.agentStatus(f.worker.id).assignment).toMatchObject({ continuation: 'unattended', awaiting: 'Desktop workflow result' });
+    restarted.send(f.parent.id, { id: randomUUID(), recipientId: f.worker.id, text: 'Result is ready' });
+    expect(restarted.agentStatus(f.worker.id).assignment).toMatchObject({ awaiting: null, continuation: 'unattended', recovery: { attempts: 3 } });
+  });
+
+  it('does not clear a new wait on a message retry and rejects invalid waits atomically', async () => {
+    const f = fixture();
+    const message = { id: randomUUID(), recipientId: f.worker.id, text: 'Old notice' };
+    f.service.send(f.parent.id, message);
+    const request = { action: 'update', assignmentId: f.worker.id, token: f.worker.token };
+    await expect(dispatchCoordination(f.service, { ...request, awaiting: 'Job' })).rejects.toThrow('unattended');
+    for (const awaiting of ['', '   ', 'a'.repeat(501)]) await expect(dispatchCoordination(f.service, { ...request, awaiting })).rejects.toThrow();
+    await dispatchCoordination(f.service, { ...request, continuation: 'unattended', awaiting: 'Job' });
+    f.service.send(f.parent.id, message);
+    expect(f.service.agentStatus(f.worker.id).assignment?.awaiting).toBe('Job');
+    await dispatchCoordination(f.service, { ...request, awaiting: null });
+    expect(f.service.agentStatus(f.worker.id).assignment?.awaiting).toBeNull();
+  });
+
+  it.each(['blocked', 'stalled', 'submitting'] as const)('does not repair %s recovery by awaiting a peer notice', status => {
+    const f = fixture(); f.service.update(f.worker.id, { continuation: 'unattended' });
+    const control = continuationControl(f.db, f.worker.id);
+    control.recovery = { status, attempts: 3, reason: 'Requires review', startedAt: new Date().toISOString(), nextAttemptAt: new Date().toISOString() };
+    saveContinuation(f.db, f.worker.id, control);
+    f.service.update(f.worker.id, { awaiting: 'Job result' });
+    f.service.send(f.parent.id, { id: randomUUID(), recipientId: f.worker.id, text: 'Ready' });
+    expect(prepareContinuation(f.db, f.worker.id, undefined).recovery).toMatchObject({ status: status === 'submitting' ? 'blocked' : status, attempts: 3 });
+  });
+
+  it('alerts a waiting supervisor once after four hours and retains deduplication across restart', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id, awaiting: 'Desktop workflow result' });
+    expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS - 1)).toBe(false);
+    vi.setSystemTime(Date.now() + AWAIT_ALERT_MS);
+    expect(alertOverdueAwait(f.db, f.worker.id)).toBe(true);
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    const inbox = restarted.poll(f.parent.id, 0).messages;
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]?.text).toContain('Desktop workflow result');
+    expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS)).toBe(false);
+    expect(continuationControl(f.db, f.worker.id).awaiting?.description).toBe('Desktop workflow result');
+    expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
+  });
+
+  it('retries the overdue alert after a full inbox opens and clears the parent wait on supervisor handoff', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id, awaiting: 'Long job' });
+    const ids = Array.from({ length: 100 }, () => randomUUID());
+    for (const id of ids) f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: 'Existing message' });
+    vi.setSystemTime(Date.now() + AWAIT_ALERT_MS);
+    expect(alertOverdueAwait(f.db, f.worker.id)).toBe(false);
+    f.service.acknowledge(f.parent.id, f.service.poll(f.parent.id, 0).messages.map(message => message.id));
+    f.service.update(f.parent.id, { continuation: 'unattended', awaiting: 'Child result' });
+    expect(alertOverdueAwait(f.db, f.worker.id)).toBe(true);
+    expect(continuationControl(f.db, f.parent.id).awaiting).toBeNull();
+    f.service.update(f.parent.id, { awaiting: 'Next child result' });
+    f.service.update(f.worker.id, { notifySupervisor: true });
+    expect(continuationControl(f.db, f.parent.id).awaiting).toBeNull();
   });
 
   it('rejects unknown, self, cyclic and finished supervisors and notification without a link', () => {

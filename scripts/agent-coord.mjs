@@ -299,6 +299,7 @@ async function serveMcp() {
     status: { type: 'string', enum: ['active', 'waiting'] },
     continuation: { type: 'string', enum: ['unattended', 'waiting_for_input'], description: 'Unattended permits continuing existing human-authorized work without another prompt. It grants no new authority. Set waiting_for_input before asking for a human decision; Stop and new human input pause it.' },
     supervisorId: { type: ['string', 'null'], description: 'Explicit supervising assignment id; null clears it. A link never enables the supervisor or grants permission.' },
+    awaiting: { type: ['string', 'null'], minLength: 1, maxLength: 500, description: 'Short description of an external result being awaited while unattended. Pauses automatic continuation without spending its budget until the next new peer message. Null cancels the wait.' },
     notifySupervisor: { type: 'boolean', description: 'Notify the declared supervisor that a result needs review.' },
     recipientId: { type: 'string' }, messageId: { type: 'string' }, text: { type: 'string' },
     messageIds: { type: 'array', items: { type: 'string' } },

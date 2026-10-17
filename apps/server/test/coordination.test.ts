@@ -780,6 +780,7 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
+    expect(tool.inputSchema.properties.awaiting).toMatchObject({ type: ['string', 'null'], maxLength: 500 });
     const wikiTool = JSON.parse(result.stdout).result.tools[1];
     expect(wikiTool.name).toBe('agent_wiki');
     expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);

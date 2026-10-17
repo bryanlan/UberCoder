@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { GRANTED_RESTART_PROMPT, PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakePaused, peerWakeAttemptKey, peerWakeFollowupKey, peerWakeRestoreKey, peerWakeComposerKey } from '../src/coordination/wake.js';
-import { continuationControl, prepareContinuation, saveContinuation, signalContinuation } from '../src/coordination/continuation.js';
+import { AWAIT_ALERT_MS, continuationControl, prepareContinuation, saveContinuation, signalContinuation } from '../src/coordination/continuation.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
@@ -891,6 +891,57 @@ describe('Unattended assignment continuation', () => {
     f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false,
       lastCompletedAt: run.timestamp, lastResponseAt: run.timestamp });
   }
+
+  it.each(['codex', 'claude'] as const)('keeps %s awaiting without nudges, then starts the result wake with its original budget', async id => {
+    const run = done(), f = await fixture(id, {}, new FakeTmux(), run);
+    signalContinuation(f.db, f.recipient, { key: 'first', source: f.sender, timestamp: new Date().toISOString(), reason: 'Work ready' });
+    await f.manager.wakePendingAssignments(); due(f);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
+    completed(f, run);
+    f.service.update(f.recipient, { awaiting: 'Desktop job result', status: 'waiting' });
+    const before = continuationControl(f.db, f.recipient);
+    before.enabledAt = new Date(Date.now() - AWAIT_ALERT_MS).toISOString();
+    before.recovery!.nextAttemptAt = new Date(0).toISOString();
+    // Even the final allowed attempt must remain usable as an inbox turn.
+    before.recovery!.attempts = 3;
+    saveContinuation(f.db, f.recipient, before);
+    backdate(f.db, f.session.id, 60);
+    for (let i = 0; i < 4; i++) await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toHaveLength(1);
+    expect(continuationControl(f.db, f.recipient)).toEqual(before);
+    const notice = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([UNATTENDED_CONTINUATION_PROMPT, PEER_WAKE_PROMPT]);
+    const after = continuationControl(f.db, f.recipient);
+    expect(after).toMatchObject({ awaiting: null, continuation: 'unattended', recovery: { status: 'scheduled', attempts: 3 } });
+    expect(PEER_WAKE_PROMPT).toContain('continue the existing human-authorized assignment in this turn');
+    f.service.poll(f.recipient, 0);
+    f.service.acknowledge(f.recipient, [notice.id]);
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+  });
+
+  it('sends one long-await supervisor inbox notice from the periodic wake pass', async () => {
+    const f = await fixture();
+    f.service.update(f.recipient, { supervisorId: f.sender, awaiting: 'Desktop workflow' });
+    const control = continuationControl(f.db, f.recipient);
+    control.awaiting!.startedAt = new Date(Date.now() - AWAIT_ALERT_MS).toISOString();
+    saveContinuation(f.db, f.recipient, control);
+    await f.manager.wakePendingAssignments(); await f.manager.wakePendingAssignments();
+    expect(f.service.poll(f.sender, 0).messages).toEqual([expect.objectContaining({ text: expect.stringContaining('Desktop workflow') })]);
+    expect(f.tmux.sent).toEqual([]);
+  });
+
+  it.each(['codex', 'claude'] as const)('keeps Stop during an await authoritative for %s when the result arrives', async id => {
+    const f = await fixture(id);
+    f.service.update(f.recipient, { awaiting: 'Desktop job result', status: 'waiting' });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(continuationControl(f.db, f.recipient)).toMatchObject({ awaiting: null, continuation: 'waiting_for_input' });
+    const message = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(peerWakePaused(f.db, f.recipient)).toBe(true);
+    expect(f.service.agentStatus(f.recipient).pendingMessageCount).toBe(1);
+    expect(f.db.meta.get(peerWakeAttemptKey(message.id))).toBeUndefined();
+  });
 
   it.each(['codex', 'claude'] as const)('continues %s after a native child result without needing a peer send', async id => {
     const children: ProviderChildActivity[] = [], run = done();

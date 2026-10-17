@@ -58,7 +58,7 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
 import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
-import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
+import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
@@ -530,6 +530,7 @@ export class SessionManager {
       }>;
     for (const recipient of recipients) {
       if (this.stopped) return;
+      if (alertOverdueAwait(this.db, recipient.id)) this.requestAssignmentWake();
       if (peerWakePaused(this.db, recipient.id)) continue;
       const sessions = restorableSessions.filter((session) => session.provider === recipient.provider
         && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
@@ -569,7 +570,7 @@ export class SessionManager {
         };
         let current = this.db.boundSessions.getById(session.id);
         let priorControl = continuationControl(this.db, recipient.id);
-        if (current && priorControl.recovery?.status === 'submitted'
+        if (current && !priorControl.awaiting && priorControl.recovery?.status === 'submitted'
           && Date.now() - Date.parse(priorControl.recovery.startedAt) >= 30_000) {
           const submittedRevision = priorControl.revision;
           const submittedAt = priorControl.recovery.startedAt;
@@ -594,11 +595,16 @@ export class SessionManager {
         const stagedWork = current.provider === 'claude' && stagedComposer?.status === 'staged'
           && stagedComposer.notice === 'unattended' && stagedComposer.assignmentId === recipient.id
           && stagedComposer.pid === current.pid && stagedComposer.startedAt === current.startedAt
-          && priorControl.continuation === 'unattended' && stagedComposer.continuationRevision === priorControl.revision
+          && !priorControl.awaiting && priorControl.continuation === 'unattended' && stagedComposer.continuationRevision === priorControl.revision
           && priorControl.recovery && ['scheduled', 'submitting'].includes(priorControl.recovery.status);
         // A confirmed unsent work notice finishes its original attempt, even
         // after restart or when that attempt is the last one in the budget.
-        let control = stagedWork ? priorControl : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
+        const peerResponse = pending().length > 0;
+        // Inbox turns do not advance the work budget while delivering the result.
+        // Preserve uncertain work submissions as blocked even on an inbox turn.
+        const preserveWorkBudget = stagedWork || (peerResponse && priorControl.recovery?.status !== 'submitting');
+        let control = preserveWorkBudget ? priorControl
+          : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
         if (control.recovery?.status === 'stalled' && control.supervisorId) {
           const signalled = signalContinuation(this.db, control.supervisorId, {
             key: `worker-stalled:${recipient.id}:${control.revision}:${control.recovery.startedAt}`,
@@ -606,11 +612,11 @@ export class SessionManager {
           });
           if (signalled) this.requestAssignmentWake();
         }
-        const peerResponse = pending().length > 0;
         const workResponse = !peerResponse || !!stagedWork;
         if ((!peerResponse && !stagedWork && !pendingContinuation(control)) || this.stopped) return;
         const revision = control.revision;
         const allowed = () => !this.stopped && !peerWakePaused(this.db, recipient.id)
+          && (!workResponse || !continuationControl(this.db, recipient.id).awaiting)
           && (!workResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
           && (!workResponse || continuationControl(this.db, recipient.id).revision === revision);
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
@@ -696,7 +702,7 @@ export class SessionManager {
             return { code: pause?.code ?? 'paused_without_reason', reason: pause?.reason ?? 'Automatic input is paused; the existing record predates pause-reason capture.' };
           }
           const permission = continuationControl(this.db, recipient.id);
-          if (workResponse && (permission.continuation !== 'unattended' || permission.revision !== revision))
+          if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision))
             return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
           const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
           if (!state || state.status === 'finished') return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };

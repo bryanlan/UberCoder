@@ -25,6 +25,7 @@ export interface CoordinationAssignment {
   lastSeenAt: string;
   continuation: AssignmentContinuation;
   supervisorId: string | null;
+  awaiting: string | null;
   recovery: AssignmentRecovery | null;
 }
 
