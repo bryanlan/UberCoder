@@ -145,7 +145,7 @@
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
 - `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
-- `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
+- `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees and landed or expired snapshot branches across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
 - `scripts/verify-live-console.mjs` - opt-in visible-browser check for live Agent Console UX
   against a running backend and Chrome CDP endpoint.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Inventory and guarded cleanup of agent-created Git worktrees. Contract: docs/worktree-lifecycle.md.
-// Reads Console state read-only; never deletes branches, uncommitted work or unknown local files.
+// Reads Console state read-only; never deletes uncommitted work, unknown local files or a branch
+// whose commits no kept ref holds.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +28,11 @@ const HOUR = 3_600_000;
 // cache may sit unused before it goes.
 const SCRATCH_DEPTH = 4;
 const BUILD_CACHE_HOURS = 168;
+const DAY = 24 * HOUR;
+// Branches that preserve uncommitted work from a retired worktree. They expire once the work they
+// were saved on top of reaches the default branch, or after SNAPSHOT_EXPIRY_DAYS.
+const SNAPSHOT_PREFIXES = ['snapshot/', 'worktree-snapshot/'];
+export const SNAPSHOT_EXPIRY_DAYS = 30;
 
 const expandHome = (value) => value.replace(/^~(?=\/|$)/, os.homedir());
 
@@ -593,6 +599,235 @@ function sweepDocker(docker, options, apply) {
   return state;
 }
 
+// Local branch inventory for one repository. Kept refs are the ones this sweep never deletes and
+// that hold commits safely: the default branch, remote-tracking branches, tags and every branch a
+// worktree has checked out. A local branch never counts its own remote copy (`origin/<name>`):
+// pushing is not landing.
+// Branches a worktree holds: checked out, or reserved by a rebase (including the stack branches
+// `--update-refs` will move) or a bisect that detached its HEAD. Git skips a worktrees directory it
+// cannot read, so an unreadable one fails the repository's branch assessment.
+function heldBranches(main, commonDir) {
+  const held = new Set(parseWorktreeList(git(main, ['worktree', 'list', '--porcelain'])).map((entry) => entry.branch).filter(Boolean));
+  let linked = [];
+  try { linked = fs.readdirSync(path.join(commonDir, 'worktrees')).map((name) => path.join(commonDir, 'worktrees', name)); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  for (const gitDir of [commonDir, ...linked]) {
+    for (const file of ['rebase-merge/head-name', 'rebase-apply/head-name']) {
+      const name = readIfPresent(path.join(gitDir, file)).trim();
+      if (name.startsWith('refs/heads/')) held.add(name);
+    }
+    for (const line of readIfPresent(path.join(gitDir, 'rebase-merge', 'update-refs')).split('\n')) {
+      if (line.startsWith('refs/heads/')) held.add(line.trim());
+    }
+    const bisect = readIfPresent(path.join(gitDir, 'BISECT_START')).trim();
+    if (bisect) held.add(`refs/heads/${bisect}`);
+  }
+  return held;
+}
+
+// Quotes one argument for the recorded recovery commands, which run in a POSIX shell.
+const shellQuote = (value) => (/^[A-Za-z0-9_./:@=+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`);
+
+function branchFacts(repository) {
+  const main = repository.main;
+  const commonDir = git(main, ['rev-parse', '--path-format=absolute', '--git-common-dir']).trim();
+  const checkedOut = heldBranches(main, commonDir);
+  const refs = git(main, ['for-each-ref', '--format=%(refname)%09%(objectname)%09%(committerdate:unix)%09%(upstream)%09%(parent)%09%(symref)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'])
+    .split('\n').filter(Boolean).map((line) => {
+      const [name, sha, committed, upstream, parents, symref] = line.split('\t');
+      return { name, sha, committedMs: Number(committed) * 1000, upstream, firstParent: parents.split(' ')[0] || null, symref };
+    });
+  const local = refs.filter((ref) => ref.name.startsWith('refs/heads/'));
+  const originHead = git(main, ['for-each-ref', '--format=%(symref)', 'refs/remotes/origin/HEAD']).trim().replace(/^refs\/remotes\/origin\//, '');
+  const defaultNames = new Set(['main', 'master', ...(originHead ? [originHead] : [])]);
+  const remotes = refs.filter((ref) => ref.name.startsWith('refs/remotes/') && !ref.name.endsWith('/HEAD'));
+  const defaults = [...local.filter((ref) => defaultNames.has(ref.name.slice(11))), ...remotes.filter((ref) => defaultNames.has(ref.name.split('/').slice(3).join('/')))];
+  // A checked-out snapshot is not a kept ref: it expires by age once released.
+  const anchors = [...defaults, ...remotes.filter((ref) => !defaults.includes(ref)),
+    ...local.filter((ref) => checkedOut.has(ref.name) && !defaults.includes(ref) && !SNAPSHOT_PREFIXES.some((prefix) => ref.name.startsWith(`refs/heads/${prefix}`)))];
+  // A remote upstream that only this branch tracks is its own pushed copy under another name.
+  // One several branches track, such as a program's integration branch, is a landing target.
+  const trackers = new Map();
+  for (const ref of local) if (ref.upstream.startsWith('refs/remotes/')) trackers.set(ref.upstream, (trackers.get(ref.upstream) ?? 0) + 1);
+  const ownUpstream = new Map(local.filter((ref) => trackers.get(ref.upstream) === 1 && !defaults.some((entry) => entry.name === ref.upstream))
+    .map((ref) => [ref.name, ref.upstream]));
+  const landedIn = new Map();
+  const pushedTo = new Map();
+  for (const anchor of anchors) {
+    const own = anchor.name.startsWith('refs/remotes/') ? `refs/heads/${anchor.name.split('/').slice(3).join('/')}` : anchor.name;
+    for (const name of git(main, ['for-each-ref', '--format=%(refname)', '--merged', anchor.sha, 'refs/heads/']).split('\n')) {
+      if (!name || landedIn.has(name)) continue;
+      if ((name === own && anchor.name !== own) || ownUpstream.get(name) === anchor.name) pushedTo.set(name, anchor.name);
+      else if (name !== own) landedIn.set(name, anchor);
+    }
+  }
+  for (const tag of refs.filter((ref) => ref.name.startsWith('refs/tags/'))) {
+    for (const name of git(main, ['for-each-ref', '--format=%(refname)', '--merged', tag.name, 'refs/heads/']).split('\n')) {
+      if (name && !landedIn.has(name)) landedIn.set(name, tag);
+    }
+  }
+  const trackedLocally = new Set(local.map((ref) => ref.upstream).filter((upstream) => upstream.startsWith('refs/heads/')));
+  const symrefTargets = new Set(refs.map((ref) => ref.symref).filter(Boolean));
+  const refShas = new Map(refs.map((ref) => [ref.name, ref.sha]));
+  // Every kept ref, tags included: commits they hold are safe.
+  const kept = [...anchors, ...refs.filter((ref) => ref.name.startsWith('refs/tags/'))].map((ref) => ref.name);
+  return { main, commonDir, checkedOut, local, defaults, defaultNames, landedIn, pushedTo, trackedLocally, symrefTargets, refShas, anchors: kept };
+}
+
+const shortRef = (name) => name.replace(/^refs\/(heads|remotes|tags)\//, '');
+
+function isAncestor(main, commit, target) {
+  try { git(main, ['merge-base', '--is-ancestor', commit, target]); return true; } catch (error) {
+    if (error.status === 1) return false;
+    throw error;
+  }
+}
+
+// Time of the newest entry in a branch reflog. File times are no signal: `git gc` rewrites every
+// reflog when it expires old entries.
+function lastReflogMs(file) {
+  const last = readIfPresent(file).trimEnd().split('\n').at(-1) ?? '';
+  const seconds = Number(last.split('\t')[0].split(' ').at(-2));
+  return Number.isFinite(seconds) ? seconds * 1000 : 0;
+}
+
+// True when a branch's reflog names a commit no kept ref holds, such as the old tip of a branch
+// that was reset. Deleting the branch would delete that history too.
+function reflogOnlyBranchCommits(facts, ref) {
+  const commits = new Set();
+  for (const line of readIfPresent(path.join(facts.commonDir, 'logs', ref.name)).split('\n')) {
+    const [previous, next] = line.split(' ');
+    if (next) { commits.add(previous); commits.add(next); }
+  }
+  for (const commit of commits) if (/^0+$/.test(commit)) commits.delete(commit);
+  if (!commits.size) return false;
+  return git(facts.main, ['rev-list', '--ignore-missing', '--stdin', '--max-count=1'], { input: `${[...commits].join('\n')}\n--not\n${facts.anchors.join('\n')}\n` }).trim() !== '';
+}
+
+function assessBranch(facts, ref) {
+  const name = ref.name.slice(11);
+  const reflog = lastReflogMs(path.join(facts.commonDir, 'logs', ref.name));
+  // Deletion requires the reflog to be exactly as assessed.
+  const reflogText = readIfPresent(path.join(facts.commonDir, 'logs', ref.name));
+  const result = { main: facts.main, branch: name, sha: ref.sha, committedAt: new Date(ref.committedMs).toISOString(), activityMs: Math.max(ref.committedMs, reflog), reflogText };
+  result.checkedOut = facts.checkedOut.has(ref.name);
+  result.protected = ref.symref ? `Symbolic ref to ${shortRef(ref.symref)}.` : facts.defaultNames.has(name) ? 'Default branch.'
+    : facts.trackedLocally.has(ref.name) ? 'Another local branch tracks it.' : facts.symrefTargets.has(ref.name) ? 'A symbolic ref points to it.' : null;
+  result.snapshot = SNAPSHOT_PREFIXES.some((prefix) => name.startsWith(prefix));
+  const anchor = facts.landedIn.get(ref.name);
+  result.landedIn = !anchor ? null : anchor.name.startsWith('refs/tags/') ? `tag ${shortRef(anchor.name)}` : shortRef(anchor.name);
+  // The kept ref that holds this branch's work; deletion verifies it is unchanged.
+  result.witness = anchor ? { ref: anchor.name, sha: anchor.sha } : null;
+  result.pushedTo = facts.pushedTo.has(ref.name) ? shortRef(facts.pushedTo.get(ref.name)) : null;
+  return result;
+}
+
+// Pure decision for one local branch. Deletion needs proof that a kept ref holds its work, or an
+// expired snapshot. `checkDeferred` runs the slower Git checks only when they can decide.
+// Patch equivalence (`git cherry`) is deliberately not proof: it ignores whitespace, which
+// changes behavior in Python.
+export function classifyBranch(facts, now, cooldownMs, checkDeferred = () => ({})) {
+  if (facts.checkedOut) return { state: 'checked-out', action: 'none', reason: 'Checked out in a worktree, or held by a rebase or bisect in progress.' };
+  if (facts.protected) return { state: 'protected', action: 'none', reason: facts.protected };
+  if (now - facts.activityMs < cooldownMs) return { state: 'recent', action: 'none', reason: `Updated within the last ${cooldownMs / HOUR}h.` };
+  const deferred = facts.landedIn || facts.snapshot ? checkDeferred(facts) : {};
+  if (facts.landedIn) {
+    if (deferred.reflogOnly) return { state: 'reflog-only-commits', action: 'none', reason: 'Its reflog holds commits no kept branch has; Git expires such entries after 30 days.' };
+    return { state: 'landed', action: 'delete', reason: `Its commits are already in ${facts.landedIn}.` };
+  }
+  if (facts.snapshot) {
+    if (deferred.baseIn) return { state: 'snapshot-expired', action: 'delete', reason: `Snapshot whose base is now in ${deferred.baseIn}.` };
+    const expires = Date.parse(facts.committedAt) + SNAPSHOT_EXPIRY_DAYS * DAY;
+    if (now >= expires) return { state: 'snapshot-expired', action: 'delete', reason: `Snapshot older than ${SNAPSHOT_EXPIRY_DAYS} days.` };
+    return { state: 'snapshot', action: 'none', reason: `Snapshot kept until its base reaches the default branch or ${new Date(expires).toISOString().slice(0, 10)}.` };
+  }
+  return { state: 'unlanded', action: 'none', reason: facts.pushedTo
+    ? `Only its own remote copy ${facts.pushedTo} holds its commits; pushing is not landing.`
+    : 'Has commits no kept branch holds.' };
+}
+
+// Classifies every local branch of one repository. Branches of worktrees removed in this run were
+// still checked out when assessed, so they wait for a later run.
+function assessBranches(options, repository, facts) {
+  try { facts ??= branchFacts(repository); } catch (error) {
+    return [{ main: repository.main, branch: null, state: 'error', action: 'none', reason: String(error.stderr || error.message).trim().split('\n')[0] }];
+  }
+  const defaults = facts.defaults.map((ref) => ref.name);
+  const witnessOf = (name) => (name ? { ref: name, sha: facts.refShas.get(name) } : null);
+  let found = {};
+  const deferred = (branch) => {
+    const ref = facts.local.find((entry) => entry.name === `refs/heads/${branch.branch}`);
+    if (branch.landedIn) return { reflogOnly: reflogOnlyBranchCommits(facts, ref) };
+    const baseIn = ref?.firstParent && defaults.find((target) => isAncestor(facts.main, ref.firstParent, target));
+    found = { baseIn: baseIn ? shortRef(baseIn) : null, witness: witnessOf(baseIn) };
+    return found;
+  };
+  return facts.local.map((ref) => {
+    const branch = assessBranch(facts, ref);
+    found = {};
+    try {
+      const decision = classifyBranch(branch, options.now, options.cooldownMs, deferred);
+      // An expired snapshot by age has no witness: its deletion is the expiry policy itself.
+      const witness = decision.action !== 'delete' ? null : branch.landedIn ? branch.witness : found.witness ?? null;
+      return { ...branch, ...decision, witness };
+    } catch (error) {
+      return { ...branch, state: 'error', action: 'none', reason: String(error.stderr || error.message).trim().split('\n')[0] };
+    }
+  });
+}
+
+
+// Deletes each planned branch after a fresh assessment of its repository. One ref transaction
+// deletes the branch only at its assessed commit and only while the kept ref that holds its work
+// is unchanged. `onBranchDelete` lets tests act before the final checks and before the transaction.
+function applyBranchActions(options, repositories, branches) {
+  for (const repository of repositories) {
+    const planned = branches.filter((item) => item.main === repository.main && item.action === 'delete');
+    if (!planned.length) continue;
+    let facts;
+    try { facts = branchFacts(repository); } catch { /* reported by the reassessment below */ }
+    const reassessed = assessBranches(options, repository, facts);
+    const failure = reassessed.find((item) => item.branch === null);
+    const fresh = new Map(reassessed.map((item) => [item.branch, item]));
+    for (const item of planned) {
+      const current = fresh.get(item.branch);
+      if (failure) { item.outcome = `failed: reassessment failed: ${failure.reason}`; continue; }
+      if (current?.state === 'error') { item.outcome = `failed: reassessment failed: ${current.reason}`; continue; }
+      if (!current || current.sha !== item.sha || current.action !== 'delete') {
+        item.outcome = `skipped: now ${current ? `${current.state} (${current.reason})` : 'gone'}`;
+        continue;
+      }
+      const ref = `refs/heads/${item.branch}`;
+      // Report the decision actually applied: its basis may differ from the first assessment.
+      Object.assign(item, { state: current.state, reason: current.reason, witness: current.witness });
+      try {
+        options.onBranchDelete?.(item, 'checks');
+        if (heldBranches(repository.main, facts.commonDir).has(ref)) throw new Skip('checked out in a worktree');
+        // Narrow the window for reflog changes and for a pruned ref that held older reflog commits.
+        if (readIfPresent(path.join(facts.commonDir, 'logs', ref)) !== current.reflogText) throw new Skip('reflog changed since assessment');
+        if (current.state === 'landed' && reflogOnlyBranchCommits(facts, { name: ref })) throw new Skip('its reflog now holds commits no kept branch has');
+        options.onBranchDelete?.(item, 'transaction');
+        const verify = current.witness ? `verify ${current.witness.ref} ${current.witness.sha}\n` : '';
+        try { git(repository.main, ['update-ref', '--stdin'], { input: `${verify}option no-deref\ndelete ${ref} ${item.sha}\n` }); } catch (error) {
+          const message = String(error.stderr || error.message).trim().split('\n')[0];
+          // Only a concurrent ref change is a skip; any other failure, such as permissions, fails the run.
+          if (/ is at [0-9a-f]+ but expected [0-9a-f]+$|unable to resolve reference '[^']+'$/.test(message)) throw new Skip(`changed during deletion: ${message}`);
+          throw error;
+        }
+        // `git update-ref` does not check worktrees: restore a branch checked out in that instant.
+        if (heldBranches(repository.main, facts.commonDir).has(ref)) {
+          git(repository.main, ['update-ref', ref, item.sha, '0'.repeat(item.sha.length)]);
+          throw new Skip('checked out during deletion; restored');
+        }
+        try { git(repository.main, ['config', '--remove-section', `branch.${item.branch}`]); } catch { /* no branch configuration */ }
+        item.outcome = 'deleted';
+        item.recovery = `git -C ${shellQuote(repository.main)} branch -- ${shellQuote(item.branch)} ${item.sha}`;
+      } catch (error) { item.outcome = outcomeOf(error); }
+    }
+  }
+}
+
 // Moves the worktree out of its known path first, so no agent can adopt or write to it,
 // then re-verifies it there before Git deletes it. Anything unexpected moves it back.
 function removeWorktree(options, repository, entry) {
@@ -646,7 +881,7 @@ function applyActions(options, repositories, results) {
         result.outcome = `skipped: now ${current.state} (${current.reason})`;
       } else if (result.action === 'remove') {
         result.outcome = removeWorktree(options, repository, entry);
-        if (result.outcome === 'removed') result.recovery = `git -C ${repository.main} worktree add ${result.path} ${result.branch}`;
+        if (result.outcome === 'removed') result.recovery = `git -C ${shellQuote(repository.main)} worktree add -- ${shellQuote(result.path)} ${shellQuote(result.branch)}`;
       } else {
         result.reclaimedBytes = 0;
         const done = [];
@@ -694,13 +929,13 @@ function writeReport(reportDir, report) {
 
 // `onQuarantine` lets tests act inside the window between quarantine and the final check.
 // Scratch roots and Docker are opt-in, so a library caller never touches the host's /tmp or Docker by default.
-export function runSweep({ configPath, reportDir, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine, scratchRoots = [], docker } = {}) {
+export function runSweep({ configPath, reportDir, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine, onBranchDelete, scratchRoots = [], docker } = {}) {
   const config = loadConsoleConfig(configPath);
   const directory = expandHome(reportDir ?? '~/.local/share/agent-console/worktree-sweep');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const release = acquireLock(directory);
   try {
-    const options = { ...config, now, cooldownMs: cooldownHours * HOUR, onQuarantine };
+    const options = { ...config, now, cooldownMs: cooldownHours * HOUR, onQuarantine, onBranchDelete };
     const filters = repoFilter.map((value) => realpathOrSelf(expandHome(value)));
     const scope = () => discoverRepositories(config.repoPaths)
       .filter((repository) => !filters.length || filters.includes(realpathOrSelf(repository.main)));
@@ -709,14 +944,20 @@ export function runSweep({ configPath, reportDir, apply = false, repoFilter = []
     if (restored.length) repositories = scope();
     const signals = gatherSignals(options, new Set(repositories.flatMap((repository) => repository.linked.map((entry) => entry.path))));
     const results = repositories.flatMap((repository) => repository.linked.map((entry) => assess(options, repository, entry, signals)));
+    const branches = repositories.flatMap((repository) => assessBranches(options, repository));
+    for (const item of branches) if (item.state === 'error') item.outcome = `failed: ${item.reason}`;
     const usable = signals.snapshot.ok && signals.scan.complete;
-    if (apply && usable) applyActions(options, repositories, results);
+    if (apply && usable) {
+      applyActions(options, repositories, results);
+      applyBranchActions(options, repositories, branches);
+    }
     const scratch = sweepScratch(scratchRoots.map((root) => realpathOrSelf(expandHome(root))), signals.scan, options, apply && usable);
     const report = {
       startedAt: new Date(now).toISOString(), apply, cooldownHours, usable,
       consoleState: signals.snapshot.ok ? `schema ${signals.snapshot.version}` : signals.snapshot.reason,
       processVisibility: signals.scan.complete ? 'complete' : `incomplete: ${signals.scan.hidden.slice(0, 5).join(', ')}`,
       restored, worktrees: results, scratch,
+      branches: branches.map(({ main, branch, sha, committedAt, state, action, reason, witness, outcome, recovery }) => ({ main, branch, sha, committedAt, state, action, reason, witness, outcome, recovery })),
       docker: docker ? sweepDocker(docker, options, apply && usable) : { available: false, reason: 'not requested', volumes: [] },
     };
     report.file = writeReport(directory, report);
@@ -731,6 +972,8 @@ export function summarize(report) {
   lines.push(`${report.worktrees.length} linked worktrees: ${[...counts].map(([state, count]) => `${state} ${count}`).join(', ')}`);
   const planned = report.worktrees.filter((item) => item.action !== 'none');
   lines.push(`Planned: remove ${planned.filter((item) => item.action === 'remove').length}, reclaim caches in ${planned.filter((item) => item.action === 'reclaim-cache').length}`);
+  const deletable = report.branches.filter((item) => item.action === 'delete');
+  lines.push(`${report.branches.length} local branches: delete ${deletable.filter((item) => item.state === 'landed').length} landed and ${deletable.filter((item) => item.state === 'snapshot-expired').length} expired snapshots; keep ${report.branches.filter((item) => item.state === 'unlanded').length} unlanded and ${report.branches.filter((item) => item.state === 'snapshot').length} snapshots`);
   lines.push(`Scratch build caches: ${report.scratch.length}, idle ${report.scratch.filter((item) => item.action === 'reclaim-cache').length}`);
   lines.push(report.docker.available
     ? `Docker: ${report.docker.volumes.filter((item) => item.action === 'remove').length} orphaned anonymous volumes of ${report.docker.volumes.length} unused; build cache: ${report.docker.buildCache.outcome ?? report.docker.buildCache.action}`
@@ -740,8 +983,8 @@ export function summarize(report) {
     const scratchBytes = report.scratch.reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0);
     const items = allItems(report);
     const failed = items.filter((item) => item.outcome?.startsWith('failed'));
-    lines.push(`Done: removed ${report.worktrees.filter((item) => item.outcome === 'removed').length}, cache GB freed ${(bytes / 1e9).toFixed(1)} in worktrees and ${(scratchBytes / 1e9).toFixed(1)} in scratch, Docker volumes removed ${report.docker.volumes.filter((item) => item.outcome === 'removed').length}, skipped on recheck ${items.filter((item) => item.outcome?.startsWith('skipped')).length}, failed ${failed.length}`);
-    for (const item of failed) lines.push(`  FAILED ${item.path ?? item.name}: ${item.outcome}`);
+    lines.push(`Done: removed ${report.worktrees.filter((item) => item.outcome === 'removed').length}, deleted branches ${report.branches.filter((item) => item.outcome === 'deleted').length}, cache GB freed ${(bytes / 1e9).toFixed(1)} in worktrees and ${(scratchBytes / 1e9).toFixed(1)} in scratch, Docker volumes removed ${report.docker.volumes.filter((item) => item.outcome === 'removed').length}, skipped on recheck ${items.filter((item) => item.outcome?.startsWith('skipped')).length}, failed ${failed.length}`);
+    for (const item of failed) lines.push(`  FAILED ${item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`}: ${item.outcome}`);
     for (const item of items.filter((entry) => entry.outcome?.startsWith('refused'))) lines.push(`  REFUSED ${item.path}: ${item.outcome}`);
     for (const item of report.restored) lines.push(`  QUARANTINE ${item.path}: ${item.outcome}`);
   }
@@ -751,7 +994,7 @@ export function summarize(report) {
 }
 
 // Every acted-on item: worktrees, quarantine restorations, scratch caches, Docker volumes and build cache.
-const allItems = (report) => [...report.worktrees, ...report.restored, ...report.scratch, ...report.docker.volumes,
+const allItems = (report) => [...report.worktrees, ...report.restored, ...report.scratch, ...report.branches, ...report.docker.volumes,
   ...(report.docker.buildCache?.outcome ? [{ name: 'Docker build cache', ...report.docker.buildCache }] : [])];
 
 // Scheduler summary: one JSON object for Waltium Control.
@@ -761,20 +1004,23 @@ function writeSummary(file, report, startedAt) {
   const reclaimed = [...items, ...report.scratch].reduce((sum, item) => sum + (item.reclaimedBytes ?? 0), 0);
   const gb = (reclaimed / 1e9).toFixed(1);
   const volumes = report.docker.volumes.filter((item) => item.outcome === 'removed').length;
+  const deleted = report.branches.filter((item) => item.outcome === 'deleted');
+  const landed = deleted.filter((item) => item.state === 'landed').length;
+  const snapshots = deleted.length - landed;
   const failed = allItems(report).filter((item) => item.outcome?.startsWith('failed'));
   const refused = [...items, ...report.scratch].filter((item) => item.outcome?.startsWith('refused'));
   const kept = items.filter((item) => ['dirty', 'local-files', 'unreleased', 'detached', 'git-operation', 'private-git-state', 'reflog-only-commits', 'hidden-index'].includes(item.state)).length;
   const status = !report.usable || failed.length ? 'failed' : 'updated';
   const dashboard = report.usable
-    ? `Removed ${removed} idle worktrees and ${volumes} orphaned Docker volumes and freed ${gb} GB of build caches; ${kept} worktrees kept for unsaved or unique content${failed.length ? `; ${failed.length} failed` : ''}.`
+    ? `Removed ${removed} idle worktrees, ${landed} landed branches, ${snapshots} expired snapshot branches and ${volumes} orphaned Docker volumes and freed ${gb} GB of build caches; ${kept} worktrees kept for unsaved or unique content${failed.length ? `; ${failed.length} failed` : ''}.`
     : `Changed nothing: ${report.consoleState.startsWith('schema') ? `process visibility ${report.processVisibility}` : report.consoleState}`;
   const summary = {
     job_key: process.env.WALTIUM_JOB_KEY ?? null, run_id: process.env.WALTIUM_RUN_ID ?? null,
     started_at: startedAt, finished_at: new Date().toISOString(), status, dashboard_summary: dashboard,
-    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories and ${report.scratch.length} build caches in scratch space such as /tmp. It keeps every branch and never deletes uncommitted work, ignored local files or a worktree a session can still resume. Docker: ${report.docker.available ? `${volumes} anonymous volumes no container used were removed and build cache unused for a week was ${report.docker.buildCache.outcome ?? 'left'}` : `skipped (${report.docker.reason})`}. ${refused.length ? `${refused.length} cache deletions were refused by a safety check and need a look. ` : ''}The full report is ${report.file}.`,
+    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories and ${report.scratch.length} build caches in scratch space such as /tmp. It deletes a local branch only after 24 idle hours when its commits are already in a kept branch (the default branch, a remote branch, a tag or a checked-out branch) and its reflog holds nothing else, and it deletes snapshot branches once their base reaches the default branch or after ${SNAPSHOT_EXPIRY_DAYS} days; ${report.branches.filter((item) => item.state === 'unlanded').length} branches with unlanded commits stay. It never deletes uncommitted work, ignored local files or a worktree a session can still resume. Docker: ${report.docker.available ? `${volumes} anonymous volumes no container used were removed and build cache unused for a week was ${report.docker.buildCache.outcome ?? 'left'}` : `skipped (${report.docker.reason})`}. ${refused.length ? `${refused.length} cache deletions were refused by a safety check and need a look. ` : ''}The full report is ${report.file}.`,
     llm_usage: { provider: null, models: [], input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-    targets: [...failed, ...refused].map((item) => ({ path: item.path ?? item.name, status: 'failed', plain_english_summary: item.outcome })),
-    issues: failed.map((item) => `${item.path ?? item.name}: ${item.outcome}`), follow_up: refused.map((item) => `${item.path}: ${item.outcome}`),
+    targets: [...failed, ...refused].map((item) => ({ path: item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`, status: 'failed', plain_english_summary: item.outcome })),
+    issues: failed.map((item) => `${item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`}: ${item.outcome}`), follow_up: refused.map((item) => `${item.path}: ${item.outcome}`),
     report_file: report.file,
   };
   fs.writeFileSync(file, `${JSON.stringify(summary, null, 1)}\n`);

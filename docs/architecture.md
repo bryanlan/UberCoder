@@ -8,7 +8,7 @@ See [Agent grants](agent-grants.md) for creation, inheritance, the durable launc
 First-class runtime surfaces:
 - Fastify startup: `apps/server/src/index.ts` calls `buildApp` in `apps/server/src/app.ts`; root `package.json` coordinates the server, web and shared packages.
 - Host coordination/MCP/hooks: `scripts/agent-coord.mjs` transports requests to the backend-owned coordination, grants and wiki services; it does not own their durable state.
-- Worktree maintenance: `scripts/worktree-sweep.mjs` inventories checkouts and performs guarded cleanup only in apply mode; it reads Console state through a read-only SQLite connection.
+- Worktree maintenance: `scripts/worktree-sweep.mjs` inventories checkouts and branches and performs guarded cleanup only in apply mode; it reads Console state through a read-only SQLite connection.
 - Fastify conversation/timeline API: `apps/server/src/routes/conversations.ts`.
 - Fastify conversation search API and index: `apps/server/src/routes/search.ts`,
   `apps/server/src/search/conversation-search.ts`,

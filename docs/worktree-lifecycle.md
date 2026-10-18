@@ -2,11 +2,13 @@
 
 Agents create Git worktrees for isolated edits. Before October 15, 2026 nothing removed them when a session ended early, so 243 linked worktrees and about 53 GB accumulated in one week. Most of the space was Rust build output (`target/`) repeated in every worktree.
 
-`scripts/worktree-sweep.mjs` takes inventory of every linked worktree in the repositories that Console knows about. It also removes the ones nobody can still use, and clears agents' leftover build caches and Docker storage (see [Scratch space and Docker](#scratch-space-and-docker)). It reads Console state read-only and changes nothing in Console.
+`scripts/worktree-sweep.mjs` takes inventory of every linked worktree in the repositories that Console knows about. It also removes the ones nobody can still use, deletes local branches whose work has landed (see [Branches](#branches)), and clears agents' leftover build caches and Docker storage (see [Scratch space and Docker](#scratch-space-and-docker)). It reads Console state read-only and changes nothing in Console.
+
+By October 18, 2026 the repositories held 768 local branches, because worktree removal kept every branch. Most came from lane-per-delivery programs; 275 held only work already in a kept branch.
 
 ## What the sweep protects
 
-A worktree directory is a view of a branch. The sweep never deletes a branch, so committed work always survives. It keeps a directory when any of the following applies:
+A worktree directory is a view of a branch. Removing a worktree keeps its branch, so committed work survives; branches follow their own rule under [Branches](#branches). The sweep keeps a directory when any of the following applies:
 
 - **Someone is using it.** An assignment that announced the checkout has a running process, or is active or waiting and recorded no process to check. A process whose working directory, executable, open files or arguments point inside it also counts.
 - **Console could resume its session.** An announcing assignment has a restorable binding, including a pending launch, but no process runs in the worktree. The sweep reports it as `resumable`.
@@ -33,7 +35,22 @@ Check-then-act is not atomic. A process would have to enter a worktree idle for 
 
 The sweep does nothing when Console's schema version is not one it was reviewed for, when Console state cannot be read, or when process visibility is incomplete. That last case covers a sandboxed PID namespace and any of this user's processes that `/proc` hides. The exceptions are a short list of login daemons that hide themselves by design. In that state it exits with status 2.
 
-To recover a removed worktree, run the `recovery` command recorded in the report: `git -C <repo> worktree add <path> <branch>`.
+To recover a removed worktree, run the `recovery` command recorded in the report: `git -C <repo> worktree add <path> <branch>`. If a later run deleted that branch, first run the branch's own `recovery` command.
+
+## Branches
+
+The sweep deletes a local branch only when nothing it holds would be lost or hidden. Kept refs are never deleted and hold commits safely: the default branch (`main`, `master` or the target of `origin/HEAD`), remote-tracking branches, tags and every branch a worktree has checked out, except snapshot branches, which expire by age.
+
+| Condition | Action |
+|---|---|
+| Its tip is in a kept ref other than its own remote copy, and every commit its reflog names is in a kept ref | Delete |
+| Snapshot branch (`snapshot/*` or `worktree-snapshot/*`) whose base, the first parent of its tip, is in the default branch | Delete |
+| Snapshot branch whose tip commit is more than 30 days old | Delete |
+| Anything else | Keep |
+
+Pushing is not landing: a branch whose only other copy is its own remote branch stays. Its own copy is the same-name remote branch, or a differently named configured upstream that no other local branch tracks; an upstream several branches track, such as a program's integration branch, is a landing target. Identical changes under different commits are not proof either, because Git's patch comparison ignores whitespace, which changes Python behavior; such branches stay. A branch whose reflog holds an older commit no kept ref has, such as the tip before a reset, stays until Git expires that entry (30 days by default). The sweep never deletes the default branch, a symbolic ref or its target, a checked-out branch, a branch a paused rebase or bisect holds (including stack branches `rebase --update-refs` will move), a branch another local branch tracks, or a branch updated within the last 24 hours. Activity is the newest reflog entry or tip commit. Reflog file times are ignored because `git gc` rewrites every reflog file.
+
+Deletion follows a fresh assessment of the repository. One Git ref transaction then deletes the branch only at its assessed commit, and only while the kept ref that holds its work is unchanged, so a branch that moves or loses that ref meanwhile stays. A branch a worktree checks out in that instant is restored when the final check sees it. A checkout that resolves the branch before deletion but writes its HEAD after that check leaves the worktree on a missing branch. For a landed branch the commits are in the kept ref, and the report's `recovery` command recreates it. Closing that window would need a lock shared by every Git client; we accept the risk, as for worktree removal. Only a concurrent ref change counts as skipped; any other deletion error fails the run. A branch whose worktree is removed in the same run was still checked out when assessed, so it waits for a later run. A repository whose branches or linked worktree records cannot be read is reported as a failed run, and none of its branches are deleted. The report records the decision actually applied, which can differ from the first assessment. Just before the transaction the sweep also requires the branch reflog to be unchanged and rechecks that kept refs still hold every commit it names; these checks are not atomic with the deletion. Each deletion records a quoted `recovery` command: `git -C <repo> branch -- <name> <sha>`. A landed branch's commits stay in the kept ref. An expired snapshot's commits have no guaranteed recovery period after deletion: `git gc` may prune them at its next run, because its cutoff uses the objects' age.
 
 ## Scratch space and Docker
 
@@ -56,7 +73,7 @@ node scripts/worktree-sweep.mjs sweep --apply     # act
 # --repo <main checkout> limits the run; --json prints the full report
 ```
 
-Every run writes `~/.local/share/agent-console/worktree-sweep/<time>.json` and `latest.json`, keeping the last 72 runs. Each worktree has a state, reason, action and outcome. Kept worktrees list their owners and the reason they were kept.
+Every run writes `~/.local/share/agent-console/worktree-sweep/<time>.json` and `latest.json`, keeping the last 72 runs. Each worktree and local branch has a state, reason, action and outcome. Kept worktrees list their owners and the reason they were kept.
 
 The Waltium scheduler runs `sweep --apply` hourly. It uses the main checkout so that it runs integrated, reviewed code.
 
@@ -68,6 +85,7 @@ The Waltium scheduler runs `sweep --apply` hourly. It uses the main checkout so 
 - Commit before stopping, even as a WIP commit. Uncommitted work keeps a worktree forever and is lost if the machine fails.
 - Never delete a worktree with `rm -rf`. Use `git worktree remove <path>` (without `--force`) for your own finished worktree, or leave it for the sweep.
 - Park a worktree that must stay with `git worktree lock --reason`.
+- Before retiring a worktree with uncommitted work you are not integrating, commit it to `snapshot/<lane>`. The sweep deletes the snapshot once its base reaches the default branch or after 30 days.
 - Build in the worktree's own `target/`, not a `CARGO_TARGET_DIR` under `/tmp`. Keep nothing you need in `/tmp`: it is scratch, cleared at reboot.
 - Remove a temporary container with `docker rm -v` (or run it with `--rm`), so its anonymous volume goes with it.
 
