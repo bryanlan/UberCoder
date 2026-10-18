@@ -1,10 +1,10 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
-import { Bug, Check, ChevronDown, ChevronRight, Copy, Link as LinkIcon, Pause, PlugZap, Unplug } from 'lucide-react';
+import { Bug, Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
 import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
-import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
@@ -13,6 +13,9 @@ import { copyTextToClipboard } from '../lib/clipboard';
 import { ExplorerPane, NavigationCrumbs } from '../features/conversation/ExplorerPane';
 import { groupTranscriptTurns, shouldShowInMainTranscript, TranscriptDocumentTurn } from '../features/conversation/transcript-turns';
 import { useConversationScrollController } from '../features/conversation/useConversationScrollController';
+import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
+
+export type MobileInputPanel = 'reply' | 'controls' | null;
 
 type AnsiPaletteColor = {
   rgb: [number, number, number];
@@ -77,32 +80,6 @@ const LiveAnsiBlock = memo(function LiveAnsiBlock({
     />
   );
 });
-
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => globalThis.matchMedia?.(query).matches ?? false);
-
-  useEffect(() => {
-    const mediaQuery = globalThis.matchMedia?.(query);
-    if (!mediaQuery) {
-      return;
-    }
-
-    const updateMatches = (event?: MediaQueryListEvent) => {
-      setMatches(event?.matches ?? mediaQuery.matches);
-    };
-
-    updateMatches();
-    if (typeof mediaQuery.addEventListener === 'function') {
-      mediaQuery.addEventListener('change', updateMatches);
-      return () => mediaQuery.removeEventListener('change', updateMatches);
-    }
-
-    mediaQuery.addListener(updateMatches);
-    return () => mediaQuery.removeListener(updateMatches);
-  }, [query]);
-
-  return matches;
-}
 
 function useFrozenValue<T,>(value: T, frozen: boolean, resetKey?: string): T {
   const valueRef = useRef(value);
@@ -190,7 +167,6 @@ type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
 
 const MIN_BRIDGE_HEIGHT_PX = 96;
 const MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.6;
-const MAX_MOBILE_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.3;
 const BRIDGE_HEIGHT_STORAGE_KEY = 'agent-console:live-bridge-height';
 
 function readStoredBridgeHeight(): number {
@@ -270,8 +246,8 @@ function LiveSessionInputBridge({
   mobileCollapsible,
   bridgeOpen,
   onToggleBridge,
-  mobileControlsHidden,
-  onToggleMobileControls,
+  mobileInputPanel,
+  onCloseMobileInput,
   mobileChromeHidden,
   onToggleMobileChrome,
   latestAssistantMessage,
@@ -297,8 +273,8 @@ function LiveSessionInputBridge({
   mobileCollapsible: boolean;
   bridgeOpen: boolean;
   onToggleBridge: () => void;
-  mobileControlsHidden: boolean;
-  onToggleMobileControls: () => void;
+  mobileInputPanel?: MobileInputPanel;
+  onCloseMobileInput?: () => void;
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
@@ -315,6 +291,7 @@ function LiveSessionInputBridge({
   const [copyingLastMessage, setCopyingLastMessage] = useState(false);
   const [copiedLastMessage, setCopiedLastMessage] = useState(false);
   const [bridgeHeight, setBridgeHeight] = useState(readStoredBridgeHeight);
+  const [mobileInputHeight, setMobileInputHeight] = useState(44);
   const captureRef = useRef<HTMLTextAreaElement | null>(null);
   const bridgeHeightRef = useRef(bridgeHeight);
   const resizeSessionRef = useRef<{ startY: number; startHeight: number } | null>(null);
@@ -382,8 +359,8 @@ function LiveSessionInputBridge({
   }, [profileBusy, provider, sessionId]);
 
   useEffect(() => {
-    captureRef.current?.focus();
-  }, [sessionId]);
+    if (!mobileCollapsible) captureRef.current?.focus({ preventScroll: true });
+  }, [sessionId, mobileCollapsible]);
 
   useEffect(() => {
     bridgeHeightRef.current = bridgeHeight;
@@ -395,6 +372,7 @@ function LiveSessionInputBridge({
 
   useEffect(() => {
     resizeCleanupRef.current?.();
+    if (mobileCollapsible) return;
     const updateViewportHeight = () => updateBridgeHeight(bridgeHeightRef.current);
     updateViewportHeight();
     window.addEventListener('resize', updateViewportHeight);
@@ -405,12 +383,10 @@ function LiveSessionInputBridge({
     };
   }, [compact, mobileCollapsible, sessionId]);
 
-  useEffect(() => {
-    if (!bridgeOpen) {
-      return;
-    }
-    captureRef.current?.focus();
-  }, [bridgeOpen]);
+  useLayoutEffect(() => {
+    if (!bridgeOpen || (mobileCollapsible && mobileInputPanel !== 'reply')) return;
+    captureRef.current?.focus({ preventScroll: true });
+  }, [bridgeOpen, mobileCollapsible, mobileInputPanel]);
 
   useEffect(() => {
     if (textBypassEnabled || (!draftDirty && !draftText)) {
@@ -444,6 +420,26 @@ function LiveSessionInputBridge({
 
   const bridgeText = textBypassEnabled ? (bypassPreviewText ?? '') : draftText;
 
+  useLayoutEffect(() => {
+    if (!mobileCollapsible || mobileInputPanel !== 'reply') return;
+    const resize = () => {
+      const input = captureRef.current;
+      if (!input) return;
+      const cap = Math.max(44, Math.min(112, (window.visualViewport?.height ?? window.innerHeight) * 0.22));
+      input.style.height = '0px';
+      const height = Math.min(cap, Math.max(44, input.scrollHeight));
+      input.style.height = `${height}px`;
+      setMobileInputHeight(height);
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    return () => {
+      window.removeEventListener('resize', resize);
+      window.visualViewport?.removeEventListener('resize', resize);
+    };
+  }, [bridgeText, mobileCollapsible, mobileInputPanel]);
+
   useEffect(() => {
     const capture = captureRef.current;
     if (!capture) {
@@ -474,6 +470,10 @@ function LiveSessionInputBridge({
         const response = await onSendKeystrokes(sessionId, request);
         if (response?.queuedInput && textBypassEnabled) stopTextBypassForQueue();
         if (response && withImages) clipboardImages.clear();
+        if (response && mobileCollapsible && mobileInputPanel === 'reply' && captureRef.current
+          && request.keys?.includes('Enter') && (request.submittedText || withImages) && !nativeSelectionActive) {
+          onCloseMobileInput?.();
+        }
         return response !== undefined;
       })
       .catch(() => false);
@@ -825,7 +825,7 @@ function LiveSessionInputBridge({
   async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
     // Keep held chat drafts separate from explicit numeric menu choices.
     // Text Bypass retains its ordered flush and consumed-preview handling below.
-    if (source === 'button' && nativeSelectionActive && !textBypassEnabled) {
+    if (source === 'button' && (nativeSelectionActive || (mobileCollapsible && mobileInputPanel === 'controls')) && !textBypassEnabled) {
       await runBridgeAction(async () => {
         if (specialKey === 'Enter' && hasNumericMenuDraft) {
           await syncDraftToRemote(['Enter'], { clearAfterSend: true });
@@ -951,9 +951,7 @@ function LiveSessionInputBridge({
   }
 
   function clampBridgeHeight(nextHeight: number): number {
-    const viewportHeight = mobileCollapsible ? (window.visualViewport?.height ?? window.innerHeight) : window.innerHeight;
-    const viewportCap = Math.floor(viewportHeight * (mobileCollapsible
-      ? MAX_MOBILE_BRIDGE_HEIGHT_VIEWPORT_RATIO : MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO));
+    const viewportCap = Math.floor(window.innerHeight * MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO);
     return Math.max(MIN_BRIDGE_HEIGHT_PX, Math.min(viewportCap, Math.round(nextHeight)));
   }
 
@@ -1000,61 +998,21 @@ function LiveSessionInputBridge({
     window.addEventListener('pointercancel', endResize);
   }
 
-  function renderBridgeHeader(
-    title: string,
-    summary?: string,
-    options: { showControlsToggle?: boolean; showChromeToggle?: boolean } = {},
-  ): ReactNode {
-    const { showControlsToggle = false, showChromeToggle = true } = options;
-    return (
-      <div className={clsx(
-        'flex items-center justify-between gap-3',
-        mobileCollapsible ? 'px-4 py-3' : 'mb-2 py-1',
-      )}>
-        <div className="min-w-0 flex-1">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>
-          {summary ? <div className="mt-1 truncate text-sm text-slate-200">{summary}</div> : null}
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            aria-expanded={bridgeOpen}
-            aria-label={bridgeOpen ? 'Collapse live input bridge' : 'Expand live input bridge'}
-            onClick={() => {
-              void handleToggleBridgePanel();
-            }}
-            className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
-          >
-            <ChevronDown className={clsx('h-4 w-4 transition-transform', bridgeOpen && 'rotate-180')} />
-          </button>
-          {showControlsToggle && (
-            <button
-              type="button"
-              aria-label={mobileControlsHidden ? 'Show bridge controls and status' : 'Hide bridge controls and status'}
-              title={mobileControlsHidden ? 'Show bridge controls and status' : 'Hide bridge controls and status'}
-              onClick={onToggleMobileControls}
-              className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
-            >
-              <ChevronRight className={clsx('h-4 w-4 transition-transform', mobileControlsHidden && 'rotate-180')} />
-            </button>
-          )}
-          {showChromeToggle && (
-            <button
-              type="button"
-              aria-label={mobileChromeHidden ? 'Show banners' : 'Hide banners'}
-              title={mobileChromeHidden ? 'Show banners' : 'Hide banners'}
-              onClick={onToggleMobileChrome}
-              className="rounded-xl border border-slate-700 p-2 text-slate-300 transition hover:border-slate-500 hover:bg-slate-800"
-            >
-              <ChevronDown className={clsx('h-4 w-4 transition-transform', !mobileChromeHidden && 'rotate-180')} />
-            </button>
-          )}
-        </div>
-      </div>
-    );
+  function renderBridgeHeader(title: string, summary?: string): ReactNode {
+    if (mobileCollapsible) {
+      return <div className="flex h-12 items-center justify-between px-3">
+        <span className="text-xs text-slate-400">{mobileInputPanel === 'controls' ? 'Session controls' : textBypassEnabled ? 'Reply · Text Bypass' : 'Reply'}</span>
+        <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-10 w-11 items-center justify-center text-slate-300"><X className="h-4 w-4" /></button>
+      </div>;
+    }
+    return <div className="mb-2 flex items-center justify-between gap-3 py-1">
+      <div className="min-w-0 flex-1"><div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>{summary && <div className="mt-1 truncate text-sm text-slate-200">{summary}</div>}</div>
+      <button type="button" aria-expanded={bridgeOpen} aria-label={bridgeOpen ? 'Collapse live input bridge' : 'Expand live input bridge'} onClick={() => { void handleToggleBridgePanel(); }} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', bridgeOpen && 'rotate-180')} /></button>
+      <button type="button" aria-label={mobileChromeHidden ? 'Show banners' : 'Hide banners'} onClick={onToggleMobileChrome} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', !mobileChromeHidden && 'rotate-180')} /></button>
+    </div>;
   }
 
-  const bridgeBodyClassName = mobileCollapsible ? 'px-4 pb-4' : 'px-4 py-4';
+  const bridgeBodyClassName = mobileCollapsible ? (mobileInputPanel === 'reply' ? 'px-3 py-2' : 'flex flex-col px-3 pb-2') : 'px-4 py-4';
   const currentProfileMatchesVisibleModel = activeModelProfile
     ? visibleModelMatchesProfile(provider, activeModelProfile, visibleModel) !== false
     : false;
@@ -1069,11 +1027,11 @@ function LiveSessionInputBridge({
   const profileApplying = modelProfileRequest?.state === 'applying';
 
   return (
-    <div className="border-t border-slate-800 bg-slate-950/90">
-      {renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.', { showControlsToggle: true })}
-      {bridgeOpen && (
+    <div className={clsx('shrink-0 bg-slate-950/90', (!mobileCollapsible || mobileInputPanel) && 'border-t border-slate-800')} data-testid="input-panel">
+      {(!mobileCollapsible || mobileInputPanel === 'controls') && renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.')}
+      {bridgeOpen && (!mobileCollapsible || mobileInputPanel) && (
         <div className={bridgeBodyClassName}>
-          <div className="mb-3 flex items-center gap-2">
+          {!mobileCollapsible && <div className="mb-3 flex items-center gap-2">
             <button
               type="button"
               aria-label="Resize live input bridge"
@@ -1096,8 +1054,8 @@ function LiveSessionInputBridge({
             >
               Smaller
             </button>
-          </div>
-          {(
+          </div>}
+          {(!mobileCollapsible || mobileInputPanel === 'controls') && (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
               <div>
                 <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Session model</div>
@@ -1138,7 +1096,7 @@ function LiveSessionInputBridge({
               </div>
             </div>
           )}
-          {clipboardImages.items.length > 0 && (
+          {(!mobileCollapsible || mobileInputPanel === 'reply') && clipboardImages.items.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2" aria-label="Attached images">
               {clipboardImages.items.map(item => (
                 <div key={item.localId} className="relative rounded-lg border border-slate-700 bg-slate-900 p-2">
@@ -1157,13 +1115,16 @@ function LiveSessionInputBridge({
           )}
           {(clipboardImages.error || imageSubmitError) && <div role="alert" className="mb-2 text-xs text-red-300">{clipboardImages.error ?? imageSubmitError}</div>}
           {agentReferenceError && <div role="alert" className="mb-2 text-xs text-red-300">{agentReferenceError}</div>}
+          {(!mobileCollapsible || mobileInputPanel === 'reply') && <div className={mobileCollapsible ? 'flex items-end gap-2' : undefined}>
           <textarea
+            aria-label="Message"
+            placeholder={mobileCollapsible ? 'Message the agent…' : undefined}
             ref={captureRef}
             readOnly={bridgeBusy}
             autoComplete="off"
             autoCorrect="off"
             spellCheck={false}
-            enterKeyHint="send"
+            enterKeyHint={mobileCollapsible ? 'enter' : 'send'}
             onDragOver={(event) => {
               if (!event.dataTransfer.types.includes(CONVERSATION_DRAG_TYPE)) return;
               event.preventDefault();
@@ -1273,7 +1234,7 @@ function LiveSessionInputBridge({
               const specialKey = specialKeyMap[event.key];
               if (specialKey) {
                 if (!textBypassEnabled) {
-                  if (specialKey === 'Enter' && !event.shiftKey) {
+                  if (specialKey === 'Enter' && !event.shiftKey && !mobileCollapsible) {
                     event.preventDefault();
                     void handleSpecialKey('Enter');
                   }
@@ -1297,21 +1258,25 @@ function LiveSessionInputBridge({
               if (textBypassEnabled || nativeEvent.isComposing) {
                 return;
               }
-              if (nativeEvent.inputType === 'insertLineBreak') {
+              if (!mobileCollapsible && nativeEvent.inputType === 'insertLineBreak') {
                 event.preventDefault();
                 void handleSpecialKey('Enter');
               }
             }}
-            rows={3}
+            rows={mobileCollapsible ? 1 : 3}
             value={bridgeText}
-            style={{ height: `${bridgeHeight}px` }}
+            style={{ height: `${mobileCollapsible ? mobileInputHeight : bridgeHeight}px` }}
             className={clsx(
               'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
+              mobileCollapsible && 'min-w-0 flex-1 !rounded-xl !px-3 !py-2 !font-sans !text-base',
               agentDragOver && 'ring-2 ring-sky-400',
             )}
           />
-          {(!mobileControlsHidden || nativeSelectionActive) && (
-            <div className="mt-3 flex flex-wrap gap-2">
+          {mobileCollapsible && <button type="button" aria-label="Send message" disabled={bridgeBusy || (!bridgeText.trim() && clipboardImages.items.length === 0)} onPointerDown={event => event.preventDefault()} onClick={() => { void handleSpecialKey('Enter', 'button'); }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-500 text-slate-950 disabled:opacity-40"><Send className="h-5 w-5" /></button>}
+          {mobileCollapsible && <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-11 w-8 shrink-0 items-center justify-center text-slate-400"><ChevronDown className="h-5 w-5" /></button>}
+          </div>}
+          {(!mobileCollapsible || mobileInputPanel === 'controls') && (
+            <div className={clsx("mt-3 flex flex-wrap gap-2", mobileCollapsible && "order-first")}>
               {specialKeyButtons.map((button) => (
                 <button
                   key={button.label}
@@ -1320,7 +1285,7 @@ function LiveSessionInputBridge({
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => {
                     void handleSpecialKey(button.keys[0]!, 'button');
-                    captureRef.current?.focus({ preventScroll: true });
+                    if (!mobileCollapsible) captureRef.current?.focus({ preventScroll: true });
                   }}
                   className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
@@ -1386,8 +1351,11 @@ interface ConversationPaneProps {
   workMode: boolean;
   mobileChromeHidden: boolean;
   onToggleMobileChrome: () => void;
-  mobileControlsHidden: boolean;
-  onToggleMobileControls: () => void;
+  mobileInputPanel?: MobileInputPanel;
+  onCloseMobileInput?: () => void;
+  onOpenChats?: () => void;
+  onOpenMobileControls?: () => void;
+  mobileDetailsOpen?: boolean;
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
   onSuspend: (sessionId: string) => Promise<void>;
@@ -1507,8 +1475,11 @@ export function ConversationPane({
   workMode,
   mobileChromeHidden,
   onToggleMobileChrome,
-  mobileControlsHidden,
-  onToggleMobileControls,
+  mobileInputPanel = null,
+  onCloseMobileInput,
+  onOpenChats,
+  onOpenMobileControls,
+  mobileDetailsOpen = false,
   onBind,
   onRelease,
   onSuspend,
@@ -1531,15 +1502,15 @@ export function ConversationPane({
   historyPrependVersion,
   tailKey,
 }: ConversationPaneProps) {
-  const isMobile = useMediaQuery('(max-width: 767px)');
-  const [mobileBridgeOpen, setMobileBridgeOpen] = useState(true);
+  const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
+  const [desktopBridgeOpen, setDesktopBridgeOpen] = useState(true);
   const [localLiveDraft, setLocalLiveDraft] = useState<LocalLiveDraft>();
   const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
   const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const compactLiveLayout = workMode && liveMode;
-  const hideTopPanel = mobileChromeHidden;
+  const hideTopPanel = isMobile ? !mobileDetailsOpen : mobileChromeHidden;
   const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
   const [largeTranscriptWarningDismissed, setLargeTranscriptWarningDismissed] = useState(false);
   useEffect(() => {
@@ -1675,8 +1646,7 @@ export function ConversationPane({
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
     debugOpen ? 'debug:open' : 'debug:closed',
-    mobileBridgeOpen ? 'bridge:open' : 'bridge:closed',
-    mobileControlsHidden ? 'controls:hidden' : 'controls:shown',
+    isMobile ? `input:${mobileInputPanel}` : `bridge:${desktopBridgeOpen}`,
     `surface:${activeSurface}`,
     compactLiveLayout ? 'layout:compact' : 'layout:regular',
     isMobile ? 'viewport:mobile' : 'viewport:desktop',
@@ -1710,7 +1680,8 @@ export function ConversationPane({
     () => groupTranscriptTurns(visibleHistoryMessages),
     [visibleHistoryMessages],
   );
-  const liveScreenPanel = liveScreen && shouldShowLiveScreenContent(liveScreen, boundSession?.isWorking) ? (
+  const mobileNeedsSelection = liveScreen?.inputActive === false && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`);
+  const liveScreenPanel = liveScreen && (!isMobile || mobileNeedsSelection || mobileInputPanel === 'controls' || !hasSavedHistory) && shouldShowLiveScreenContent(liveScreen, boundSession?.isWorking) ? (
     <div
       data-testid="live-screen-panel"
       className="mt-4 rounded-md border border-slate-800 bg-slate-950 p-3 shadow-inner"
@@ -1734,12 +1705,19 @@ export function ConversationPane({
         </div>
       );
     }
+    if (isMobile) {
+      return <div className="flex h-full items-center justify-center p-6 text-center text-slate-400"><div>
+        <div className="mb-2 text-lg text-slate-100">Your conversations</div>
+        <p className="mb-4 text-sm">Choose an active chat or start a new one.</p>
+        <button type="button" onClick={onOpenChats} className="min-h-11 rounded-xl border border-sky-400/30 px-4 text-sky-200">Open chats</button>
+      </div></div>;
+    }
     if (workMode) {
       return (
         <div className="flex h-full items-center justify-center px-6 text-center">
           <div className="max-w-md">
             <div className="text-lg font-medium text-slate-100">Work mode</div>
-            <div className="mt-2 text-sm text-slate-400">Select a bound session from the left pane or start a new Codex or Claude session there.</div>
+            <div className="mt-2 text-sm text-slate-400">{isMobile ? 'Open Chats to choose a conversation or start a new one.' : 'Select a bound session from the left pane or start a new Codex or Claude session there.'}</div>
           </div>
         </div>
       );
@@ -1747,7 +1725,7 @@ export function ConversationPane({
     return <ExplorerPane projects={projects} project={project} selectedProvider={selectedProvider} />;
   }
 
-  if (workMode && !boundSession) {
+  if (!isMobile && workMode && !boundSession) {
     return (
       <>
         <div className="flex h-full items-center justify-center px-6 text-center">
@@ -1781,7 +1759,7 @@ export function ConversationPane({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {boundSession?.queuedInputs?.length ? <QueuedInputNotice sessionId={boundSession.id} inputs={boundSession.queuedInputs} csrfToken={csrfToken} /> : null}
+      {boundSession?.queuedInputs?.length ? <QueuedInputNotice sessionId={boundSession.id} inputs={boundSession.queuedInputs} csrfToken={csrfToken} compact={isMobile} /> : null}
       {boundSession?.runFailure && !sessionSuspended && <RunFailureNotice failure={boundSession.runFailure}
         onStop={() => { void onSendKeystrokes(boundSession.id, { keys: ['Escape'] }); }} />}
       {sessionSuspended && (
@@ -1959,7 +1937,8 @@ export function ConversationPane({
 
       <div
         ref={scrollRef}
-        className="scrollbar-thin flex-1 min-h-0 overflow-y-auto px-4 py-5"
+        data-testid="conversation-scroll"
+        className="scrollbar-thin flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-5"
       >
         {renderedShowMessages || renderedHasOlderMessages || renderedLoadingOlderMessages ? (
           <div className="w-full pb-5">
@@ -1990,6 +1969,9 @@ export function ConversationPane({
         )}
       </div>
 
+      {isMobile && liveScreen?.inputActive === false && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`) && mobileInputPanel !== 'controls' && (
+        <button type="button" onClick={onOpenMobileControls} className="shrink-0 border-t border-amber-400/20 bg-amber-500/10 px-3 py-2 text-left text-sm text-amber-200">Needs your input · Open controls</button>
+      )}
       {sessionSuspended ? (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
           Resume this session to use the live input bridge.
@@ -2012,10 +1994,10 @@ export function ConversationPane({
           onDiscardLocalSubmittedText={onDiscardLocalSubmittedText}
           compact={compactLiveLayout}
           mobileCollapsible={isMobile}
-          bridgeOpen={mobileBridgeOpen}
-          onToggleBridge={() => setMobileBridgeOpen((current) => !current)}
-          mobileControlsHidden={mobileControlsHidden}
-          onToggleMobileControls={onToggleMobileControls}
+          bridgeOpen={isMobile || desktopBridgeOpen}
+          onToggleBridge={() => setDesktopBridgeOpen((current) => !current)}
+          mobileInputPanel={mobileInputPanel}
+          onCloseMobileInput={onCloseMobileInput}
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
@@ -2038,7 +2020,7 @@ export function ConversationPane({
               <PlugZap className="h-4 w-4" />
               {isExternalClaude ? 'Move to Agent Console' : 'Bind / resume'}
             </button>
-            {mobileChromeHidden && (
+            {!isMobile && mobileChromeHidden && (
               <button
                 type="button"
                 onClick={onToggleMobileChrome}
@@ -2052,7 +2034,7 @@ export function ConversationPane({
         </div>
       )}
 
-      {liveMode && liveScreen && !mobileControlsHidden && (
+      {liveMode && liveScreen && (!isMobile || mobileInputPanel === 'controls') && (
         <LiveSessionStatus
           status={liveScreen.status}
           statusAnsi={liveScreen.statusAnsi}

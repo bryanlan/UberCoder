@@ -17,6 +17,12 @@ it does not query the live Console database.
   and cached-index backfill coverage.
 
 ## Targeted Test Patterns
+- Mobile layout: `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane sidebar-projects Sidebar`;
+  browser checks: `NODE_ENV=test npm run test:e2e -- apps/web/e2e/mobile-conversation.spec.ts apps/web/e2e/input-rejection.spec.ts apps/web/e2e/sidebar.spec.ts`.
+  Use free E2E ports. These fixtures mock provider input and simulate a visualViewport-only
+  keyboard resize/pan without changing the layout viewport. They verify reading space,
+  scroll position, per-chat drafts, key-only controls, filtering and accepted/queued/rejected
+  sends. They do not establish physical iOS or Android keyboard behavior.
 - Authentication/CSRF recovery: `npm run build -w @agent-console/shared`, then
   `NODE_ENV=test npm run test -w @agent-console/server -- auth` and
   `NODE_ENV=test npm run test -w @agent-console/web -- api`. Browser coverage:

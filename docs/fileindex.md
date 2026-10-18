@@ -125,8 +125,12 @@
   from genuine activity ordering.
 - `apps/web/src/features/navigation/useSidebarWidth.ts` - browser-local desktop sidebar sizing,
   pointer and keyboard resizing, viewport bounds, and saved width restoration.
+- `apps/web/src/features/navigation/useMobileViewport.ts` and `apps/web/src/lib/useMediaQuery.ts` -
+  shared mobile layout selection and visual viewport height/panning while the keyboard is open.
+- `apps/web/e2e/mobile-conversation.spec.ts` - mobile reading, chat switching, per-chat drafts,
+  separate key controls and keyboard viewport/scroll checks with mocked provider input.
 - `apps/web/e2e/sidebar.spec.ts` - browser coverage for sidebar resizing, width persistence,
-  mobile drawer bounds, and the empty conversation rename field.
+  full-screen mobile navigation, and the empty conversation rename field.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation

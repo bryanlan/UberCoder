@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, ChevronDown, LogOut, Menu, PanelLeftClose, PanelRightOpen, Settings, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, LogOut, Menu, MessageSquare, MoreHorizontal, PanelLeftClose, PanelRightOpen, Settings, SlidersHorizontal, X } from 'lucide-react';
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   BoundSession,
@@ -46,6 +46,10 @@ import { LoginPage } from './pages/LoginPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { WikiPage } from './pages/WikiPage';
 import { GrantsPage } from './pages/GrantsPage';
+import { MOBILE_LAYOUT_QUERY, useMediaQuery } from './lib/useMediaQuery';
+import { useMobileViewport } from './features/navigation/useMobileViewport';
+import { isBoundSessionSuspended } from '@agent-console/shared';
+import type { MobileInputPanel } from './components/ConversationPane';
 
 function useLocalStorageBoolean(key: string, fallback: boolean) {
   const [value, setValue] = useState<boolean>(() => {
@@ -89,7 +93,15 @@ function NotFoundPane() {
 }
 
 function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection }) {
-  const [workersOpen, setWorkersOpen] = useLocalStorageBoolean('agent-console:workers-open', false);
+  const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
+  const mobileViewport = useMobileViewport(isMobile);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [mobileInputPanel, setMobileInputPanel] = useState<MobileInputPanel>(null);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
+  const [workersOpen, setWorkersOpen] = useLocalStorageBoolean(
+    isMobile ? 'agent-console:mobile-workers-open' : 'agent-console:workers-open', false,
+  );
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -99,7 +111,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
   const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden:v2', true);
-  const [mobileControlsHidden, setMobileControlsHidden] = useState(false);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
@@ -151,7 +162,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     selectedProjectSlug,
     selectedProvider,
     selectedConversationRef,
-    debugOpen,
+    debugOpen: debugOpen && (!isMobile || mobileDetailsOpen),
     realtimeDegraded,
   });
 
@@ -171,19 +182,36 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   }, [location.pathname, routeSelection.isConsoleRoute, setLastConsolePath]);
 
   useEffect(() => {
-    if (routeSelection.inSettings || !timeline?.boundSession) {
-      setMobileControlsHidden(false);
-    }
-  }, [routeSelection.inSettings, timeline?.boundSession]);
+    setMobileInputPanel(null);
+    setMobileMoreOpen(false);
+    setMobileDetailsOpen(false);
+    setMobileNavOpen(isMobile && routeSelection.kind === 'home');
+  }, [location.pathname, isMobile]);
 
-  useEffect(() => {
-    setMobileControlsHidden(false);
-  }, [selectedConversationRef, selectedProjectSlug, selectedProvider]);
+  function dismissMobileInput(): void {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setMobileInputPanel(null);
+  }
+
+  function openMobileChats(): void {
+    dismissMobileInput();
+    setMobileMoreOpen(false);
+    setMobileDetailsOpen(false);
+    setWorkersOpen(false);
+    setMobileNavOpen(true);
+  }
+
+  function toggleMobileInput(panel: Exclude<MobileInputPanel, null>): void {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setMobileMoreOpen(false);
+    setMobileDetailsOpen(false);
+    setWorkersOpen(false);
+    setMobileInputPanel(current => current === panel ? null : panel);
+  }
 
   function closeSidebarIfMobile(): void {
-    if (globalThis.matchMedia?.('(max-width: 1023px)').matches) {
-      setNavOpen(false);
-    }
+    if (isMobile) setMobileNavOpen(false);
+    else if (globalThis.matchMedia?.('(max-width: 1023px)').matches) setNavOpen(false);
   }
 
   const scheduleTimelineMessageRefresh = useCallback((projectSlug: string, provider: ProviderId, conversationRef: string): void => {
@@ -892,10 +920,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   }
 
   return (
-    <div className="fixed inset-0 flex h-[100dvh] overflow-hidden bg-slate-950">
+    <div onKeyDown={event => { if (event.key === 'Escape' && mobileMoreOpen) { event.stopPropagation(); setMobileMoreOpen(false); } }} data-testid="console-shell" className="fixed inset-0 flex h-[100dvh] overflow-hidden bg-slate-950" style={isMobile ? { height: `${mobileViewport.height}px`, top: `${mobileViewport.top}px`, bottom: 'auto' } : undefined}>
       <Sidebar
         tree={treeQuery.data}
-        open={navOpen}
+        open={isMobile ? mobileNavOpen : navOpen}
         onClose={closeSidebarIfMobile}
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
@@ -917,8 +945,27 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         onRefresh={handleRefresh}
         refreshing={refreshMutation.isPending}
       />
-      <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-        {mobileChromeHidden && (
+      <div inert={isMobile && mobileNavOpen} className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+        {isMobile && <header className="relative z-20 flex h-12 shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-950 px-3" data-testid="mobile-header">
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-xs text-slate-400">{project?.displayName ?? 'Agent Console'}</div>
+            <div className="truncate text-sm font-medium">{timeline?.conversation.title ?? (routeSelection.inSettings ? 'Settings' : 'Conversations')}</div>
+          </div>
+          {timeline?.boundSession && <span className="shrink-0 text-xs text-slate-400">{isBoundSessionSuspended(timeline.boundSession) ? 'Suspended' : timeline.boundSession.runFailure ? 'Needs attention' : timeline.boundSession.isWorking ? 'Working' : 'Ready'}</span>}
+          <button type="button" aria-label="More options" aria-expanded={mobileMoreOpen} onClick={() => { dismissMobileInput(); setMobileMoreOpen(value => !value); }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-300"><MoreHorizontal className="h-5 w-5" /></button>
+          {mobileMoreOpen && <>
+            <button type="button" aria-label="Close more options" onClick={() => setMobileMoreOpen(false)} className="fixed inset-0 z-20 cursor-default" />
+            <div className="absolute right-3 top-full z-30 mt-1 max-h-[60dvh] w-60 overflow-y-auto rounded-xl border border-slate-700 bg-slate-950 p-2 shadow-panel" aria-label="More options">
+              <button type="button" onClick={() => { setMobileDetailsOpen(value => !value); setMobileMoreOpen(false); }} className="mobile-menu-item">{mobileDetailsOpen ? 'Hide session details' : 'Session details'}</button>
+              <button type="button" onClick={() => { setWorkersOpen(true); setMobileMoreOpen(false); }} className="mobile-menu-item">Workers</button>
+              {project && <Link to={`/projects/${encodeURIComponent(project.slug)}/wiki`} className="mobile-menu-item">Project wiki</Link>}
+              <Link to="/grants" className="mobile-menu-item">Grants</Link>
+              <Link to={routeSelection.inSettings ? lastConsolePath : '/settings'} className="mobile-menu-item">{routeSelection.inSettings ? 'Back to console' : 'Settings'}</Link>
+              <button type="button" onClick={() => logoutMutation.mutate()} className="mobile-menu-item">Sign out</button>
+            </div>
+          </>}
+        </header>}
+        {!isMobile && mobileChromeHidden && (
           <div className="pointer-events-none absolute right-4 top-4 z-30 flex gap-2">
             {!workersOpen && <button type="button" aria-label="Open worker panel" onClick={() => setWorkersOpen(true)}
               className="pointer-events-auto inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-950/90 px-3 py-2 text-sm text-slate-200 shadow-panel">
@@ -934,7 +981,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
             </button>
           </div>
         )}
-        <header className={`sticky top-0 z-20 shrink-0 border-b border-slate-800 bg-slate-950/90 backdrop-blur ${mobileChromeHidden ? 'hidden' : ''}`}>
+        {!isMobile && <header className={`sticky top-0 z-20 shrink-0 border-b border-slate-800 bg-slate-950/90 backdrop-blur ${mobileChromeHidden ? 'hidden' : ''}`}>
           {!workersOpen && <button type="button" aria-label="Open worker panel" onClick={() => setWorkersOpen(true)}
             className="float-right m-3 inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200">
             <PanelRightOpen size={16} /> Workers
@@ -1011,22 +1058,22 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               </button>
             </div>
           </div>
-        </header>
+        </header>}
 
         {eventError && (
-          <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6">
-            <AlertTriangle className="h-4 w-4" />
-            {eventError}
+          <div title={eventError} role="status" className={isMobile ? 'flex shrink-0 items-center gap-2 border-b border-amber-400/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-200' : 'mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6'}>
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {isMobile ? 'Live updates interrupted' : eventError}
           </div>
         )}
         {actionError && (
-          <div className="mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 lg:mx-6">
-            <AlertTriangle className="h-4 w-4" />
+          <div role="alert" className={isMobile ? 'flex max-h-20 shrink-0 items-center gap-2 overflow-y-auto border-b border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200' : 'mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200 lg:mx-6'}>
+            <AlertTriangle className="h-4 w-4 shrink-0" />
             {actionError}
           </div>
         )}
 
-        {project && !routeSelection.inSettings && routeSelection.kind !== 'wiki' && <CoordinationPanel checkout={project.path} />}
+        {(!isMobile || mobileDetailsOpen) && project && !routeSelection.inSettings && routeSelection.kind !== 'wiki' && <CoordinationPanel checkout={project.path} />}
         <main className="min-h-0 flex-1 overflow-hidden">
           {routeSelection.inSettings ? (
             <SettingsPage
@@ -1052,11 +1099,14 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               resuming={resuming}
               onRetryResume={retryResume}
               loading={timelineLoading}
-              workMode={workMode}
+              workMode={isMobile ? false : workMode}
+              onOpenChats={openMobileChats}
+              mobileInputPanel={mobileInputPanel}
+              onCloseMobileInput={dismissMobileInput}
+              onOpenMobileControls={() => toggleMobileInput('controls')}
+              mobileDetailsOpen={mobileDetailsOpen}
               mobileChromeHidden={mobileChromeHidden}
               onToggleMobileChrome={() => setMobileChromeHidden((current) => !current)}
-              mobileControlsHidden={mobileControlsHidden}
-              onToggleMobileControls={() => setMobileControlsHidden((current) => !current)}
               onBind={handleBindExisting}
               onRelease={handleRelease}
               onSuspend={handleSuspend}
@@ -1068,7 +1118,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
               suspending={suspendMutation.isPending}
-              debugOpen={debugOpen}
+              debugOpen={debugOpen && (!isMobile || mobileDetailsOpen)}
               onToggleDebug={() => setDebugOpen((current) => !current)}
               rawOutput={rawOutput}
               rawLoading={rawLoading}
@@ -1081,6 +1131,11 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
             />
           )}
         </main>
+        {isMobile && <nav aria-label="Conversation actions" className="flex shrink-0 border-t border-slate-800 bg-slate-950 px-2 pb-[env(safe-area-inset-bottom)]" data-testid="mobile-actions">
+          <button type="button" onClick={openMobileChats} className="mobile-action"><Menu className="h-5 w-5" />Chats</button>
+          <button type="button" disabled={!timeline?.boundSession || isBoundSessionSuspended(timeline.boundSession)} aria-expanded={mobileInputPanel === 'reply'} onClick={() => toggleMobileInput('reply')} className="mobile-action"><MessageSquare className="h-5 w-5" />Reply</button>
+          <button type="button" disabled={!timeline?.boundSession || isBoundSessionSuspended(timeline.boundSession)} aria-expanded={mobileInputPanel === 'controls'} onClick={() => toggleMobileInput('controls')} className="mobile-action"><SlidersHorizontal className="h-5 w-5" />Controls</button>
+        </nav>}
       </div>
       {workersOpen && <WorkerPanel onClose={() => setWorkersOpen(false)} />}
     </div>

@@ -9,6 +9,7 @@ import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 import { getConversationStatusClass } from '../features/navigation/work-status';
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
+import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { TitleTooltip } from './TitleTooltip';
 import { startConversationDrag } from '../features/conversation/agent-reference';
 
@@ -203,6 +204,7 @@ function ConversationLink({
   provider,
   conversationRef,
   title,
+  excerpt,
   prefixLabel,
   isBound,
   canRebind,
@@ -228,6 +230,7 @@ function ConversationLink({
   provider: ProviderId;
   conversationRef: string;
   title: string;
+  excerpt?: string;
   prefixLabel?: string;
   isBound: boolean;
   canRebind: boolean;
@@ -351,8 +354,11 @@ function ConversationLink({
         {prefixLabel ? (
           <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">{prefixLabel}</span>
         ) : null}
-        <TitleTooltip text={title} className="line-clamp-1 min-w-0" />
-        {launchContext && <span className="shrink-0 text-[10px] text-sky-300" title={`Launched by ${launchContext.launcherName} under Bryan's standing grants`}>Launched by {launchContext.launcherName.slice(0, 24)}</span>}
+        <div className="min-w-0 flex-1">
+          <TitleTooltip text={title} className="line-clamp-1 min-w-0" />
+          <div className="mobile-chat-preview mt-0.5 hidden truncate text-xs text-slate-500">{excerpt || (suspended ? 'Select to resume' : !isBound ? 'History' : runFailure ? 'Check session status' : isWorking ? 'Working' : 'Ready')}</div>
+        </div>
+        {launchContext && <span className="hidden shrink-0 text-[10px] text-sky-300 md:inline" title={`Launched by ${launchContext.launcherName} under Bryan's standing grants`}>Launched by {launchContext.launcherName.slice(0, 24)}</span>}
         {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
@@ -423,6 +429,7 @@ function fallbackProjectDisplayName(project: Pick<ProjectSummary, 'path' | 'dire
 function ProjectSection({
   project,
   workMode,
+  mobile = false,
   creatingConversationKey,
   creatingAnyConversation,
   onNewConversation,
@@ -445,6 +452,7 @@ function ProjectSection({
 }: {
   project: SidebarProject;
   workMode: boolean;
+  mobile?: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
@@ -516,11 +524,11 @@ function ProjectSection({
       .filter((conversation) => conversation.provider === provider)
       .slice(0, 2));
 
-  const displayedConversations = workMode || showAllConversations
+  const displayedConversations = workMode || mobile || showAllConversations
     ? project.combinedConversations
     : collapsedConversations;
 
-  const hasHiddenConversations = !workMode && project.combinedConversations.length > collapsedConversations.length;
+  const hasHiddenConversations = !workMode && !mobile && project.combinedConversations.length > collapsedConversations.length;
 
   return (
     <section
@@ -580,6 +588,11 @@ function ProjectSection({
               </div>
             </div>
           </div>
+        ) : mobile ? (
+          <h2 className="flex min-h-11 min-w-0 flex-1 items-center gap-3 px-2 text-sm font-medium">
+            <FolderTree className="h-4 w-4 shrink-0 text-sky-300" />
+            <TitleTooltip text={project.displayName} className="min-w-0 truncate" />
+          </h2>
         ) : (
           <Link
             to={`/projects/${encodeURIComponent(project.slug)}`}
@@ -703,6 +716,7 @@ function ProjectSection({
                 provider={provider}
                 conversationRef={conversation.ref}
                 title={conversation.title}
+                excerpt={conversation.excerpt}
                 prefixLabel={`${provider.toUpperCase()}:`}
                 isBound={conversation.isBound}
                 canRebind={conversation.kind === 'history' && provider !== 'claude'}
@@ -771,7 +785,14 @@ export function Sidebar({
   onRefresh,
   refreshing,
 }: SidebarProps) {
+  const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
+  const [mobileShowAll, setMobileShowAll] = useState(false);
+  const [newChatMode, setNewChatMode] = useState(false);
+  useEffect(() => {
+    if (!open) setNewChatMode(false);
+  }, [open]);
   const { width, resizing, separatorProps } = useSidebarWidth(open);
+  const effectiveWorkMode = isMobile ? !mobileShowAll : workMode;
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
@@ -814,10 +835,11 @@ export function Sidebar({
 
   const visibleProjects = useMemo(() => deriveSidebarProjects({
     tree,
-    workMode,
+    workMode: effectiveWorkMode,
     recentActivitySortEnabled,
     manualProjectOrder,
-  }), [manualProjectOrder, recentActivitySortEnabled, tree, workMode]);
+    mobileActiveOnly: isMobile && !mobileShowAll,
+  }), [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -831,19 +853,19 @@ export function Sidebar({
   }
   return (
     <>
-      <div className={clsx('fixed inset-0 z-20 bg-slate-950/70 lg:hidden', open ? 'block' : 'hidden')} onClick={onClose} />
-      <aside style={{ '--sidebar-width': `${width}px` } as CSSProperties} className={clsx(
-        'fixed inset-y-0 left-0 z-30 max-w-[88vw] shrink-0 overflow-hidden backdrop-blur lg:relative lg:inset-y-auto lg:left-auto lg:z-0 lg:max-w-none',
+      {!isMobile && <div className={clsx('fixed inset-0 z-20 bg-slate-950/70 lg:hidden', open ? 'block' : 'hidden')} onClick={onClose} />}
+      <aside aria-label="Chats" aria-hidden={!open} inert={!open} style={{ '--sidebar-width': `${width}px` } as CSSProperties} className={clsx(
+        isMobile ? 'absolute inset-0 z-40 w-full' : 'fixed inset-y-0 left-0 z-30 max-w-[88vw] shrink-0 overflow-hidden backdrop-blur lg:relative lg:inset-y-auto lg:left-auto lg:z-0 lg:max-w-none',
         resizing ? 'transition-none' : 'transition-[transform,width,border-color]',
-        open
+        isMobile ? (open ? 'translate-x-0' : '-translate-x-full') : open
           ? 'w-[22rem] translate-x-0 border-r border-slate-800 lg:w-[var(--sidebar-width)]'
           : 'w-[22rem] -translate-x-full border-r border-slate-800 lg:w-0 lg:translate-x-0 lg:border-r-0',
       )}>
-        <div className="flex h-full w-[22rem] max-w-[88vw] flex-col bg-slate-950/95 lg:w-[var(--sidebar-width)] lg:max-w-none">
+        <div className={clsx("flex h-full min-h-0 flex-col", isMobile ? "w-full bg-slate-950" : "w-[22rem] max-w-[88vw] bg-slate-950/95 lg:w-[var(--sidebar-width)] lg:max-w-none")}>
           <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4">
             <div>
-              <div className="text-lg font-semibold">Agent Console</div>
-              <div className="text-xs text-slate-400">project → provider → conversation</div>
+              <div className="text-lg font-semibold">{isMobile ? newChatMode ? "New chat" : "Chats" : "Agent Console"}</div>
+              <div className="text-xs text-slate-400">{isMobile ? newChatMode ? "Choose a project and agent" : mobileShowAll ? "All projects and conversations" : "Active conversations by project" : "project → provider → conversation"}</div>
             </div>
             <button
               type="button"
@@ -854,8 +876,13 @@ export function Sidebar({
               <RefreshCcw className={clsx('h-4 w-4', refreshing && 'animate-spin')} />
             </button>
           </div>
+          {isMobile && <div className="flex gap-2 border-b border-slate-800 px-4 py-2">
+            <button type="button" aria-pressed={mobileShowAll} onClick={() => { setMobileShowAll(value => !value); setNewChatMode(false); }} className="min-h-11 rounded-xl border border-slate-700 px-3 text-sm">{mobileShowAll ? 'Active only' : 'Show all'}</button>
+            <button type="button" onClick={() => { setNewChatMode(value => !value); setSearchQuery(''); setSubmittedSearchQuery(''); }} className="min-h-11 rounded-xl border border-sky-400/30 px-3 text-sm text-sky-200">{newChatMode ? 'Back to chats' : 'New chat'}</button>
+            <button type="button" aria-label="Close chats" onClick={onClose} className="ml-auto min-h-11 min-w-11 rounded-xl border border-slate-700 p-2"><X className="mx-auto h-5 w-5" /></button>
+          </div>}
           <div className="flex flex-wrap gap-2 border-b border-slate-800 px-4 py-3">
-            <button
+            {!isMobile && <button
               type="button"
               onClick={onToggleWorkMode}
               className={clsx(
@@ -866,8 +893,8 @@ export function Sidebar({
               )}
             >
               Work mode
-            </button>
-            <button
+            </button>}
+            {!isMobile && <button
               type="button"
               onClick={() => void onToggleRecentActivity()}
               disabled={updatingUiPreferences}
@@ -879,7 +906,7 @@ export function Sidebar({
               )}
             >
               Recent activity
-            </button>
+            </button>}
             <div className="relative min-w-[13rem] flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
               <input
@@ -912,8 +939,15 @@ export function Sidebar({
               ) : null}
             </div>
           </div>
-          <div className="scrollbar-thin flex-1 overflow-y-auto p-3">
-            {showingSubmittedSearchResults ? (
+          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
+            {isMobile && newChatMode ? (tree?.projects ?? []).map(project => (
+              <section key={project.slug} className="mb-3 rounded-xl border border-slate-800 p-3">
+                <div className="mb-2 font-medium">{project.displayName}</div>
+                <div className="flex gap-2">{(['codex', 'claude'] as const).map(provider => (
+                  <button key={provider} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{providerMeta(provider).label}</button>
+                ))}</div>
+              </section>
+            )) : showingSubmittedSearchResults ? (
               <SearchResultsPanel
                 query={trimmedSubmittedSearchQuery}
                 results={searchResults}
@@ -925,14 +959,15 @@ export function Sidebar({
               <ProjectSection
                 key={project.slug}
                 project={project}
-                workMode={workMode}
+                workMode={effectiveWorkMode}
+                mobile={isMobile}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
                 onNewConversation={onNewConversation}
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}
                 onClose={onClose}
-                manualOrderingEnabled={!recentActivitySortEnabled}
+                manualOrderingEnabled={!isMobile && !recentActivitySortEnabled}
                 isDragTarget={dragOverProjectSlug === project.slug}
                 onDragStartProject={setDraggingProjectSlug}
                 onDragOverProject={(event, projectSlug) => {
@@ -957,7 +992,7 @@ export function Sidebar({
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
-                No active projects are visible yet. Check your config JSON and refresh.
+                {isMobile && !mobileShowAll ? 'No active chats. Start a new chat or choose Show all.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
               </div>
             )}
           </div>

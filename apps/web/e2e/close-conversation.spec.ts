@@ -148,7 +148,11 @@ for (const failure of ['kill', 'liveness'] as const) {
       expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
       expect(db.boundSessions.listTreeVisible().map(item => item.id)).toContain(session.id);
       expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
-      expect(events.filter(event => event.type === 'session.updated').map(event => event.session.status)).toEqual(['releasing', 'bound']);
+      const statuses = events.filter(event => event.type === 'session.updated').map(event => event.session.status);
+      const releaseStartedAt = statuses.indexOf('releasing');
+      // Queue cancellation can publish the still-bound session before release starts.
+      expect(statuses.slice(0, releaseStartedAt).every(status => status === 'bound')).toBe(true);
+      expect(statuses.slice(releaseStartedAt)).toEqual(['releasing', 'bound']);
     } finally {
       unsubscribe();
       await manager.stop();

@@ -20,6 +20,34 @@ First-class runtime surfaces:
 - React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
 - npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`, `npm run verify:live-console`.
 
+## Mobile conversation layout
+
+On narrow screens, including touch screens below 1024 CSS pixels in landscape,
+the app opens conversations in reading mode with a compact
+project/chat header and persistent Chats, Reply and Controls actions. Chats fills
+the screen and groups active conversations by project. Its default filter hides
+history, manual/pressure/idle suspensions and projects with no remaining chats.
+Show all and search provide access to hidden history; New chat includes every
+configured project. These are display filters and do not change session state.
+Desktop navigation retains its existing Work/Browse filtering and sizing.
+
+Reply and Controls share one optional panel. Reply starts at one line, grows to
+at most 112 pixels or 22% of the visible viewport with a 44-pixel minimum, and
+scrolls internally for longer drafts. A separate Send button submits; the phone Return key inserts a
+newline in ordinary draft mode. An accepted or queued reply closes the composer;
+rejection retains it. Closing input and switching chats preserve per-chat drafts.
+Controls exposes terminal keys and model settings without focusing a text field;
+key-only actions keep a separate unsent chat draft local. Interactive provider
+choices retain their parsed screen and offer a direct Open controls action.
+
+The mobile shell follows visualViewport height and offsetTop on resize and scroll
+so the keyboard and browser panning cannot cover the footer. The transcript keeps
+its own flexible scroll area. Its existing scroll controller follows new output
+only at the bottom, preserves a reader's position above the bottom, and loads
+earlier history through the server-owned pagination path. Routine terminal
+details stay out of the mobile transcript when saved conversation text exists.
+Session details, workers and other occasional tools are available under More.
+
 ## Search index updates
 
 Search updates use `conversation_search_rows`, an ordinary indexed ownership table mapping

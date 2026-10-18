@@ -35,7 +35,7 @@ class MockEventSource extends EventTarget {
 globalThis.EventSource = MockEventSource as unknown as typeof EventSource;
 
 if (!globalThis.matchMedia) {
-  globalThis.matchMedia = vi.fn().mockImplementation((query: string) => ({
+  globalThis.matchMedia = (query: string) => ({
     matches: false,
     media: query,
     onchange: null,
@@ -44,5 +44,5 @@ if (!globalThis.matchMedia) {
     addListener: vi.fn(),
     removeListener: vi.fn(),
     dispatchEvent: vi.fn(),
-  }));
+  });
 }

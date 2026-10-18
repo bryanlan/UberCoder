@@ -37,11 +37,13 @@ export function deriveSidebarProjects({
   workMode,
   recentActivitySortEnabled,
   manualProjectOrder,
+  mobileActiveOnly = false,
 }: {
   tree?: TreeResponse;
   workMode: boolean;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
+  mobileActiveOnly?: boolean;
 }): SidebarProject[] {
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
   const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
@@ -71,7 +73,10 @@ export function deriveSidebarProjects({
             launchContext: session?.launchContext,
           };
         }))
-        .filter(({ conversation }) => !workMode || conversation.isBound);
+        .filter(({ conversation, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt }) => (
+          (!workMode || conversation.isBound)
+          && (!mobileActiveOnly || (conversation.isBound && !manualSuspendedAt && !pressureSuspendedAt && !idleSuspendedAt))
+        ));
       const latestActivityAt = combinedConversations.reduce(
         (latest, conversation) => conversation.activityTimestamp > latest ? conversation.activityTimestamp : latest,
         '',
@@ -83,6 +88,7 @@ export function deriveSidebarProjects({
         latestActivityAt,
       };
     })
+    .filter((project) => !mobileActiveOnly || project.combinedConversations.length > 0)
     .sort((a, b) => {
       if (workMode) {
         const aHasActiveConversation = a.combinedConversations.length > 0;

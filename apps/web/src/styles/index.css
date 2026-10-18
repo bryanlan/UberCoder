@@ -29,3 +29,46 @@ body {
   background: rgba(148, 163, 184, 0.35);
   border-radius: 999px;
 }
+
+.mobile-action {
+  @apply flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl px-2 text-xs text-slate-400 disabled:opacity-40;
+}
+
+.mobile-action[aria-expanded='true'] {
+  @apply bg-sky-500/10 text-sky-200;
+}
+
+.mobile-menu-item {
+  @apply flex min-h-11 w-full items-center rounded-lg px-3 text-left text-sm text-slate-200 hover:bg-slate-800;
+}
+
+@media (max-width: 767px), (max-width: 1023px) and (pointer: coarse) {
+  .mobile-chat-preview {
+    display: block;
+  }
+
+  [data-testid='input-panel'] {
+    max-height: 42%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  [data-testid='input-panel'] button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  aside[aria-label='Chats'] button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  aside[aria-label='Chats'] a,
+  aside[aria-label='Chats'] input {
+    min-height: 44px;
+  }
+
+  aside[aria-label='Chats'] input {
+    font-size: 16px;
+  }
+}

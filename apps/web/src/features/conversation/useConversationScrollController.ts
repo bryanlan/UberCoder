@@ -274,7 +274,6 @@ export function useConversationScrollController({
 
     const scroller = scrollNode;
     if (!scroller) {
-      previousConversationKeyRef.current = conversationKey;
       return;
     }
     if (isSelectingInScroller(scroller)) {

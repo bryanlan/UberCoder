@@ -3,7 +3,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
-import { ConversationPane } from './ConversationPane';
+import { ConversationPane, type MobileInputPanel } from './ConversationPane';
 import { api } from '../lib/api';
 import { CONVERSATION_DRAG_TYPE } from '../features/conversation/agent-reference';
 
@@ -177,10 +177,11 @@ function timeline(input: {
 }
 
 function renderPane(input: {
+  mobileInputPanel?: MobileInputPanel;
+  onCloseMobileInput?: () => void;
   inputText?: string;
   inputActive?: boolean;
   messages?: NormalizedMessage[];
-  mobileControlsHidden?: boolean;
   screenContent?: string;
   screenContentAnsi?: string;
   screenStatus?: string;
@@ -219,10 +220,10 @@ function renderPane(input: {
         onRetryResume={vi.fn()}
         loading={false}
         workMode={false}
+        mobileInputPanel={input.mobileInputPanel}
+        onCloseMobileInput={input.onCloseMobileInput}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={input.mobileControlsHidden ?? false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={input.onSuspend ?? vi.fn()}
@@ -308,8 +309,6 @@ it('submits a busy-session profile immediately and does not carry its server que
         workMode={false}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
@@ -367,8 +366,6 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         workMode={false}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
@@ -534,8 +531,7 @@ describe('ConversationPane live input bridge', () => {
 
   it.each(['claude', 'codex'] as const)('%s menu buttons send only keys and retain the separate draft', async (provider) => {
     const send = vi.fn().mockResolvedValue({ session: boundSession() });
-    const view = renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send,
-      inputActive: false, mobileControlsHidden: true,
+    const view = renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send, inputActive: false,
       screenContent: 'Select model\n❯ 2. Opus 5.5\nEnter to confirm · Esc to cancel' });
     const textbox = screen.getByRole('textbox');
     fireEvent.change(textbox, { target: { value: 'Switching models before reviewing the plan' } });
@@ -718,19 +714,25 @@ describe('ConversationPane live input bridge', () => {
     } finally { localStorage.removeItem('agent-console:live-bridge-height'); }
   });
 
-  it('caps mobile input against the visible viewport and shrinks when the keyboard opens', () => {
+  it('opens mobile input compactly, caps long drafts above the keyboard, and preserves desktop sizing', () => {
     localStorage.setItem('agent-console:live-bridge-height', '600');
     const viewport = Object.assign(new EventTarget(), { height: 600 });
     vi.stubGlobal('visualViewport', viewport);
     vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     try {
-      renderPane();
+      renderPane({ mobileInputPanel: 'reply' });
       const textbox = screen.getByRole('textbox');
-      expect(textbox).toHaveStyle({ height: '180px' });
+      expect(textbox).toHaveStyle({ height: '44px' });
+      Object.defineProperty(textbox, 'scrollHeight', { configurable: true, value: 600 });
+      fireEvent.change(textbox, { target: { value: 'A long mobile draft' } });
+      expect(textbox).toHaveStyle({ height: '112px' });
       viewport.height = 320;
       act(() => { viewport.dispatchEvent(new Event('resize')); });
-      expect(textbox).toHaveStyle({ height: '96px' });
-      expect(screen.getByRole('button', { name: 'Reset input height' })).toBeVisible();
+      expect(parseFloat(textbox.style.height)).toBeLessThanOrEqual(71);
+      expect(textbox).toHaveValue('A long mobile draft');
+      expect(screen.queryByRole('button', { name: 'Reset input height' })).not.toBeInTheDocument();
+      expect(localStorage.getItem('agent-console:live-bridge-height')).toBe('600');
+      fireEvent.change(textbox, { target: { value: '' } });
     } finally {
       vi.unstubAllGlobals();
       localStorage.removeItem('agent-console:live-bridge-height');
@@ -820,8 +822,6 @@ describe('ConversationPane live input bridge', () => {
           workMode={false}
           mobileChromeHidden={false}
           onToggleMobileChrome={vi.fn()}
-          mobileControlsHidden={false}
-          onToggleMobileControls={vi.fn()}
           onBind={vi.fn()}
           onRelease={vi.fn()}
           onSuspend={vi.fn()}
@@ -1027,8 +1027,6 @@ describe('ConversationPane external Claude handoff', () => {
             workMode={false}
             mobileChromeHidden={false}
             onToggleMobileChrome={vi.fn()}
-            mobileControlsHidden={false}
-            onToggleMobileControls={vi.fn()}
             onBind={onBind}
             onRelease={vi.fn()}
             onSuspend={vi.fn()}

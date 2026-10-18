@@ -75,6 +75,9 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
     await route.fulfill({ json: { session } });
   });
   await page.goto(`/projects/demo/${provider}/c1`);
+  if ((page.viewportSize()?.width ?? 1280) < 768) {
+    await page.getByRole('button', { name: 'Reply', exact: true }).click();
+  }
   await expect(page.getByRole('textbox')).toBeVisible();
   return { inputCalls, bindCalls, releaseCalls, screenSessions };
 }
@@ -176,47 +179,25 @@ test('Codex Rebind still replaces the session only when explicitly selected', as
 test.describe('mobile live input', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  test('native menu buttons preserve a draft, and oversized input can shrink by touch', async ({ page }) => {
+  test('native menu controls preserve the reply without opening the phone keyboard', async ({ page }, testInfo) => {
     await page.addInitScript(() => localStorage.setItem('agent-console:live-bridge-height', '600'));
     const calls = await openConversation(page, 'claude', 'reject', true);
-    await page.locator('aside').getByRole('link', { name: /Background build/ }).tap();
-    const textbox = page.getByRole('textbox');
+    const textbox = page.getByRole('textbox', { name: 'Message' });
     const draft = 'Switching to Fable for the plan review';
     await textbox.fill(draft);
-    const initialHeight = await textbox.evaluate(node => node.getBoundingClientRect().height);
-    expect(initialHeight).toBeLessThanOrEqual(844 * 0.3);
-    await page.getByRole('button', { name: '↓', exact: true }).tap();
-    await expect.poll(() => calls.inputCalls).toEqual([{ sessionId: 'original-session', body: { keys: ['Down'] } }]);
-    await page.getByRole('button', { name: 'Enter', exact: true }).tap();
-    await expect.poll(() => calls.inputCalls).toHaveLength(2);
-    expect(calls.inputCalls[1].body).toEqual({ keys: ['Enter'] });
-    await page.getByRole('button', { name: 'Esc', exact: true }).tap();
-    await expect.poll(() => calls.inputCalls).toHaveLength(3);
-    expect(calls.inputCalls[2].body).toEqual({ keys: ['Escape'] });
+    expect(await textbox.evaluate(node => node.getBoundingClientRect().height)).toBeLessThanOrEqual(112);
+    await page.getByRole('button', { name: 'Controls', exact: true }).tap();
+    await expect(textbox).toBeHidden();
+    for (const [label, key] of [['↓', 'Down'], ['Enter', 'Enter'], ['Esc', 'Escape']] as const) {
+      await page.getByRole('button', { name: label, exact: true }).tap();
+      await expect.poll(() => calls.inputCalls.at(-1)?.body).toEqual({ keys: [key] });
+      expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
+    }
+    await page.getByRole('button', { name: 'Reply', exact: true }).tap();
     await expect(textbox).toHaveValue(draft);
-    await page.getByRole('button', { name: 'Reset input height' }).tap();
-    await expect(textbox).toHaveCSS('height', '96px');
-    await expect(textbox).toHaveValue(draft);
-    // Raw CDP touch drags suppress the next synthesized compatibility click
-    // even on plain HTML buttons. Verify the native reset tap before dragging.
-    const handle = page.getByRole('button', { name: 'Resize live input bridge' });
-    await handle.scrollIntoViewIfNeeded();
-    const handleBox = await handle.boundingBox();
-    expect(handleBox!.height).toBeGreaterThanOrEqual(44);
-    const cdp = await page.context().newCDPSession(page);
-    const point = { x: handleBox!.x + handleBox!.width / 2, y: handleBox!.y + handleBox!.height / 2 };
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y - 80 }] });
-    await expect.poll(() => textbox.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThan(96);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...point, y: point.y + 60 }] });
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await expect.poll(() => page.evaluate(() => document.body.style.cursor)).toBe('');
-    await expect(textbox).toHaveCSS('height', '96px');
-    await cdp.detach();
-    await expect(textbox).toHaveValue(draft);
-    await expect.poll(() => page.evaluate(() => localStorage.getItem('agent-console:live-bridge-height'))).toBe('96');
+    expect(await page.evaluate(() => localStorage.getItem('agent-console:live-bridge-height'))).toBe('600');
     expect(calls.bindCalls).toEqual([]);
     expect(calls.releaseCalls).toEqual([]);
-    await page.screenshot({ path: '/tmp/console-input-mobile-20261013.png', fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('mobile-menu-reply.png') });
   });
 });

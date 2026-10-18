@@ -67,13 +67,13 @@ test('drags the sidebar, remembers its width, and keeps the conversation pane us
   await expect(sidebar).toHaveCSS('width', '352px');
 });
 
-test('keeps the mobile drawer within the viewport after a desktop width was saved', async ({ page }) => {
+test('uses the full mobile viewport regardless of the saved desktop sidebar width', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.addInitScript(() => localStorage.setItem('agent-console:sidebar-width', '640'));
   await openConsole(page);
   await expect(page.getByRole('separator', { name: 'Resize sidebar width' })).toBeHidden();
   const bounds = await page.locator('aside').boundingBox();
-  expect(bounds?.width).toBeLessThanOrEqual(390 * 0.88);
+  expect(bounds?.width).toBe(390);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
