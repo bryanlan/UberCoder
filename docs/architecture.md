@@ -327,7 +327,11 @@ editing may leave earlier wrapped rows behind. Delivery requires a verified empt
 composer afterward, and an uncertain clear stays reviewable without replay.
 Model switches defer while a queued message owns typed or unconfirmed native input.
 Stop, successful explicit suspension, release, or cancelling a queued send prevents further
-automatic submission; already typed native text stays available for inspection.
+automatic submission. Cancellation also owns an unchanged Text Bypass draft when its saved
+text matches the cancelled message, its original prefix is empty, and its native PID matches.
+This cleanup ownership stays separate from the queued message's delivery fields. The idle
+cleanup clears it once, immediately or before the next queued message; it verifies the live
+pane owner, PID and input revision and preserves mixed or edited drafts.
 Rejected suspension leaves the queue intact. Once Enter starts, the message is
 shown as sending and cannot be cancelled; uncertain delivery remains reviewable.
 Native choices, slash commands and raw terminal typing retain their explicit control

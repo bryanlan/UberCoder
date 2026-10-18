@@ -54,7 +54,7 @@ import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
-import { cancelledRemnant, InputQueue, queuedInputSummary, queuedTransportText, type QueuedInputRecord } from './input-queue.js';
+import { InputQueue, queuedInputSummary, queuedTransportText, type QueuedInputRecord } from './input-queue.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
@@ -2202,10 +2202,11 @@ export class SessionManager {
 
   private cancelQueuedInputs(sessionId: string): void {
     if (!this.db.isOpen()) return;
+    const panePid = this.db.boundSessions.getById(sessionId)?.pid;
     for (const record of this.inputQueue.list(sessionId)) {
       // The human's own Stop key reaches the provider; clear our typed text
       // before the next queued message instead of racing a repeated Escape.
-      const remnant = cancelledRemnant(record);
+      const remnant = this.inputQueue.cancelledRemnant(sessionId, record, panePid);
       if (remnant) this.inputQueue.setRemnant(sessionId, { ...remnant, nativeRevision: this.inputQueue.revision(sessionId) });
       this.inputQueue.put(sessionId, record.state === 'submitting'
         ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
@@ -2222,7 +2223,7 @@ export class SessionManager {
       throw new SessionInputRejectedError('Submission has already started. Check the conversation before sending again.');
     }
     this.saveQueuedInput(sessionId, { ...record, state: 'cancelled' });
-    const remnant = cancelledRemnant(record);
+    const remnant = this.inputQueue.cancelledRemnant(sessionId, record, this.mustGetSession(sessionId).pid);
     if (remnant) {
       this.inputQueue.setRemnant(sessionId, remnant);
       void this.runtimes.run(sessionId, 'clearCancelledInput', () => this.clearQueuedInputRemnantInternal(sessionId))
@@ -2240,14 +2241,17 @@ export class SessionManager {
     if (session.pid !== remnant.panePid) {
       this.inputQueue.setRemnant(sessionId, undefined); return false;
     }
-    if (session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
+    if (session.status !== 'bound' || session.manualSuspendedAt || session.pressureSuspendedAt
+      || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
+    const revision = this.inputQueue.revision(sessionId);
+    if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== sessionId
+      || await this.tmuxClient.getPanePid(session.tmuxSessionName) !== remnant.panePid) return false;
     const screen = await this.captureSessionScreen(session, false);
     // Claude's clear-input key interrupts a running turn. Cancellation may
     // now happen after human text was staged during that turn; leave it intact.
-    if (!screenLooksReadyForLiteralPrompt(screen)
+    if (revision !== this.inputQueue.revision(sessionId) || !screenLooksReadyForLiteralPrompt(screen)
       || (this.providerTurnIsWorking(sessionId) ?? this.mustGetSession(sessionId).isWorking)) return false;
     if (!screen.inputText.trim()) { this.inputQueue.setRemnant(sessionId, undefined); return true; }
-    const revision = this.inputQueue.revision(sessionId);
     if (!screenInputMatchesText(screen, remnant.text)
       && !(remnant.nativeRevision === revision && screenInputMatchesPaste(screen, remnant.text, session.provider))) return false;
     // Journal before transport: an uncertain clear is never repeated, because

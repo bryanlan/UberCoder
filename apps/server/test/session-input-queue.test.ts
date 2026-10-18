@@ -17,6 +17,7 @@ const approval = 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel ·
 class InputTmux extends FakeTmux {
   acceptText = true;
   failEnter = false;
+  clearInput = true;
   pid = 4241;
   onText?: () => Promise<void>;
   onEnter?: () => Promise<void>;
@@ -38,7 +39,7 @@ class InputTmux extends FakeTmux {
   }
   override async sendKeys(name: string, keys: string[]): Promise<void> {
     await super.sendKeys(name, keys);
-    if (keys.includes('C-c') && /^› ?\S/m.test(this.paneText)) this.paneText = ready();
+    if (this.clearInput && keys.includes('C-c') && /^› ?\S/m.test(this.paneText)) this.paneText = ready();
     if (keys.includes('Enter')) {
       await this.onEnter?.();
       this.paneText = busy;
@@ -420,6 +421,104 @@ describe('durable human input queue', () => {
     f.tmux.paneText = ready('expected draft');
     await vi.waitFor(() => expect(f.tmux.sentKeys).toEqual([['Enter']]), { timeout: 4000 });
     expect(f.tmux.sent).toEqual([]);
+  });
+
+  it.each(['cancel', 'Stop', 'restart'] as const)('clears cancelled live-staged text after %s without interrupting a running turn', async action => {
+    const f = await fixture('claude');
+    const text = 'the already answered approval', requestId = randomUUID();
+    await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+    f.tmux.paneText = approval;
+    await f.manager.sendKeystrokes(f.session.id, { submittedText: text, keys: ['Enter'], submissionId: requestId });
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: true });
+    f.tmux.paneText = ready(text);
+    if (action === 'Stop') await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    else await f.manager.cancelQueuedInput(f.session.id, requestId);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(f.tmux.sentKeys).toEqual(action === 'Stop' ? [['Escape']] : []);
+    expect(f.tmux.paneText).toContain(text);
+    if (action === 'restart') await f.restart();
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    const result = await f.submit('the next message');
+    expect(result.recordedUserInput?.text).toBe('the next message');
+    expect(f.tmux.sentKeys).toEqual([...(action === 'Stop' ? [['Escape']] : []), ['C-c'], ['Enter']]);
+    expect(f.tmux.sent).toEqual([text, 'the next message']);
+    const events = (await fs.readFile(f.session.eventLogPath!, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+    expect(events.filter(event => event.type === 'user-input').map(event => event.text)).toEqual(['the next message']);
+  });
+
+  it('clears an owned collapsed live-staged paste on idle cancellation', async () => {
+    const f = await fixture('claude');
+    const text = 'cancelled long approval '.repeat(70).trim(), requestId = randomUUID();
+    f.tmux.onText = async () => { f.tmux.paneText = ready('[Pasted text #1 +70 lines]'); };
+    await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+    f.tmux.onText = undefined;
+    f.tmux.paneText = approval;
+    await f.manager.sendKeystrokes(f.session.id, { submittedText: text, keys: ['Enter'], submissionId: requestId });
+    f.tmux.paneText = ready('[Pasted text #1 +70 lines]');
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    await f.manager.cancelQueuedInput(f.session.id, requestId);
+    expect((await f.submit('the next message')).recordedUserInput?.text).toBe('the next message');
+    expect(f.tmux.sentKeys).toEqual([['C-c'], ['Enter']]);
+    expect(f.tmux.sent).toEqual([text, 'the next message']);
+  });
+
+  it.each(['edited', 'prefix', 'PID', 'key', 'owner'] as const)('preserves cancelled live-staged text after a change to its %s', async change => {
+    const f = await fixture('claude');
+    const prefix = change === 'prefix' ? 'existing human draft ' : '';
+    f.tmux.paneText = ready(prefix);
+    const text = 'cancelled approval', requestId = randomUUID();
+    await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+    f.tmux.paneText = approval;
+    await f.manager.sendKeystrokes(f.session.id, { submittedText: prefix + text, keys: ['Enter'], submissionId: requestId });
+    if (change === 'key') await f.manager.sendKeystrokes(f.session.id, { keys: ['Left'] });
+    if (change === 'PID') f.tmux.pid++;
+    if (change === 'owner') await f.tmux.setOption(f.session.tmuxSessionName, '@agent_console_session_id', 'another-owner');
+    f.tmux.paneText = ready(prefix + text + (change === 'edited' ? ', edited by hand' : ''));
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    await f.manager.cancelQueuedInput(f.session.id, requestId);
+    expect((await f.submit('the next message')).queuedInput?.state).toBe('queued');
+    expect(f.tmux.sentKeys).toEqual(change === 'key' ? [['Left']] : []);
+    expect(f.tmux.paneText).toContain(text);
+  });
+
+  it('does not clear live-staged text when human typing invalidates its captured screen', async () => {
+    const f = await fixture('claude');
+    const text = 'cancelled approval', requestId = randomUUID();
+    await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+    f.tmux.paneText = approval;
+    await f.manager.sendKeystrokes(f.session.id, { submittedText: text, keys: ['Enter'], submissionId: requestId });
+    f.tmux.paneText = ready(text);
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    const capture = f.tmux.capturePane.bind(f.tmux);
+    let edit: Promise<unknown> | undefined;
+    vi.spyOn(f.tmux, 'capturePane').mockImplementationOnce(async () => {
+      const snapshot = await capture();
+      edit = f.manager.sendKeystrokes(f.session.id, { text: ', edited by hand', deferScreenUpdate: true });
+      return snapshot;
+    });
+    await f.manager.cancelQueuedInput(f.session.id, requestId);
+    await vi.waitFor(() => expect(edit).toBeDefined());
+    await edit;
+    expect((await f.submit('the next message')).queuedInput?.state).toBe('queued');
+    expect(f.tmux.sentKeys).toEqual([]);
+    expect(f.tmux.paneText).toContain('edited by hand');
+  });
+
+  it('does not repeat an uncertain clear of cancelled live-staged text', async () => {
+    const f = await fixture('claude');
+    const text = 'cancelled approval', requestId = randomUUID();
+    await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
+    f.tmux.paneText = approval;
+    await f.manager.sendKeystrokes(f.session.id, { submittedText: text, keys: ['Enter'], submissionId: requestId });
+    f.tmux.paneText = ready(text);
+    f.tmux.clearInput = false;
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    await f.manager.cancelQueuedInput(f.session.id, requestId);
+    expect((await f.submit('the next message')).queuedInput?.state).toBe('queued');
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(f.tmux.sentKeys).toEqual([['C-c']]);
+    expect(f.tmux.sent).toEqual([text]);
+    expect(f.tmux.paneText).toContain(text);
   });
 
   it('cancels during text transport before Enter and clears only the text it typed', async () => {
