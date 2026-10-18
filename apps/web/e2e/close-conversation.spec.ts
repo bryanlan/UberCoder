@@ -52,17 +52,43 @@ async function openChat(page: Page, provider: ProviderId, kind: ConversationKind
     calls.releases += 1;
     conversation.isBound = false;
     conversation.boundSessionId = undefined;
+    conversation.lastClosedAt = new Date().toISOString();
     await route.fulfill({ status: 204 });
   });
   const chatPath = `/projects/demo/${provider}/${encodeURIComponent(ref)}`;
   await page.goto(chatPath);
   await expect(page.locator('aside').getByRole('link', { name: /Chat to close/ })).toBeVisible();
-  return { calls, chatPath, session };
+  return { calls, chatPath, session, conversation };
 }
 
 async function closeChat(page: Page) {
   await page.getByRole('button', { name: 'Conversation actions for Chat to close' }).click();
   await page.getByRole('button', { name: 'Close', exact: true }).click();
+}
+
+for (const width of [1280, 390]) {
+  test(`closed Claude chats resume without terminal handoff at ${width}px`, async ({ page }, testInfo) => {
+    const { calls, chatPath, session, conversation } = await openChat(page, 'claude');
+    await closeChat(page);
+    await expect(page).toHaveURL(/\/projects\/demo$/);
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(chatPath);
+    await expect(page.getByText('This conversation is closed. Resume it to continue in Agent Console.')).toBeVisible();
+    await expect(page.getByText(/outside Agent Console|original terminal/)).toHaveCount(0);
+    expect(calls.binds).toBe(0);
+    await page.screenshot({ path: testInfo.outputPath(`closed-claude-${width}.png`) });
+    await page.route('**/api/conversations/**/bind', route => {
+      calls.binds += 1;
+      expect(route.request().postDataJSON()).toEqual({ force: false });
+      conversation.isBound = true;
+      conversation.boundSessionId = session.id;
+      return route.fulfill({ json: { session } });
+    });
+    await page.getByRole('button', { name: 'Resume', exact: true }).first().click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText('This conversation is closed. Resume it to continue in Agent Console.')).toHaveCount(0);
+    expect(calls.binds).toBe(1);
+  });
 }
 
 for (const provider of ['codex', 'claude'] as const) {

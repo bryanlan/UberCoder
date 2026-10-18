@@ -120,6 +120,8 @@ export interface ConversationSummary {
   branch?: string;
   isBound: boolean;
   boundSessionId?: string;
+  /** Most recent ended Console binding, derived from retained session records. */
+  lastClosedAt?: string;
   degraded: boolean;
   model?: string;
   statusKind?: 'run-failure';

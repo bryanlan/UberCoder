@@ -1538,7 +1538,10 @@ export function ConversationPane({
     setHandoffConfirmed(false);
   }, [conversationKey]);
 
-  const isExternalClaude = timeline?.conversation.provider === 'claude' && !boundSession;
+  const isClosedConversation = !boundSession && Boolean(timeline?.conversation.lastClosedAt);
+  const isExternalClaude = timeline?.conversation.provider === 'claude' && !boundSession && !isClosedConversation;
+  const bindActionLabel = isClosedConversation ? 'Resume' : isExternalClaude ? 'Move to Agent Console' : 'Bind / resume';
+  const conversationStatus = boundSession ? 'Bound' : isClosedConversation ? 'Closed' : isExternalClaude ? 'Outside Agent Console' : 'Not bound';
 
   function requestBind(): void {
     if (isExternalClaude) {
@@ -1559,10 +1562,10 @@ export function ConversationPane({
       <div className="w-full max-w-lg rounded-2xl border border-amber-400/30 bg-slate-950 p-5 shadow-panel">
         <h2 id="external-handoff-title" className="text-lg font-semibold text-slate-100">Move this Claude chat to Agent Console?</h2>
         <p className="mt-2 text-sm leading-6 text-slate-300">
-          Agent Console cannot move the process in your command window. To avoid two Claudes working in the same chat, stop that terminal session first. Agent Console will then resume this exact conversation in its managed workspace.
+          If this chat is running in another terminal, stop that session first to avoid two Claudes working in the same chat. Agent Console will then resume this exact conversation in its managed workspace.
         </p>
         <p className="mt-2 text-sm leading-6 text-amber-200">
-          Any text still unsubmitted in the original terminal will not transfer.
+          Unsubmitted text in another terminal will not transfer.
         </p>
         <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-200">
           <input
@@ -1571,7 +1574,7 @@ export function ConversationPane({
             onChange={(event) => setHandoffConfirmed(event.target.checked)}
             className="mt-0.5 h-4 w-4 rounded border-slate-600 bg-slate-950 text-sky-500"
           />
-          <span>I have stopped the Claude session outside Agent Console.</span>
+          <span>This chat is not running outside Agent Console.</span>
         </label>
         <div className="mt-5 flex justify-end gap-2">
           <button
@@ -1580,7 +1583,7 @@ export function ConversationPane({
             disabled={binding}
             className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-900 disabled:opacity-60"
           >
-            Keep in terminal
+            Cancel
           </button>
           <button
             type="button"
@@ -1732,8 +1735,10 @@ export function ConversationPane({
           <div className="max-w-md">
             <div className="text-lg font-medium text-slate-100">{timeline.conversation.title}</div>
             <div className="mt-2 text-sm text-slate-400">
-              {isExternalClaude
-                ? 'This Claude transcript is outside Agent Console. You can move it here after stopping the original terminal session.'
+              {isClosedConversation
+                ? 'This conversation is closed. Resume it to continue in Agent Console.'
+                : isExternalClaude
+                ? 'This Claude chat is not currently managed by Agent Console. If it is running in another terminal, stop that session before starting it here.'
                 : 'This conversation is not currently bound. Start a new session from the left pane, or bind this one to continue working here.'}
             </div>
             <div className="mt-5">
@@ -1744,7 +1749,7 @@ export function ConversationPane({
                 className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
               >
                 <PlugZap className="h-4 w-4" />
-                {isExternalClaude ? 'Move to Agent Console' : 'Bind / resume'}
+                {bindActionLabel}
               </button>
             </div>
           </div>
@@ -1775,7 +1780,7 @@ export function ConversationPane({
               title="Conversation"
               summary={[
                 timeline.conversation.title,
-                boundSession ? 'Bound' : isExternalClaude ? 'Outside Agent Console' : 'Not bound',
+                conversationStatus,
                 timeline.conversation.degraded ? 'Degraded parse' : undefined,
               ].filter(Boolean).join(' · ')}
               className=""
@@ -1819,7 +1824,7 @@ export function ConversationPane({
                   className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
                 >
                   <PlugZap className="h-4 w-4" />
-                  {isExternalClaude ? 'Move to Agent Console' : 'Bind / resume'}
+                  {bindActionLabel}
                 </button>
               )}
             </div>
@@ -1832,7 +1837,7 @@ export function ConversationPane({
                 <h1 className="truncate text-xl font-semibold text-white">{timeline.conversation.title}</h1>
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
                   <span className={clsx('rounded-full border px-2.5 py-1', boundSession ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-400')}>
-                    {boundSession ? 'Bound' : isExternalClaude ? 'Outside Agent Console' : 'Not bound'}
+                    {conversationStatus}
                   </span>
                   {timeline.conversation.degraded && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
@@ -1878,7 +1883,7 @@ export function ConversationPane({
                     className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
                   >
                     <PlugZap className="h-4 w-4" />
-                    {isExternalClaude ? 'Move to Agent Console' : 'Bind / resume'}
+                    {bindActionLabel}
                   </button>
                 )}
               </div>
@@ -1923,7 +1928,7 @@ export function ConversationPane({
 
       {isExternalClaude && (
         <div className="flex flex-wrap items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          <span className="min-w-0 flex-1">This Claude chat is outside Agent Console. Its transcript can update here, but input stays in the original terminal until you move it.</span>
+          <span className="min-w-0 flex-1">This Claude chat is not currently managed by Agent Console. If it is running in another terminal, stop that session before starting it here.</span>
           <button
             type="button"
             onClick={requestBind}
@@ -1964,7 +1969,7 @@ export function ConversationPane({
           </div>
         ) : (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
-            No saved transcript yet. Bind this conversation and use the composer below to drive the live session.
+            {isClosedConversation ? 'No saved transcript yet. Resume this conversation to continue.' : 'No saved transcript yet. Bind this conversation and use the composer below to drive the live session.'}
           </div>
         )}
       </div>
@@ -2009,7 +2014,7 @@ export function ConversationPane({
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
-          <div>{isExternalClaude ? 'This chat is read-only here until you move it into Agent Console.' : 'Bind this conversation to unlock the live input bridge.'}</div>
+          <div>{isClosedConversation ? 'This conversation is closed. Resume it to continue in Agent Console.' : isExternalClaude ? 'This chat is read-only here until you move it into Agent Console.' : 'Bind this conversation to unlock the live input bridge.'}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
@@ -2018,7 +2023,7 @@ export function ConversationPane({
               className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-100 transition hover:bg-sky-500/20 disabled:opacity-60"
             >
               <PlugZap className="h-4 w-4" />
-              {isExternalClaude ? 'Move to Agent Console' : 'Bind / resume'}
+              {bindActionLabel}
             </button>
             {!isMobile && mobileChromeHidden && (
               <button

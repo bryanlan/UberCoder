@@ -116,7 +116,11 @@ describe('conversation routes', () => {
     }
   });
 
-  it('requires explicit confirmation before moving an unbound Claude history into Agent Console', async () => {
+  it.each([
+    { name: 'unknown Claude history', closed: false, indexed: true },
+    { name: 'closed Console Claude history', closed: true, indexed: true },
+    { name: 'closed history discovered on demand', closed: true, indexed: false },
+  ])('uses recorded Console history when binding $name', async ({ closed, indexed }) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const summary: ConversationSummary = {
@@ -129,7 +133,7 @@ describe('conversation routes', () => {
       isBound: false,
       degraded: false,
     };
-    db.conversationIndex.replace('demo', 'claude', [summary]);
+    if (indexed) db.conversationIndex.replace('demo', 'claude', [summary]);
     const movedSession: BoundSession = {
       id: 'moved-session',
       provider: 'claude',
@@ -141,6 +145,9 @@ describe('conversation routes', () => {
       startedAt: summary.updatedAt,
       updatedAt: summary.updatedAt,
     };
+    if (closed) db.boundSessions.upsert({
+      ...movedSession, id: 'closed-session', status: 'ended', shouldRestore: false,
+    });
     const bindConversation = vi.fn(async () => movedSession);
     const app = fastify();
     await registerConversationRoutes(
@@ -156,7 +163,7 @@ describe('conversation routes', () => {
           commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
         }),
       } as never,
-      { get: () => ({ getConversation: async () => null }) } as never,
+      { get: () => ({ getConversation: async () => ({ summary, messages: [] }) }) } as never,
       {
         bindConversation,
         getSessionByConversation: () => undefined,
@@ -171,6 +178,16 @@ describe('conversation routes', () => {
         url: '/api/conversations/demo/claude/external-claude-history/bind',
         payload: {},
       });
+      if (closed) {
+        expect(blocked.statusCode).toBe(200);
+        expect(bindConversation).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ conversationRef: summary.ref }));
+        for (const limit of [0, 20]) {
+          const timeline = await app.inject({ method: 'GET', url: `/api/conversations/demo/claude/${summary.ref}/messages?limit=${limit}` });
+          expect(timeline.statusCode).toBe(200);
+          expect(timeline.json().conversation).toMatchObject({ isBound: false, lastClosedAt: summary.updatedAt });
+        }
+        return;
+      }
       expect(blocked.statusCode).toBe(409);
       expect(blocked.json()).toMatchObject({
         error: 'Confirm that the Claude chat is stopped outside Agent Console before moving it here.',

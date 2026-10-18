@@ -995,78 +995,107 @@ describe('ConversationPane live input bridge', () => {
 });
 
 describe('ConversationPane external Claude handoff', () => {
-  it('keeps an external Claude transcript read-only until the user confirms handoff', async () => {
-    const onBind = vi.fn().mockResolvedValue(undefined);
-    const externalTimeline: ConversationTimeline = {
-      conversation: {
-        ref: 'external-claude-chat',
-        kind: 'history',
-        projectSlug: 'demo',
-        provider: 'claude',
-        title: 'Review Waltium business plan',
-        updatedAt: baseTime,
-        isBound: false,
-        degraded: false,
-      },
-      messages: [],
-      boundSession: undefined,
-      liveScreen: undefined,
-      messagePage: { hasOlder: false, total: 0 },
-    };
-    function HandoffPane({ conversationKey }: { conversationKey: string }) {
-      return (
-        <MemoryRouter>
-          <ConversationPane
-            projects={[project()]}
-            project={project()}
-            selectedProvider="claude"
-            timeline={externalTimeline}
-            liveMode={false}
-            onRetryResume={vi.fn()}
-            loading={false}
-            workMode={false}
-            mobileChromeHidden={false}
-            onToggleMobileChrome={vi.fn()}
-            onBind={onBind}
-            onRelease={vi.fn()}
-            onSuspend={vi.fn()}
-            onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
-            onSetModelProfile={vi.fn().mockResolvedValue(true)}
-            onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
-            onLocalSubmittedText={vi.fn()}
-            onDiscardLocalSubmittedText={vi.fn()}
-            binding={false}
-            releasing={false}
-            suspending={false}
-            debugOpen={false}
-            onToggleDebug={vi.fn()}
-            rawLoading={false}
-            hasOlderMessages={false}
-            loadingOlderMessages={false}
-            onLoadOlderMessages={vi.fn()}
-            conversationKey={conversationKey}
-            historyPrependVersion={0}
-          />
-        </MemoryRouter>
-      );
-    }
-    const view = render(<HandoffPane conversationKey="demo:claude:external-claude-chat" />);
+  it.each([
+    { name: 'unknown Claude history', closed: false, active: false, mobile: false, workMode: false },
+    { name: 'closed desktop chat', closed: true, active: false, mobile: false, workMode: false },
+    { name: 'closed chat in desktop Work mode', closed: true, active: false, mobile: false, workMode: true },
+    { name: 'closed mobile chat', closed: true, active: false, mobile: true, workMode: false },
+    { name: 'resumed chat with a previous close', closed: true, active: true, mobile: false, workMode: false },
+  ])('offers the correct resume action for $name', async ({ closed, active, mobile, workMode }) => {
+    const media = vi.spyOn(globalThis, 'matchMedia').mockImplementation(query => ({
+      matches: mobile, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
+    try {
+      const onBind = vi.fn().mockResolvedValue(undefined);
+      const externalTimeline: ConversationTimeline = {
+        conversation: {
+          ref: 'external-claude-chat',
+          kind: 'history',
+          projectSlug: 'demo',
+          provider: 'claude',
+          title: 'Review Waltium business plan',
+          updatedAt: baseTime,
+          isBound: active,
+          lastClosedAt: closed ? baseTime : undefined,
+          degraded: false,
+        },
+        messages: [],
+        boundSession: active ? boundSession({ provider: 'claude' }) : undefined,
+        liveScreen: undefined,
+        messagePage: { hasOlder: false, total: 0 },
+      };
+      function HandoffPane({ conversationKey }: { conversationKey: string }) {
+        return (
+          <MemoryRouter>
+            <ConversationPane
+              projects={[project()]}
+              project={project()}
+              selectedProvider="claude"
+              timeline={externalTimeline}
+              liveMode={false}
+              onRetryResume={vi.fn()}
+              loading={false}
+              workMode={workMode}
+              mobileChromeHidden={false}
+              onToggleMobileChrome={vi.fn()}
+              onBind={onBind}
+              onRelease={vi.fn()}
+              onSuspend={vi.fn()}
+              onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
+              onSetModelProfile={vi.fn().mockResolvedValue(true)}
+              onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
+              onLocalSubmittedText={vi.fn()}
+              onDiscardLocalSubmittedText={vi.fn()}
+              binding={false}
+              releasing={false}
+              suspending={false}
+              debugOpen={false}
+              onToggleDebug={vi.fn()}
+              rawLoading={false}
+              hasOlderMessages={false}
+              loadingOlderMessages={false}
+              onLoadOlderMessages={vi.fn()}
+              conversationKey={conversationKey}
+              historyPrependVersion={0}
+            />
+          </MemoryRouter>
+        );
+      }
+      const view = render(<HandoffPane conversationKey="demo:claude:external-claude-chat" />);
 
-    expect(screen.getByText(/This Claude chat is outside Agent Console/)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
-    expect(screen.getByRole('dialog')).toHaveTextContent('stop that terminal session first');
-    expect(screen.getByRole('button', { name: 'Start in Agent Console' })).toBeDisabled();
+      if (active) {
+        expect(screen.getByText('Bound')).toBeVisible();
+        expect(screen.queryByText(/This conversation is closed/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^Resume$/ })).not.toBeInTheDocument();
+        return;
+      }
+      if (closed) {
+        expect(screen.getByText(/This conversation is closed/)).toBeVisible();
+        expect(screen.queryByText(/outside Agent Console/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Move to Agent Console' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getAllByRole('button', { name: /^Resume$/ })[0]!);
+        await waitFor(() => expect(onBind).toHaveBeenCalledExactlyOnceWith());
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        return;
+      }
+      expect(screen.getByText(/This Claude chat is not currently managed by Agent Console/)).toBeInTheDocument();
+      fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+      expect(screen.getByRole('dialog')).toHaveTextContent('If this chat is running in another terminal, stop that session first');
+      expect(screen.getByRole('button', { name: 'Start in Agent Console' })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('checkbox'));
-    fireEvent.click(screen.getByRole('button', { name: 'Start in Agent Console' }));
-    await waitFor(() => expect(onBind).toHaveBeenCalledWith({ confirmExternalHandoff: true }));
+      fireEvent.click(screen.getByRole('checkbox'));
+      fireEvent.click(screen.getByRole('button', { name: 'Start in Agent Console' }));
+      await waitFor(() => expect(onBind).toHaveBeenCalledWith({ confirmExternalHandoff: true }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
-    fireEvent.click(screen.getByRole('checkbox'));
-    view.rerender(<HandoffPane conversationKey="demo:claude:another-chat" />);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+      fireEvent.click(screen.getByRole('checkbox'));
+      view.rerender(<HandoffPane conversationKey="demo:claude:another-chat" />);
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(onBind).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(onBind).toHaveBeenCalledTimes(1);
+    } finally { media.mockRestore(); }
   });
 });

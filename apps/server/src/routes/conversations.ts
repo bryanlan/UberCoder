@@ -310,6 +310,7 @@ export async function registerConversationRoutes(
           title: cachedSummary?.title ?? pendingSummary?.title ?? conversation.summary.title,
           isBound: Boolean(cachedSummary?.isBound),
           boundSessionId: cachedSummary?.boundSessionId,
+          lastClosedAt: db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef)?.lastClosedAt,
         };
         visibleMessages = conversation.messages;
         allMessages = conversation.allMessages ?? conversation.messages;
@@ -499,6 +500,7 @@ export async function registerConversationRoutes(
       providerId === 'claude'
       && bindableSummary.kind === 'history'
       && !existingSession?.shouldRestore
+      && !db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef)?.lastClosedAt
       && parsedBody.data.confirmExternalHandoff !== true
     ) {
       reply.code(409).send({

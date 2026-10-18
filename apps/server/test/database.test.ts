@@ -305,6 +305,41 @@ describe('AppDatabase', () => {
     db.close();
   });
 
+  it('derives the last Console close from ended bindings for the exact project and provider', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const summary = {
+      ref: 'closed-chat', kind: 'history' as const, projectSlug: 'demo', provider: 'claude' as const,
+      title: 'Closed chat', updatedAt: '2026-03-07T00:00:00.000Z', isBound: false, degraded: false,
+      lastClosedAt: 'untrusted-provider-metadata',
+    };
+    try {
+      db.conversationIndex.upsert(summary);
+      const ended = boundSession({
+        id: 'other-project', conversationRef: summary.ref, provider: 'claude', projectSlug: 'other',
+        status: 'ended', shouldRestore: false, updatedAt: '2026-03-08T00:00:00.000Z',
+      });
+      db.boundSessions.upsert(ended);
+      db.boundSessions.upsert({ ...ended, id: 'other-provider', projectSlug: 'demo', provider: 'codex' });
+      db.boundSessions.upsert({ ...ended, id: 'failed-start', projectSlug: 'demo', status: 'error' });
+      expect(db.conversationIndex.get('demo', 'claude', summary.ref)?.lastClosedAt).toBeUndefined();
+      expect(db.conversationIndex.list()[0]?.lastClosedAt).toBeUndefined();
+
+      const lastClosedAt = '2026-03-07T02:00:00.000Z';
+      db.boundSessions.upsert({ ...ended, id: 'first-close', projectSlug: 'demo', updatedAt: '2026-03-07T01:00:00.000Z' });
+      db.boundSessions.upsert({ ...ended, id: 'latest-close', projectSlug: 'demo', updatedAt: lastClosedAt });
+      expect(db.conversationIndex.get('demo', 'claude', summary.ref)).toMatchObject({ isBound: false, lastClosedAt });
+      expect(db.conversationIndex.list()[0]).toMatchObject({ isBound: false, lastClosedAt });
+
+      db.boundSessions.upsert({ ...ended, id: 'resumed', projectSlug: 'demo', status: 'bound', shouldRestore: true,
+        updatedAt: '2026-03-07T03:00:00.000Z' });
+      expect(db.conversationIndex.get('demo', 'claude', summary.ref)).toMatchObject({ isBound: true, lastClosedAt });
+    } finally {
+      db.close();
+      await fs.rm(tempDir, { recursive: true });
+    }
+  });
+
   it('uses the newest visible bound session for legacy duplicate session rows', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
