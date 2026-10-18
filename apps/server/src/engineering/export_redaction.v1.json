@@ -1273,56 +1273,6 @@
       }
     },
     {
-      "name": "worktree subjects retain absolute typed paths across sweeps",
-      "input": {
-        "kind": "worktree",
-        "subject": "/repo/engineering_governance_observability_inventory",
-        "summary": "PASSWORD=shortpass"
-      },
-      "expected": {
-        "kind": "worktree",
-        "subject": "/repo/engineering_governance_observability_inventory",
-        "summary": "[credential-bearing line omitted]"
-      }
-    },
-    {
-      "name": "other and unknown subjects remain free text",
-      "input": [
-        {
-          "kind": "docs",
-          "subject": "/repo/engineering_governance_observability_inventory"
-        },
-        {
-          "kind": "digest",
-          "subject": "PASSWORD=shortpass"
-        },
-        {
-          "subject": "PASSWORD=shortpass"
-        },
-        {
-          "kind": "worktree",
-          "subject": "PASSWORD=shortpass"
-        }
-      ],
-      "expected": [
-        {
-          "kind": "docs",
-          "subject": "[high-entropy value omitted]"
-        },
-        {
-          "kind": "digest",
-          "subject": "[credential-bearing line omitted]"
-        },
-        {
-          "subject": "[credential-bearing line omitted]"
-        },
-        {
-          "kind": "worktree",
-          "subject": "[credential-bearing line omitted]"
-        }
-      ]
-    },
-    {
       "input": {
         "SSHPASS": "shortpass",
         "total_tokens": 42
@@ -1440,7 +1390,6 @@
     "checkout",
     "process_checkout",
     "changed_files",
-    "run_record_path",
     "summary_path",
     "file_path",
     "repo_key",
@@ -1494,7 +1443,6 @@
     "activity_summary",
     "error",
     "issues",
-    "digest",
     "latest_error",
     "plain_english_summary",
     "dashboard_summary",
@@ -1512,15 +1460,6 @@
     "source_branch": "[A-Za-z0-9_./-]{1,500}",
     "integration_target": "[A-Za-z0-9_./-]{1,500}"
   },
-  "conditional_path_fields": [
-    {
-      "field": "subject",
-      "when": {
-        "kind": "worktree"
-      },
-      "absolute": true
-    }
-  ],
   "context_sources": [
     {
       "formats": [

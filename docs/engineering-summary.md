@@ -80,14 +80,6 @@ configuration and `agents` and `wiki` are null.
   resolve `/proc/<pid>/cwd` to the Git worktree root with read-only Git commands.
   Failed lookups retain live process identity with unknown checkout; a
   stale bound row or unrelated reused PID is insufficient.
-- `activity_yesterday`: retained `coordination_events.kind in ('update','finished')` records from
-  UTC yesterday `[00:00, next 00:00)`, sorted by timestamp and event sequence. It
-  includes `date`, `timezone: UTC`, retained `total`, `sampled`, and at most 1,000
-  `items` with numeric event `id`, `assignment_id`, nullable `checkout`, `at`,
-  assignment `description`, and event `summary`. Text is redacted before display
-  limits. This is history, not a reconstruction from the latest scope. Missing
-  history is null with `sources.activity` unavailable, without invalidating
-  otherwise valid live ownership evidence. Message bodies remain excluded.
 - `messages`: retained total, unsupplied, unacknowledged, pending to unfinished
   recipients, and a zero-filled 14 UTC calendar-day series including today so far.
   Unsupplied means never offered to the recipient; unacknowledged includes both

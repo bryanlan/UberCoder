@@ -7,8 +7,6 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it, vi } from 'vitest';
 import { appConfigSchema } from '../src/config/schema.js';
-import { AppDatabase } from '../src/db/database.js';
-import { CoordinationService } from '../src/coordination/service.js';
 import { engineeringSummary, readProcessIdentity } from '../src/engineering/summary.js';
 import { redactText } from '../src/engineering/export-redaction.js';
 import redactionContract from '../src/engineering/export_redaction.v1.json' with { type: 'json' };
@@ -123,7 +121,7 @@ it('shows independent source failures without creating missing databases or an a
   expect(failed.status).toBe('error');
   expect(failed.agents.counts).toBeNull();
   expect(failed.agents.messages).toBeNull();
-  expect(failed.issues).toHaveLength(3);
+  expect(failed.issues.map(issue => issue.source)).toEqual(['console', 'wiki']);
 });
 
 it('keeps unaffected Console measurements visible when one schema is unsupported', () => {
@@ -393,76 +391,12 @@ it('exports only configured project paths and faults independently on missing or
   expect(fs.existsSync(options.config)).toBe(false);
 });
 
-it('exports retained yesterday update history in stable UTC order without substituting current summaries', () => {
-  const options = fixture(), db = new Database(options.database);
-  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
-  insert.run('live', '/repo/wt', 'update', 'Earlier retained result', '2026-10-14T00:00:00.000Z');
-  insert.run('live', '/repo/wt', 'update', 'PASSWORD="synthetic_history_secret"', '2026-10-14T23:59:59.999Z');
-  insert.run('live', '/repo/wt', 'message', 'PRIVATE_MESSAGE', '2026-10-14T12:00:00.000Z');
-  insert.run('live', '/repo/wt', 'update', 'PRIVATE_PREVIOUS_DAY', '2026-10-13T23:59:59.999Z');
-  db.close();
-  const before = fs.readFileSync(options.database), result = engineeringSummary(options);
-  expect(result.agents.activity_yesterday).toMatchObject({ date: '2026-10-14', timezone: 'UTC', total: 2, sampled: false });
-  expect(result.agents.activity_yesterday?.items).toEqual([
-    { id: 2, assignment_id: 'live', checkout: '/repo/wt', at: '2026-10-14T00:00:00.000Z', description: 'Assignment live', summary: 'Earlier retained result' },
-    { id: 3, assignment_id: 'live', checkout: '/repo/wt', at: '2026-10-14T23:59:59.999Z', description: 'Assignment live', summary: '[credential-bearing line omitted]' },
-  ]);
-  expect(result.sources.activity.status).toBe('ok');
-  expect(JSON.stringify(result)).not.toContain('synthetic_history_secret');
-  expect(JSON.stringify(result)).not.toContain('PRIVATE_PREVIOUS_DAY');
-  expect(fs.readFileSync(options.database)).toEqual(before);
-});
-
-it('exports completion-only yesterday activity emitted by the real coordination service', () => {
-  const options = fixture();
-  options.database = path.join(path.dirname(options.database), 'completion.sqlite');
-  const db = new AppDatabase(options.database);
-  vi.useFakeTimers({ toFake: ['Date'] });
-  try {
-    const service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
-    vi.setSystemTime(new Date('2026-10-13T12:00:00Z'));
-    const { assignmentId } = service.register({ provider: 'codex', token: 'private-test-token',
-      nativeSessionId: 'completion-only', pid: process.pid, cwd: path.dirname(options.database) });
-    vi.setSystemTime(new Date('2026-10-14T18:00:00Z'));
-    service.finish(assignmentId!, 'Completed the review. PASSWORD=shortpass');
-    expect(db.sqlite.prepare("select kind from coordination_events where assignment_id=? order by seq").all(assignmentId)).toEqual([{ kind: 'started' }, { kind: 'finished' }]);
-  } finally { db.close(); vi.useRealTimers(); }
-  const before = fs.readFileSync(options.database), result = engineeringSummary(options);
-  expect(result.sources.activity.status).toBe('ok');
-  expect(result.agents.activity_yesterday).toMatchObject({ date: '2026-10-14', timezone: 'UTC', total: 1, sampled: false });
-  expect(result.agents.activity_yesterday?.items).toHaveLength(1);
-  expect(result.agents.activity_yesterday?.items[0]).toMatchObject({ checkout: null,
-    at: '2026-10-14T18:00:00.000Z', summary: '[credential-bearing line omitted]' });
-  expect(JSON.stringify(result)).not.toContain('shortpass');
-  expect(fs.readFileSync(options.database)).toEqual(before);
-});
-
-it('bounds yesterday history and keeps history failures separate from ownership', () => {
-  const options = fixture(), db = new Database(options.database);
-  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
-  db.transaction(() => { for (let i = 0; i < 1001; i++) insert.run('live', '/repo/wt', 'update', `Update ${i}`, '2026-10-14T12:00:00.000Z'); })();
-  const result = engineeringSummary(options);
-  expect(result.agents.activity_yesterday).toMatchObject({ total: 1001, sampled: true });
-  expect(result.agents.activity_yesterday?.items).toHaveLength(1000);
-  expect(result.agents.activity_yesterday?.items[0]?.summary).toBe('Update 0');
-  db.exec('alter table coordination_events rename column text to unavailable'); db.close();
-  const failed = engineeringSummary(options);
-  expect(failed.agents.activity_yesterday).toBeNull();
-  expect(failed.sources.activity.status).toBe('error');
-  expect(failed.sources.console.status).toBe('ok');
-  expect(failed.agents.assignments?.find(a => a.id === 'live')?.live_process).toBe(true);
-  expect(failed.status).toBe('partial');
-});
-
-
 it('redacts a bare Google API key containing both URL-safe punctuation characters through the full exporter', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
   const key = 'AIza' + 'AbCdEfGhIjKlMnOpQ' + '_' + 'rStUvWxYz0123456' + '-';
   expect(key).toHaveLength(39);
   db.prepare('update coordination_assignments set description=?').run(`Review ${key} diagnostics`);
   db.prepare('update coordination_scopes set summary=?').run(`Review ${key} diagnostics`);
-  db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
-    .run('live', '/repo/wt', 'update', `Review ${key} diagnostics`, '2026-10-14T12:00:00.000Z');
   wiki.prepare('update wiki_pages set title=?').run(`Review ${key} diagnostics`);
   db.close(); wiki.close();
   const result = JSON.stringify(engineeringSummary(options));
@@ -575,19 +509,6 @@ it('isolates malformed wake and grant records without discarding valid measureme
   expect(JSON.stringify(result)).not.toContain('PRIVATE_BAD_');
 });
 
-it('isolates malformed historical activity while keeping its source independent of live ownership', () => {
-  const options = fixture(), db = new Database(options.database);
-  const insert = db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)');
-  insert.run('live', '/repo/wt', 'update', 'Valid yesterday update', '2026-10-14T12:00:00.000Z');
-  insert.run('live', '/repo/wt', 'update', Buffer.from('PRIVATE_BAD_HISTORY'), '2026-10-14T12:30:00.000Z');
-  db.close();
-  const result = engineeringSummary(options);
-  expect(result.sources.activity.status).toBe('partial');
-  expect(result.sources.console.status).toBe('ok');
-  expect(result.agents.activity_yesterday?.items.map(i => i.summary)).toEqual(['Valid yesterday update']);
-});
-
-
 // Each case gets its own rows so one export covers the corpus. A synchronous per-case loop of
 // exports or CLI launches blocks the worker past Vitest's 60-second RPC timeout and fails the run.
 function addCaseRows(db: Database.Database, wiki: Database.Database, id: string, revision: number, input: string) {
@@ -598,14 +519,13 @@ function addCaseRows(db: Database.Database, wiki: Database.Database, id: string,
 
 it('redacts every pinned provider vector through all permitted exporter text fields', () => {
   const options = fixture(), db = new Database(options.database), wiki = new Database(options.wikiDatabase);
-  const vectors = redactionContract.provider_cases, yesterday = Date.parse('2026-10-14T12:00:00.000Z');
+  const vectors = redactionContract.provider_cases;
   try {
     db.exec('begin'); wiki.exec('begin');
     vectors.forEach((vector, i) => {
       const id = `vector-${i}`, revision = 100 + i;
       addCaseRows(db, wiki, id, revision, vector.input);
       db.prepare('insert into coordination_scopes values(?,?,?,?)').run(id, `/repo/${id}`, '/repo/.git', vector.input);
-      db.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run(id, `/repo/${id}`, 'update', vector.input, new Date(yesterday + i * 1000).toISOString());
       wiki.prepare('insert into wiki_access values(?,?,?,?,?,?,?,?,?)').run(revision, '/repo/.git', 'codex:searcher', 'search', 0, stamp, null, vector.input, null);
     });
     db.exec('commit'); wiki.exec('commit');
@@ -614,7 +534,6 @@ it('redacts every pinned provider vector through all permitted exporter text fie
   for (const vector of vectors) expect(output, vector.rule_id).not.toContain(vector.matched);
   expect(result.agents.counts?.total).toBe(4 + vectors.length);
   expect(result.agents.assignments?.flatMap(a => a.scopes)).toHaveLength(2 + vectors.length);
-  expect(result.agents.activity_yesterday?.items).toHaveLength(vectors.length);
   expect(result.wiki?.pages).toHaveLength(1 + vectors.length);
   expect(result.wiki?.no_result_searches).toHaveLength(1 + vectors.length);
 });

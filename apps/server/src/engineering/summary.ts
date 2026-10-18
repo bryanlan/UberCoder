@@ -166,18 +166,6 @@ function readConfiguredProjects(configPath: string): string[] {
   return [...new Set(paths)].sort();
 }
 
-function readYesterdayActivity(db: Database.Database, now: number, report: ReportInvalid) {
-  const end = Date.parse(iso(now).slice(0, 10)), start = end - DAY;
-  const total = count(db, "select count(*) as n from coordination_events where kind in ('update','finished') and timestamp>=? and timestamp<?", iso(start), iso(end));
-  const items = validRows(db.prepare(`select e.seq as id,e.assignment_id,e.checkout,e.timestamp as at,
-      coalesce(a.description,'Assignment metadata unavailable') as description,e.text as summary
-    from coordination_events e left join coordination_assignments a on a.id=e.assignment_id
-    where e.kind in ('update','finished') and e.timestamp>=? and e.timestamp<? order by e.timestamp,e.seq limit 1000`)
-    .all(iso(start), iso(end)) as Array<{ id: number; assignment_id: string; checkout: string | null; at: string; description: string; summary: string }>, row => integer(row.id, 1) && nonempty(row.assignment_id) && nullableText(row.checkout)
-      && timestamp(row.at) && text(row.description) && text(row.summary), report, 'activity');
-  return { date: iso(start).slice(0, 10), timezone: 'UTC' as const, total, sampled: total > items.length, items };
-}
-
 function readMessages(db: Database.Database, now: number) {
   const start = Date.parse(iso(now).slice(0, 10)) - 13 * DAY;
   const rows = db.prepare(`select substr(created_at,1,10) as date,count(*) as count from coordination_messages
@@ -327,10 +315,9 @@ export function engineeringSummary(options: SummaryOptions) {
   const now = options.now ?? Date.now();
   if (!Number.isFinite(now)) throw new Error('Invalid summary time.');
   const issues: Issue[] = [];
-  const sources: Record<'console' | 'wiki' | 'projects' | 'activity', Source> = {
+  const sources: Record<'console' | 'wiki' | 'projects', Source> = {
     console: { path: '[database path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
     wiki: { path: '[database path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
-    activity: { path: '[database path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
     projects: { path: '[config path omitted]', status: 'ok', observed_at: iso(now), issues: [] },
   };
   const failed = (source: keyof typeof sources, stage: string, error: unknown) => {
@@ -346,7 +333,6 @@ export function engineeringSummary(options: SummaryOptions) {
   let configuredProjects: string[] = [];
   try { configuredProjects = readConfiguredProjects(options.config ?? process.env.AGENT_CONSOLE_CONFIG ?? '~/.config/agent-console/config.json'); }
   catch (error) { failed('projects', 'projects', error); sources.projects.status = 'error'; }
-  let activity: ReturnType<typeof readYesterdayActivity> | null = null;
   let agents: ReturnType<typeof readAssignments> | null = null;
   let messages: ReturnType<typeof readMessages> | null = null;
   let wakes: ReturnType<typeof readWakes> | null = null;
@@ -375,23 +361,19 @@ export function engineeringSummary(options: SummaryOptions) {
             successes++;
           } catch (error) { failed(source, stage, error); }
         }
-        try { activity = readYesterdayActivity(db, now, report('activity')); }
-        catch (error) { failed('activity', 'activity', error); sources.activity.status = 'error'; }
       } else { wiki = readWiki(db, options, report('wiki')); successes++; }
     } catch (error) {
       failed(source, source === 'console' ? 'open' : 'wiki', error);
-      if (source === 'console') { failed('activity', 'open', error); sources.activity.status = 'error'; }
     }
     finally {
       if (db) { try { db.exec('ROLLBACK'); } finally { db.close(); } }
       sources[source].status = sources[source].issues.length ? (successes ? 'partial' : 'error') : 'ok';
     }
   }
-  if (activity && sources.activity.issues.length) sources.activity.status = 'partial';
-  const status: Status = [sources.console, sources.wiki, sources.activity].every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
+  const status: Status = [sources.console, sources.wiki].every(s => s.status === 'error') ? 'error' : issues.length ? 'partial' : 'ok';
   const result = sanitizeExport({ schema_version: 1, generated_at: iso(now), status, sources, issues, configured_projects: configuredProjects,
     agents: { counts: agents?.counts ?? null, assignments: agents?.assignments ?? null, sessions: agents?.sessions ?? null, unattributed_sessions: agents?.unattributed_sessions ?? null,
-      messages, wakes, grants, activity_yesterday: activity }, wiki });
+      messages, wakes, grants }, wiki });
   // Analyze complete values and typed identifiers before applying narrower display limits.
   const bounded = (value: string, limit: number) => value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, limit);
   for (const assignment of result.agents.assignments ?? []) {
@@ -400,9 +382,6 @@ export function engineeringSummary(options: SummaryOptions) {
     for (const scope of assignment.scopes) scope.summary = bounded(scope.summary, 2000);
   }
   for (const session of result.agents.unattributed_sessions ?? []) session.description = bounded(session.description, 1000);
-  for (const event of result.agents.activity_yesterday?.items ?? []) {
-    event.description = bounded(event.description, 1000); event.summary = bounded(event.summary, 2000);
-  }
   for (const query of result.wiki?.no_result_searches ?? []) query.query = bounded(query.query, 160);
   return result;
 }

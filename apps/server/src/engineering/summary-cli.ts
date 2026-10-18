@@ -20,7 +20,7 @@ function main() {
       + 'node apps/server/dist/engineering/summary-cli.js [--config PATH] [--database PATH] [--wiki-database PATH]\n'
       + 'Source mode: node_modules/.bin/tsx apps/server/src/engineering/summary-cli.ts [same options]\n'
       + 'Reads explicit metadata columns from existing SQLite databases; never starts the backend or migrates a database.\n'
-      + 'Reads configured project paths and retained UTC yesterday activity; no profiles or auth state are exported.\nExit 0: complete; exit 2: partial/unavailable sources; exit 1: invalid invocation/config.');
+      + 'Reads configured project paths; no profiles or auth state are exported.\nExit 0: complete; exit 2: partial/unavailable sources; exit 1: invalid invocation/config.');
     return;
   }
   let database = values.database;
