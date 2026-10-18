@@ -4,7 +4,7 @@ Agents create Git worktrees for isolated edits. Before October 15, 2026 nothing 
 
 `scripts/worktree-sweep.mjs` takes inventory of every linked worktree in the repositories that Console knows about. It also removes the ones nobody can still use, deletes local branches whose work has landed (see [Branches](#branches)), and clears agents' leftover build caches and Docker storage (see [Scratch space and Docker](#scratch-space-and-docker)). It reads Console state read-only and changes nothing in Console.
 
-By October 18, 2026 the repositories held 768 local branches, because worktree removal kept every branch. Most came from lane-per-delivery programs; 275 held only work already in a kept branch.
+By October 18, 2026 the repositories held 773 local branches, because worktree removal kept every branch. Most came from lane-per-delivery programs. The first run with branch retirement, at 21:45 UTC that day, deleted 240 branches whose work was already in a kept branch and 15 expired snapshots, with no failures.
 
 ## What the sweep protects
 
