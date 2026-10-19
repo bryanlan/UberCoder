@@ -811,6 +811,41 @@ describe('assignment coordination', () => {
     expect(wikiTool.inputSchema.required).toContain('checkout');
   });
 
+  it('registers a Grok process that inherited the Claude hook as grok', async () => {
+    const { root, checkout, db, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const helper = path.resolve('..', '..', 'scripts', 'agent-coord.mjs');
+    const configPath = path.join(root, 'host-config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ runtimeDir: root, coordination: { enabled: true, pilotPaths: [checkout] } }));
+    const parent = [
+      'import ctypes, os, subprocess, sys',
+      'libc = ctypes.CDLL(None)',
+      'if libc.prctl(15, b"grok", 0, 0, 0) != 0: raise SystemExit("prctl failed")',
+      'if open("/proc/self/comm").read().strip() != "grok": raise SystemExit("comm was not grok")',
+      'sys.stderr.write(f"parent-pid={os.getpid()}\\n")',
+      'sys.stderr.flush()',
+      'raise SystemExit(subprocess.run(sys.argv[1:], input=sys.stdin.read(), text=True).returncode)',
+    ].join('\n');
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn('python3', ['-c', parent, process.execPath, helper, 'hook', 'claude'], {
+        env: { ...process.env, CODEX_THREAD_ID: '', AGENT_COORD_RUNTIME: root, AGENT_CONSOLE_CONFIG: configPath },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stdout = ''; let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+      child.stdin.end(JSON.stringify({ sessionId: nativeSessionId, cwd: checkout, hook_event_name: 'SessionStart' }));
+    });
+    expect(result.code, `${result.stderr}\n${result.stdout}`).toBe(0);
+    expect(result.stdout).not.toContain('Agent coordination unavailable');
+    const parentPid = Number(result.stderr.match(/parent-pid=(\d+)/)?.[1]);
+    expect(db.sqlite.prepare('select provider, native_session_id, pid from coordination_assignments').get())
+      .toEqual({ provider: 'grok', native_session_id: nativeSessionId, pid: parentPid });
+  });
+
   it('reports malformed configuration without blocking lifecycle hooks', () => {
     const { root, checkout } = fixture();
     const config = path.join(root, 'broken-config.json'); fs.writeFileSync(config, '{broken');

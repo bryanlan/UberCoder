@@ -16,6 +16,7 @@ let hookDeadline;
 let hookStarted;
 let hookEvent;
 const hookEvents = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'];
+const providerNames = new Set(['codex', 'claude', 'grok']);
 const actions = ['status', 'history', 'update', 'send', 'ack', 'finish'];
 const wikiActions = ['list', 'search', 'read', 'history', 'write'];
 const grantActions = ['list', 'record', 'request', 'launch', 'restart', 'close', 'cancel', 'launch_status'];
@@ -39,12 +40,25 @@ function processInfo(pid) {
 function owner() {
   let item = processInfo(process.ppid);
   while (item && item.pid > 1) {
-    if (/^(codex|claude)$/.test(item.name)) return item;
+    if (providerNames.has(item.name)) return item;
     const locator = path.join(directory, 'owners', `${item.pid}-${item.start}.json`);
     if (fs.existsSync(locator)) return item;
     item = processInfo(item.parent);
   }
   throw new Error('No registered agent process found. Start the provider with coordination hooks enabled.');
+}
+
+function hookProvider(requested, processOwner) {
+  // The live process name is the provider. Grok loads Claude's installed hook
+  // command (`hook claude`); recording that process as Claude would publish the wrong identity.
+  if (providerNames.has(processOwner.name)) return processOwner.name;
+  if (providerNames.has(requested)) return requested;
+  throw new Error(`Unsupported coordination provider: ${requested ?? 'missing'}`);
+}
+
+function hookSession(input) {
+  if (!input.session_id && typeof input.sessionId === 'string') input.session_id = input.sessionId;
+  return input;
 }
 
 function writePrivate(file, value, createOnly = false) {
@@ -236,15 +250,17 @@ async function main() {
   if (action === 'hook') {
     hookStarted = performance.now();
     hookDeadline = hookStarted + 2400;
-    const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+    const input = hookSession(JSON.parse(fs.readFileSync(0, 'utf8')));
     hookEvent = input.hook_event_name;
     // Ignore uninstalled events before touching config, credentials or the server.
     // An existing provider may still hold its old PreToolUse definition in memory.
     if (!hookEvents.includes(input.hook_event_name)) return;
     loadConfiguration();
     if (!process.env.AGENT_COORD_RUNTIME && !hostConfig.coordination?.enabled) return;
-    if (input.hook_event_name === 'Stop' || input.hook_event_name === 'SessionEnd') await runHook(process.argv[3], input);
-    else await withSessionDelivery(process.argv[3], input.session_id, () => runHook(process.argv[3], input));
+    if (!input.session_id) throw new Error('Coordination hook received no session id.');
+    const provider = hookProvider(process.argv[3], owner());
+    if (input.hook_event_name === 'Stop' || input.hook_event_name === 'SessionEnd') await runHook(provider, input);
+    else await withSessionDelivery(provider, input.session_id, () => runHook(provider, input));
     recordCoordinationTelemetry(path.dirname(directory), { kind: 'hook', event: hookEvent,
       outcome: 'ok', durationMs: performance.now() - hookStarted });
     return;

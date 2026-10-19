@@ -13,10 +13,13 @@ import { dispatchGrants } from '../grants/transport.js';
 import type { AgentSessionLaunches } from '../grants/session-launches.js';
 
 const text = z.string().trim().min(1);
+// Grok is a coordination identity only. Console session providers stay PROVIDERS,
+// so Grok is not launched, pasted into, or indexed as a Console conversation.
+const coordinationProviders = ['codex', 'claude', 'grok'] as const;
 const inputSchema = z.object({
   action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
-  provider: z.enum(['codex', 'claude']).optional(), nativeSessionId: text.max(160).optional(),
+  provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   consoleSessionId: z.string().uuid().optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
