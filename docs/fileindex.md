@@ -56,6 +56,10 @@
 - `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
 - `apps/server/src/lib/conversation-summary.ts` - synthetic bound-conversation summaries and shared
   activity-date selection for tree placeholders and live search, excluding maintenance timestamps.
+- `apps/server/src/lib/conversation-title.ts` - one write path for chosen titles (renames and generated
+  titles): title override, search title, bound-session title and tree refresh event.
+- `apps/server/src/titles/service.ts` - first-message GPT-6 Luna titles for chats created in the Console,
+  with their durable `titleGeneration` state on the pending record.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor
   transcript discovery and launch command adapters; Codex pending adoption prefilters decoded JSONL

@@ -9,7 +9,7 @@ import { WorkerPanelService } from '../src/workers/service.js';
 import { WorkerSnapshotStore } from '../src/workers/snapshot-store.js';
 import { WorkerUserActivity, WORKER_IDLE_MS } from '../src/workers/user-activity.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
-import { SharedSummaryRuntime, parseRuntimeResult, parseProjectResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
+import { SharedSummaryRuntime, parseRuntimeResult, parseProjectResult, parseTitleResult, type SummaryResult, type SummaryRunner } from '../src/workers/runtime.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -103,6 +103,15 @@ describe('one project overview per conversation', () => {
     for (const text of ['An unfinished thought', 'A multi-line\nproject.', 'An excessively lengthy description of the whole project.']) {
       expect(parseProjectResult(envelope(text))).toEqual({ text: null, usage });
     }
+  });
+  it('accepts only a single-line conversation title of at most five words', () => {
+    const envelope = (title: string) => ({ ok: true, response_text: JSON.stringify({ title }), llm_usage: {
+      available: true, input_tokens: 20, cache_read_tokens: 5, cache_creation_tokens: 2, output_tokens: 3, total_tokens: 30 } });
+    expect(parseTitleResult(envelope(' Fix Login Redirect Loop '))).toEqual({ title: 'Fix Login Redirect Loop', usage });
+    for (const title of ['', 'One Two Three Four Five Six', 'Two\nLines', 'Double  Space']) {
+      expect(parseTitleResult(envelope(title))).toEqual({ title: null, usage });
+    }
+    expect(parseTitleResult({ ok: false })).toEqual({ title: null, usage: null });
   });
 });
 

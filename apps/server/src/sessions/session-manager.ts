@@ -1782,12 +1782,18 @@ export class SessionManager {
         || conversation.summary.rawMetadata?.forkedFromId))) return;
       const owner = this.db.boundSessions.getRestorableByConversation(project.slug, providerId, nativeSessionId);
       if (owner && owner.id !== session.id) return;
-      this.db.conversationIndex.upsert({ ...conversation.summary, title: session.title ?? conversation.summary.title });
+      // A launcher chose its session's title. A human-created chat's session title is only its
+      // "New … conversation" placeholder, which must not mask the transcript's title once it has a first message.
+      const hasFirstMessage = typeof conversation.summary.rawMetadata?.firstUserTextHash === 'string';
+      const summary = session.title && (session.launchContext || !hasFirstMessage)
+        ? { ...conversation.summary, title: session.title }
+        : conversation.summary;
+      this.db.conversationIndex.upsert(summary);
       if (session.launchContext && session.title) this.db.titleOverrides.set(project.slug, providerId, nativeSessionId, session.title, nowIso());
       const pending = this.db.pendingConversations.get(session.conversationRef);
       if (pending) {
         const adoption = adoptPendingConversation({ db: this.db, projectSlug: project.slug, providerId,
-          pendingRef: pending.ref, matchedConversation: { ...conversation.summary, title: session.title ?? conversation.summary.title } });
+          pendingRef: pending.ref, matchedConversation: summary });
         if (adoption.reboundSession) this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
       } else if (session.conversationRef.startsWith('pending:')) {
         const adopted = { ...session, conversationRef: nativeSessionId, resumeConversationRef: nativeSessionId, updatedAt: nowIso() };

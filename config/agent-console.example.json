@@ -12,6 +12,10 @@
     "enabled": true,
     "runtimeCommand": ["~/.local/bin/agent-consult"]
   },
+  "conversationTitles": {
+    "enabled": true,
+    "runtimeCommand": ["~/.local/bin/agent-consult"]
+  },
   "coordination": {
     "enabled": false,
     "pilotPaths": []

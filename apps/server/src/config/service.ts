@@ -47,6 +47,7 @@ export class ConfigService {
       runtimeDir: normalizeFsPath(config.runtimeDir),
       databasePath: normalizeFsPath(config.databasePath),
       workerSummaries: { ...config.workerSummaries, runtimeCommand: config.workerSummaries.runtimeCommand.map(expandHome) },
+      conversationTitles: { ...config.conversationTitles, runtimeCommand: config.conversationTitles.runtimeCommand.map(expandHome) },
       coordination: { ...config.coordination, pilotPaths: config.coordination.pilotPaths.map(normalizeFsPath) },
       projects: Object.fromEntries(Object.entries(config.projects).map(([key, project]) => [
         key,

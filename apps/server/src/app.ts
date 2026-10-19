@@ -44,6 +44,7 @@ import { WorkerPanelService } from './workers/service.js';
 import { WorkerSnapshotStore } from './workers/snapshot-store.js';
 import { WorkerUserActivity } from './workers/user-activity.js';
 import { registerWorkerRoutes } from './workers/routes.js';
+import { ConversationTitleService } from './titles/service.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -102,6 +103,11 @@ export async function buildApp(options: AppOptions = {}) {
     new SharedSummaryRuntime(config.workerSummaries.runtimeCommand, path.join(workerDirectory, 'runs')),
     new WorkerSummaryAudit(workerDirectory), new WorkerSnapshotStore(workerDirectory), new WorkerUserActivity(db.meta, eventBus), db.meta, config.workerSummaries.enabled, Date.now,
     (enabled) => configService.setWorkerTracking(enabled));
+  const titles = config.conversationTitles.enabled
+    ? new ConversationTitleService(db, eventBus, new SharedSummaryRuntime(config.conversationTitles.runtimeCommand,
+      path.join(config.runtimeDir, 'conversation-titles', 'runs'), 'conversation-title'),
+    (error) => app.log.warn({ err: error }, 'Conversation title generation failed.'))
+    : undefined;
   await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Initial wiki backup failed.'));
   const restartService = new RestartService(() => app.close());
 
@@ -205,6 +211,7 @@ export async function buildApp(options: AppOptions = {}) {
   app.addHook('onClose', async () => {
     await agentLaunches.stop();
     await workers.stop();
+    await titles?.stop();
     stopTelemetry?.();
     if (coordinationTimer) clearInterval(coordinationTimer);
     await wakeAlerts.stop();

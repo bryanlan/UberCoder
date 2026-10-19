@@ -418,7 +418,17 @@ user's actual prompt.
   clamps the displayed width without overwriting the saved preference; mobile keeps its existing drawer.
 - Conversation rename opens a focused, empty field. Saving a nonempty name uses the existing
   server-owned title override; cancelling leaves the current title intact.
-- Generated conversation titles retain up to 288 characters. Sidebar and search titles use a
+- A chat created with New Codex/Claude conversation starts with `titleGeneration: awaiting_message`
+  on its pending record. Its first human message (not a slash command, picker number or
+  coordination wake) asks the shared `agent-consult` runtime for a GPT-6 Luna title of at most five
+  words, through the worker panel's data-only, account-OAuth path. The title becomes the title
+  override only if none exists, so a rename wins. The state then becomes `ready`, `failed` or
+  `skipped`; a failed or interrupted call is not retried, and its usage is not in the worker-panel
+  footer. Agent-launched sessions keep their launcher's title. `conversationTitles` configures it.
+- Native registration can adopt a new chat before its first message. The index row shows the
+  session's placeholder title only until the transcript has a first user message; afterwards
+  registration, including on resume, keeps the transcript title.
+- Transcript-derived conversation titles retain up to 288 characters. Sidebar and search titles use a
   wrapped, viewport-constrained hover tooltip after 167 ms; it renders outside the scrolling
   sidebar so the expanded text is not clipped. Escape, scrolling, navigation, and pointer exit
   dismiss the tooltip. Parser-version invalidation regenerates older 72-character titles on
