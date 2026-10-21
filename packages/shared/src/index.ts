@@ -120,6 +120,8 @@ export interface ConversationSummary {
   branch?: string;
   isBound: boolean;
   boundSessionId?: string;
+  /** Most recent ended Console binding, derived from retained session records. */
+  lastClosedAt?: string;
   degraded: boolean;
   model?: string;
   statusKind?: 'run-failure';
@@ -248,6 +250,8 @@ export interface BoundSession {
   manualSuspendedAt?: string;
   /** Automatically suspended during low available memory; selecting the conversation resumes it. */
   pressureSuspendedAt?: string;
+  /** Automatically asleep after the loaded idle window. */
+  idleSuspendedAt?: string;
   isWorking?: boolean;
   queuedInputs?: SessionQueuedInput[];
   pid?: number | null;
@@ -256,7 +260,7 @@ export interface BoundSession {
 }
 
 export function isBoundSessionSuspended(session: BoundSession | undefined): boolean {
-  return Boolean(session?.manualSuspendedAt || session?.pressureSuspendedAt);
+  return Boolean(session?.manualSuspendedAt || session?.pressureSuspendedAt || session?.idleSuspendedAt);
 }
 
 export interface SessionInputRequest {
@@ -555,3 +559,13 @@ export interface AgentLaunchContext {
   supervisorId: string;
 }
 export interface AgentGrantsSnapshot { grants: AgentGrant[]; uses: AgentGrantUse[]; nextUseOffset: number | null }
+
+export interface AgentSessionRequest {
+  id: string; assignmentId: string; grantId: string; action: AgentGrantAction;
+  status: 'queued' | 'starting' | 'completed' | 'failed' | 'cancelled';
+  sessionId: string; title?: string; reason: string | null; updatedAt: string;
+}
+export interface AgentSessionRequests {
+  requests: AgentSessionRequest[]; availableBytes?: number; requiredBytes: number;
+}
+export interface AgentSessionCancellation extends AgentSessionRequests { cancelled: boolean; reason?: string }

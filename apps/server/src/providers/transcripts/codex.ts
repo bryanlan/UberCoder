@@ -291,6 +291,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
   let originator: string | undefined;
   let source: string | undefined;
   let threadSource: string | undefined;
+  let forkedFromId: string | undefined;
 
   for await (const { index, record } of iterateJsonlRecords(input.filePath)) {
     if (shouldCollectPathMetadata) {
@@ -302,6 +303,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
       originator ??= typeof payload?.originator === 'string' ? payload.originator : undefined;
       source ??= typeof payload?.source === 'string' ? payload.source : undefined;
       threadSource ??= typeof payload?.thread_source === 'string' ? payload.thread_source : undefined;
+      forkedFromId ??= typeof payload?.forked_from_id === 'string' ? payload.forked_from_id : undefined;
     }
     const extracted = extractCodexMessage(record);
     if (!extracted) continue;
@@ -341,6 +343,7 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
       originator,
       source,
       threadSource,
+      forkedFromId,
     },
   });
 }

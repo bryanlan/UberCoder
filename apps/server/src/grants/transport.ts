@@ -28,13 +28,16 @@ export async function dispatchGrants(coordination: CoordinationService, grants: 
     case 'close':
       if (!launches) throw new Error('Session controls are unavailable.');
       return launches.request(input.assignmentId, 'close_session', input);
+    case 'cancel':
+      if (!launches || !input.requestId) throw new Error('requestId and session controls are required.');
+      return launches.cancel(input.requestId, input.assignmentId);
     case 'launch_status':
       if (!launches) throw new Error('Session launches are unavailable.');
       return launches.status(input.assignmentId, input.requestId);
   }
 }
 
-export function registerGrantRoutes(app: FastifyInstance, auth: AuthService, grants: GrantService, push: GrantPushService): void {
+export function registerGrantRoutes(app: FastifyInstance, auth: AuthService, grants: GrantService, push: GrantPushService, launches: AgentSessionLaunches): void {
   app.get('/api/grants', async (request, reply) => {
     await auth.ensureAuthenticated(request, reply);
     const query = z.object({ useOffset: z.coerce.number().int().nonnegative().default(0) }).parse(request.query);
@@ -52,6 +55,16 @@ export function registerGrantRoutes(app: FastifyInstance, auth: AuthService, gra
     const { grantId } = z.object({ grantId: z.string().uuid() }).parse(request.params);
     try { return { grant: grants.revoke(grantId) }; }
     catch (error) { return reply.code(404).send({ error: error instanceof Error ? error.message : 'Grant not found.' }); }
+  });
+  app.get('/api/grants/session-requests', async (request, reply) => {
+    await auth.ensureAuthenticated(request, reply);
+    return launches.snapshot();
+  });
+  app.post('/api/grants/session-requests/:requestId/cancel', async (request, reply) => {
+    await auth.ensureAuthenticated(request, reply);
+    const { requestId } = z.object({ requestId: z.string().uuid() }).parse(request.params);
+    try { return launches.cancel(requestId); }
+    catch (error) { return reply.code(404).send({ error: error instanceof Error ? error.message : 'Unknown session request.' }); }
   });
   app.get('/api/grants/push-key', async (request, reply) => { await auth.ensureAuthenticated(request, reply); return { publicKey: push.publicKey() }; });
   app.post('/api/grants/push-subscriptions', async (request, reply) => {

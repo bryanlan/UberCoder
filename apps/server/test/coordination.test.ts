@@ -57,6 +57,30 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it.each(['codex', 'claude'])('reopens the same finished %s agent reference on its next human prompt', async provider => {
+    const { root, checkout, db, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID(), sessionId = randomUUID();
+    const registered = await runHelper(root, checkout, ['register'], { provider, nativeSessionId, pid: process.pid, cwd: checkout });
+    const assignmentId = JSON.parse(registered.stdout).assignmentId;
+    const now = new Date().toISOString();
+    const conversation = { projectSlug: 'demo', provider, conversationRef: nativeSessionId };
+    db.boundSessions.upsert({ ...conversation, provider: provider as 'codex' | 'claude', id: sessionId,
+      status: 'bound', shouldRestore: true, tmuxSessionName: 'fixture-only', startedAt: now, updatedAt: now });
+    service.finish(assignmentId, 'The previous human task is complete.');
+    expect(service.conversationReference(conversation).recipientId).toBe(assignmentId);
+    expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
+    const result = await runHelper(root, checkout, ['hook', provider], {
+      session_id: nativeSessionId, cwd: checkout, hook_event_name: 'UserPromptSubmit',
+    });
+    expect(result.code).toBe(0);
+    expect(result.stdout).not.toContain('Agent coordination unavailable');
+    expect(service.conversationReference(conversation).recipientId).toBe(assignmentId);
+    expect(service.agentStatus(assignmentId).assignment?.status).toBe('active');
+    expect(service.agentStatus(assignmentId).assignment?.continuation).toBe('waiting_for_input');
+    expect(db.sqlite.prepare('select count(*) as n from coordination_messages').get()).toEqual({ n: 0 });
+  });
+
   it('shares one hook deadline across calls and records an abandoned offer exactly once', async () => {
     const { root, checkout, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
@@ -780,10 +804,46 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
+    expect(tool.inputSchema.properties.awaiting).toMatchObject({ type: ['string', 'null'], maxLength: 500 });
     const wikiTool = JSON.parse(result.stdout).result.tools[1];
     expect(wikiTool.name).toBe('agent_wiki');
     expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);
     expect(wikiTool.inputSchema.required).toContain('checkout');
+  });
+
+  it('registers a Grok process that inherited the Claude hook as grok', async () => {
+    const { root, checkout, db, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const helper = path.resolve('..', '..', 'scripts', 'agent-coord.mjs');
+    const configPath = path.join(root, 'host-config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ runtimeDir: root, coordination: { enabled: true, pilotPaths: [checkout] } }));
+    const parent = [
+      'import ctypes, os, subprocess, sys',
+      'libc = ctypes.CDLL(None)',
+      'if libc.prctl(15, b"grok", 0, 0, 0) != 0: raise SystemExit("prctl failed")',
+      'if open("/proc/self/comm").read().strip() != "grok": raise SystemExit("comm was not grok")',
+      'sys.stderr.write(f"parent-pid={os.getpid()}\\n")',
+      'sys.stderr.flush()',
+      'raise SystemExit(subprocess.run(sys.argv[1:], input=sys.stdin.read(), text=True).returncode)',
+    ].join('\n');
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn('python3', ['-c', parent, process.execPath, helper, 'hook', 'claude'], {
+        env: { ...process.env, CODEX_THREAD_ID: '', AGENT_COORD_RUNTIME: root, AGENT_CONSOLE_CONFIG: configPath },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stdout = ''; let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stdout, stderr }));
+      child.stdin.end(JSON.stringify({ sessionId: nativeSessionId, cwd: checkout, hook_event_name: 'SessionStart' }));
+    });
+    expect(result.code, `${result.stderr}\n${result.stdout}`).toBe(0);
+    expect(result.stdout).not.toContain('Agent coordination unavailable');
+    const parentPid = Number(result.stderr.match(/parent-pid=(\d+)/)?.[1]);
+    expect(db.sqlite.prepare('select provider, native_session_id, pid from coordination_assignments').get())
+      .toEqual({ provider: 'grok', native_session_id: nativeSessionId, pid: parentPid });
   });
 
   it('reports malformed configuration without blocking lifecycle hooks', () => {

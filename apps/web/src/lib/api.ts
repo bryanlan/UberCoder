@@ -1,5 +1,5 @@
 import type {
-  AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot,
+  AgentGrant, AgentGrantDefinition, AgentGrantsSnapshot, AgentReference,
   AuthState,
   ImageAttachment,
   BoundSession,
@@ -106,6 +106,9 @@ async function request<T>(input: string, init: RequestInit = {}, csrfToken?: str
 }
 
 export const api = {
+  sessionRequests: () => request<import('@agent-console/shared').AgentSessionRequests>('/api/grants/session-requests'),
+  cancelSessionRequest: (id: string, csrfToken?: string) => request<import('@agent-console/shared').AgentSessionCancellation>(
+    `/api/grants/session-requests/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: '{}' }, csrfToken),
   grants: (useOffset = 0) => request<AgentGrantsSnapshot>(`/api/grants?useOffset=${useOffset}`),
   decideGrant: (id: string, decision: 'approve' | 'deny', definition?: AgentGrantDefinition, csrfToken?: string) =>
     request<{ grant: AgentGrant }>(`/api/grants/${encodeURIComponent(id)}/decision`, { method: 'POST', body: JSON.stringify({ decision, definition }) }, csrfToken),
@@ -132,6 +135,8 @@ export const api = {
   login: (password: string) => request<AuthState>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: (csrfToken?: string) => request<void>('/api/auth/logout', { method: 'POST', body: '{}' }, csrfToken),
   tree: () => request<TreeResponse>('/api/projects/tree'),
+  agentReference: (reference: { projectSlug: string; provider: string; conversationRef: string }) =>
+    request<AgentReference>(`/api/agent-reference?${new URLSearchParams(reference)}`),
   wikiList: (projectSlug: string, offset = 0) => request<WikiListResponse>(
     `/api/wiki/${encodeURIComponent(projectSlug)}/pages?offset=${offset}`,
   ),

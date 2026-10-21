@@ -78,9 +78,11 @@ for (const provider of ['codex', 'claude'] as const) {
     await textbox.press('Enter');
     await expect.poll(() => calls.delivered).toBe(1);
     await expect(textbox).toHaveValue('');
+    const submissionId = calls.input[0]?.body.submissionId;
+    expect(submissionId).toEqual(expect.any(String));
     expect(calls.input).toEqual([
-      { token: 'old-token', body: { text: draft, keys: ['Enter'], submittedText: draft } },
-      { token: 'new-token', body: { text: draft, keys: ['Enter'], submittedText: draft } },
+      { token: 'old-token', body: { text: draft, keys: ['Enter'], submittedText: draft, submissionId } },
+      { token: 'new-token', body: { text: draft, keys: ['Enter'], submittedText: draft, submissionId } },
     ]);
     expect(calls.auth).toBe(calls.initialAuthReads + 1);
     expect(calls.navigations).toBe(1);

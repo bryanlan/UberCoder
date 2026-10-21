@@ -49,6 +49,10 @@ function shouldHideClaudeDisplayMessage(message: NormalizedMessage): boolean {
 }
 
 function extractClaudeMessage(record: Record<string, unknown>): { role: NormalizedMessage['role']; text: string } | undefined {
+  // API request blobs copy model context, including earlier messages and injected
+  // instructions. They are not new turns and carry no conversation timestamp.
+  if (record.type === 'api-request-blob') return undefined;
+
   const progressEnvelope = asObject(asObject(record.data)?.message);
   if (progressEnvelope) {
     const nestedMessage = asObject(progressEnvelope.message) ?? progressEnvelope;

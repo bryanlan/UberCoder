@@ -183,7 +183,7 @@ This is not a generic localhost gateway.
 Core tests cover:
 
 - config parsing and config merge behavior
-- project discovery
+- explicit project configuration and tree refresh
 - provider history discovery
 - command construction
 - proxy allowlisting
@@ -235,11 +235,10 @@ If a transcript schema changes and the parser cannot fully normalize it:
 ## What is intentionally out of scope in v1
 
 - exact recreation of Codex CLI or Claude Code TUIs
-- issue/worktree/task queue abstractions
+- a general issue tracker or task-management product (assignment coordination and guarded worktree maintenance are implemented; see `docs/agent-coordination.md` and `docs/worktree-lifecycle.md`)
 - multi-user collaboration
 - arbitrary terminal multiplexing unrelated to Codex/Claude
 - cloud-hosted backend
-- full-text search across all transcripts
 
 ## Notes on validation in this environment
 

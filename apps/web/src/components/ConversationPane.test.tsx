@@ -3,8 +3,9 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
-import { ConversationPane } from './ConversationPane';
+import { ConversationPane, type MobileInputPanel } from './ConversationPane';
 import { api } from '../lib/api';
+import { CONVERSATION_DRAG_TYPE } from '../features/conversation/agent-reference';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
 
@@ -176,9 +177,11 @@ function timeline(input: {
 }
 
 function renderPane(input: {
+  mobileInputPanel?: MobileInputPanel;
+  onCloseMobileInput?: () => void;
   inputText?: string;
   inputActive?: boolean;
-  mobileControlsHidden?: boolean;
+  messages?: NormalizedMessage[];
   screenContent?: string;
   screenContentAnsi?: string;
   screenStatus?: string;
@@ -205,6 +208,7 @@ function renderPane(input: {
         timeline={timeline({
           inputText: input.inputText,
           inputActive: input.inputActive,
+          messages: input.messages,
           screenContent: input.screenContent,
           screenContentAnsi: input.screenContentAnsi,
           screenStatus: input.screenStatus,
@@ -216,10 +220,10 @@ function renderPane(input: {
         onRetryResume={vi.fn()}
         loading={false}
         workMode={false}
+        mobileInputPanel={input.mobileInputPanel}
+        onCloseMobileInput={input.onCloseMobileInput}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={input.mobileControlsHidden ?? false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={input.onSuspend ?? vi.fn()}
@@ -305,8 +309,6 @@ it('submits a busy-session profile immediately and does not carry its server que
         workMode={false}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
@@ -364,8 +366,6 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         workMode={false}
         mobileChromeHidden={false}
         onToggleMobileChrome={vi.fn()}
-        mobileControlsHidden={false}
-        onToggleMobileControls={vi.fn()}
         onBind={vi.fn()}
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
@@ -415,6 +415,74 @@ it('cancels the exact server-owned queued profile request', async () => {
 });
 
 describe('ConversationPane live input bridge', () => {
+  it.each(['codex', 'claude'] as const)('inserts a dropped agent into the %s draft at the selection without sending', async provider => {
+    const resolved = { recipientId: 'peer-assignment', title: 'Review agent', provider: 'claude', projectSlug: 'another-project', conversationRef: 'peer-chat' };
+    const lookup = vi.spyOn(api, 'agentReference').mockResolvedValue(resolved);
+    const { onSendKeystrokes } = renderPane({ sessionOverrides: { provider } });
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'Before REPLACE after' } });
+    textbox.setSelectionRange(7, 14);
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'another-project', provider: 'claude', conversationRef: 'peer-chat' }) } });
+    await waitFor(() => expect(textbox.value).toContain('recipientId=peer-assignment'));
+    expect(textbox.value).toMatch(/^Before \[Agent "Review agent"/);
+    expect(textbox.value).toMatch(/\n after$/);
+    expect(textbox.value).not.toContain('REPLACE');
+    expect(lookup).toHaveBeenCalledWith({ projectSlug: 'another-project', provider: 'claude', conversationRef: 'peer-chat' });
+    expect(onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('retains the draft when the dropped chat has no available agent or a malformed payload', async () => {
+    const lookup = vi.spyOn(api, 'agentReference').mockRejectedValue(new Error('This chat has no connected agent.'));
+    const { onSendKeystrokes } = renderPane();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'Keep this draft' } });
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'peer' }) } });
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no connected agent'));
+    expect(textbox).toHaveValue('Keep this draft');
+    lookup.mockClear();
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => 'not json' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('invalid');
+    expect(textbox).toHaveValue('Keep this draft');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('discards a reference lookup when its composer is replaced during the request', async () => {
+    const result = deferred<Awaited<ReturnType<typeof api.agentReference>>>();
+    const lookup = vi.spyOn(api, 'agentReference').mockReturnValue(result.promise);
+    const first = renderPane();
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Original draft' } });
+    fireEvent.drop(screen.getByRole('textbox'), { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'peer' }) } });
+    first.unmount();
+    const second = renderPane({ sessionOverrides: { id: 'replacement-session' } });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'New composer draft' } });
+    await act(async () => result.resolve({ recipientId: 'stale-peer', title: 'Old reference', provider: 'codex', projectSlug: 'demo', conversationRef: 'peer' }));
+    expect(textbox).toHaveValue('New composer draft');
+    expect(first.onSendKeystrokes).not.toHaveBeenCalled();
+    expect(second.onSendKeystrokes).not.toHaveBeenCalled();
+    fireEvent.change(textbox, { target: { value: '' } });
+    lookup.mockRestore();
+  });
+
+  it('types a dropped reference through Text Bypass without submitting Enter', async () => {
+    const lookup = vi.spyOn(api, 'agentReference').mockResolvedValue({ recipientId: 'bypass-peer', title: 'Helper', provider: 'codex', projectSlug: 'demo', conversationRef: 'helper' });
+    const { onSendKeystrokes } = renderPane();
+    const textbox = screen.getByRole('textbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.drop(textbox, { dataTransfer: { types: [CONVERSATION_DRAG_TYPE], getData: () => JSON.stringify({ projectSlug: 'demo', provider: 'codex', conversationRef: 'helper' }) } });
+    await waitFor(() => expect((textbox as HTMLTextAreaElement).value).toContain('recipientId=bypass-peer'));
+    await waitFor(() => expect(onSendKeystrokes).toHaveBeenCalled());
+    expect(onSendKeystrokes).toHaveBeenLastCalledWith('session-1', { text: expect.stringContaining('recipientId=bypass-peer'), deferScreenUpdate: true });
+    expect(vi.mocked(onSendKeystrokes).mock.calls.every(([, payload]) => !payload.keys?.includes('Enter'))).toBe(true);
+    lookup.mockRestore();
+  });
+
   it('stops Text Bypass after queue acceptance and keeps the next message local until Enter', async () => {
     const queuedInput = { requestId: 'queued-1', text: 'first message', requestedAt: baseTime,
       state: 'queued' as const, reason: 'Waiting for the session to accept input.' };
@@ -463,8 +531,7 @@ describe('ConversationPane live input bridge', () => {
 
   it.each(['claude', 'codex'] as const)('%s menu buttons send only keys and retain the separate draft', async (provider) => {
     const send = vi.fn().mockResolvedValue({ session: boundSession() });
-    const view = renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send,
-      inputActive: false, mobileControlsHidden: true,
+    const view = renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send, inputActive: false,
       screenContent: 'Select model\n❯ 2. Opus 5.5\nEnter to confirm · Esc to cancel' });
     const textbox = screen.getByRole('textbox');
     fireEvent.change(textbox, { target: { value: 'Switching models before reviewing the plan' } });
@@ -622,7 +689,9 @@ describe('ConversationPane live input bridge', () => {
 
   it('quoted menu instructions at an active composer keep normal chat submission', async () => {
     const send = vi.fn().mockResolvedValue({ session: boundSession() });
-    renderPane({ inputActive: true, screenContent: 'Enter to confirm · Esc to cancel', onSendKeystrokes: send });
+    renderPane({ inputActive: true, sessionOverrides: { isWorking: false },
+      screenContent: 'Enter to confirm · Esc to cancel', onSendKeystrokes: send });
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'This is my chat message' } });
     fireEvent.click(screen.getByRole('button', { name: 'Enter' }));
     await waitFor(() => expect(send).toHaveBeenCalledWith('session-1', {
@@ -645,19 +714,25 @@ describe('ConversationPane live input bridge', () => {
     } finally { localStorage.removeItem('agent-console:live-bridge-height'); }
   });
 
-  it('caps mobile input against the visible viewport and shrinks when the keyboard opens', () => {
+  it('opens mobile input compactly, caps long drafts above the keyboard, and preserves desktop sizing', () => {
     localStorage.setItem('agent-console:live-bridge-height', '600');
     const viewport = Object.assign(new EventTarget(), { height: 600 });
     vi.stubGlobal('visualViewport', viewport);
     vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     try {
-      renderPane();
+      renderPane({ mobileInputPanel: 'reply' });
       const textbox = screen.getByRole('textbox');
-      expect(textbox).toHaveStyle({ height: '180px' });
+      expect(textbox).toHaveStyle({ height: '44px' });
+      Object.defineProperty(textbox, 'scrollHeight', { configurable: true, value: 600 });
+      fireEvent.change(textbox, { target: { value: 'A long mobile draft' } });
+      expect(textbox).toHaveStyle({ height: '112px' });
       viewport.height = 320;
       act(() => { viewport.dispatchEvent(new Event('resize')); });
-      expect(textbox).toHaveStyle({ height: '96px' });
-      expect(screen.getByRole('button', { name: 'Reset input height' })).toBeVisible();
+      expect(parseFloat(textbox.style.height)).toBeLessThanOrEqual(71);
+      expect(textbox).toHaveValue('A long mobile draft');
+      expect(screen.queryByRole('button', { name: 'Reset input height' })).not.toBeInTheDocument();
+      expect(localStorage.getItem('agent-console:live-bridge-height')).toBe('600');
+      fireEvent.change(textbox, { target: { value: '' } });
     } finally {
       vi.unstubAllGlobals();
       localStorage.removeItem('agent-console:live-bridge-height');
@@ -747,8 +822,6 @@ describe('ConversationPane live input bridge', () => {
           workMode={false}
           mobileChromeHidden={false}
           onToggleMobileChrome={vi.fn()}
-          mobileControlsHidden={false}
-          onToggleMobileControls={vi.fn()}
           onBind={vi.fn()}
           onRelease={vi.fn()}
           onSuspend={vi.fn()}
@@ -828,6 +901,8 @@ describe('ConversationPane live input bridge', () => {
 
   it('shows interactive live screen output for terminal pickers', () => {
     renderPane({
+      sessionOverrides: { isWorking: false },
+      inputActive: false,
       inputText: '/model',
       screenContent: [
         'gpt-5.5 default fast · ~/code/demo',
@@ -844,13 +919,21 @@ describe('ConversationPane live input bridge', () => {
     ['Select Model and Effort', 'enter select · esc back'],
     ['Select Reasoning Level for GPT-6-Sol', 'enter default · s session · esc back'],
   ])('shows the current Codex %s picker', (heading, footer) => {
-    renderPane({ screenContent: `${heading}\n› 2. GPT-6-Sol (current)\n${footer}` });
+    renderPane({ inputActive: false, sessionOverrides: { isWorking: false },
+      screenContent: `${heading}\n› 2. GPT-6-Sol (current)\n${footer}` });
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(heading);
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent(footer);
   });
 
+  it('shows a Claude approval menu while the session is idle', () => {
+    renderPane({ inputActive: false, sessionOverrides: { provider: 'claude', isWorking: false },
+      screenContent: 'Do you want to proceed?\n❯ 1. Yes\n2. No\nEnter to confirm · Esc to cancel' });
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('Do you want to proceed?');
+  });
+
   it('shows provider progress while Claude is still thinking', () => {
     renderPane({
+      sessionOverrides: { provider: 'claude', isWorking: true },
       screenContent: [
         '* Fluttering… (6m 29s · almost done thinking with medium effort)',
         '⎿ Tip: Try setting environment variable COLORTERM=truecolor for richer colors',
@@ -863,12 +946,38 @@ describe('ConversationPane live input bridge', () => {
 
   it('shows provider progress when only the status line is active', () => {
     renderPane({
+      sessionOverrides: { isWorking: true },
       screenStatus: '* still thinking with medium effort',
       screenStatusAnsi: '\u001b[33m* still thinking with medium effort\u001b[39m',
     });
 
     expect(screen.queryByText('Waiting for session output…')).not.toBeInTheDocument();
     expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('still thinking with medium effort');
+  });
+
+  it.each([
+    ['codex', 'Enter to confirm · Esc to cancel'],
+    ['claude', 'Enter to confirm · Esc to cancel'],
+    ['codex', '/model choose a different model'],
+    ['claude', '/model choose a different model'],
+  ] as const)('keeps the completed %s answer in chat when it quotes %s', (provider, quotedControl) => {
+    const answer = `The preview is ready. For later changes:\n\n${quotedControl}`;
+    renderPane({
+      sessionOverrides: { provider, isWorking: false },
+      messages: [{ id: 'completed-answer', provider, role: 'assistant', lifecycle: 'durable',
+        text: answer, timestamp: baseTime, conversationRef: 'conversation-1', source: 'history-file' }],
+      screenContent: `${answer}\nBrewed for 10s · done 5:02 AM · 1 shell still running\nTry thinking about the next step.`,
+      screenStatus: '⏵⏵ bypass permissions on · 1 shell · ← for agents · ↓ to manage',
+    });
+
+    expect(screen.getByText('The preview is ready. For later changes:')).toBeVisible();
+    expect(screen.getByText(quotedControl)).toBeVisible();
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
+  });
+
+  it('shows current working output without depending on provider-specific progress words', () => {
+    renderPane({ sessionOverrides: { isWorking: true }, screenContent: 'Inspecting the latest build results.' });
+    expect(screen.getByTestId('live-screen-panel')).toHaveTextContent('Inspecting the latest build results.');
   });
 
   it('mirrors text-bypass typing into the main transcript before submission', async () => {
@@ -886,80 +995,107 @@ describe('ConversationPane live input bridge', () => {
 });
 
 describe('ConversationPane external Claude handoff', () => {
-  it('keeps an external Claude transcript read-only until the user confirms handoff', async () => {
-    const onBind = vi.fn().mockResolvedValue(undefined);
-    const externalTimeline: ConversationTimeline = {
-      conversation: {
-        ref: 'external-claude-chat',
-        kind: 'history',
-        projectSlug: 'demo',
-        provider: 'claude',
-        title: 'Review Waltium business plan',
-        updatedAt: baseTime,
-        isBound: false,
-        degraded: false,
-      },
-      messages: [],
-      boundSession: undefined,
-      liveScreen: undefined,
-      messagePage: { hasOlder: false, total: 0 },
-    };
-    function HandoffPane({ conversationKey }: { conversationKey: string }) {
-      return (
-        <MemoryRouter>
-          <ConversationPane
-            projects={[project()]}
-            project={project()}
-            selectedProvider="claude"
-            timeline={externalTimeline}
-            liveMode={false}
-            onRetryResume={vi.fn()}
-            loading={false}
-            workMode={false}
-            mobileChromeHidden={false}
-            onToggleMobileChrome={vi.fn()}
-            mobileControlsHidden={false}
-            onToggleMobileControls={vi.fn()}
-            onBind={onBind}
-            onRelease={vi.fn()}
-            onSuspend={vi.fn()}
-            onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
-            onSetModelProfile={vi.fn().mockResolvedValue(true)}
-            onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
-            onLocalSubmittedText={vi.fn()}
-            onDiscardLocalSubmittedText={vi.fn()}
-            binding={false}
-            releasing={false}
-            suspending={false}
-            debugOpen={false}
-            onToggleDebug={vi.fn()}
-            rawLoading={false}
-            hasOlderMessages={false}
-            loadingOlderMessages={false}
-            onLoadOlderMessages={vi.fn()}
-            conversationKey={conversationKey}
-            historyPrependVersion={0}
-          />
-        </MemoryRouter>
-      );
-    }
-    const view = render(<HandoffPane conversationKey="demo:claude:external-claude-chat" />);
+  it.each([
+    { name: 'unknown Claude history', closed: false, active: false, mobile: false, workMode: false },
+    { name: 'closed desktop chat', closed: true, active: false, mobile: false, workMode: false },
+    { name: 'closed chat in desktop Work mode', closed: true, active: false, mobile: false, workMode: true },
+    { name: 'closed mobile chat', closed: true, active: false, mobile: true, workMode: false },
+    { name: 'resumed chat with a previous close', closed: true, active: true, mobile: false, workMode: false },
+  ])('offers the correct resume action for $name', async ({ closed, active, mobile, workMode }) => {
+    const media = vi.spyOn(globalThis, 'matchMedia').mockImplementation(query => ({
+      matches: mobile, media: query, onchange: null,
+      addEventListener: vi.fn(), removeEventListener: vi.fn(),
+      addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+    }));
+    try {
+      const onBind = vi.fn().mockResolvedValue(undefined);
+      const externalTimeline: ConversationTimeline = {
+        conversation: {
+          ref: 'external-claude-chat',
+          kind: 'history',
+          projectSlug: 'demo',
+          provider: 'claude',
+          title: 'Review Waltium business plan',
+          updatedAt: baseTime,
+          isBound: active,
+          lastClosedAt: closed ? baseTime : undefined,
+          degraded: false,
+        },
+        messages: [],
+        boundSession: active ? boundSession({ provider: 'claude' }) : undefined,
+        liveScreen: undefined,
+        messagePage: { hasOlder: false, total: 0 },
+      };
+      function HandoffPane({ conversationKey }: { conversationKey: string }) {
+        return (
+          <MemoryRouter>
+            <ConversationPane
+              projects={[project()]}
+              project={project()}
+              selectedProvider="claude"
+              timeline={externalTimeline}
+              liveMode={false}
+              onRetryResume={vi.fn()}
+              loading={false}
+              workMode={workMode}
+              mobileChromeHidden={false}
+              onToggleMobileChrome={vi.fn()}
+              onBind={onBind}
+              onRelease={vi.fn()}
+              onSuspend={vi.fn()}
+              onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
+              onSetModelProfile={vi.fn().mockResolvedValue(true)}
+              onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
+              onLocalSubmittedText={vi.fn()}
+              onDiscardLocalSubmittedText={vi.fn()}
+              binding={false}
+              releasing={false}
+              suspending={false}
+              debugOpen={false}
+              onToggleDebug={vi.fn()}
+              rawLoading={false}
+              hasOlderMessages={false}
+              loadingOlderMessages={false}
+              onLoadOlderMessages={vi.fn()}
+              conversationKey={conversationKey}
+              historyPrependVersion={0}
+            />
+          </MemoryRouter>
+        );
+      }
+      const view = render(<HandoffPane conversationKey="demo:claude:external-claude-chat" />);
 
-    expect(screen.getByText(/This Claude chat is outside Agent Console/)).toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
-    expect(screen.getByRole('dialog')).toHaveTextContent('stop that terminal session first');
-    expect(screen.getByRole('button', { name: 'Start in Agent Console' })).toBeDisabled();
+      if (active) {
+        expect(screen.getByText('Bound')).toBeVisible();
+        expect(screen.queryByText(/This conversation is closed/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^Resume$/ })).not.toBeInTheDocument();
+        return;
+      }
+      if (closed) {
+        expect(screen.getByText(/This conversation is closed/)).toBeVisible();
+        expect(screen.queryByText(/outside Agent Console/)).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Move to Agent Console' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getAllByRole('button', { name: /^Resume$/ })[0]!);
+        await waitFor(() => expect(onBind).toHaveBeenCalledExactlyOnceWith());
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        return;
+      }
+      expect(screen.getByText(/This Claude chat is not currently managed by Agent Console/)).toBeInTheDocument();
+      fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+      expect(screen.getByRole('dialog')).toHaveTextContent('If this chat is running in another terminal, stop that session first');
+      expect(screen.getByRole('button', { name: 'Start in Agent Console' })).toBeDisabled();
 
-    fireEvent.click(screen.getByRole('checkbox'));
-    fireEvent.click(screen.getByRole('button', { name: 'Start in Agent Console' }));
-    await waitFor(() => expect(onBind).toHaveBeenCalledWith({ confirmExternalHandoff: true }));
+      fireEvent.click(screen.getByRole('checkbox'));
+      fireEvent.click(screen.getByRole('button', { name: 'Start in Agent Console' }));
+      await waitFor(() => expect(onBind).toHaveBeenCalledWith({ confirmExternalHandoff: true }));
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
-    fireEvent.click(screen.getByRole('checkbox'));
-    view.rerender(<HandoffPane conversationKey="demo:claude:another-chat" />);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(screen.getAllByRole('button', { name: 'Move to Agent Console' })[0]!);
+      fireEvent.click(screen.getByRole('checkbox'));
+      view.rerender(<HandoffPane conversationKey="demo:claude:another-chat" />);
 
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-    expect(onBind).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(onBind).toHaveBeenCalledTimes(1);
+    } finally { media.mockRestore(); }
   });
 });

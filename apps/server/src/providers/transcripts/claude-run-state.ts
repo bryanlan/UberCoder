@@ -18,10 +18,21 @@ export function claudeRunError(record: Record<string, unknown>): ProviderRunStat
     : typeof record.error === 'string' ? record.error : 'unknown', message: text };
 }
 
+/** Escape writes this user record and ends the turn; no assistant record follows it. */
+function isNativeInterruption(record: Record<string, unknown>): boolean {
+  if (record.type !== 'user' || record.isSidechain === true) return false;
+  const content = (record.message as Record<string, unknown> | undefined)?.content;
+  const parts = typeof content === 'string' ? [content] : Array.isArray(content)
+    ? content.flatMap((part: unknown) => part && typeof part === 'object' && (part as Record<string, unknown>).type === 'text'
+      ? [String((part as Record<string, unknown>).text ?? '')] : [])
+    : [];
+  return parts.length === 1 && /^\[Request interrupted by user(?: for tool use)?\]$/.test(parts[0]!.trim());
+}
+
 /** Claude's user records include tool results. Only a real submitted prompt starts a turn. */
 function isSubmittedPrompt(record: Record<string, unknown>): boolean {
   if (record.type !== 'user' || record.isSidechain === true || record.isMeta === true
-    || record.isCompactSummary === true) return false;
+    || record.isCompactSummary === true || isNativeInterruption(record)) return false;
   const message = record.message as Record<string, unknown> | undefined;
   const content = message?.content;
   if (typeof content === 'string' && content.trim().startsWith('<task-notification>')) return false;
@@ -76,7 +87,11 @@ export class ClaudeRunMonitor implements ProviderRunMonitor {
                 if (this.children.length > 128) this.children.shift();
               }
             }
-            if (timestamp && isSubmittedPrompt(record)) {
+            if (timestamp && isNativeInterruption(record)) {
+              if (this.turnId && this.latest?.turnId === this.turnId && this.latest.status === 'running') {
+                this.latest = { ...this.latest, timestamp, status: 'cancelled' };
+              }
+            } else if (timestamp && isSubmittedPrompt(record)) {
               this.turnId = typeof record.uuid === 'string' ? record.uuid : timestamp;
               this.latest = { turnId: this.turnId, timestamp, startedAt: timestamp, status: 'running' };
             } else if (timestamp && record.type === 'assistant' && record.isSidechain !== true && this.turnId) {

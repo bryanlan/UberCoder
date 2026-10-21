@@ -15,6 +15,8 @@ import { SessionManager } from '../sessions/session-manager.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 import { statFileSafe } from '../providers/file-utils.js';
 import { nowIso } from '../lib/time.js';
+import { saveConversationTitle } from '../lib/conversation-title.js';
+import { TITLE_GENERATION_AWAITING_MESSAGE } from '../titles/service.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
 
 const providerSchema = z.enum(PROVIDERS);
@@ -310,6 +312,7 @@ export async function registerConversationRoutes(
           title: cachedSummary?.title ?? pendingSummary?.title ?? conversation.summary.title,
           isBound: Boolean(cachedSummary?.isBound),
           boundSessionId: cachedSummary?.boundSessionId,
+          lastClosedAt: db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef)?.lastClosedAt,
         };
         visibleMessages = conversation.messages;
         allMessages = conversation.allMessages ?? conversation.messages;
@@ -407,7 +410,8 @@ export async function registerConversationRoutes(
       updatedAt: nowIso(),
       isBound: false,
       degraded: false,
-      rawMetadata: { pending: true },
+      // A generated title replaces the placeholder after the first human message.
+      rawMetadata: { pending: true, titleGeneration: TITLE_GENERATION_AWAITING_MESSAGE },
     };
     try {
       const session = await sessions.bindConversation({
@@ -499,6 +503,7 @@ export async function registerConversationRoutes(
       providerId === 'claude'
       && bindableSummary.kind === 'history'
       && !existingSession?.shouldRestore
+      && !db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef)?.lastClosedAt
       && parsedBody.data.confirmExternalHandoff !== true
     ) {
       reply.code(409).send({
@@ -556,19 +561,12 @@ export async function registerConversationRoutes(
       return;
     }
 
-    const updatedAt = nowIso();
-    const title = parsedBody.data.title.trim();
-    db.titleOverrides.set(projectSlug, providerId, resolvedConversationRef, title, updatedAt);
-    db.searchIndex.updateTitle(projectSlug, providerId, resolvedConversationRef, title);
-
-    const boundSession = db.boundSessions.getRestorableByConversation(projectSlug, providerId, resolvedConversationRef);
-    if (boundSession) {
-      db.boundSessions.upsert({
-        ...boundSession,
-        title,
-        updatedAt,
-      });
-    }
+    saveConversationTitle(db, eventBus, {
+      projectSlug,
+      provider: providerId,
+      conversationRef: resolvedConversationRef,
+      title: parsedBody.data.title.trim(),
+    });
 
     const updatedConversation = resolvedConversationRef.startsWith('pending:')
       ? db.pendingConversations.get(resolvedConversationRef)
@@ -578,14 +576,6 @@ export async function registerConversationRoutes(
       reply.code(500).send({ error: 'Updated conversation could not be loaded.' });
       return;
     }
-
-    eventBus.emit({
-      type: 'conversation.index-updated',
-      projectSlug,
-      provider: providerId,
-      conversationRef: resolvedConversationRef,
-      timestamp: updatedAt,
-    });
 
     return { conversation: updatedConversation };
   });

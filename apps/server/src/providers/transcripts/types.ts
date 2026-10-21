@@ -21,4 +21,5 @@ export interface TranscriptMetadata {
   originator?: string;
   source?: string;
   threadSource?: string;
+  forkedFromId?: string;
 }

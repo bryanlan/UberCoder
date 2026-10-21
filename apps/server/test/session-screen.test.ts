@@ -50,7 +50,7 @@ describe('parseSessionScreenSnapshot', () => {
       '  and then check the result"',
       '────────────────────────────────────────', 'bypass permissions on',
     ].join('\n'));
-    expect(screen.inputText).toBe('Try "edit this file to add a longer example and then check the result"');
+    expect(screen.inputText).toBe('Try "edit this file to add a longer example\nand then check the result"');
   });
 
   it('preserves complete quoted Try text when it is typed rather than dimmed', () => {
@@ -135,7 +135,7 @@ describe('parseSessionScreenSnapshot', () => {
       '• Previous answer', '', '› Inspect these screenshots', ...wrapped,
       'gpt-6.1-sol xhigh · 80% left · ~/demo',
     ].join('\n'));
-    expect(draft.inputText).toBe(['Inspect these screenshots', ...wrapped].join(' '));
+    expect(draft.inputText).toBe(['Inspect these screenshots', ...wrapped].join('\n'));
     expect(draft.content).toContain('Previous answer');
     expect(draft.status).not.toContain('image reference');
     const submitted = parseSessionScreenSnapshot([
@@ -262,7 +262,7 @@ describe('parseSessionScreenSnapshot', () => {
       'gpt-5.4 medium · 98% left · ~/demo',
     ].join('\n'));
 
-    expect(screen.inputText).toBe('draft a long prompt that fills the composer width wrapped prompt text should stay attached to the composer buffer');
+    expect(screen.inputText).toBe('draft a long prompt that fills the composer width\nwrapped prompt text should stay attached to the composer buffer');
     expect(screen.status).toContain('98% left');
     expect(screen.status).not.toContain('wrapped prompt text');
   });
@@ -469,7 +469,7 @@ describe('parseSessionScreenSnapshot', () => {
       '────────────────────────────────────────────────────────────────────────────────',
       '⏵⏵ bypass permissions on (shift+tab to cycle)', '', '  ● main',
     ].join('\n'));
-    expect(screen.inputText).toBe('Please check this again  Here is the second paragraph. It wraps onto another row.');
+    expect(screen.inputText).toBe('Please check this again\n\nHere is the second paragraph.\nIt wraps onto another row.');
     expect(screen.content).toContain('Answer already delivered.');
     expect(screen.content).not.toContain('second paragraph');
     expect(screen.status).toContain('● main');
@@ -484,7 +484,7 @@ describe('parseSessionScreenSnapshot', () => {
       '────────────────────────────────────────────────────────────────────────────────',
       '⏵⏵ bypass permissions on (shift+tab to cycle)',
     ].join('\n'));
-    expect(screen.inputText).toBe('Review the following excerpt  > quoted text ● a bullet in the draft 1. a numbered draft line');
+    expect(screen.inputText).toBe('Review the following excerpt\n\n> quoted text\n● a bullet in the draft\n1. a numbered draft line');
     expect(screen.content).not.toContain('quoted text');
   });
 
@@ -498,7 +498,7 @@ describe('parseSessionScreenSnapshot', () => {
       '────────────────────────────────────────────────────────────────────────────────',
       ...(position === 'before' ? [...roster, footer] : [footer, ...roster]),
     ].join('\n'));
-    expect(screen.inputText).toBe('[Pasted text #2] paste again to expand');
+    expect(screen.inputText).toBe('[Pasted text #2]\npaste again to expand');
     expect(screen.content).not.toContain('Pasted text');
     expect(screen.content).not.toContain('● main');
     expect(screen.status).toContain('general-purpose');

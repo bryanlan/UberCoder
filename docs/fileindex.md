@@ -45,7 +45,6 @@
 
 - `README.md` - key tracked file or entrypoint for this repo.
 - `AGENTS.md` - key tracked file or entrypoint for this repo.
-- `CLAUDE.md` - key tracked file or entrypoint for this repo.
 - `package.json` - key tracked file or entrypoint for this repo.
 - `requirements.txt` - key tracked file or entrypoint for this repo.
 - `package-lock.json` - key tracked file or entrypoint for this repo.
@@ -63,6 +62,10 @@
 - `apps/server/src/indexing/indexing-service.ts` - provider/project conversation indexing and tree refresh.
 - `apps/server/src/lib/conversation-summary.ts` - synthetic bound-conversation summaries and shared
   activity-date selection for tree placeholders and live search, excluding maintenance timestamps.
+- `apps/server/src/lib/conversation-title.ts` - one write path for chosen titles (renames and generated
+  titles): title override, search title, bound-session title and tree refresh event.
+- `apps/server/src/titles/service.ts` - first-message GPT-6 Luna titles for chats created in the Console,
+  with their durable `titleGeneration` state on the pending record.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
 - `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor
   transcript discovery and launch command adapters; Codex pending adoption prefilters decoded JSONL
@@ -132,8 +135,12 @@
   from genuine activity ordering.
 - `apps/web/src/features/navigation/useSidebarWidth.ts` - browser-local desktop sidebar sizing,
   pointer and keyboard resizing, viewport bounds, and saved width restoration.
+- `apps/web/src/features/navigation/useMobileViewport.ts` and `apps/web/src/lib/useMediaQuery.ts` -
+  shared mobile layout selection and visual viewport height/panning while the keyboard is open.
+- `apps/web/e2e/mobile-conversation.spec.ts` - mobile reading, chat switching, per-chat drafts,
+  separate key controls and keyboard viewport/scroll checks with mocked provider input.
 - `apps/web/e2e/sidebar.spec.ts` - browser coverage for sidebar resizing, width persistence,
-  mobile drawer bounds, and the empty conversation rename field.
+  full-screen mobile navigation, and the empty conversation rename field.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
@@ -148,6 +155,7 @@
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
 - `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
+- `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees and landed or expired snapshot branches across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
 - `scripts/verify-live-console.mjs` - opt-in visible-browser check for live Agent Console UX
   against a running backend and Chrome CDP endpoint.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.

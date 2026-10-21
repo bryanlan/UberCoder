@@ -273,3 +273,25 @@ describe('deriveSidebarProjects', () => {
     expect(afterRebind[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['only-history']);
   });
 });
+
+
+describe('mobile active conversations', () => {
+  it('hides every suspension reason, history and projects with no visible chats without changing desktop filtering', () => {
+    const stamp = '2026-10-18T00:00:00Z';
+    const refs = ['ready', 'manual', 'pressure', 'idle', 'history'];
+    const chats = refs.map(ref => conversation({ ref, provider: 'codex', projectSlug: 'alpha', updatedAt: stamp, isBound: ref !== 'history' }));
+    const sessions = refs.slice(0, 4).map(ref => ({
+      ...boundSession({ projectSlug: 'alpha', provider: 'codex', conversationRef: ref }),
+      ...(ref === 'manual' ? { manualSuspendedAt: stamp } : ref === 'pressure' ? { pressureSuspendedAt: stamp } : ref === 'idle' ? { idleSuspendedAt: stamp } : {}),
+    }));
+    const tree: TreeResponse = { projects: [project({ slug: 'alpha', displayName: 'Alpha', codex: chats }), project({ slug: 'empty', displayName: 'Empty' })], boundSessions: sessions };
+    const options = { tree, workMode: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
+    const mobile = deriveSidebarProjects({ ...options, mobileActiveOnly: true });
+    expect(mobile.map(item => item.slug)).toEqual(['alpha']);
+    expect(mobile[0]?.combinedConversations.map(item => item.conversation.ref)).toEqual(['ready']);
+    const desktop = deriveSidebarProjects(options);
+    expect(desktop).toHaveLength(2);
+    expect(desktop[0]?.combinedConversations).toHaveLength(4);
+    expect(tree.projects[0]?.providers.codex.conversations).toHaveLength(5);
+  });
+});

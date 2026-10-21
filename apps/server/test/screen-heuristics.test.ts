@@ -8,6 +8,7 @@ import {
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenAllowsLiteralSelectionWithoutInput,
   screenLooksReadyForLiteralPrompt,
+  screenAcceptsHumanPrompt,
   screenShowsClaudeResumeSessionChoice,
   claudeFullSessionResumeSelection,
   screenShowsInteractiveSelectionHint,
@@ -48,6 +49,28 @@ describe('Native background work indicators', () => {
 });
 
 describe('screen heuristics', () => {
+  it.each([
+    'OpenAI Codex\n• Working (1s • esc to interrupt)\n› \n  GPT-6.1-Sol xhigh · ~/demo',
+    'OpenAI Codex\n• Working (1s • esc to interrupt)\n› \n  tab to queue message',
+  ])('accepts human input while keeping automatic input blocked during native work', (snapshot) => {
+    const parsed = parseSessionScreenSnapshot(snapshot);
+    expect(screenAcceptsHumanPrompt(parsed)).toBe(true);
+    expect(screenLooksReadyForLiteralPrompt(parsed)).toBe(false);
+  });
+
+  it('accepts a human message at Claude\'s composer while tools run', () => {
+    const parsed = parseSessionScreenSnapshot('Claude Code\n✻ Thinking… (1s · esc to interrupt)\n────────────────────\n❯ \n────────────────────\n⏵⏵ bypass permissions on');
+    expect(screenAcceptsHumanPrompt(parsed)).toBe(true);
+  });
+
+  it.each([
+    'Starting MCP servers\n› \n  GPT-6.1-Sol xhigh · ~/demo',
+    'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel · Tab to amend',
+    'OpenAI Codex\n• Working (1s • esc to interrupt)',
+  ])('does not treat startup, approval or a missing composer as human input', (snapshot) => {
+    expect(screenAcceptsHumanPrompt(parseSessionScreenSnapshot(snapshot))).toBe(false);
+  });
+
   it('treats a number in a real composer as chat when older output contains menu controls', () => {
     const ready = parseSessionScreenSnapshot([
       'The startup menu used these controls:', 'Enter to confirm · Esc to cancel',
@@ -85,6 +108,42 @@ describe('screen heuristics', () => {
     expect(screenInputMatchesText(draft, text.replace('1,000', '2,000'))).toBe(false);
     expect(screenInputMatchesText(draft, text.replace('input tokens', 'inputtokens'))).toBe(false);
     expect(screenInputMatchesText(draft, `${text}\n${text}`)).toBe(false);
+  });
+
+  it('keeps the visible text of Codex hyperlinks that wrap across composer rows', () => {
+    const url = 'https://console.example.test/projects/demo--app/claude/2fee7569-0c8d-4fc9-9b1a-8f00fd8899ea';
+    const link = (label: string) => `\u001b]8;;${url}\u001b\\${label}\u001b]8;;\u001b\\`;
+    const draft = parseSessionScreenSnapshot([
+      '• Done.',
+      '',
+      `\u001b[1m›\u001b[0m this session ${link('https://console.example.test/projects/')}`,
+      `  ${link('demo--app/claude/2fee7569-0c8d-4fc9-9b1a-8f00fd8899ea')} has the`,
+      '  same problem.',
+      '',
+      '  GPT-6.1-Sol xhigh · ~/code/demo',
+    ].join('\n'));
+    const text = `this session ${url} has the same problem.`;
+    expect(draft.inputText).toContain('https://console.example.test/projects/\ndemo--app/claude/');
+    expect(screenInputMatchesText(draft, text)).toBe(true);
+    expect(screenInputMatchesText(draft, 'this session has the same problem.')).toBe(false);
+  });
+
+  it('matches a boxed Claude composer that wraps inside a URL', () => {
+    const draft = parseSessionScreenSnapshot([
+      '✻ Sautéed for 2m 0s · done 7:37 AM',
+      '',
+      '────────────────────────────────────────',
+      '❯ please read this session:',
+      '  https://console.example.test/projects/',
+      '  demo--app/codex/01a13d78-77d6-7663-aabc  the',
+      '  slide.  then fix it',
+      '────────────────────────────────────────',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n'));
+    const text = 'please read this session: https://console.example.test/projects/demo--app/codex/01a13d78-77d6-7663-aabc  the slide.  then fix it';
+    expect(draft.inputText).toContain('projects/\ndemo--app');
+    expect(screenInputMatchesText(draft, text)).toBe(true);
+    expect(screenInputMatchesText(draft, `${text}${text}`)).toBe(false);
   });
 
   it('recognizes a real Claude composer without requiring the permissions footer', () => {

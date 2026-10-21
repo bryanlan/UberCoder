@@ -17,6 +17,12 @@ it does not query the live Console database.
   and cached-index backfill coverage.
 
 ## Targeted Test Patterns
+- Mobile layout: `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane sidebar-projects Sidebar`;
+  browser checks: `NODE_ENV=test npm run test:e2e -- apps/web/e2e/mobile-conversation.spec.ts apps/web/e2e/input-rejection.spec.ts apps/web/e2e/sidebar.spec.ts`.
+  Use free E2E ports. These fixtures mock provider input and simulate a visualViewport-only
+  keyboard resize/pan without changing the layout viewport. They verify reading space,
+  scroll position, per-chat drafts, key-only controls, filtering and accepted/queued/rejected
+  sends. They do not establish physical iOS or Android keyboard behavior.
 - Authentication/CSRF recovery: `npm run build -w @agent-console/shared`, then
   `NODE_ENV=test npm run test -w @agent-console/server -- auth` and
   `NODE_ENV=test npm run test -w @agent-console/web -- api`. Browser coverage:
@@ -26,6 +32,15 @@ it does not query the live Console database.
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Durable queued chat submission: `NODE_ENV=test npm run test -w @agent-console/server -- session-input-queue session-routes session-interactive-input`. These fixtures use disposable SQLite databases and fake tmux transports to verify delayed repaint, database reopen, FIFO, matching drafts, cancellation before/during Enter, failed suspension, model-switch deferral, ownership and uncertain Enter. `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane` covers the queued Text Bypass handoff and sending-state controls. Browser coverage in `apps/web/e2e/input-rejection.spec.ts` verifies separate consecutive messages, pending-message display, refresh without resubmission, cancellation and preservation of genuine rejection behavior. Use isolated E2E ports; browser fixtures intercept provider input.
+- Real active-turn delivery: after `npm run build`, run `node scripts/prove-active-input.mjs --run`.
+  This opt-in proof uses installed Codex/Claude terminals and model calls in a private project,
+  database, runtime and tmux server. It sends a human follow-up through authenticated `/keys`
+  longer than 1,000 characters, including Unicode, while a real foreground tool runs. It
+  checks the provider transcript for delivery within
+  the original turn, exactly once, with the same native process and uninterrupted tool completion.
+  Claude's native `absorbed_mid_turn` record is checked explicitly. It releases its own sessions
+  and retains receipts, transcript copies and captures under the printed private directory in
+  `~/.local/state/agent-console-diagnostics/`. `PROOF_PROVIDERS=claude` or `codex` selects one provider.
 - Live output normalization: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- live-output`.
 - Large event-log prompt restoration and cache races: `NODE_ENV=test npm run test -w @agent-console/server -- last-user-input session-output-restoration session-recency session-runtime`.
 - Timeline merge, transcript catch-up, stale transcript cache, or duplicated bubble fixes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- timeline-merge transcript-watcher conversation-routes provider-conversation-cache`.
@@ -33,9 +48,12 @@ it does not query the live Console database.
 - Live session recovery and route handling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-routes tmux-health`.
 - Pending Codex progress or stale bound timeline polling: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- providers && npm run test -w @agent-console/web -- useConversationData transcript-turns`.
 - Conversation search or search-index backfill: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- search`.
-- Project/settings browser flow: `npm run build -w @agent-console/shared && playwright test apps/web/e2e/settings.spec.ts`.
+- Project/settings browser flow: `npm run test:e2e -- apps/web/e2e/settings.spec.ts` (builds the shared package first).
 - Host-level Codex adoption: `npm run smoke:codex -- --project <project-slug> --password '<login-password>'` only when a backend is running and real Codex/tmux state is intentionally in scope.
 - Visible live-console UX check: `npm run verify:live-console -- --base-url http://127.0.0.1:4317 --cdp-url http://127.0.0.1:9222 --password '<login-password>' --claude-url <conversation-route> --codex-url <conversation-route>` only when a backend and visible Chrome CDP endpoint are already running and the Claude/Codex live sessions are deliberately chosen. The verifier attaches to visible Chrome, sends `/model` plus model-selection input, and submits `Reply exactly ...` marker prompts through Text Bypass, so it changes real model, session, and transcript state. Omitted route defaults are Bryan-specific hard-coded pending sessions and should not be used unless that is the intended target.
+
+- Worktree cleanup guards: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- worktree-sweep`. These fixtures create private repositories and SQLite state; do not run the host sweep in apply mode as a test.
+- Shared wiki storage/search and API: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- wiki`. Fixtures use temporary Git repositories and SQLite files.
 
 ## Environment and Fixtures
 - Install with `npm install`.
@@ -118,6 +136,16 @@ registered native identity. Evidence remains under `/tmp/console-close-proof-*`.
 `PROOF_PROVIDERS=codex` or `claude` limits the run; provider authentication and
 tmux are required. The fixture releases only its own sessions during cleanup.
 
+Finished-agent inboxes: after building, run
+`PROOF_FINISHED_INBOX=1 node scripts/prove-peer-message-wake.mjs --run`.
+The private Codex/Claude fixtures finish their assignment, resolve its inert drag
+reference, keep historical unread messages asleep, and receive a fresh peer
+message. After finishing again, a second message must be acknowledged while the
+completed marker action stays completed. The proof preserves waiting permission,
+the native PID and a later manual Stop. Run each provider separately with
+`PROOF_PROVIDERS=codex` or `claude` on a memory-constrained host. This variant is
+separate from `PROOF_UNATTENDED=1`.
+
 Waiting-agent peer wake (#84): after `npm run build`, run
 `node scripts/prove-peer-message-wake.mjs --run`. This opt-in proof uses real Codex
 and Claude in a private project, database, runtime socket and tmux server. A sender
@@ -126,6 +154,21 @@ acknowledge and reply without a second human input, keep its pending human
 decision and continuation permission, and respect a subsequent manual Stop.
 `PROOF_PROVIDERS=codex` or `claude` narrows the run. The fixtures are released and
 private `proof.json` evidence remains in the printed temporary directory.
+
+Unattended peer wake and explicit restart (#89): the `peer-message-wake`,
+`agent-session-launches` and `providers` suites cover same-turn unattended work
+instructions for warm and idle-suspended Codex/Claude sessions, continuation
+budget preservation, assignment-addressed restarts, finished/waiting assignments,
+resume prompts and Stop/grant changes during restart. Existing wake fixtures
+continue to cover drafts, approvals, memory pressure and uncertain input.
+After building, `PROOF_UNATTENDED=1 node scripts/prove-peer-message-wake.mjs --run`
+uses disposable real conversations to verify an assigned file write and result
+handoff in the peer-wake turn, without a restart or second human input. It then
+finishes that private assignment and verifies a granted restart addressed by
+assignment ID starts another native turn in the same conversation. A message
+reports facts only; the pending task comes from the original test prompt. Each
+provider must also respect a later Stop. Evidence is retained under
+`~/.local/state/agent-console-diagnostics/peer-wake-*`.
 
 Wake refusal and supervisor alerts (#86): run `NODE_ENV=test npm run test -w
 @agent-console/server -- peer-message-wake peer-wake-audit assignment-continuation

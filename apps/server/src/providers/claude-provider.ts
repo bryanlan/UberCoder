@@ -168,7 +168,7 @@ export class ClaudeProvider implements ProviderAdapter {
     options?: ProviderLaunchOptions,
   ): LaunchCommand {
     const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
-    const initialPrompt = conversationRef ? undefined : options?.initialPrompt?.trim();
+    const initialPrompt = options?.initialPrompt?.trim();
     let baseArgv = ensureProviderFlag(
       renderTemplateTokens(template, {
         conversationId: conversationRef ?? '',

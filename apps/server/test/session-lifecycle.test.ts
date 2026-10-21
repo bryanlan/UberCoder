@@ -639,12 +639,19 @@ describe('SessionManager lifecycle', () => {
 
     // Selecting the conversation restores on demand, and the restore grace keeps
     // the reaper from immediately re-suspending it.
-    const restored = await manager.ensureSession(session.id);
+    expect(await manager.ensureSession(session.id)).toBeUndefined();
+    expect(await manager.getSessionScreen(session.id)).toBeUndefined();
+    const restarted = createRecoveryManager(db, tmux, path.join(tempDir, 'runtime-restart'), new RealtimeEventBus());
+    expect(db.boundSessions.getById(session.id)?.idleSuspendedAt).toBeTruthy();
+    expect(await restarted.getSessionScreen(session.id)).toBeUndefined();
+    const restored = await restarted.resumeSession(session.id);
     expect(restored?.id).toBe(session.id);
+    expect(db.boundSessions.getById(session.id)?.idleSuspendedAt).toBeUndefined();
     expect(tmux.created).toHaveLength(2);
 
-    await manager.reconcileSessions();
+    await restarted.reconcileSessions();
     expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
+    await restarted.stop();
     db.close();
   });
 
@@ -1047,6 +1054,8 @@ describe('SessionManager lifecycle', () => {
     { hours: 217, suspension: 'none', released: true },
     { hours: 215.99, suspension: 'pressure', released: false },
     { hours: 216, suspension: 'pressure', released: true },
+    { hours: 215.99, suspension: 'idle', released: false },
+    { hours: 216, suspension: 'idle', released: true },
     { hours: 240, suspension: 'manual', released: false },
   ])('sets history release to $released after $hours idle hours with $suspension suspension', async ({ hours, suspension, released }) => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-'));
@@ -1077,6 +1086,7 @@ describe('SessionManager lifecycle', () => {
     db.sqlite.prepare('update bound_sessions set started_at = ? where id = ?').run(old, session.id);
     if (suspension !== 'none') {
       if (suspension === 'manual') db.boundSessions.setManualSuspendedAt(session.id, old);
+      else if (suspension === 'idle') db.boundSessions.setIdleSuspendedAt(session.id, old);
       else db.boundSessions.setPressureSuspendedAt(session.id, old);
       tmux.alive.clear();
     }

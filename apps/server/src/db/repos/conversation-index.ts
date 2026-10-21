@@ -4,6 +4,12 @@ import { treeVisibleBoundSessionSql } from '../../lib/bound-session-state.js';
 import { isConversationVisibleInDiscovery } from '../../lib/conversation-visibility.js';
 import { boolAsInt, optionalString, parseJson, type SqliteRow } from '../utils.js';
 
+const closedConversationsSql = `
+  select project_slug, provider, conversation_ref, max(updated_at) as last_closed_at
+  from bound_sessions where status = 'ended' and should_restore = 0
+  group by project_slug, provider, conversation_ref
+`;
+
 export function pickPreferredConversation(existing: ConversationSummary | undefined, candidate: ConversationSummary): ConversationSummary {
   if (!existing) return candidate;
 
@@ -79,8 +85,10 @@ export class ConversationIndexRepo {
 
   list(): ConversationSummary[] {
     const rows = this.sqlite.prepare(`
-      select ci.*, cto.title as override_title, bs.id as bound_session_id
+      select ci.*, cto.title as override_title, bs.id as bound_session_id, closed.last_closed_at
       from conversation_index ci
+      left join (${closedConversationsSql}) closed
+        on closed.project_slug = ci.project_slug and closed.provider = ci.provider and closed.conversation_ref = ci.ref
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
@@ -107,8 +115,10 @@ export class ConversationIndexRepo {
 
   get(projectSlug: string, provider: string, ref: string): ConversationSummary | undefined {
     const row = this.sqlite.prepare(`
-      select ci.*, cto.title as override_title, bs.id as bound_session_id
+      select ci.*, cto.title as override_title, bs.id as bound_session_id, closed.last_closed_at
       from conversation_index ci
+      left join (${closedConversationsSql}) closed
+        on closed.project_slug = ci.project_slug and closed.provider = ci.provider and closed.conversation_ref = ci.ref
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs
@@ -155,6 +165,7 @@ function mapConversationIndexRow(row: SqliteRow): ConversationSummary {
     branch: optionalString(row.branch),
     isBound: Boolean(row.bound_session_id),
     boundSessionId: optionalString(row.bound_session_id),
+    lastClosedAt: optionalString(row.last_closed_at),
     degraded: Boolean(row.degraded),
     rawMetadata: parseJson<Record<string, unknown>>(optionalString(row.raw_metadata_json)),
   };

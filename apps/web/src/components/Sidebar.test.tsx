@@ -9,7 +9,7 @@ import { Sidebar } from './Sidebar';
 afterEach(() => vi.restoreAllMocks());
 
 const now = Date.parse('2026-09-27T23:00:00.000Z');
-const cases = (['manualSuspendedAt', 'pressureSuspendedAt'] as const).flatMap((marker) => (
+const cases = (['manualSuspendedAt', 'pressureSuspendedAt', 'idleSuspendedAt'] as const).flatMap((marker) => (
   [
     { hours: 0.5, color: 'bg-emerald-400' },
     { hours: 2, color: 'bg-yellow-400' },

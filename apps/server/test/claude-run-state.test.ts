@@ -133,3 +133,31 @@ describe('Claude authoritative failed turns', () => {
     for (const result of checks) if (result.status === 'rejected') throw result.reason;
   }, 25_000);
 });
+
+describe('Claude native interruption', () => {
+  const toolUse = { type: 'assistant', uuid: 'ask', timestamp: new Date().toISOString(),
+    message: { content: [{ type: 'tool_use', id: 't1', name: 'AskUserQuestion', input: {} }], stop_reason: 'tool_use' } };
+  const rejected = { type: 'user', uuid: 'rejected', timestamp: new Date().toISOString(),
+    message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: "The user doesn't want to proceed with this tool use." }] } };
+  const interrupted = (text: string) => ({ type: 'user', uuid: `interrupt-${text.length}`, timestamp: new Date().toISOString(),
+    message: { content: [{ type: 'text', text }] } });
+
+  it.each(['[Request interrupted by user for tool use]', '[Request interrupted by user]'])
+    ('ends the running turn as cancelled instead of starting a new one: %s', async (text) => {
+      const p = await file([prompt, toolUse, rejected, interrupted(text),
+        { type: 'system', subtype: 'turn_duration', timestamp: new Date().toISOString() }]);
+      expect(await new ClaudeRunMonitor().read(p)).toMatchObject({ turnId: 'turn1', status: 'cancelled' });
+    });
+
+  it('starts the next real prompt after an interruption', async () => {
+    const p = await file([prompt, toolUse, interrupted('[Request interrupted by user for tool use]')]); const m = new ClaudeRunMonitor();
+    expect((await m.read(p))?.status).toBe('cancelled');
+    await fs.appendFile(p, line({ ...prompt, uuid: 'turn2', message: { content: 'give me the link' } }));
+    expect(await m.read(p)).toMatchObject({ turnId: 'turn2', status: 'running' });
+  });
+
+  it('keeps a prompt that only quotes the interruption marker as a real prompt', async () => {
+    const p = await file([{ ...prompt, message: { content: 'Why did I see [Request interrupted by user] earlier?' } }]);
+    expect(await new ClaudeRunMonitor().read(p)).toMatchObject({ turnId: 'turn1', status: 'running' });
+  });
+});

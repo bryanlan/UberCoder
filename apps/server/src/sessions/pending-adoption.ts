@@ -106,7 +106,9 @@ export function findPendingAdoptionMatch(
     return undefined;
   }
 
-  return conversations
+  const matches = conversations
+    .filter(conversation => conversation.provider !== 'codex' || (conversation.rawMetadata?.threadSource !== 'subagent'
+      && !conversation.rawMetadata?.forkedFromId))
     .filter((conversation) => !options.claimedRefs?.has(conversation.ref) && conversation.ref !== pending.ref)
     .map((conversation) => ({
       conversation,
@@ -114,7 +116,10 @@ export function findPendingAdoptionMatch(
       score: scorePendingMatch(pendingLastUserHash, conversation),
     }))
     .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= PENDING_ADOPTION_MATCH_WINDOW_MS)
-    .sort((a, b) => a.score - b.score || a.delta - b.delta)[0]?.conversation;
+    .map(({ conversation }) => conversation);
+  // Repeated prompts and inherited child histories are not proof of identity.
+  const unique = new Map(matches.map(conversation => [conversation.ref, conversation]));
+  return unique.size === 1 ? unique.values().next().value : undefined;
 }
 
 export function adoptPendingConversation(input: {
@@ -130,6 +135,10 @@ export function adoptPendingConversation(input: {
     if (!pending || typeof pending.rawMetadata?.adoptedConversationRef === 'string') {
       return { adopted: false };
     }
+
+    const boundId = pending.boundSessionId ?? input.db.boundSessions.getRestorableByConversation(input.projectSlug, input.providerId, pending.ref)?.id;
+    const existingOwner = input.db.boundSessions.getRestorableByConversation(input.projectSlug, input.providerId, input.matchedConversation.ref);
+    if (existingOwner && existingOwner.id !== boundId) return { adopted: false };
 
     // Persist the native ref and transcript path in the same transaction as the
     // binding. Polling, transcript watchers and alias reads use this index.

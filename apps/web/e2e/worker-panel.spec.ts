@@ -47,7 +47,13 @@ async function openConsole(page: Page, data = snapshot, openingTexts: Record<str
     return route.fulfill({ json: data });
   });
   await page.goto('/');
-  await page.getByRole('button', { name: 'Open worker panel' }).click();
+  if ((page.viewportSize()?.width ?? 1280) < 768) {
+    await page.getByRole('button', { name: 'Close chats', exact: true }).click();
+    await page.getByRole('button', { name: 'More options', exact: true }).click();
+    await page.getByRole('button', { name: 'Workers', exact: true }).click();
+  } else {
+    await page.getByRole('button', { name: 'Open worker panel' }).click();
+  }
   await expect(page.getByRole('complementary', { name: 'Active workers' })).toBeVisible();
   return refreshes;
 }

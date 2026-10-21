@@ -32,7 +32,9 @@ export function stableTextHash(text: string): string {
 
 export function stripAnsiAndControl(text: string): string {
   let cleaned = text
-    .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, '')
+    // OSC payloads end at BEL or ST. Stop at the first ESC so the visible label
+    // of an OSC 8 hyperlink between its opening and closing codes survives.
+    .replace(/\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g, '')
     .replace(/\u001BP[\s\S]*?\u001B\\/g, '')
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\u001B[()*+\-.\/][0-~]/g, '')

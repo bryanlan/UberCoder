@@ -13,6 +13,7 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
   return {
     coordination: { enabled: false, pilotPaths: [] },
     workerSummaries: { enabled: false, runtimeCommand: ['agent-consult'] },
+    conversationTitles: { enabled: false, runtimeCommand: ['agent-consult'] },
     server: {
       host: '127.0.0.1',
       port: 4317,

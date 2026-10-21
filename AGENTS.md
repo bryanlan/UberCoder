@@ -35,7 +35,7 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - Provider transcript parsing belongs behind the Codex/Claude adapter interfaces; avoid leaking vendor history formats into routes or UI code.
 - Root workspace scripts build `packages/shared/` first; prefer root `npm` commands unless you intentionally need a package-local target.
 - Browser e2e artifacts under `test-results/` can be stale; rerun Playwright before treating them as current failures.
-- Local Playwright runs can reuse an already-running Agent Console server; ensure ports/config are isolated before treating settings e2e failures as product regressions.
+- Playwright starts isolated backend/web servers with `reuseExistingServer: false`; use free E2E ports and its fixture config rather than a running Console service.
 - The Codex smoke test is stateful and needs a running backend plus real Codex/tmux access; keep it opt-in.
 - Call out config schema, auth, proxy, session lifecycle, or localhost exposure changes explicitly in handoffs.
 
@@ -45,3 +45,4 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - `docs/agent_docs/running_tests.md` — current test commands, host prerequisites, and e2e caveats.
 - `config/agent-console.example.json` — runtime config template for projects, proxy allowlists, auth, and providers.
 - `docs/agent-wiki.md` — per-repository shared pages, agent and browser use, revision history, and pilot review.
+- `docs/worktree-lifecycle.md` — what the hourly worktree sweep keeps and removes, and the worktree rules for agents.

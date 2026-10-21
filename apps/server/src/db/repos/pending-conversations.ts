@@ -58,6 +58,28 @@ export class PendingConversationsRepo {
     return row ? mapPendingConversationRow(row) : undefined;
   }
 
+  getByAdoptedRef(projectSlug: string, provider: string, adoptedRef: string): ConversationSummary | undefined {
+    const row = this.sqlite.prepare(`
+      select pc.*, cto.title as override_title, bs.id as bound_session_id
+      from pending_conversations pc
+      left join conversation_title_overrides cto
+        on cto.project_slug = pc.project_slug and cto.provider = pc.provider and cto.ref = pc.ref
+      left join bound_sessions bs on bs.id = pc.bound_session_id and bs.should_restore = 1
+      where pc.project_slug = ? and pc.provider = ? and json_extract(pc.raw_metadata_json, '$.adoptedConversationRef') = ?
+      order by coalesce(pc.created_at, pc.updated_at) desc
+      limit 1
+    `).get(projectSlug, provider, adoptedRef) as SqliteRow | undefined;
+    return row ? mapPendingConversationRow(row) : undefined;
+  }
+
+  setTitleGeneration(ref: string, state: string): void {
+    this.sqlite.prepare(`
+      update pending_conversations
+      set raw_metadata_json = json_set(coalesce(raw_metadata_json, '{}'), '$.titleGeneration', ?)
+      where ref = ?
+    `).run(state, ref);
+  }
+
   delete(ref: string): void {
     this.sqlite.prepare(`delete from pending_conversations where ref = ?`).run(ref);
   }

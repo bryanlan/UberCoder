@@ -73,6 +73,10 @@ export const appConfigSchema = z.object({
     enabled: z.boolean().default(true),
     runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),
   }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
+  conversationTitles: z.object({
+    enabled: z.boolean().default(true),
+    runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),
+  }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
   coordination: z.object({
     enabled: z.boolean().default(false),
     pilotPaths: z.array(z.string().min(1)).default([]),

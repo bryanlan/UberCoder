@@ -349,6 +349,7 @@ export function useConversationData({
     selectedBoundSession?.id,
     selectedBoundSession?.manualSuspendedAt,
     selectedBoundSession?.pressureSuspendedAt,
+    selectedBoundSession?.idleSuspendedAt,
     selectedMetaTimeline,
   ]);
 

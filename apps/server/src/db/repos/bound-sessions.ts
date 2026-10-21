@@ -145,6 +145,23 @@ export class BoundSessionsRepo {
     })();
   }
 
+  // Idle sleep is durable and does not change activity or response recency.
+  setIdleSuspendedAt(id: string, suspendedAt: string | undefined): BoundSession | undefined {
+    return this.sqlite.transaction(() => {
+      const current = this.getById(id);
+      if (!current) return undefined;
+      this.sqlite.prepare(`
+        update bound_sessions
+        set idle_suspended_at = ?,
+            pid = case when ? is null then pid else null end,
+            is_working = case when ? is null then is_working else 0 end,
+            updated_at = ?
+        where id = ?
+      `).run(suspendedAt ?? null, suspendedAt ?? null, suspendedAt ?? null, nextUpdatedAt(current.updatedAt, new Date().toISOString()), id);
+      return this.getById(id);
+    })();
+  }
+
   // Pressure suspension is independently owned so ordinary status updates cannot restore it.
   setPressureSuspendedAt(id: string, suspendedAt: string | undefined): BoundSession | undefined {
     return this.sqlite.transaction(() => {
@@ -293,6 +310,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     autoTrackedAt: optionalString(row.auto_tracked_at),
     manualSuspendedAt: optionalString(row.manual_suspended_at),
     pressureSuspendedAt: optionalString(row.pressure_suspended_at),
+    idleSuspendedAt: optionalString(row.idle_suspended_at),
     isWorking: Boolean(row.is_working),
     pid: numberOrUndefined(row.pid),
     rawLogPath: optionalString(row.raw_log_path),

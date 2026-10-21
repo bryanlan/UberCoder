@@ -3,10 +3,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { SessionQueuedInput } from '@agent-console/shared';
 import { api } from '../lib/api';
 
-export function QueuedInputNotice({ sessionId, inputs, csrfToken }: {
+export function QueuedInputNotice({ sessionId, inputs, csrfToken, compact = false }: {
   sessionId: string;
   inputs: SessionQueuedInput[];
   csrfToken?: string;
+  compact?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
@@ -19,7 +20,7 @@ export function QueuedInputNotice({ sessionId, inputs, csrfToken }: {
       setError(cause instanceof Error ? cause.message : 'Could not cancel the queued message.');
     }
   }
-  return <div className="border-b border-sky-800/60 bg-sky-950/40 px-4 py-2 text-sm text-sky-100" role="status">
+  const notice = <div className="border-b border-sky-800/60 bg-sky-950/40 px-4 py-2 text-sm text-sky-100" role="status">
     {inputs.map(input => <div key={input.requestId} className="py-1">
       <div className="flex items-center gap-3">
         <span className="font-medium">{input.state === 'needs_review' ? 'Check delivery' : input.state === 'submitting' ? 'Sending…' : 'Queued'}</span>
@@ -32,4 +33,12 @@ export function QueuedInputNotice({ sessionId, inputs, csrfToken }: {
     </div>)}
     {error && <div className="text-rose-300">{error}</div>}
   </div>;
+  if (!compact) return notice;
+  const summary = inputs.some(input => input.state === 'needs_review') ? 'Check message delivery'
+    : inputs.some(input => input.state === 'submitting') ? 'Sending message…'
+    : `${inputs.length} queued message${inputs.length === 1 ? '' : 's'}`;
+  return <details className="shrink-0 border-b border-sky-800/60 bg-sky-950/40 text-xs text-sky-100">
+    <summary className="min-h-8 cursor-pointer px-3 py-2"><span aria-live="polite">{summary}</span></summary>
+    <div className="max-h-32 overflow-y-auto overscroll-contain">{notice}</div>
+  </details>;
 }

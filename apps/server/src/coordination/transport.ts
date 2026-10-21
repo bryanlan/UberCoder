@@ -3,6 +3,7 @@ import path from 'node:path';
 import net from 'node:net';
 import fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { PROVIDERS } from '@agent-console/shared';
 import type { AuthService } from '../security/auth-service.js';
 import { CoordinationService } from './service.js';
 import { WikiService } from '../wiki/service.js';
@@ -12,16 +13,19 @@ import { dispatchGrants } from '../grants/transport.js';
 import type { AgentSessionLaunches } from '../grants/session-launches.js';
 
 const text = z.string().trim().min(1);
+// Grok is a coordination identity only. Console session providers stay PROVIDERS,
+// so Grok is not launched, pasted into, or indexed as a Console conversation.
+const coordinationProviders = ['codex', 'claude', 'grok'] as const;
 const inputSchema = z.object({
   action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
-  provider: z.enum(['codex', 'claude']).optional(), nativeSessionId: text.max(160).optional(),
+  provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   consoleSessionId: z.string().uuid().optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
-  notifySupervisor: z.boolean().optional(),
+  notifySupervisor: z.boolean().optional(), awaiting: text.max(500).nullable().optional(),
   offset: z.number().int().nonnegative().default(0),
   recipientId: z.string().uuid().optional(), messageId: z.string().uuid().optional(),
   text: text.max(2000).optional(), messageIds: z.array(z.string().uuid()).max(100).optional(),
@@ -153,6 +157,14 @@ export async function startCoordinationSocket(service: CoordinationService, runt
 }
 
 export async function registerCoordinationRoutes(app: FastifyInstance, auth: AuthService, service: CoordinationService) {
+  app.get('/api/agent-reference', async (request, reply) => {
+    await auth.ensureAuthenticated(request, reply);
+    if (reply.sent) return;
+    const parsed = z.object({ projectSlug: text.max(200), provider: z.enum(PROVIDERS), conversationRef: text.max(200) }).safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'Invalid chat reference.' });
+    try { return service.conversationReference(parsed.data); }
+    catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : 'Cannot reference this agent.' }); }
+  });
   app.get('/api/assignment-activity', async (request, reply) => {
     await auth.ensureAuthenticated(request, reply);
     const input = z.object({ checkout: text.max(4096).optional() }).parse(request.query);

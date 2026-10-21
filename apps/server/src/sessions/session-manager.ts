@@ -12,7 +12,7 @@ import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { ProviderRunState } from '../providers/types.js';
-import { isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
+import { CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS, isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
 import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
@@ -34,8 +34,10 @@ import {
   screenAllowsLiteralSelectionTokenWithoutInput,
   screenInputChanged,
   screenInputMatchesText,
+  screenInputMatchesPaste,
   screenIsStartingUp,
   screenLooksReadyForLiteralPrompt,
+  screenAcceptsHumanPrompt,
   screenShowsClaudeResumeSessionChoice,
   claudeFullSessionResumeSelection,
   screenShowsQueuedMessageHint,
@@ -52,15 +54,16 @@ import { RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
-import { InputQueue, queuedInputSummary, type QueuedInputRecord } from './input-queue.js';
+import { InputQueue, queuedInputSummary, queuedTransportText, type QueuedInputRecord } from './input-queue.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
-import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
-import { continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
+import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
+import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
+const QUEUED_PASTE_CONFIRMATION_MS = 30_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
 const CLAUDE_FOLDER_TRUST_WAIT_MS = 15_000;
@@ -265,9 +268,7 @@ export class SessionManager {
   private readonly activeInputCommands = new Set<Promise<unknown>>();
   private reconciliationTimer?: ReturnType<typeof setInterval>;
   private reconciliationStartupTimer?: ReturnType<typeof setTimeout>;
-  // Sessions confirmed suspended (tmux dead) this process lifetime, so each
-  // reconciliation cycle does not re-check tmux liveness for every idle session.
-  private readonly suspendedSessionIds = new Set<string>();
+  // Restoration grants a loaded idle window without advancing conversation recency.
   private readonly suspensionGraceUntilMs = new Map<string, number>();
   private readonly conversationBindRuns = new Map<string, Promise<BoundSession>>();
   private readonly scheduledModelProfileDrains = new Set<string>();
@@ -330,7 +331,7 @@ export class SessionManager {
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
           .get(session.provider, session.conversationRef) as { status: string } | undefined;
         if (assignment?.status === 'finished') return 'This assignment is finished.';
-        if (session.manualSuspendedAt || session.pressureSuspendedAt || session.queuedInputs?.length || session.modelProfileRequest) return 'This session is paused or has a pending model change.';
+        if (session.manualSuspendedAt || session.pressureSuspendedAt || session.idleSuspendedAt || session.queuedInputs?.length || session.modelProfileRequest) return 'This session is paused or has a pending model change.';
         const available = this.availableMemoryBytes();
         if (this.pressureSuspendAvailableBytes !== undefined
           && (available === undefined || available < this.pressureSuspendAvailableBytes)) return 'Recovery is stopped while available memory is below the configured threshold.';
@@ -363,7 +364,7 @@ export class SessionManager {
           const available = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
           return isCurrent() && !this.stopped && this.getCurrentRestorableSession(session)?.id === session.id
             && this.unattendedAssignment(session) !== undefined
-            && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.modelProfileRequest && !current.queuedInputs?.length
+            && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.idleSuspendedAt && !current.modelProfileRequest && !current.queuedInputs?.length
             && assignment?.status !== 'finished'
             && (this.pressureSuspendAvailableBytes === undefined || (available !== undefined && available >= this.pressureSuspendAvailableBytes));
         };
@@ -532,6 +533,7 @@ export class SessionManager {
       }>;
     for (const recipient of recipients) {
       if (this.stopped) return;
+      if (alertOverdueAwait(this.db, recipient.id)) this.requestAssignmentWake();
       if (peerWakePaused(this.db, recipient.id)) continue;
       const sessions = restorableSessions.filter((session) => session.provider === recipient.provider
         && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
@@ -571,7 +573,7 @@ export class SessionManager {
         };
         let current = this.db.boundSessions.getById(session.id);
         let priorControl = continuationControl(this.db, recipient.id);
-        if (current && priorControl.recovery?.status === 'submitted'
+        if (current && !priorControl.awaiting && priorControl.recovery?.status === 'submitted'
           && Date.now() - Date.parse(priorControl.recovery.startedAt) >= 30_000) {
           const submittedRevision = priorControl.revision;
           const submittedAt = priorControl.recovery.startedAt;
@@ -596,11 +598,16 @@ export class SessionManager {
         const stagedWork = current.provider === 'claude' && stagedComposer?.status === 'staged'
           && stagedComposer.notice === 'unattended' && stagedComposer.assignmentId === recipient.id
           && stagedComposer.pid === current.pid && stagedComposer.startedAt === current.startedAt
-          && priorControl.continuation === 'unattended' && stagedComposer.continuationRevision === priorControl.revision
+          && !priorControl.awaiting && priorControl.continuation === 'unattended' && stagedComposer.continuationRevision === priorControl.revision
           && priorControl.recovery && ['scheduled', 'submitting'].includes(priorControl.recovery.status);
         // A confirmed unsent work notice finishes its original attempt, even
         // after restart or when that attempt is the last one in the budget.
-        let control = stagedWork ? priorControl : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
+        const peerResponse = pending().length > 0;
+        // Inbox turns do not advance the work budget while delivering the result.
+        // Preserve uncertain work submissions as blocked even on an inbox turn.
+        const preserveWorkBudget = stagedWork || (peerResponse && priorControl.recovery?.status !== 'submitting');
+        let control = preserveWorkBudget ? priorControl
+          : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
         if (control.recovery?.status === 'stalled' && control.supervisorId) {
           const signalled = signalContinuation(this.db, control.supervisorId, {
             key: `worker-stalled:${recipient.id}:${control.revision}:${control.recovery.startedAt}`,
@@ -608,11 +615,11 @@ export class SessionManager {
           });
           if (signalled) this.requestAssignmentWake();
         }
-        const peerResponse = pending().length > 0;
         const workResponse = !peerResponse || !!stagedWork;
         if ((!peerResponse && !stagedWork && !pendingContinuation(control)) || this.stopped) return;
         const revision = control.revision;
         const allowed = () => !this.stopped && !peerWakePaused(this.db, recipient.id)
+          && (!workResponse || !continuationControl(this.db, recipient.id).awaiting)
           && (!workResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
           && (!workResponse || continuationControl(this.db, recipient.id).revision === revision);
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
@@ -698,7 +705,7 @@ export class SessionManager {
             return { code: pause?.code ?? 'paused_without_reason', reason: pause?.reason ?? 'Automatic input is paused; the existing record predates pause-reason capture.' };
           }
           const permission = continuationControl(this.db, recipient.id);
-          if (workResponse && (permission.continuation !== 'unattended' || permission.revision !== revision))
+          if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision))
             return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
           const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
           if (!state || state.status === 'finished') return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
@@ -762,6 +769,12 @@ export class SessionManager {
             await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
           }
           else await this.runInputTmuxAction(current, async () => {
+            const saveComposer = (status: PeerWakeComposer['status']) => {
+              if (typeof current!.pid === 'number') this.db.meta.set(peerWakeComposerKey(current!.id), JSON.stringify({
+                assignmentId: recipient.id, pid: current!.pid, startedAt: current!.startedAt, timestamp, status, messages,
+                notice: workResponse ? 'unattended' : 'peer', ...(workResponse ? { continuationRevision: revision } : {}),
+              } satisfies PeerWakeComposer));
+            };
             let entered = await this.captureSessionScreen(current!, false);
             block = submissionBlock();
             if (block) throw new Error(block.reason);
@@ -769,6 +782,7 @@ export class SessionManager {
               if (!entered.inputActive || entered.inputText.trim() || sessionScreenShowsWorking(entered)
                 || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered))
                 throw new Error('The provider composer changed before paste; existing text remains unsent.');
+              saveComposer('pasting');
               pasteStarted = true;
               await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
               entered = await this.waitForScreenMatch(current!, hashScreen(screen), combinedTextKeySettleWaitMs(prompt),
@@ -777,12 +791,6 @@ export class SessionManager {
             if (!entered || !screenInputMatchesText(entered, prompt) || !entered.inputActive || sessionScreenShowsWorking(entered)
               || screenShowsInteractiveSelectionHint(entered) || screenShowsQueuedMessageHint(entered) || screenIsStartingUp(entered)) throw new Error('The provider did not confirm a ready continuation composer; text remains unsent.');
             composerConfirmed = true;
-            const saveComposer = (status: PeerWakeComposer['status']) => {
-              if (typeof current!.pid === 'number') this.db.meta.set(peerWakeComposerKey(current!.id), JSON.stringify({
-                assignmentId: recipient.id, pid: current!.pid, startedAt: current!.startedAt, timestamp, status, messages,
-                notice: workResponse ? 'unattended' : 'peer', ...(workResponse ? { continuationRevision: revision } : {}),
-              } satisfies PeerWakeComposer));
-            };
             saveComposer('staged');
             await requireSubmissionGuard();
             // Ownership checks await tmux and can overlap native typing. Read
@@ -907,6 +915,18 @@ export class SessionManager {
     }
   }
 
+  private async tryEnsurePaneSize(session: BoundSession): Promise<void> {
+    const state = this.runtimeState(session.id);
+    if (session.pid === undefined || session.pid === null || state.paneSizedPid === session.pid) return;
+    try {
+      await this.tmuxClient.ensureMinimumWindowSize(session.tmuxSessionName, CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS);
+      state.paneSizedPid = session.pid;
+    } catch (error) {
+      this.logger?.warn({ err: error, sessionId: session.id, tmuxSessionName: session.tmuxSessionName },
+        'Failed to size the hidden tmux pane.');
+    }
+  }
+
   private async cleanupCreatedTmuxSession(session: Pick<BoundSession, 'id' | 'tmuxSessionName'>): Promise<void> {
     try {
       const tmuxOwner = await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id');
@@ -923,6 +943,25 @@ export class SessionManager {
     return this.runtimes.state(sessionId);
   }
 
+  private async verifyNativeProcessEpoch(session: BoundSession): Promise<void> {
+    const state = this.runtimeState(session.id);
+    if (!session.pid || state.nativeProcess?.pid === session.pid) return;
+    const [owner, pid, startedAt] = await Promise.all([
+      this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id'),
+      this.tmuxClient.getPanePid(session.tmuxSessionName),
+      this.tmuxClient.getSessionCreatedAt(session.tmuxSessionName),
+    ]);
+    if (owner === session.id && pid === session.pid) {
+      state.nativeProcess = { pid, startedAt };
+      if (state.submittedTurnAt && state.submittedTurnAt < startedAt) state.submittedTurnAt = undefined;
+    }
+  }
+
+  private runPredatesNativeProcess(session: BoundSession, run: ProviderRunState): boolean {
+    const native = this.runtimeState(session.id).nativeProcess;
+    return native !== undefined && native.pid === session.pid && run.timestamp < native.startedAt;
+  }
+
   private providerTurnIsWorking(sessionId: string): boolean | undefined {
     const run = this.runRecovery.getRunState(sessionId);
     const state = this.runtimeState(sessionId);
@@ -930,9 +969,10 @@ export class SessionManager {
     // A previous completion cannot acknowledge a newly submitted turn.
     if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
     const session = this.db.boundSessions.getById(sessionId);
-    const restoreText = this.db.meta.get(peerWakeRestoreKey(sessionId));
-    const restore = restoreText ? JSON.parse(restoreText) as { pid: number; restoredAt: string } : undefined;
-    if (restore && restore.pid === session?.pid && run.timestamp < restore.restoredAt) return undefined;
+    // Resuming history does not resume its unfinished native request. This also
+    // applies to ordinary restores and survives a backend-only restart because
+    // the epoch comes from the existing tmux writer, not backend attachment time.
+    if (session && this.runPredatesNativeProcess(session, run)) return undefined;
     // Claude can emit end_turn before another Stop hook continues the turn.
     // A completed record only clears working after the input prompt is visible.
     if (session?.provider === 'claude' && run.status === 'completed'
@@ -943,6 +983,7 @@ export class SessionManager {
 
   private recordProviderResponse(session: BoundSession, run: ProviderRunState): void {
     if (run.status !== 'completed' || !session.shouldRestore || session.status !== 'bound') return;
+    if (this.runPredatesNativeProcess(session, run)) return;
     const submittedAt = this.runtimeState(session.id).submittedTurnAt;
     if (submittedAt && run.timestamp < submittedAt) return;
     const completedMs = Date.parse(run.timestamp);
@@ -1072,9 +1113,21 @@ export class SessionManager {
       // A user suspension survives reconciliation and backend restarts until
       // that conversation is explicitly opened again.
       if (session.manualSuspendedAt) continue;
-      if (session.launchContext && session.conversationRef.startsWith('pending:')) {
+      if (session.conversationRef.startsWith('pending:')) {
         const registered = this.assignmentForSession(session);
-        if (registered) await this.adoptRegisteredSession(session.id, session.provider, registered.nativeSessionId);
+        if (registered && (session.launchContext || this.hasRecordedPendingUserInput(session)))
+          await this.adoptRegisteredSession(session.id, session.provider, registered.nativeSessionId);
+        else if (session.provider === 'codex' && this.hasRecordedPendingUserInput(session) && !session.isWorking && !session.queuedInputs?.length && !session.modelProfileRequest
+          && Date.now() - this.sessionIdleTimestampMs(session) >= this.eagerRestoreWindowMs && this.recoveryDependencies) {
+          await this.runtimes.run(session.id, 'resolveIdlePendingSession', async () => {
+            const current = this.mustGetSession(session.id);
+            if (current.isWorking || current.queuedInputs?.length || current.modelProfileRequest || current.manualSuspendedAt) return;
+            const { projectService, providerRegistry } = this.recoveryDependencies!;
+            const project = await projectService.getProjectBySlug(current.projectSlug);
+            if (project) await this.tryResolvePendingResumeSession(current, project, providerRegistry.get(current.provider),
+              projectService.getMergedProviderSettings(project, current.provider));
+          });
+        }
         session = this.db.boundSessions.getById(session.id) ?? session;
         if (!session.shouldRestore) continue;
       }
@@ -1111,6 +1164,7 @@ export class SessionManager {
       // Pressure suspensions stay stopped after memory recovers and across
       // backend restarts. Selecting the conversation explicitly restores one.
       if (session.pressureSuspendedAt) continue;
+      if (session.idleSuspendedAt && !session.queuedInputs?.length && !session.modelProfileRequest) continue;
       if (session.modelProfileRequest) {
         await this.runtimes.run(session.id, 'reconcileModelProfileRequest', () => this.drainModelProfileRequestInternal(session.id));
         const current = this.db.boundSessions.getById(session.id);
@@ -1132,8 +1186,7 @@ export class SessionManager {
         && !this.hasActiveCoordinationAssignment(session)
         && this.providerTurnIsWorking(session.id) !== true
         && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') continue;
-      this.suspendedSessionIds.delete(session.id);
-      await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session, { restoreMissing: true }));
+      await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session, { restoreMissing: true, resumeIdle: true }));
     }
   }
 
@@ -1215,7 +1268,7 @@ export class SessionManager {
     this.stopWatching(current.id);
     this.runtimes.clearEphemeral(current.id);
     this.runRecovery.cancel(current.id);
-    this.suspendedSessionIds.add(current.id);
+    this.db.meta.set(peerWakeComposerKey(current.id), '');
     const suspended = this.db.boundSessions.setPressureSuspendedAt(current.id, nowIso());
     if (!suspended) return false;
     this.appendEvent(suspended, {
@@ -1273,7 +1326,7 @@ export class SessionManager {
     if (!session || !session.shouldRestore || !this.isIdleSuspendable(session)) {
       return;
     }
-    if (this.suspendedSessionIds.has(session.id)) {
+    if (session.idleSuspendedAt) {
       return;
     }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
@@ -1307,12 +1360,10 @@ export class SessionManager {
     }
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
-    this.suspendedSessionIds.add(session.id);
-    if (session.isWorking || session.pid !== undefined) {
-      const suspended: BoundSession = { ...session, isWorking: false, pid: undefined, updatedAt: nowIso() };
-      this.db.boundSessions.upsert(suspended);
-      this.eventBus.emit({ type: 'session.updated', session: suspended });
-    }
+    this.runRecovery.cancel(session.id);
+    this.db.meta.set(peerWakeComposerKey(session.id), '');
+    const suspended = this.db.boundSessions.setIdleSuspendedAt(session.id, nowIso());
+    if (suspended) this.eventBus.emit({ type: 'session.updated', session: suspended });
   }
 
   startSessionReconciliation(options: { intervalMs?: number; initialDelayMs?: number } = {}): void {
@@ -1464,11 +1515,13 @@ export class SessionManager {
     project: ActiveProject,
     provider: ProviderAdapter,
     providerSettings: MergedProviderSettings,
+    initialPrompt?: string,
   ): { cwd: string; argv: string[]; env: Record<string, string> } | undefined {
     const resumeConversationRef = session.resumeConversationRef
       ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
     if (resumeConversationRef) {
       return provider.getLaunchCommand(project, resumeConversationRef, providerSettings, {
+        initialPrompt,
         codexProfile: session.provider === 'codex' ? session.codexProfile : undefined,
         claudeProfile: session.provider === 'claude' ? session.claudeProfile : undefined,
         model: activeModelProfile(session) ? undefined : session.launchContext?.model,
@@ -1504,7 +1557,9 @@ export class SessionManager {
     const conversations = provider.listPendingAdoptionCandidates
       ? await provider.listPendingAdoptionCandidates(project, pending, providerSettings)
       : await provider.listConversations(project, providerSettings);
-    const matchedConversation = findPendingAdoptionMatch(pending, conversations);
+    const claimedRefs = new Set(this.db.boundSessions.list().filter(candidate => candidate.shouldRestore && candidate.id !== session.id
+      && candidate.projectSlug === session.projectSlug && candidate.provider === session.provider).map(candidate => candidate.conversationRef));
+    const matchedConversation = findPendingAdoptionMatch(pending, conversations, { claimedRefs });
     if (!matchedConversation) {
       return session;
     }
@@ -1551,7 +1606,7 @@ export class SessionManager {
     }
   }
 
-  private async restoreSession(requestedSession: BoundSession, explicitResume = false): Promise<BoundSession | undefined> {
+  private async restoreSession(requestedSession: BoundSession, explicitResume = false, initialPrompt?: string, beforeStart?: () => void): Promise<BoundSession | undefined> {
     let session = this.getCurrentRestorableSession(requestedSession);
     if (!session) {
       return undefined;
@@ -1562,7 +1617,6 @@ export class SessionManager {
     }
     // Restores do not move recency, so grant an explicit grace window before the
     // idle reaper may suspend this session again.
-    this.suspendedSessionIds.delete(session.id);
     this.suspensionGraceUntilMs.set(session.id, Date.now() + this.restoreGraceMs);
 
     const dependencies = this.recoveryDependencies;
@@ -1588,7 +1642,7 @@ export class SessionManager {
     if (!session) {
       return undefined;
     }
-    const launch = this.buildRecoveryLaunchCommand(session, project, provider, providerSettings);
+    const launch = this.buildRecoveryLaunchCommand(session, project, provider, providerSettings, initialPrompt);
     if (!launch) {
       const pending = session.conversationRef.startsWith('pending:')
         ? this.db.pendingConversations.get(session.conversationRef)
@@ -1612,6 +1666,7 @@ export class SessionManager {
     }
 
     launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: session.id };
+    beforeStart?.();
     const prepared = this.ensureSessionLogPaths(session);
     const shouldEmitRestoreAttempt = prepared.status !== 'error';
     const restoring = {
@@ -1631,6 +1686,7 @@ export class SessionManager {
     try {
       await this.tmuxClient.newDetachedSession(restoring.tmuxSessionName, launch.cwd, commandToShell(launch.argv, launch.env));
       tmuxCreated = true;
+      this.runtimes.clearEphemeral(restoring.id);
       await this.tmuxClient.pipePaneToFile(restoring.tmuxSessionName, restoring.rawLogPath!);
       await this.configureTmuxSessionOptions(restoring.tmuxSessionName, {
         sessionId: restoring.id,
@@ -1656,6 +1712,7 @@ export class SessionManager {
       if (resumed.pressureSuspendedAt) {
         resumed = this.db.boundSessions.setPressureSuspendedAt(resumed.id, undefined) ?? resumed;
       }
+      if (resumed.idleSuspendedAt) resumed = this.db.boundSessions.setIdleSuspendedAt(resumed.id, undefined) ?? resumed;
       this.appendEvent(resumed, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
       this.eventBus.emit({ type: 'session.updated', session: resumed });
       this.watchSessionOutput(resumed);
@@ -1721,13 +1778,22 @@ export class SessionManager {
       const provider = this.recoveryDependencies.providerRegistry.get(providerId);
       const settings = this.recoveryDependencies.projectService.getMergedProviderSettings(project, providerId);
       const conversation = await provider.getConversation(project, nativeSessionId, settings);
-      if (!conversation) return;
-      this.db.conversationIndex.upsert({ ...conversation.summary, title: session.title ?? conversation.summary.title });
+      if (!conversation || (providerId === 'codex' && (conversation.summary.rawMetadata?.threadSource === 'subagent'
+        || conversation.summary.rawMetadata?.forkedFromId))) return;
+      const owner = this.db.boundSessions.getRestorableByConversation(project.slug, providerId, nativeSessionId);
+      if (owner && owner.id !== session.id) return;
+      // A launcher chose its session's title. A human-created chat's session title is only its
+      // "New … conversation" placeholder, which must not mask the transcript's title once it has a first message.
+      const hasFirstMessage = typeof conversation.summary.rawMetadata?.firstUserTextHash === 'string';
+      const summary = session.title && (session.launchContext || !hasFirstMessage)
+        ? { ...conversation.summary, title: session.title }
+        : conversation.summary;
+      this.db.conversationIndex.upsert(summary);
       if (session.launchContext && session.title) this.db.titleOverrides.set(project.slug, providerId, nativeSessionId, session.title, nowIso());
       const pending = this.db.pendingConversations.get(session.conversationRef);
       if (pending) {
         const adoption = adoptPendingConversation({ db: this.db, projectSlug: project.slug, providerId,
-          pendingRef: pending.ref, matchedConversation: { ...conversation.summary, title: session.title ?? conversation.summary.title } });
+          pendingRef: pending.ref, matchedConversation: summary });
         if (adoption.reboundSession) this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
       } else if (session.conversationRef.startsWith('pending:')) {
         const adopted = { ...session, conversationRef: nativeSessionId, resumeConversationRef: nativeSessionId, updatedAt: nowIso() };
@@ -1737,27 +1803,41 @@ export class SessionManager {
     });
   }
 
-  /** Grant actions use the existing session queue and recovery transport. */
-  async restartGrantedSession(sessionId: string): Promise<BoundSession> {
+  /** An explicit granted restart starts one turn, independently of automatic recovery. */
+  async restartGrantedSession(sessionId: string, prompt: string | undefined, authorized: () => boolean): Promise<BoundSession> {
     return this.runtimes.run(sessionId, 'restartGrantedSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (!session.shouldRestore || session.status === 'ended' || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest)
         throw new Error('This session is finished or paused.');
-      if (!this.unattendedAssignment(session)) throw new SessionInputRejectedError('This session is waiting for human input or has been stopped.');
+      const assignment = this.assignmentForSession(session);
+      const requireRestartAuthority = () => {
+        const latest = this.mustGetSession(sessionId);
+        if (!authorized()) throw new Error('The grant no longer covers restarting this session.');
+        if (this.stopped || this.getCurrentRestorableSession(latest)?.id !== sessionId
+          || latest.manualSuspendedAt || latest.pressureSuspendedAt || latest.modelProfileRequest || latest.queuedInputs?.length
+          || (assignment && peerWakePaused(this.db, assignment.id)))
+          throw new SessionInputRejectedError('Restart is waiting for human input or a session pause to clear.');
+      };
+      requireRestartAuthority();
       const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
       if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
+      if (liveness === 'dead' && assignment && processStart(assignment.pid) === assignment.processStart)
+        throw new SessionInputRejectedError('The original provider still has a live owner outside this binding.');
       if (liveness === 'alive') {
-        const screen = await this.captureSessionScreen(session, false);
-        if (session.isWorking || this.providerTurnIsWorking(sessionId) === true || !screen.inputActive || screen.inputText.trim()
-          || sessionScreenShowsWorking(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
-          throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) throw new Error('Session ownership changed.');
+        const screen = await this.captureSessionScreen(session, false);
+        requireRestartAuthority();
+        if (this.mustGetSession(sessionId).isWorking || this.providerTurnIsWorking(sessionId) === true || !screen.inputActive || screen.inputText.trim()
+          || sessionScreenShowsWorking(screen) || screenShowsBackgroundWork(screen) || screenIsStartingUp(screen)
+          || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
+          throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
         await this.tmuxClient.killSession(session.tmuxSessionName);
       }
+      requireRestartAuthority();
+      this.runRecovery.stopWatching(sessionId);
       this.db.boundSessions.setRunFailure(sessionId, undefined);
       this.db.meta.set(`run-recovery-budget:${sessionId}`, '');
-      await this.runRecovery.processExited(sessionId);
-      const restored = await this.restoreSession(session);
+      const restored = await this.restoreSession(session, true, prompt ?? GRANTED_RESTART_PROMPT, requireRestartAuthority);
       if (!restored) throw new Error('The original conversation could not be restored.');
       return restored;
     });
@@ -1926,7 +2006,7 @@ export class SessionManager {
   }, sessionId: string): Promise<SessionCommandResult> {
     const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
-      const liveSession = await this.refreshSessionState(existing);
+      const liveSession = await this.refreshSessionState(existing, { resumeIdle: true });
       if (liveSession) {
         return sessionCommandResult(liveSession);
       }
@@ -2055,7 +2135,7 @@ export class SessionManager {
 
   private async sendInputInternal(sessionId: string, text: string): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
-    const liveSession = await this.refreshSessionState(session);
+    const liveSession = await this.refreshSessionState(session, { resumeIdle: true });
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
@@ -2128,7 +2208,12 @@ export class SessionManager {
 
   private cancelQueuedInputs(sessionId: string): void {
     if (!this.db.isOpen()) return;
+    const panePid = this.db.boundSessions.getById(sessionId)?.pid;
     for (const record of this.inputQueue.list(sessionId)) {
+      // The human's own Stop key reaches the provider; clear our typed text
+      // before the next queued message instead of racing a repeated Escape.
+      const remnant = this.inputQueue.cancelledRemnant(sessionId, record, panePid);
+      if (remnant) this.inputQueue.setRemnant(sessionId, { ...remnant, nativeRevision: this.inputQueue.revision(sessionId) });
       this.inputQueue.put(sessionId, record.state === 'submitting'
         ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
         : { ...record, state: 'cancelled' });
@@ -2144,8 +2229,48 @@ export class SessionManager {
       throw new SessionInputRejectedError('Submission has already started. Check the conversation before sending again.');
     }
     this.saveQueuedInput(sessionId, { ...record, state: 'cancelled' });
+    const remnant = this.inputQueue.cancelledRemnant(sessionId, record, this.mustGetSession(sessionId).pid);
+    if (remnant) {
+      this.inputQueue.setRemnant(sessionId, remnant);
+      void this.runtimes.run(sessionId, 'clearCancelledInput', () => this.clearQueuedInputRemnantInternal(sessionId))
+        .catch((error: unknown) => this.logger?.warn({ err: error, sessionId }, 'Cancelled message text was left in the native composer.'));
+    }
     this.scheduleInputDrain(sessionId);
     return { session: this.mustGetSession(sessionId) };
+  }
+
+  /** Clears cancelled queue text only while it is the whole, unchanged, idle native draft. */
+  private async clearQueuedInputRemnantInternal(sessionId: string): Promise<boolean> {
+    const remnant = this.inputQueue.remnant(sessionId);
+    const session = this.db.boundSessions.getById(sessionId);
+    if (!remnant || !session || this.stopped) return false;
+    if (session.pid !== remnant.panePid) {
+      this.inputQueue.setRemnant(sessionId, undefined); return false;
+    }
+    if (session.status !== 'bound' || session.manualSuspendedAt || session.pressureSuspendedAt
+      || this.getCurrentRestorableSession(session)?.id !== sessionId) return false;
+    const revision = this.inputQueue.revision(sessionId);
+    if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== sessionId
+      || await this.tmuxClient.getPanePid(session.tmuxSessionName) !== remnant.panePid) return false;
+    const screen = await this.captureSessionScreen(session, false);
+    // Claude's clear-input key interrupts a running turn. Cancellation may
+    // now happen after human text was staged during that turn; leave it intact.
+    if (revision !== this.inputQueue.revision(sessionId) || !screenLooksReadyForLiteralPrompt(screen)
+      || (this.providerTurnIsWorking(sessionId) ?? this.mustGetSession(sessionId).isWorking)) return false;
+    if (!screen.inputText.trim()) { this.inputQueue.setRemnant(sessionId, undefined); return true; }
+    if (!screenInputMatchesText(screen, remnant.text)
+      && !(remnant.nativeRevision === revision && screenInputMatchesPaste(screen, remnant.text, session.provider))) return false;
+    // Journal before transport: an uncertain clear is never repeated, because
+    // a second clear key on an empty composer can arm the provider's exit.
+    this.inputQueue.setRemnant(sessionId, undefined);
+    await this.runInputTmuxAction(session, () => revision === this.inputQueue.revision(sessionId)
+      ? this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']) : Promise.resolve());
+    const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(remnant.text),
+      candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
+    if (!cleared) return false;
+    this.inputQueue.stage(sessionId, undefined);
+    await this.emitScreenUpdate(this.mustGetSession(sessionId));
+    return true;
   }
 
   private async queueInputInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
@@ -2208,7 +2333,14 @@ export class SessionManager {
         this.saveQueuedInput(sessionId, record);
       }
     };
-    const session = this.mustGetSession(sessionId);
+    let session = this.mustGetSession(sessionId);
+    // The fast input poll may wake a bound sleeper once. Failed or incomplete
+    // restores belong to reconciliation, rather than another one-second launch.
+    if (session.idleSuspendedAt && session.status === 'bound') {
+      const restored = await this.refreshSessionState(session, { resumeIdle: true });
+      if (!restored) { defer('Waiting for the session to resume.'); return; }
+      session = restored;
+    }
     if (!session.shouldRestore || session.status !== 'bound' || this.getCurrentRestorableSession(session)?.id !== sessionId) {
       defer('Waiting for the original session to be available.'); return;
     }
@@ -2227,6 +2359,13 @@ export class SessionManager {
       if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== sessionId) return false;
       const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName);
       const latest = this.db.boundSessions.getById(sessionId);
+      if (pid !== undefined && record.panePid !== undefined && pid !== record.panePid
+        && this.inputQueue.get(sessionId, record.requestId)?.state === record.state
+        && this.inputQueue.revision(sessionId) === attemptRevision) {
+        this.saveQueuedInput(sessionId, { ...record, state: 'failed',
+          reason: 'The native session changed after text entry. Check the conversation before sending again.' });
+        return false;
+      }
       return !this.stopped && latest?.status === 'bound' && !latest.manualSuspendedAt && !latest.pressureSuspendedAt
         && this.getCurrentRestorableSession(latest)?.id === sessionId
         && this.inputQueue.get(sessionId, record.requestId)?.state === record.state
@@ -2236,9 +2375,9 @@ export class SessionManager {
     };
     if (!await stillOwned()) { defer('Waiting to verify the original live session.'); return; }
     let screen = await this.captureSessionScreen(session, false);
-    const turnWorking = this.providerTurnIsWorking(sessionId);
-    if (!screenLooksReadyForLiteralPrompt(screen)
-      || turnWorking === true || (turnWorking === undefined && session.isWorking)) {
+    // Human Enter steers/queues within the native active turn. Working state
+    // blocks automatic input, not an explicitly submitted human message.
+    if (!screenAcceptsHumanPrompt(screen)) {
       defer(screenShowsInteractiveSelectionHint(screen)
         ? 'Waiting for you to finish the approval or menu.' : 'Waiting for the session to accept input.');
       return;
@@ -2251,7 +2390,7 @@ export class SessionManager {
       return;
     }
     const noticePrompt = notice?.notice === 'unattended' ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT;
-    if (record.state === 'queued' && session.provider === 'claude' && notice?.status === 'staged'
+    if (record.state === 'queued' && session.provider === 'claude' && notice && ['pasting', 'staged'].includes(notice.status)
       && !noticePrompt.includes('\n')
       && notice.assignmentId === this.assignmentForSession(session)?.id
       && notice.pid === session.pid && notice.startedAt === session.startedAt
@@ -2264,6 +2403,7 @@ export class SessionManager {
       const canRetire = () => {
         const latest = this.db.boundSessions.getById(sessionId);
         return !this.stopped && latest?.status === 'bound' && !latest.manualSuspendedAt && !latest.pressureSuspendedAt
+          && !(this.providerTurnIsWorking(sessionId) ?? latest.isWorking)
           && latest.pid === session.pid && latest.startedAt === session.startedAt
           && this.getCurrentRestorableSession(latest)?.id === sessionId
           && this.inputQueue.revision(sessionId) === attemptRevision
@@ -2289,22 +2429,26 @@ export class SessionManager {
         return;
       }
     }
+    if (record.state === 'queued' && screen.inputText.trim() && this.inputQueue.remnant(sessionId)
+      && !this.queuedInputConfirmed(sessionId, record, screen, session.pid)) {
+      if (!await stillOwned()) return;
+      if (await this.clearQueuedInputRemnantInternal(sessionId)) screen = await this.captureSessionScreen(session, false);
+    }
     let confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     if (record.state === 'queued' && !confirmed) {
-      let transportText = record.text;
       if (screen.inputText.trim()) {
         const delta = record.initialText?.trimEnd();
         const prefix = delta && record.text.endsWith(delta) ? record.text.slice(0, -delta.length).trim() : '';
         if (!prefix || !this.queuedInputConfirmed(sessionId, { ...record, text: prefix }, screen, session.pid)) {
           defer('Waiting for the existing terminal draft to be sent or cleared.'); return;
         }
-        transportText = record.initialText!;
       }
       if (!await stillOwned()) return;
       // Persist before transport: after a crash, observe this paste, never repeat it.
-      record = { ...record, state: 'awaiting_input', baselineInput: screen.inputText,
+      record = { ...record, state: 'awaiting_input', baselineInput: screen.inputText, typedAt: nowIso(),
         panePid: session.pid ?? undefined, nativeRevision: this.inputQueue.revision(sessionId), reason: 'Waiting for the typed message to appear.' };
       this.saveQueuedInput(sessionId, record);
+      const transportText = queuedTransportText(record);
       try {
         await this.runInputTmuxAction(session, () => shouldUseBracketedPasteTransport(transportText)
           ? this.tmuxClient.pasteText(session.tmuxSessionName, transportText)
@@ -2321,10 +2465,15 @@ export class SessionManager {
       confirmed = this.queuedInputConfirmed(sessionId, record, screen, session.pid);
     } else if (record.state === 'awaiting_input') {
       confirmed ||= this.queuedInputConfirmed(sessionId, record, screen, session.pid);
+      if (!confirmed && Date.now() - Date.parse(record.typedAt ?? record.requestedAt) >= QUEUED_PASTE_CONFIRMATION_MS) {
+        this.saveQueuedInput(sessionId, { ...record, state: 'failed',
+          reason: 'The typed message could not be confirmed within 30 seconds. Check the live draft before sending again.' });
+        return;
+      }
     }
-    if (!confirmed || !screenLooksReadyForLiteralPrompt(screen) || !await stillOwned()) return;
+    if (!confirmed || !screenAcceptsHumanPrompt(screen) || !await stillOwned()) return;
     screen = await this.captureSessionScreen(session, false);
-    if (!screenLooksReadyForLiteralPrompt(screen)
+    if (!screenAcceptsHumanPrompt(screen)
       || !this.queuedInputConfirmed(sessionId, record, screen, session.pid) || !await stillOwned()) return;
     const observedInput = record;
     record = { ...record, state: 'submitting', nativeRevision: this.inputQueue.revision(sessionId),
@@ -2340,9 +2489,8 @@ export class SessionManager {
       // Ownership reads can yield while the native composer changes. Observe it
       // last, then perform synchronous queue/revision checks before sending Enter.
       const finalScreen = await this.captureSessionScreen(session, false);
-      if (!screenLooksReadyForLiteralPrompt(finalScreen)
+      if (!screenAcceptsHumanPrompt(finalScreen)
         || !this.queuedInputConfirmed(sessionId, observedInput, finalScreen, session.pid)
-        || this.providerTurnIsWorking(sessionId) === true
         || this.inputQueue.revision(sessionId) !== attemptRevision
         || this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') {
         if (this.inputQueue.get(sessionId, record.requestId)?.state === 'submitting') {
@@ -2368,23 +2516,22 @@ export class SessionManager {
     }
   }
 
-  private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen): boolean {
+  private queuedPasteConfirmed(record: QueuedInputRecord, screen: SessionScreen, provider: ProviderId): boolean {
     if (record.state !== 'awaiting_input' || screen.inputText === record.baselineInput) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
-    return Boolean(placeholder && placeholder[1]?.trim() === (record.baselineInput ?? '').trim());
+    return screenInputMatchesPaste(screen, queuedTransportText(record), provider, record.baselineInput ?? '');
   }
 
   private queuedInputConfirmed(sessionId: string, record: QueuedInputRecord, screen: SessionScreen, pid: number | null | undefined): boolean {
-    if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen)) return true;
+    const provider = this.mustGetSession(sessionId).provider;
+    if (screenInputMatchesText(screen, record.text) || this.queuedPasteConfirmed(record, screen, provider)) return true;
     const staged = this.inputQueue.staged(sessionId);
-    if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim()) return false;
-    const placeholder = screen.inputText.match(/^(.*?)\[Pasted text #\d+(?: \+\d+ lines)?\](?: paste again to expand)?$/i);
-    return Boolean(placeholder && placeholder[1]?.trim() === staged.prefix.trim());
+    if (!staged || staged.panePid !== pid || staged.text.trim() !== record.text.trim() || !staged.hasPaste) return false;
+    return screenInputMatchesPaste(screen, staged.text.slice(staged.prefix.length), provider, staged.prefix);
   }
 
   private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
-    const liveSession = await this.refreshSessionState(session);
+    const liveSession = await this.refreshSessionState(session, { resumeIdle: true });
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
@@ -2834,6 +2981,12 @@ export class SessionManager {
     let session = this.db.boundSessions.getById(sessionId);
     let request = session?.modelProfileRequest;
     if (!session || !request || request.state === 'failed') return;
+    if (session.idleSuspendedAt) {
+      session = await this.refreshSessionState(session, { resumeIdle: true });
+      if (!session) return;
+      request = session.modelProfileRequest;
+      if (!request || request.state === 'failed') return;
+    }
     if (request.state === 'applying') {
       await this.reconcileApplyingModelProfileRequest(session, request);
       return;
@@ -3108,6 +3261,15 @@ export class SessionManager {
     return assignment?.status === 'active';
   }
 
+  private ownsUnsentAutomaticNotice(session: BoundSession, screen: SessionScreen): boolean {
+    const value = this.db.meta.get(peerWakeComposerKey(session.id));
+    if (!value || session.provider !== 'claude') return false;
+    const notice = JSON.parse(value) as PeerWakeComposer;
+    return ['pasting', 'staged'].includes(notice.status) && notice.pid === session.pid && notice.startedAt === session.startedAt
+      && notice.assignmentId === this.assignmentForSession(session)?.id
+      && screenInputMatchesText(screen, notice.notice === 'unattended' ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT);
+  }
+
   private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
     // An assignment can remain active after SessionStart without a running
     // turn. Ordinary idle sleep uses native activity. Manual suspension can
@@ -3116,10 +3278,10 @@ export class SessionManager {
       || await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== session.id) {
       return 'ownership';
     }
+    await this.runRecovery.refresh(session.id);
     const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
     if (!snapshot.trim()) return 'screen';
     const screen = parseSessionScreenSnapshot(snapshot, nowIso());
-    await this.runRecovery.refresh(session.id);
     const current = this.db.boundSessions.getById(session.id);
     const idleResumeChoice = session.provider === 'claude' && claudeFullSessionResumeSelection(screen) !== undefined;
     const run = this.runRecovery.getRunState(session.id);
@@ -3134,6 +3296,11 @@ export class SessionManager {
       && selectionLines.filter(line => /^(?:[❯›>]\s*)?\d+\.\s/u.test(line)).length >= 2);
     const manualInputWait = mode === 'manual' && !screen.inputActive && nativeSelection && screenShowsInteractiveSelectionHint(screen)
       && (!run || run.timestamp <= screen.capturedAt);
+    const noticeValue = this.db.meta.get(peerWakeComposerKey(session.id));
+    const notice = noticeValue ? JSON.parse(noticeValue) as PeerWakeComposer : undefined;
+    if (notice && notice.pid === session.pid && notice.startedAt === session.startedAt
+      && ['submitting', 'retiring'].includes(notice.status)) return 'busy';
+    const ownedNotice = this.ownsUnsentAutomaticNotice(session, screen);
     const turnIsWorking = this.providerTurnIsWorking(session.id);
     // A ready composer/model is required for automatic sleep, not a human
     // pause. Native completion also permits pausing a still-repainting resume.
@@ -3145,7 +3312,7 @@ export class SessionManager {
       || current.conversationRef.startsWith('pending:') || (!manualInputWait && turnIsWorking === true)
       || sessionScreenShowsWorking(screen) || (requireReadyPrompt && screenIsStartingUp(screen))
       || screenShowsBackgroundWork(screen)
-      || screen.inputText.trim() || (requireReadyPrompt && !idleResumeChoice && (!screen.inputActive || screenShowsInteractiveSelectionHint(screen)))
+      || (screen.inputText.trim() && !ownedNotice) || (requireReadyPrompt && !idleResumeChoice && (!screen.inputActive || screenShowsInteractiveSelectionHint(screen)))
       || screenShowsQueuedMessageHint(screen)
       || (requireReadyPrompt && (session.provider === 'codex' ? !screen.model : !idleResumeChoice && !screenLooksReadyForLiteralPrompt(screen)))) {
       return 'busy';
@@ -3158,6 +3325,13 @@ export class SessionManager {
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;
+      if (session.idleSuspendedAt && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') {
+        this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
+        const suspended = this.db.boundSessions.setIdleSuspendedAt(session.id, undefined)!;
+        this.cancelQueuedInputs(session.id);
+        this.eventBus.emit({ type: 'session.updated', session: suspended });
+        return suspended;
+      }
       if (!session.shouldRestore || session.status !== 'bound'
         || session.modelProfileRequest || session.conversationRef.startsWith('pending:')) {
         throw new SessionInputRejectedError('Only an idle, established session can be suspended.');
@@ -3180,9 +3354,10 @@ export class SessionManager {
       this.stopWatching(session.id);
       this.runtimes.clearEphemeral(session.id);
       this.runRecovery.cancel(session.id);
-      this.suspendedSessionIds.add(session.id);
+      this.db.meta.set(peerWakeComposerKey(session.id), '');
       let suspended = this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
       if (!suspended) throw new Error('Session disappeared while suspending.');
+      if (suspended.idleSuspendedAt) suspended = this.db.boundSessions.setIdleSuspendedAt(session.id, undefined)!;
       this.cancelQueuedInputs(sessionId);
       suspended = this.mustGetSession(sessionId);
       this.appendEvent(suspended, { type: 'status', text: 'Session suspended; opening this conversation will resume it.', timestamp: nowIso() });
@@ -3265,6 +3440,7 @@ export class SessionManager {
     this.db.boundSessions.upsert(ended);
     if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
     if (session.pressureSuspendedAt) ended = this.db.boundSessions.setPressureSuspendedAt(session.id, undefined) ?? ended;
+    if (session.idleSuspendedAt) ended = this.db.boundSessions.setIdleSuspendedAt(session.id, undefined) ?? ended;
     if (session.conversationRef.startsWith('pending:')) {
       const pending = this.db.pendingConversations.get(session.conversationRef);
       if (removePendingConversation) {
@@ -3322,17 +3498,18 @@ export class SessionManager {
     options: { startLine?: number } = {},
   ): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
     let session = this.mustGetSession(sessionId);
-    if (session.manualSuspendedAt || session.pressureSuspendedAt) return undefined;
-    if (session.launchContext && session.conversationRef.startsWith('pending:')) {
+    if (session.manualSuspendedAt || session.pressureSuspendedAt || session.idleSuspendedAt) return undefined;
+    if (session.conversationRef.startsWith('pending:')) {
       const registered = this.assignmentForSession(session);
-      if (registered) await this.adoptRegisteredSession(sessionId, session.provider, registered.nativeSessionId);
+      if (registered && (session.launchContext || this.hasRecordedPendingUserInput(session)))
+        await this.adoptRegisteredSession(sessionId, session.provider, registered.nativeSessionId);
       session = this.mustGetSession(sessionId);
     }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     const liveSession = liveness === 'dead'
       ? await this.runtimes.run(sessionId, 'restoreSessionForScreen', async () => {
           const current = this.mustGetSession(sessionId);
-          if (current.status === 'error' || current.manualSuspendedAt || current.pressureSuspendedAt) {
+          if (current.status === 'error' || current.manualSuspendedAt || current.pressureSuspendedAt || current.idleSuspendedAt) {
             return undefined;
           }
           return await this.refreshSessionState(current, { restoreMissing: true });
@@ -3378,16 +3555,18 @@ export class SessionManager {
 
   private async refreshSessionState(
     staleSession: BoundSession,
-    options: { restoreMissing?: boolean; resumeSuspension?: boolean } = {},
+    options: { restoreMissing?: boolean; resumeSuspension?: boolean; resumeIdle?: boolean } = {},
   ): Promise<BoundSession | undefined> {
     let session = this.db.boundSessions.getById(staleSession.id);
-    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
+    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)
+      || (session.idleSuspendedAt && !options.resumeSuspension && !options.resumeIdle)) {
       return undefined;
     }
     const restoreMissing = options.restoreMissing ?? true;
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     session = this.db.boundSessions.getById(staleSession.id);
-    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)) {
+    if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)
+      || (session.idleSuspendedAt && !options.resumeSuspension && !options.resumeIdle)) {
       return undefined;
     }
     if (liveness === 'unknown') {
@@ -3400,7 +3579,7 @@ export class SessionManager {
       }
       if (restoreMissing && session.shouldRestore && this.unattendedAssignment(session)
         && (session.pid !== undefined || session.runFailure?.code === 'process_exited')
-        && !this.suspendedSessionIds.has(session.id) && session.status !== 'releasing') {
+        && !session.idleSuspendedAt && session.status !== 'releasing') {
         // Unfinished unattended sessions use the durable backed-off controller.
         // Reconciliation and browser polling cannot launch them in a hot loop.
         await this.runRecovery.processExited(session.id);
@@ -3449,6 +3628,17 @@ export class SessionManager {
       return undefined;
     }
 
+    // A restart may land after tmux creation but before the restore commit.
+    // An intentional wake can adopt that owned writer instead of staying asleep.
+    if (session.idleSuspendedAt) {
+      if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== session.id) return undefined;
+      const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName).catch(() => undefined);
+      if (pid === undefined) return undefined;
+      this.updateBoundSessionFields(session.id, { pid, updatedAt: nowIso() });
+      session = this.db.boundSessions.setIdleSuspendedAt(session.id, undefined)!;
+      this.suspensionGraceUntilMs.set(session.id, Date.now() + this.restoreGraceMs);
+    }
+
     const logReadySession = this.ensureSessionLogPaths(session);
     const nextStatus = logReadySession.status === 'starting' || logReadySession.status === 'error' ? 'bound' : logReadySession.status;
     const refreshed: BoundSession = nextStatus === logReadySession.status
@@ -3467,6 +3657,8 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: refreshed });
     }
     await this.tryEnsureRawLogPipe(refreshed);
+    await this.tryEnsurePaneSize(refreshed);
+    await this.verifyNativeProcessEpoch(refreshed);
     this.watchSessionOutput(refreshed);
     if (!this.runtimeState(refreshed.id).lastScreenHash) {
       await this.emitScreenUpdate(refreshed);
@@ -4170,6 +4362,7 @@ export class SessionManager {
         ? 'Provider session exited during startup.'
         : 'Could not verify provider session startup.');
     }
+    await this.verifyNativeProcessEpoch(session);
   }
 
   private decorateScreenForSession(session: BoundSession, screen: SessionScreen): SessionScreen {

@@ -25,8 +25,11 @@ export class FakeTmux implements TmuxClient {
   captureStartLines: Array<number | undefined> = [];
   options: Array<{ sessionName: string; name: string; value: string }> = [];
   hasSessionResults: Array<boolean | Error> = [];
+  windowSizeChecks: string[] = [];
+  sessionCreatedAt = '1970-01-01T00:00:01.000Z';
 
   async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
+    if (this.created.length) this.sessionCreatedAt = new Date().toISOString();
     this.created.push(sessionName);
     this.createdCommands.push(shellCommand);
     this.alive.add(sessionName);
@@ -77,6 +80,11 @@ export class FakeTmux implements TmuxClient {
     return this.alive.has(sessionName);
   }
   async getPanePid(): Promise<number | undefined> { return 4242; }
+  async getSessionCreatedAt(): Promise<string> { return this.sessionCreatedAt; }
+  async ensureMinimumWindowSize(sessionName: string, _columns: number, _rows: number): Promise<boolean> {
+    this.windowSizeChecks.push(sessionName);
+    return false;
+  }
   async getOption(sessionName: string, name: string): Promise<string | undefined> {
     for (let index = this.options.length - 1; index >= 0; index -= 1) {
       const option = this.options[index];

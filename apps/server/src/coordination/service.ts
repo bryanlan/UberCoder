@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
+import type { AgentReference, AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
-import { CONTINUATION_POLICY, continuationControl, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
+import { CONTINUATION_POLICY, continuationControl, endAwaiting, setAwaiting, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { GRANT_POLICY } from '../grants/schema.js';
 
@@ -40,7 +40,7 @@ export class CoordinationService {
     const row = this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments where id=?`).get(id) as CoordinationAssignment | undefined;
     if (!row) throw new Error('Unknown assignment.');
     const control = continuationControl(this.db, id);
-    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, recovery: control.recovery };
+    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, awaiting: control.awaiting?.description ?? null, recovery: control.recovery };
   }
 
   private pilotCache: { key: string; repositories: Set<string> } | null = null;
@@ -69,6 +69,34 @@ export class CoordinationService {
 
   eligible(directory: string): boolean {
     try { this.identity(directory); return true; } catch { return false; }
+  }
+
+  conversationReference(input: { projectSlug: string; provider: string; conversationRef: string }): AgentReference {
+    if (!this.settings.enabled) throw new Error('Agent coordination is disabled.');
+    const candidate = this.db.pendingConversations.get(input.conversationRef);
+    const pending = candidate?.projectSlug === input.projectSlug && candidate.provider === input.provider ? candidate : undefined;
+    const adopted = pending?.rawMetadata?.adoptedConversationRef;
+    const conversationRef = typeof adopted === 'string' ? adopted : input.conversationRef;
+    const session = this.db.boundSessions.getRestorableByConversation(input.projectSlug, input.provider, conversationRef);
+    if (!session || !['starting', 'bound'].includes(session.status)) {
+      throw new Error('This chat has no connected agent. Open it and resume its agent before referencing it.');
+    }
+    const nativeRef = session.resumeConversationRef ?? session.conversationRef;
+    // Before transcript adoption, native registration already identifies the exact
+    // Console binding. Require a unique registration rather than guessing a peer.
+    const assignments = (nativeRef.startsWith('pending:')
+      ? this.db.sqlite.prepare(`select a.id, a.status from coordination_assignments a
+          join meta m on m.key='console-session:' || a.id
+          where m.value=? and a.provider=? limit 2`).all(session.id, input.provider)
+      : this.db.sqlite.prepare(`select id, status from coordination_assignments
+          where provider=? and native_session_id=?`).all(input.provider, nativeRef)) as { id: string; status: string }[];
+    const assignment = assignments.length === 1 ? assignments[0] : undefined;
+    if (!assignment) {
+      throw new Error('This chat has no available coordinating agent. Resume its agent before referencing it.');
+    }
+    const summary = this.db.conversationIndex.get(input.projectSlug, input.provider, conversationRef);
+    return { recipientId: assignment.id, provider: input.provider, projectSlug: input.projectSlug,
+      conversationRef, title: summary?.title ?? session.title ?? pending?.title ?? conversationRef };
   }
 
   register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string }): { enabled: boolean; assignmentId?: string } {
@@ -129,7 +157,7 @@ export class CoordinationService {
   }
 
   update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
-    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean }) {
+    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean; awaiting?: string | null }) {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
@@ -153,6 +181,7 @@ export class CoordinationService {
         }
         this.event(id, null, 'continuation', `Continuation: ${input.continuation ?? current.continuation}; supervisor: ${input.supervisorId === undefined ? current.supervisorId ?? 'none' : input.supervisorId ?? 'none'}.`);
       }
+      if (input.awaiting !== undefined) setAwaiting(this.db, id, input.awaiting);
       this.db.sqlite.prepare('update coordination_assignments set description=?, status=?, last_seen_at=? where id=?')
         .run(input.description ?? current.description, input.status ?? current.status, new Date().toISOString(), id);
       if (identity) this.db.sqlite.prepare(`insert into coordination_scopes values(?,?,?,?) on conflict(assignment_id,checkout) do update set summary=excluded.summary`)
@@ -175,7 +204,7 @@ export class CoordinationService {
     const current = this.assignment(id);
     const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
     const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160),
-      continuation: current.continuation, supervisorId: current.supervisorId, recovery: current.recovery };
+      continuation: current.continuation, supervisorId: current.supervisorId, awaiting: current.awaiting, recovery: current.recovery };
     // A checkout outside the pilot has no activity view, but the assignment and direct messages
     // still work. Say so explicitly; an empty "disabled" reply reads as "messaging is unavailable".
     if (directory && !this.eligible(directory)) {
@@ -251,9 +280,23 @@ export class CoordinationService {
     return { id: message.id, queued: true, recipient, delivery, note };
   }
 
+  /** Completion ends work authority, not the inbox of a still-connected Console agent. */
+  private hasLiveConsoleRecipient(id: string): boolean {
+    const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
+      .get(id) as { pid: number; process_start: string };
+    if (!owner.process_start || processStart(owner.pid) !== owner.process_start) return false;
+    const sessions = this.db.sqlite.prepare(`select s.project_slug as projectSlug, s.provider, s.conversation_ref as conversationRef
+      from bound_sessions s join coordination_assignments a on a.id=? and a.provider=s.provider
+      where s.should_restore=1 and s.status in ('starting','bound') and
+        (s.conversation_ref=a.native_session_id or s.resume_conversation_ref=a.native_session_id
+          or (s.conversation_ref like 'pending:%' and s.id=(select value from meta where key='console-session:' || a.id)))
+      limit 2`).all(id) as Array<{ projectSlug: string; provider: string; conversationRef: string }>;
+    if (sessions.length !== 1) return false;
+    try { return this.conversationReference(sessions[0]!).recipientId === id; } catch { return false; }
+  }
+
   send(id: string, input: { id: string; recipientId: string; text: string }): CoordinationSendReceipt {
-    this.assignment(input.recipientId);
-    if (this.assignment(input.recipientId).status === 'finished') throw new Error('Recipient assignment is finished.');
+    const recipient = this.assignment(input.recipientId);
     const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
       .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
     if (existing) {
@@ -261,9 +304,17 @@ export class CoordinationService {
       this.requestWake?.();
       return this.sendReceipt(existing);
     }
+    if (recipient.status === 'finished' && !this.hasLiveConsoleRecipient(input.recipientId)) throw new Error('Recipient assignment is finished; resume its agent before messaging it.');
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
-    this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+    this.db.sqlite.transaction(() => {
+      if (recipient.status === 'finished') {
+        setContinuation(this.db, input.recipientId, 'waiting_for_input');
+        this.db.sqlite.prepare("update coordination_assignments set status='waiting' where id=? and status='finished'").run(input.recipientId);
+      }
+      this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+      endAwaiting(this.db, input.recipientId);
+    })();
     this.requestWake?.();
     return this.sendReceipt({ id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
   }
@@ -409,6 +460,7 @@ export class CoordinationService {
       if (!blocked) {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(messageId, id, control.supervisorId, text, timestamp);
+        endAwaiting(this.db, control.supervisorId);
       }
       signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: text });
     }
@@ -427,6 +479,7 @@ export class CoordinationService {
       this.db.sqlite.transaction(() => {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(handoff.messageId, handoff.workerId, handoff.recipientId, handoff.text, handoff.timestamp);
+        endAwaiting(this.db, handoff.recipientId);
         delete handoff.blockedReason;
         this.db.meta.set(row.key, JSON.stringify(handoff));
       })();
