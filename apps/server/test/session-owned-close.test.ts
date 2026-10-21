@@ -40,34 +40,34 @@ async function fixture(options: { launched?: boolean; status?: 'finished' | 'wai
     restart: async () => { await manager.stop(); manager = createRecoveryManager(db, tmux, path.join(root, 'runtime'), undefined, adapter); } };
 }
 
-describe('Finished agent-created session archive', () => {
-  it('retries startup adoption from the exact registered native identity before archiving a pending helper', async () => {
+describe('Finished agent inbox retention and explicit close', () => {
+  it('retries startup adoption from the exact registered native identity while retaining a finished helper inbox', async () => {
     const f = await fixture({ registeredHistory: true });
     f.db.boundSessions.upsert({ ...f.session, conversationRef: 'pending:startup-registration', resumeConversationRef: undefined });
     f.db.meta.set(`console-session:${f.assignmentId}`, f.session.id);
     f.tmux.alive.clear();
     await f.manager.reconcileSessions();
-    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ conversationRef: f.session.conversationRef, status: 'ended', shouldRestore: false });
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ conversationRef: f.session.conversationRef, shouldRestore: true });
     expect(await fs.readFile(f.transcriptPath, 'utf8')).toBe(f.history);
     expect(f.tmux.created).toHaveLength(1);
   });
-  it('archives a freshly finished exited helper, retains its transcript and never restores it after restart', async () => {
+  it('retains a finished exited helper inbox without eager restoration across restart', async () => {
     const f = await fixture(); f.tmux.alive.clear();
     await f.manager.reconcileSessions();
-    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ status: 'ended', shouldRestore: false, isWorking: false });
-    expect(f.manager.listActiveSessions().map(s => s.id)).not.toContain(f.session.id);
-    expect(f.manager.getSessionByConversation(project.slug, 'codex', f.session.conversationRef)).toBeUndefined();
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ shouldRestore: true, isWorking: false });
+    expect(f.manager.listActiveSessions().map(s => s.id)).toContain(f.session.id);
+    expect(f.manager.getSessionByConversation(project.slug, 'codex', f.session.conversationRef)?.id).toBe(f.session.id);
     expect(await fs.readFile(f.transcriptPath, 'utf8')).toBe(f.history);
     expect(f.db.conversationIndex.get(project.slug, 'codex', f.session.conversationRef)?.kind).toBe('history');
     await f.restart(); await f.manager.reconcileSessions();
     expect(f.tmux.created).toHaveLength(1);
-    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(false);
+    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
   });
 
-  it('archives from a screen poll without allowing that poll to restore the finished helper', async () => {
+  it('keeps a finished inbox restorable while screen polling leaves its process asleep', async () => {
     const f = await fixture(); f.tmux.alive.clear();
-    expect(await f.manager.getSessionScreen(f.session.id)).toBeUndefined();
-    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
+    await f.manager.getSessionScreen(f.session.id);
+    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
     expect(f.tmux.created).toHaveLength(1);
   });
 
@@ -81,7 +81,7 @@ describe('Finished agent-created session archive', () => {
     expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
   });
 
-  it('does not restore a finished helper while its native history is missing, and archives when history becomes readable', async () => {
+  it('retains a finished inbox both before and after its history becomes readable', async () => {
     const f = await fixture({ history: false }); f.tmux.alive.clear();
     await f.manager.reconcileSessions();
     expect(f.tmux.created).toHaveLength(1);
@@ -90,7 +90,7 @@ describe('Finished agent-created session archive', () => {
     f.db.conversationIndex.upsert({ ref: f.session.conversationRef, kind: 'history', projectSlug: project.slug, provider: 'codex',
       title: 'Helper', updatedAt: new Date().toISOString(), transcriptPath: f.transcriptPath, isBound: true, degraded: false });
     await f.manager.reconcileSessions();
-    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(false);
+    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
     expect(await fs.readFile(f.transcriptPath, 'utf8')).toBe(f.history);
   });
 
@@ -102,7 +102,17 @@ describe('Finished agent-created session archive', () => {
     expect(f.tmux.created).toHaveLength(1);
   });
 
-  it('keeps a live finished helper until its owned process exits', async () => {
+  it('clears a dead completed provider working flag while preserving its restorable inbox', async () => {
+    const f = await fixture(); f.tmux.alive.clear();
+    f.db.boundSessions.upsert({ ...f.session, isWorking: true });
+    await f.manager.reconcileSessions();
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ shouldRestore: true, isWorking: false });
+    expect(f.db.boundSessions.getById(f.session.id)?.pid).toBeUndefined();
+    expect(f.db.boundSessions.getById(f.session.id)?.idleSuspendedAt).toBeTruthy();
+    expect(f.tmux.created).toHaveLength(1);
+  });
+
+  it('keeps a live finished helper available for inbox delivery', async () => {
     const f = await fixture(); await f.manager.reconcileSessions();
     expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
     expect(f.tmux.alive.has(f.session.tmuxSessionName)).toBe(true);
@@ -119,12 +129,12 @@ describe('Finished agent-created session archive', () => {
     expect(f.tmux.alive.has(f.session.tmuxSessionName)).toBe(true);
   });
 
-  it('does not apply helper auto-archive to a human-created conversation', async () => {
+  it('also leaves a finished human-created conversation asleep and restorable', async () => {
     const f = await fixture({ launched: false }); f.tmux.alive.clear();
     f.db.meta.set(`assignment-continuation:${f.assignmentId}`, '');
     await f.manager.reconcileSessions();
     expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
-    expect(f.tmux.created).toHaveLength(2);
+    expect(f.tmux.created).toHaveLength(1);
   });
 
   it('does not archive on unknown tmux liveness', async () => {
@@ -132,6 +142,21 @@ describe('Finished agent-created session archive', () => {
     await f.manager.reconcileSessions();
     expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
     expect(f.tmux.created).toHaveLength(1);
+  });
+
+  it('preserves a replacement provider that appears during a stale liveness read', async () => {
+    const f = await fixture(); f.tmux.alive.clear();
+    let changed = false;
+    f.tmux.hasSession = async () => {
+      if (!changed) {
+        changed = true;
+        f.db.boundSessions.upsert({ ...f.session, pid: 987654, startedAt: new Date(Date.now() + 1000).toISOString(), isWorking: true });
+      }
+      return false;
+    };
+    await f.manager.reconcileSessions();
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ pid: 987654, shouldRestore: true, isWorking: true });
+    expect(f.db.boundSessions.getById(f.session.id)?.idleSuspendedAt).toBeUndefined();
   });
 
   it('rechecks assignment completion after liveness I/O', async () => {

@@ -140,7 +140,8 @@ export async function startCoordinationSocket(service: CoordinationService, runt
       }
       return result;
     }
-    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Coordination request failed.' }); }
+    catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Coordination request failed.',
+      ...(error instanceof Error && 'code' in error ? { code: error.code } : {}) }); }
   });
   if (wiki) ipc.post('/wiki', { bodyLimit: 96 * 1024 }, async (request, reply) => {
     try { return dispatchWiki(service, wiki, request.body); }

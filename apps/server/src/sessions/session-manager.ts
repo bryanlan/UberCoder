@@ -474,20 +474,21 @@ export class SessionManager {
       .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as Assignment | undefined;
   }
 
-  private isFinishedLaunchedSession(session: BoundSession): boolean {
-    return !!session.launchContext && this.assignmentForSession(session)?.status === 'finished';
+  private isFinishedSession(session: BoundSession): boolean {
+    return this.assignmentForSession(session)?.status === 'finished';
   }
 
-  private async archiveFinishedExitedSession(sessionId: string): Promise<void> {
-    const session = this.db.boundSessions.getById(sessionId);
-    if (!session?.shouldRestore || session.manualSuspendedAt || !this.isFinishedLaunchedSession(session)) return;
-    const assignment = this.assignmentForSession(session)!;
-    if (processStart(assignment.pid) === assignment.processStart || !(await this.hasReadableIndexedTranscript(session))) return;
-    if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') return;
-    const current = this.db.boundSessions.getById(sessionId);
-    if (!current?.shouldRestore || current.manualSuspendedAt || !this.isFinishedLaunchedSession(current)) return;
-    this.runRecovery.cancel(sessionId);
-    await this.releaseSessionInternal(sessionId);
+  private retainFinishedInbox(session: BoundSession): void {
+    const current = this.db.boundSessions.getById(session.id);
+    const assignment = current && this.assignmentForSession(current);
+    if (!current?.shouldRestore || current.status === 'ended' || current.pid !== session.pid || current.startedAt !== session.startedAt
+      || assignment?.status !== 'finished'
+      || (assignment.processStart && processStart(assignment.pid) === assignment.processStart)) return;
+    this.stopWatching(current.id);
+    this.runtimes.clearEphemeral(current.id);
+    this.runRecovery.cancel(current.id);
+    if (!current.idleSuspendedAt || current.pid !== undefined || current.isWorking)
+      this.db.boundSessions.setIdleSuspendedAt(current.id, current.idleSuspendedAt ?? nowIso());
   }
 
   private unattendedAssignment(session: BoundSession): { id: string; status: string } | undefined {
@@ -499,7 +500,7 @@ export class SessionManager {
   private pauseAutomaticInput(sessionId: string, code: AutomaticInputPause['code'], reason: string): void {
     const session = this.db.boundSessions.getById(sessionId);
     const assignment = session && this.assignmentForSession(session);
-    if (assignment && assignment.status !== 'finished') {
+    if (assignment) {
       setPeerWakePaused(this.db, assignment.id, true, { sessionId, code, reason, timestamp: nowIso() });
       setContinuation(this.db, assignment.id, 'waiting_for_input');
     }
@@ -528,7 +529,7 @@ export class SessionManager {
     const restorableSessions = this.listRestorableSessions();
     const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
       a.pid, a.process_start as processStart from coordination_assignments a
-      where a.status!='finished'`).all() as Array<{
+      where a.status!='finished' or exists(select 1 from coordination_messages m where m.recipient_id=a.id and m.acknowledged_at is null)`).all() as Array<{
         id: string; provider: string; nativeSessionId: string; pid: number; processStart: string;
       }>;
     for (const recipient of recipients) {
@@ -635,7 +636,7 @@ export class SessionManager {
           // A surviving provider outside this tmux binding must never get a second writer.
           if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
           if (!allowed()) return;
-          if (current.pid !== undefined) {
+          if (current.pid !== undefined && !this.isFinishedSession(current)) {
             await this.runRecovery.processExited(current.id);
             return;
           }
@@ -688,7 +689,7 @@ export class SessionManager {
           && (workResponse ? stagedWork && composer.notice === 'unattended' && composer.continuationRevision === revision : composer.notice === 'peer')
           && screenInputMatchesText(screen, prompt);
         if (!allowed() || !current || this.getCurrentRestorableSession(current)?.id !== current.id
-          || !assignment || assignment.status === 'finished' || current.status !== 'bound'
+          || !assignment || (workResponse && assignment.status === 'finished') || current.status !== 'bound'
           || current.isWorking || this.providerTurnIsWorking(current.id) === true
           || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt || current.pressureSuspendedAt
           || composer?.status === 'retiring'
@@ -708,7 +709,7 @@ export class SessionManager {
           if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision))
             return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
           const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
-          if (!state || state.status === 'finished') return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
+          if (!state || (workResponse && state.status === 'finished')) return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
           if (latest?.status !== 'bound' || this.getCurrentRestorableSession(latest)?.id !== latest.id
             || latest.pid !== current!.pid || latest.startedAt !== current!.startedAt)
             return { code: 'binding_changed', reason: 'The current provider binding changed during submission.' };
@@ -1131,10 +1132,10 @@ export class SessionManager {
         session = this.db.boundSessions.getById(session.id) ?? session;
         if (!session.shouldRestore) continue;
       }
-      if (this.isFinishedLaunchedSession(session)) {
+      if (this.isFinishedSession(session)) {
         const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
         if (liveness !== 'alive') {
-          if (liveness === 'dead') await this.runtimes.run(session.id, 'archiveFinishedExitedSession', () => this.archiveFinishedExitedSession(session.id));
+          if (liveness === 'dead') this.retainFinishedInbox(session);
           continue;
         }
       }
@@ -1611,9 +1612,9 @@ export class SessionManager {
     if (!session) {
       return undefined;
     }
-    if (!explicitResume && this.isFinishedLaunchedSession(session)) {
-      await this.archiveFinishedExitedSession(session.id);
-      return undefined;
+    if (!explicitResume && this.isFinishedSession(session)) {
+      const assignment = this.assignmentForSession(session)!;
+      if (!this.db.sqlite.prepare('select 1 from coordination_messages where recipient_id=? and acknowledged_at is null limit 1').get(assignment.id)) return undefined;
     }
     // Restores do not move recency, so grant an explicit grace window before the
     // idle reaper may suspend this session again.
@@ -3563,6 +3564,7 @@ export class SessionManager {
       return undefined;
     }
     const restoreMissing = options.restoreMissing ?? true;
+    const checkedSession = session;
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     session = this.db.boundSessions.getById(staleSession.id);
     if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)
@@ -3573,9 +3575,11 @@ export class SessionManager {
       return session;
     }
     if (liveness === 'dead') {
-      if (!options.resumeSuspension && this.isFinishedLaunchedSession(session)) {
-        await this.archiveFinishedExitedSession(session.id);
-        return undefined;
+      // Finished work keeps its restorable inbox. Only an explicit selection or
+      // the guarded inbox wake path may restore its provider.
+      if (!options.resumeSuspension && this.isFinishedSession(session)) {
+        this.retainFinishedInbox(checkedSession);
+        return this.db.boundSessions.getById(session.id);
       }
       if (restoreMissing && session.shouldRestore && this.unattendedAssignment(session)
         && (session.pid !== undefined || session.runFailure?.code === 'process_exited')

@@ -121,7 +121,8 @@ This works across projects and can restore the original automatically sleeping
 conversation. The fixed notice says that wake grants no new authority, pending
 Bryan decisions stay pending, and the agent returns to waiting when a decision
 still blocks its assignment. Existing active grants continue to govern authorized
-work. The notice tells the recipient to check current coordination status: an
+work. The hook supplies current assignment status, continuation, recovery and pending
+message count. No separate status lookup is needed to decide whether an
 `unattended` assignment resumes its remaining authorized work after the inbox,
 in the same turn, unless recovery is `blocked` or `stalled`. A waiting recipient
 returns to waiting after handling its inbox. This also applies after automatic
@@ -136,8 +137,13 @@ registration and backend restart; only the next accepted human conversation turn
 clears the peer-wake pause. Draft typing also defers wake until that human turn
 is submitted. An ordinary native end-of-turn Stop hook does not pause wake.
 Active turns, drafts, approval prompts, queued model changes, insufficient memory
-and uncertain session ownership still defer input. Finished assignments reject
-new messages, and closed sessions cannot wake without a current restorable binding.
+and uncertain session ownership still defer input. Completing an assignment leaves its inbox available. A late message can wake the
+original eligible conversation for inbox handling while the assignment stays
+finished and its work permission stays off. Registration and automatic prompt
+hooks preserve completion; a genuine human prompt or explicit active update can
+begin new work. Closed sessions retain messages until explicit resume and cannot
+wake without a current restorable binding. Finished supervisors also retain late
+result handoffs and overdue alerts.
 
 ### Send receipts
 
@@ -175,7 +181,14 @@ keys, then confirms an empty ready composer before entering the human message. S
 Changed or mixed human text is preserved. An uncertain clear or interrupted retirement becomes
 a reviewable queued message across restart; neither clear nor Enter is automatically replayed.
 
-Send returns id, queued, recipient, delivery and a plain-English note. The recipient reports working, idle or stopped, provider, last messaging contact, and resumableInConsole. Process identity is checked by PID and start time; an unambiguous current Console binding supplies working/suspension state. A recorded resumable binding is not a guarantee that a provider restart will succeed.
+Send returns id, queued, recipient, delivery and a plain-English note. A known
+recipient accepts a durable message independently of its process or completion
+state. Retired or paused conversations retain the message for explicit resume.
+CLI failures are JSON on stderr; an unknown destination carries code
+`unknown_assignment`. This is a permanent destination error. A successful
+`acknowledged` receipt has `queued: false` because delivery is already complete.
+
+The recipient reports working, idle or stopped, provider, last messaging contact, and resumableInConsole. Process identity is checked by PID and start time; an unambiguous current Console binding supplies working/suspension state. A recorded resumable binding is not a guarantee that a provider restart will succeed.
 
 - next_step: queued for the next supported native hook; long tools can delay it.
 - wake_pending: a peer-inbox response is requested for the original Console conversation, including while waiting for Bryan. Drafts, approvals, provider startup and insufficient memory defer it. A recorded refusal before submission includes its reason and remains eligible when guards clear.

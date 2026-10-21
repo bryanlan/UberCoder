@@ -493,7 +493,7 @@ describe('Peer message wake and one-hour sleep', () => {
     }
     const message = f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
-    expect(f.tmux.sent[0]).toContain('If continuation is unattended and recovery is neither blocked nor stalled');
+    expect(f.tmux.sent[0]).toContain('If the assignment is unfinished, continuation is unattended and recovery is neither blocked nor stalled');
     expect(f.tmux.sent[0]).toContain('continue the existing human-authorized assignment in this turn');
     expect(f.tmux.sent[0]).not.toContain('End when the inbox is handled');
     expect(continuationControl(f.db, f.recipient)).toEqual(before);
@@ -846,6 +846,35 @@ describe('Peer message wake and one-hour sleep', () => {
     f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
     await f.manager.reconcileSessions();
     expect(f.tmux.alive.has(f.session.tmuxSessionName)).toBe(true);
+  });
+
+  it.each(['codex', 'claude'] as const)('wakes finished %s inboxes after idle sleep without reopening work', async id => {
+    const f = await fixture(id);
+    f.service.finish(f.recipient, 'Work completed');
+    backdate(f.db, f.session.id, 61);
+    await f.manager.reconcileSessions();
+    expect(f.tmux.alive.has(f.session.tmuxSessionName)).toBe(false);
+    expect(f.db.boundSessions.getById(f.session.id)?.shouldRestore).toBe(true);
+    f.db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(f.recipient);
+    const message = f.send();
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.alive.has(f.session.tmuxSessionName)).toBe(true);
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.service.agentStatus(f.recipient).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input', recovery: null });
+    f.service.poll(f.recipient, 0); f.service.acknowledge(f.recipient, [message.id]);
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toHaveLength(1);
+  });
+
+  it.each(['manual', 'retired'] as const)('holds finished inbox messages under %s suspension', async mode => {
+    const f = await fixture(); f.service.finish(f.recipient, 'Done');
+    if (mode === 'manual') await f.manager.suspendSession(f.session.id);
+    else await f.manager.releaseSession(f.session.id);
+    const message = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.service.send(f.sender, message)).toMatchObject({ queued: true, delivery: 'on_resume' });
+    expect(f.service.agentStatus(f.recipient).assignment?.status).toBe('finished');
   });
 
   it('does not sleep an old session with an unsent draft', async () => {

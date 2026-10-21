@@ -7,6 +7,7 @@ import fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService, processStart } from '../src/coordination/service.js';
+import { PEER_WAKE_PROMPT } from '../src/coordination/wake.js';
 import { checkoutIdentity } from '../src/coordination/git.js';
 import { dispatchCoordination, registerCoordinationRoutes, startCoordinationSocket } from '../src/coordination/transport.js';
 import { WikiService } from '../src/wiki/service.js';
@@ -81,6 +82,63 @@ describe('assignment coordination', () => {
     expect(db.sqlite.prepare('select count(*) as n from coordination_messages').get()).toEqual({ n: 0 });
   });
 
+  it.each(['codex', 'claude'])('keeps finished %s work finished through registration, automatic input and Stop', async provider => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const registered = await runHelper(root, checkout, ['register'], { provider, nativeSessionId, pid: process.pid, cwd: checkout });
+    const id = JSON.parse(registered.stdout).assignmentId;
+    service.finish(id, 'Completed original work');
+    await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'SessionStart' });
+    expect(service.agentStatus(id).assignment?.status).toBe('finished');
+    const sender = register();
+    service.send(sender.id, { id: randomUUID(), recipientId: id, text: 'Late question' });
+    const hook = await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout,
+      hook_event_name: 'UserPromptSubmit', prompt: PEER_WAKE_PROMPT });
+    expect(hook.code).toBe(0);
+    const context = JSON.parse(hook.stdout).hookSpecificOutput.additionalContext;
+    expect(context).toContain('"status":"finished"');
+    expect(context).toContain('"continuation":"waiting_for_input"');
+    expect(context).toContain('"pendingMessageCount":1');
+    const stop = await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'Stop' });
+    expect(stop.stdout).toBe('');
+    expect(service.agentStatus(id).assignment?.status).toBe('finished');
+    service.finish(id, 'Inbox answer is not another work completion');
+    expect(service.snapshot().events.filter(event => event.assignmentId === id && event.kind === 'finished')).toHaveLength(1);
+    await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout,
+      hook_event_name: 'UserPromptSubmit', prompt: PEER_WAKE_PROMPT + ' Now do this new human task.' });
+    expect(service.agentStatus(id).assignment).toMatchObject({ status: 'active', continuation: 'waiting_for_input' });
+  });
+
+  it('returns a structured unknown destination error through the real helper', async () => {
+    const { root, checkout, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
+    const result = await runHelper(root, checkout, ['send'], { recipientId: randomUUID(), text: 'Unknown destination' });
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stderr.trim().split('\n').at(-1)!)).toEqual({ error: 'Unknown assignment.', code: 'unknown_assignment' });
+    expect(service.snapshot().messages).toHaveLength(0);
+  });
+
+  it('supplies changed continuation state in hooks without needing status', async () => {
+    const { root, checkout, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const result = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const id = JSON.parse(result.stdout).assignmentId;
+    const hook = () => runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
+    await hook();
+    service.update(id, { continuation: 'unattended', awaiting: 'Owner result' });
+    const status = vi.spyOn(service, 'agentStatus');
+    const changed = await hook();
+    const payload = JSON.parse(changed.stdout).hookSpecificOutput.additionalContext;
+    expect(payload).toContain('"continuation":"unattended"');
+    expect(payload).toContain('"awaiting":"Owner result"');
+    expect(payload).toContain('"pendingMessageCount":0');
+    expect(status).not.toHaveBeenCalled();
+    expect((await hook()).stdout).toBe('');
+  });
+
   it('shares one hook deadline across calls and records an abandoned offer exactly once', async () => {
     const { root, checkout, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
@@ -129,7 +187,8 @@ describe('assignment coordination', () => {
     expect(service.send(sender.id, input)).toMatchObject({ queued: false, delivery: 'acknowledged' });
     expect(() => service.send(sender.id, { ...input, text: 'Different content' })).toThrow('different content');
     service.finish(recipient.id, 'Done');
-    expect(() => service.send(sender.id, { ...input, id: randomUUID() })).toThrow('finished');
+    expect(service.send(sender.id, { ...input, id: randomUUID() })).toMatchObject({ queued: true });
+    expect(service.agentStatus(recipient.id).assignment?.status).toBe('finished');
   });
 
   it('derives idle and suspended availability from the exact Console binding without resuming it', () => {

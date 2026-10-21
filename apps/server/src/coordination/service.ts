@@ -38,7 +38,7 @@ export class CoordinationService {
 
   private assignment(id: string): CoordinationAssignment {
     const row = this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments where id=?`).get(id) as CoordinationAssignment | undefined;
-    if (!row) throw new Error('Unknown assignment.');
+    if (!row) throw Object.assign(new Error('Unknown assignment.'), { code: 'unknown_assignment' });
     const control = continuationControl(this.db, id);
     return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, awaiting: control.awaiting?.description ?? null, recovery: control.recovery };
   }
@@ -121,7 +121,7 @@ export class CoordinationService {
           this.db.sqlite.prepare('update coordination_assignments set token_hash=? where id=?').run(tokenHash, id);
           this.event(id, null, 'credential-recovered', 'Repaired the credential for the same live provider process; assignment and messages preserved.');
         }
-        this.db.sqlite.prepare("update coordination_assignments set pid=?, process_start=?, status='active', last_seen_at=? where id=?").run(input.pid, start, now, id);
+        this.db.sqlite.prepare("update coordination_assignments set pid=?, process_start=?, status=case when status='finished' then status else 'active' end, last_seen_at=? where id=?").run(input.pid, start, now, id);
       } else {
         this.db.sqlite.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')
           .run(id, input.provider, input.nativeSessionId, tokenHash, 'Assignment not yet described', 'active', input.pid, start, now, now);
@@ -161,7 +161,12 @@ export class CoordinationService {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
-      if (current.status === 'finished' || current.status === 'disconnected') throw new Error('Resume this assignment before updating it.');
+      if (current.status === 'finished' && input.status !== 'active' && input.continuation !== 'unattended'
+        && [input.description, input.checkout, input.summary, input.supervisorId,
+          input.notifySupervisor, input.awaiting].every(value => value === undefined)) return { assignment: current };
+      // Registration restores a process, not completed work. An explicit active
+      // update (including a real human prompt) can begin another assignment.
+      if ((current.status === 'finished' && input.status !== 'active') || current.status === 'disconnected') throw new Error('Resume this assignment before updating it.');
       if (input.notifySupervisor && !(input.supervisorId === undefined ? current.supervisorId : input.supervisorId)) throw new Error('Declare a supervisor before notifying it.');
       if (input.supervisorId) {
         const visited = new Set([id]); let next: string | null = input.supervisorId;
@@ -280,23 +285,8 @@ export class CoordinationService {
     return { id: message.id, queued: true, recipient, delivery, note };
   }
 
-  /** Completion ends work authority, not the inbox of a still-connected Console agent. */
-  private hasLiveConsoleRecipient(id: string): boolean {
-    const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
-      .get(id) as { pid: number; process_start: string };
-    if (!owner.process_start || processStart(owner.pid) !== owner.process_start) return false;
-    const sessions = this.db.sqlite.prepare(`select s.project_slug as projectSlug, s.provider, s.conversation_ref as conversationRef
-      from bound_sessions s join coordination_assignments a on a.id=? and a.provider=s.provider
-      where s.should_restore=1 and s.status in ('starting','bound') and
-        (s.conversation_ref=a.native_session_id or s.resume_conversation_ref=a.native_session_id
-          or (s.conversation_ref like 'pending:%' and s.id=(select value from meta where key='console-session:' || a.id)))
-      limit 2`).all(id) as Array<{ projectSlug: string; provider: string; conversationRef: string }>;
-    if (sessions.length !== 1) return false;
-    try { return this.conversationReference(sessions[0]!).recipientId === id; } catch { return false; }
-  }
-
   send(id: string, input: { id: string; recipientId: string; text: string }): CoordinationSendReceipt {
-    const recipient = this.assignment(input.recipientId);
+    this.assignment(input.recipientId);
     const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
       .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
     if (existing) {
@@ -304,14 +294,9 @@ export class CoordinationService {
       this.requestWake?.();
       return this.sendReceipt(existing);
     }
-    if (recipient.status === 'finished' && !this.hasLiveConsoleRecipient(input.recipientId)) throw new Error('Recipient assignment is finished; resume its agent before messaging it.');
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
     this.db.sqlite.transaction(() => {
-      if (recipient.status === 'finished') {
-        setContinuation(this.db, input.recipientId, 'waiting_for_input');
-        this.db.sqlite.prepare("update coordination_assignments set status='waiting' where id=? and status='finished'").run(input.recipientId);
-      }
       this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
       endAwaiting(this.db, input.recipientId);
     })();
@@ -373,7 +358,8 @@ export class CoordinationService {
         ? `${latest.updateCount} activity updates from ${latest.peerCount} ${latest.peerCount === 1 ? 'assignment' : 'assignments'} summarized; showing ${events.length} latest. Use status for current scopes or history with checkout and offset for full activity.`
         : null;
       if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
-      return { assignment: current, continuationPolicy: CONTINUATION_POLICY,
+      const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
+      return { assignment: current, pendingMessageCount, continuationPolicy: CONTINUATION_POLICY,
         grantPolicy: this.grants ? GRANT_POLICY : undefined,
         authority: this.grants?.authorityFor(id), latestHumanInput: this.grants?.latestHumanInput(id),
         activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
@@ -395,6 +381,7 @@ export class CoordinationService {
 
   finish(id: string, summary: string) {
     return this.db.sqlite.transaction(() => {
+      if (this.assignment(id).status === 'finished') return { finished: true };
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.grants?.expireForAssignment(id);
@@ -445,7 +432,7 @@ export class CoordinationService {
     const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')
       .get(id) as { seq: number };
     const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(control.supervisorId) as { status: string } | undefined;
-    if (!parent || parent.status === 'finished') return;
+    if (!parent) return;
     const key = `supervisor-handoff:${id}:${event.seq}:${reason}`;
     if (!this.db.meta.get(key)) {
       const messageId = randomUUID(), timestamp = new Date().toISOString();
@@ -480,7 +467,7 @@ export class CoordinationService {
     for (const row of rows) {
       const handoff = JSON.parse(row.value) as { messageId: string; recipientId: string; workerId: string; timestamp: string; text: string; blockedReason?: string };
       const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(handoff.recipientId) as { status: string } | undefined;
-      if (!parent || parent.status === 'finished') continue;
+      if (!parent) continue;
       const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(handoff.recipientId) as { n: number };
       if (count.n >= 100) continue;
       this.db.sqlite.transaction(() => {

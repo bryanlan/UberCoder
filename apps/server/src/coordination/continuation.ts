@@ -59,7 +59,7 @@ export function alertOverdueAwait(db: AppDatabase, id: string, now = Date.now())
     if (control.continuation !== 'unattended' || !awaiting || awaiting.alerted || !control.supervisorId
       || now - Date.parse(awaiting.startedAt) < AWAIT_ALERT_MS) return false;
     const parent = db.sqlite.prepare('select status from coordination_assignments where id=?').get(control.supervisorId) as { status: string } | undefined;
-    if (!parent || parent.status === 'finished') return false;
+    if (!parent) return false;
     const count = db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null')
       .get(control.supervisorId) as { n: number };
     if (count.n >= 100) return false;

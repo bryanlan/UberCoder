@@ -252,6 +252,17 @@ describe('Explicit unattended continuation contract', () => {
     expect(continuationControl(f.db, f.parent.id).awaiting).toBeNull();
   });
 
+  it('delivers result handoffs and overdue alerts to a finished supervisor without reopening it', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', awaiting: 'Late result' });
+    f.service.finish(f.parent.id, 'Supervisor work completed');
+    f.service.update(f.worker.id, { summary: 'A distinct late review result', notifySupervisor: true });
+    expect(f.service.poll(f.parent.id, 0).messages[0]?.text).toContain('A distinct late review result');
+    expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS)).toBe(true);
+    expect(f.service.agentStatus(f.parent.id).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input', recovery: null });
+    expect(f.service.snapshot().messages.filter(m => m.recipientId === f.parent.id)).toHaveLength(2);
+  });
+
   it('rejects unknown, self, cyclic and finished supervisors and notification without a link', () => {
     const f = fixture();
     expect(() => f.service.update(f.worker.id, { supervisorId: randomUUID() })).toThrow('Unknown');

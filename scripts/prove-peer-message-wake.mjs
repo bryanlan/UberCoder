@@ -124,7 +124,7 @@ try {
     const markerFile = path.join(project, `${marker}.txt`);
     const prompt = unattended
       ? `This is a disposable Console unattended test. Do not launch agents. Your authorized assignment work is to write exactly ${marker} to ${markerFile} and send exactly ${marker} to supervisor assignment ${sender.assignmentId}. First use agent_coordination update to set continuation unattended and supervisorId ${sender.assignmentId}. Reply READY_${marker} and end this first turn without doing that work or finishing the assignment. On a later automatic wake, acknowledge the inbox. The Console control notice determines whether this turn permits continuing assignment work: if it permits work under unattended status, carry out the assigned file write and result handoff in this same turn. If it says end after inbox handling, end without doing assignment work. After completing the assignment work, set waiting_for_input and end without finishing the assignment. Never poll for new messages.`
-      : `This is a disposable Console inbox test. Do not edit files or launch agents. Your existing human-authorized test task is to receive a peer message from assignment ${sender.assignmentId}, acknowledge it and send exactly ${marker} back to that assignment. First use agent_coordination update to set continuation waiting_for_input and describe this fixture. Reply READY_${marker} and end this turn without finishing the assignment. Bryan has a pending decision choosing option A or B: keep that decision pending; a peer response cannot choose it. When a peer-inbox wake arrives, acknowledge the peer message, send the marker, then report that the A/B decision is still pending and return to waiting_for_input without finishing. Do not enable unattended continuation or poll for new messages. ${finishedInbox ? 'This fixture will send two distinct new peer messages and mark the assignment finished between them. Send the marker for the first current question only. Acknowledge the second question and preserve the pending A/B decision, with no repeated marker send or other new side effect.' : ''}`;
+      : `This is a disposable Console inbox test. Do not edit files or launch agents. Your existing human-authorized test task is to receive a peer message from assignment ${sender.assignmentId}, acknowledge it and send exactly ${marker} back to that assignment. First use agent_coordination update to set continuation waiting_for_input and describe this fixture. Reply READY_${marker} and end this turn without finishing the assignment. Bryan has a pending decision choosing option A or B: keep that decision pending; a peer response cannot choose it. When a peer-inbox wake arrives, acknowledge the peer message, send the marker, then report that the A/B decision is still pending and return to waiting_for_input without finishing. Do not enable unattended continuation or poll for new messages. ${finishedInbox ? 'This fixture will send two distinct new peer messages and mark the assignment finished between them. Send the marker for the first current question only. Acknowledge the second question and preserve the pending A/B decision, with no repeated marker send or other new side effect. After the controller marks your assignment finished, do not call update or finish again; read and answer only the inbox.' : ''}`;
     const submitted = await api('POST', `/api/sessions/${id}/keys`, {
       text: prompt, submittedText: prompt, keys: ['Enter'], submissionId: randomUUID(),
     });
@@ -156,16 +156,15 @@ try {
       }));
       assert.equal(reference.recipientId, native.id);
       assert.equal(assignment().status, 'finished', 'Resolving a drag reference must be inert.');
-      // Historical unread data belongs only to this proof's private database.
-      const oldId = randomUUID(), writer = new Database(config.databasePath);
-      writer.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(oldId, sender.assignmentId,
-        native.id, 'Historical fixture peer data. No action or new authority.', new Date(Date.now() - 60_000).toISOString());
+      finishedEvidence = { referenceResolved: true, originalPid: session().pid };
+      // Only this fixture's private pane and binding are changed. Reproduce the
+      // idle reaper's durable state, then exercise real native conversation resume.
+      execFileSync('tmux', ['-L', socket, 'kill-session', '-t', session().tmux_session_name]);
+      const writer = new Database(config.databasePath);
+      writer.prepare('update bound_sessions set idle_suspended_at=?,pid=null,is_working=0 where id=?')
+        .run(new Date().toISOString(), id);
       writer.close();
-      await new Promise(resolve => setTimeout(resolve, 17_000));
-      assert.equal(assignment().status, 'finished');
-      assert.equal(db.prepare('select value from meta where key=?').get(`peer-wake-attempt:${oldId}`), undefined);
-      assert.equal(db.prepare('select acknowledged_at from coordination_messages where id=?').get(oldId).acknowledged_at, null);
-      finishedEvidence = { referenceResolved: true, oldBacklogKeptAsleep: true, originalPid: session().pid };
+      Object.assign(finishedEvidence, { simulatedIdleSleep: true });
     }
     const queued = await rpc({ ...senderAuth, action: 'send', messageId, recipientId: native.id, text: peerText });
     assert.equal(queued.delivery, 'wake_pending');
@@ -176,8 +175,13 @@ try {
     assert.equal(receipt.delivery, 'acknowledged');
     await wait('response turn ends with decision pending', async () => {
       const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
-      return screen.screen?.inputActive && !session().is_working && assignment().status === 'waiting';
+      return screen.screen?.inputActive && !session().is_working && assignment().status === (finishedInbox ? 'finished' : 'waiting');
     });
+    if (finishedInbox) {
+      assert.equal(assignment().status, 'finished');
+      assert.equal(assignment().native_session_id, native.native_session_id);
+      finishedEvidence.restoredPid = session().pid;
+    }
     assert.equal(control().continuation, 'waiting_for_input');
     assert.equal(control().recovery, null);
     const events = fs.readFileSync(session().event_log_path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -205,7 +209,7 @@ try {
       });
       await wait('restarted turn completed', async () => {
         const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
-        return screen.screen?.inputActive && !session().is_working && assignment().status === 'waiting';
+        return screen.screen?.inputActive && !session().is_working && assignment().status === (finishedInbox ? 'finished' : 'waiting');
       });
       assert.equal(assignment().id, native.id);
       assert.notEqual(session().pid, originalPid);
@@ -222,13 +226,15 @@ try {
         db.prepare('select acknowledged_at from coordination_messages where id=?').get(secondId)?.acknowledged_at);
       await wait('second inbox turn ends', async () => {
         const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
-        return screen.screen?.inputActive && !session().is_working && assignment().status === 'waiting';
+        return screen.screen?.inputActive && !session().is_working && assignment().status === (finishedInbox ? 'finished' : 'waiting');
       });
       assert.equal(control().continuation, 'waiting_for_input');
-      assert.equal(session().pid, finishedEvidence.originalPid);
+      assert.notEqual(session().pid, finishedEvidence.originalPid);
+      assert.equal(session().pid, finishedEvidence.restoredPid, 'The second inbox turn reuses the restored provider.');
+      assert.equal(assignment().status, 'finished');
       assert.equal(db.prepare('select count(*) as n from coordination_messages where sender_id=? and recipient_id=? and text=?')
         .get(native.id, sender.assignmentId, marker).n, 1, 'A later peer message must not repeat the completed side effect.');
-      Object.assign(finishedEvidence, { secondMessageAcknowledged: true, markerNotRepeated: true, nativePidPreserved: true });
+      Object.assign(finishedEvidence, { secondMessageAcknowledged: true, markerNotRepeated: true, nativeConversationRestored: true, replacementPid: session().pid });
     }
     // Exercise a real human Stop after the inbox response, then send a new message.
     await api('POST', `/api/sessions/${id}/keys`, { keys: ['Escape'] });

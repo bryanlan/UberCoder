@@ -96,7 +96,7 @@ Close stops the owned provider and releases its Work binding, while keeping nati
 
 New grant definitions include launch, restart and close by default. Existing records retain their explicit actions; they do not gain `close_session` automatically. Bryan can approve that action in a new broad grant. Agents with a cached MCP schema use `node scripts/agent-coord.mjs grants` with the same JSON; the helper obtains their credentials.
 
-An agent-created session whose assignment is finished and whose native process has exited is archived automatically once its indexed native transcript is readable. It leaves Work, retains Browse history and is not restored by polling, reconciliation or recovery. Missing history defers archival without restarting the finished helper. Live native processes, unknown liveness, human-created conversations and manual suspension remain protected. A human can explicitly resume a manually suspended conversation.
+A finished assignment retains its restorable conversation after its native process exits. Reconciliation and screen polling leave it asleep; a late message can request an inbox-only wake without reopening work or restoring expired grants. Explicit close releases the binding and holds later messages until explicit resume. Manual suspension remains protected.
 
 The provider recovery controller handles capacity failures and unexpected process exits with bounded backoff.
 Useful output resets its consecutive failure budget. A new running turn clears the visible retry notice.

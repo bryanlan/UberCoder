@@ -124,7 +124,7 @@ printed temporary evidence directory. `PROOF_PROVIDERS=codex` or `claude` narrow
 the run. Native hooks and MCP must point to that private runtime. Do not use a
 running production database or provider session as a fixture.
 
-Owned helper close/archive (#82): `NODE_ENV=test npm run test -w @agent-console/server -- agent-session-launches session-owned-close agent-grants` and `NODE_ENV=test npm run test -w @agent-console/web -- GrantsPage`. These use disposable SQLite/native transcript fixtures and verify exact launcher ownership, current grant authority, history retention, low-memory cleanup, durable request deduplication, automatic finished/exited archival, no recovery after close, missing-history deferral and manual-pause protection.
+Owned helper close and completed inbox retention (#82): `NODE_ENV=test npm run test -w @agent-console/server -- agent-session-launches session-owned-close agent-grants` and `NODE_ENV=test npm run test -w @agent-console/web -- GrantsPage`. These use disposable SQLite/native transcript fixtures and verify exact launcher ownership, current grant authority, history retention, low-memory cleanup, durable request deduplication, finished inbox retention across process exit, no eager restore or recovery after close, missing-history preservation and manual-pause protection.
 
 After `npm run build`, opt into real-provider verification with
 `node scripts/prove-session-close.mjs --run`. It uses a private project, SQLite
