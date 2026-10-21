@@ -105,18 +105,69 @@ describe('Explicit unattended continuation contract', () => {
     expect(continuationControl(f.db, f.worker.id).continuation).toBe('waiting_for_input');
   });
 
+  it('delivers the actual result and final summary without a separate direct message', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { description: 'Repair result delivery', supervisorId: f.parent.id,
+      summary: 'Candidate ready. Seven checks pass. Next: integrate the change. Details: docs/result.md.', notifySupervisor: true });
+    const ready = f.service.poll(f.parent.id, 0).messages;
+    expect(ready).toHaveLength(1);
+    expect(ready[0]!.text).toContain('Latest update (activity event');
+    expect(ready[0]!.text).toContain('Seven checks pass. Next: integrate the change. Details: docs/result.md.');
+    f.service.acknowledge(f.parent.id, [ready[0]!.id]);
+
+    f.service.finish(f.worker.id, 'Integrated and verified. Next: resume the dependent task. Details: docs/final.md.');
+    const final = f.service.poll(f.parent.id, 0).messages;
+    expect(final).toHaveLength(1);
+    expect(final[0]!.text).toContain('Final summary (activity event');
+    expect(final[0]!.text).toContain('Integrated and verified. Next: resume the dependent task. Details: docs/final.md.');
+    expect(final[0]!.text).not.toContain('Candidate ready');
+    expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
+  });
+
+  it('preserves distinct result events even when their wording matches and deduplicates a retry', () => {
+    const f = fixture();
+    const result = { summary: 'Review complete. Ready for the next round.', notifySupervisor: true };
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, ...result });
+    f.service.update(f.worker.id, result);
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    restarted.update(f.worker.id, { notifySupervisor: true });
+    const messages = restarted.poll(f.parent.id, 0).messages;
+    expect(messages).toHaveLength(2);
+    expect(new Set(messages.map(message => message.id)).size).toBe(2);
+    expect(messages.every(message => message.text.includes(result.summary))).toBe(true);
+    expect(messages[0]!.text).not.toBe(messages[1]!.text);
+  });
+
+  it('bounds a handoff while retaining its full result and activity reference', () => {
+    const f = fixture();
+    const summary = 'Result and next action first. Details: docs/result.md. ' + 'supporting evidence '.repeat(120);
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary, notifySupervisor: true });
+    const message = f.service.poll(f.parent.id, 0).messages[0]!;
+    expect(message.text).toContain('Result and next action first. Details: docs/result.md.');
+    expect(message.text).toContain('…');
+    expect(message.text.length).toBeLessThanOrEqual(2000);
+    const event = f.db.sqlite.prepare("select seq,text from coordination_events where assignment_id=? and kind='update' order by seq desc limit 1")
+      .get(f.worker.id) as { seq: number; text: string };
+    expect(event.text).toBe(summary);
+    expect(message.text).toContain(`activity event ${event.seq}`);
+    expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
+  });
+
   it('retains a supervisor handoff behind a full inbox and queues it when acknowledgements open space', () => {
     const f = fixture();
     for (let i = 0; i < 100; i++) f.service.send(f.worker.id, { id: randomUUID(), recipientId: f.parent.id, text: 'Existing peer result.' });
-    f.service.update(f.worker.id, { supervisorId: f.parent.id, notifySupervisor: true });
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary: 'Actual result retained while the inbox is full.', notifySupervisor: true });
     const saved = f.db.sqlite.prepare("select value from meta where key like 'supervisor-handoff:%'").get() as { value: string };
     const handoff = JSON.parse(saved.value);
     expect(handoff.blockedReason).toContain('inbox is full');
+    expect(handoff.text).toContain('Actual result retained while the inbox is full.');
     expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(handoff.messageId)).toBeUndefined();
-    const inbox = f.service.poll(f.parent.id, 0);
-    f.service.acknowledge(f.parent.id, inbox.messages.map(message => message.id));
-    expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(handoff.messageId)).toEqual({ id: handoff.messageId });
-    f.service.reconcileProcesses();
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    const inbox = restarted.poll(f.parent.id, 0);
+    restarted.acknowledge(f.parent.id, inbox.messages.map(message => message.id));
+    expect(f.db.sqlite.prepare('select id,text from coordination_messages where id=?').get(handoff.messageId))
+      .toEqual({ id: handoff.messageId, text: handoff.text });
+    restarted.reconcileProcesses();
     expect(f.db.sqlite.prepare('select count(*) as n from coordination_messages where id=?').get(handoff.messageId)).toEqual({ n: 1 });
     expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
   });
