@@ -395,11 +395,11 @@ export class CoordinationService {
 
   finish(id: string, summary: string) {
     return this.db.sqlite.transaction(() => {
-      this.notifySupervisor(id, 'A supervised worker completed its assignment.');
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.grants?.expireForAssignment(id);
       this.event(id, null, 'finished', summary);
+      this.notifySupervisor(id, 'A supervised worker completed its assignment.');
       return { finished: true };
     }).immediate();
   }
@@ -449,7 +449,14 @@ export class CoordinationService {
     const key = `supervisor-handoff:${id}:${event.seq}:${reason}`;
     if (!this.db.meta.get(key)) {
       const messageId = randomUUID(), timestamp = new Date().toISOString();
-      const text = `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}`;
+      const headline = `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}`;
+      const result = this.db.sqlite.prepare(`select seq, checkout, kind, text from coordination_events
+        where assignment_id=? and kind in ('update','finished') order by seq desc limit 1`)
+        .get(id) as { seq: number; checkout: string | null; kind: string; text: string } | undefined;
+      const location = result?.checkout ? `; checkout ${compact(result.checkout, 220)}` : '';
+      const text = result?.text.trim()
+        ? `${headline}\n${result.kind === 'finished' ? 'Final summary' : 'Latest update'} (activity event ${result.seq}${location}):\n${compact(result.text.trim(), 1200)}`
+        : headline;
       // A handoff needs an acknowledged inbox identity even when its parent is
       // waiting_for_input. Continuation signals alone disappear on a pause.
       const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null')
@@ -462,7 +469,7 @@ export class CoordinationService {
           .run(messageId, id, control.supervisorId, text, timestamp);
         endAwaiting(this.db, control.supervisorId);
       }
-      signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: text });
+      signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: headline });
     }
     this.requestWake?.();
   }
