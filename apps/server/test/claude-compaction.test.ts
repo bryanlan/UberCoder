@@ -45,7 +45,52 @@ async function fixture(records: Record<string, unknown>[]) {
   return { filePath, dir, parse: () => parseClaudeConversationFile(input) };
 }
 
+// Native compaction can move the logical tail after the summary. Its new
+// parent closes a cycle; only the preserved segment still names the old turns.
+const preservedPrompt = { ...prompt, uuid: 'preserved-user', parentUuid: 'answer',
+  timestamp: '2026-10-09T05:10:00.000Z', message: { role: 'user', content: 'Keep this latest question too.' } };
+const preservedAnswer = { ...answer, uuid: 'preserved-answer', parentUuid: 'preserved-user',
+  timestamp: '2026-10-09T05:11:00.000Z', message: { ...answer.message, content: 'The latest answer before compaction.' } };
+const cyclicBoundary = { ...boundary, logicalParentUuid: 'moved-tail', compactMetadata: {
+  trigger: 'auto', preservedSegment: { headUuid: 'answer', anchorUuid: 'summary', tailUuid: 'moved-tail' },
+  preservedMessages: { anchorUuid: 'summary', uuids: ['answer', 'preserved-user', 'preserved-answer', 'moved-tail'],
+    allUuids: ['answer', 'preserved-user', 'preserved-answer', 'missing-attachment', 'moved-tail'] },
+} };
+const movedTail = { uuid: 'moved-tail', type: 'attachment', parentUuid: 'summary' };
+
 describe('Claude compaction history', () => {
+  it('restores explicit preserved turns and their ancestors when the logical parent cycles through the summary', async () => {
+    const { parse } = await fixture([prompt, answer, preservedPrompt, preservedAnswer,
+      { ...prompt, uuid: 'discarded-user', parentUuid: 'answer', message: { role: 'user', content: 'Unselected sibling.' } },
+      cyclicBoundary, summary, movedTail,
+      { ...answer, uuid: 'after', parentUuid: 'moved-tail', timestamp: '2026-10-09T06:00:00.000Z' },
+    ]);
+    const parsed = await parse();
+    expect(parsed.displayMessages.map(m => m.text)).toEqual([
+      prompt.message.content, answer.message.content, preservedPrompt.message.content, preservedAnswer.message.content,
+      '[Claude auto summarized]', answer.message.content,
+    ]);
+    expect(parsed.summary.createdAt).toBe(prompt.timestamp);
+    expect(parsed.summary.rawMetadata?.lastUserAt).toBe(preservedPrompt.timestamp);
+  });
+
+  it('crosses repeated cyclic compactions without activating a sibling compaction', async () => {
+    const { parse } = await fixture([prompt, answer, preservedPrompt, preservedAnswer, cyclicBoundary, summary, movedTail,
+      { ...boundary, uuid: 'sibling-boundary', logicalParentUuid: 'discarded-user' },
+      { ...prompt, uuid: 'discarded-user', parentUuid: 'answer', message: { role: 'user', content: 'Unselected sibling.' } },
+      { ...boundary, uuid: 'boundary-2', logicalParentUuid: 'tail-2', compactMetadata: {
+        trigger: 'auto', preservedSegment: { headUuid: 'summary', anchorUuid: 'summary-2', tailUuid: 'tail-2' },
+      } },
+      { ...summary, uuid: 'summary-2', parentUuid: 'boundary-2', timestamp: '2026-10-09T06:55:00.000Z' },
+      { uuid: 'tail-2', type: 'attachment', parentUuid: 'summary-2' },
+      { ...answer, uuid: 'after', parentUuid: 'tail-2', timestamp: '2026-10-09T07:00:00.000Z' },
+    ]);
+    expect((await parse()).displayMessages.map(m => m.text)).toEqual([
+      prompt.message.content, answer.message.content, preservedPrompt.message.content, preservedAnswer.message.content,
+      '[Claude auto summarized]', '[Claude auto summarized]', answer.message.content,
+    ]);
+  });
+
   it('retains real prompts and replies, replaces the summary with a marker, and preserves activity metadata', async () => {
     const { parse } = await fixture([prompt, answer, boundary, summary]);
     const parsed = await parse();
@@ -123,7 +168,8 @@ describe('Claude compaction history', () => {
   });
 
   it('returns the restored paginated history and public marker without exposing the summary body', async () => {
-    const { dir, filePath, parse } = await fixture([prompt, answer, boundary, summary]);
+    const { dir, filePath, parse } = await fixture([prompt, answer, preservedPrompt, preservedAnswer,
+      cyclicBoundary, summary, movedTail]);
     const db = new AppDatabase(path.join(dir, 'test.sqlite'));
     cleanup.push(async () => { db.close(); });
     db.conversationIndex.upsert((await parse()).summary);
@@ -136,7 +182,7 @@ describe('Claude compaction history', () => {
     const response = await app.inject({ method: 'GET', url: `${url}?limit=1` });
     expect(response.statusCode).toBe(200);
     const tail = response.json();
-    expect(tail.messagePage).toMatchObject({ total: 3, hasOlder: true });
+    expect(tail.messagePage).toMatchObject({ total: 5, hasOlder: true });
     expect(tail.messages).toEqual([expect.objectContaining({
       role: 'status', statusKind: 'compaction', text: '[Claude auto summarized]',
     })]);
@@ -144,7 +190,7 @@ describe('Claude compaction history', () => {
     expect(response.body).not.toContain('internal summary body');
     const older = await app.inject({ method: 'GET', url: `${url}?limit=10&before=${tail.messagePage.olderCursor}` });
     expect(older.json().messages.map((m: { text: string }) => m.text)).toEqual([
-      prompt.message.content, answer.message.content,
+      prompt.message.content, answer.message.content, preservedPrompt.message.content, preservedAnswer.message.content,
     ]);
     expect(older.json().conversation.transcriptPath).toBe(filePath);
   });

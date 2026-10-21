@@ -412,6 +412,9 @@ user's actual prompt.
 - Claude transcripts can contain multiple parent-linked branches when the same provider session is
   resumed concurrently. The transcript adapter follows the last message leaf back through
   `parentUuid` and exposes that active branch instead of flattening sibling turns together.
+  At compaction boundaries it also follows the logical parent and explicit preserved-segment
+  UUIDs. Claude can move the logical tail beneath the summary, creating a cycle; the preserved
+  records retain the earlier branch and its original turns. Visited UUIDs bound traversal.
 - Claude's provider-supplied `aiTitle` is durable transcript metadata and is preferred for the
   conversation title over an initial continuation wrapper. Newly created provider transcript files
   trigger a debounced refresh of that Claude project only, so externally started chats appear in

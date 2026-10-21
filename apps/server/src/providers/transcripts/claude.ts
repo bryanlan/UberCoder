@@ -111,16 +111,30 @@ function activeClaudeBranchRecordUuids(records: Array<{ record: Record<string, u
   }
 
   const activeUuids = new Set<string>();
-  let cursor: string | undefined = leafUuid;
-  while (cursor && !activeUuids.has(cursor)) {
+  const pendingUuids = [leafUuid];
+  while (pendingUuids.length > 0) {
+    const cursor = pendingUuids.pop()!;
+    if (activeUuids.has(cursor)) continue;
     activeUuids.add(cursor);
     const record = recordsByUuid.get(cursor);
     // Compaction resets Claude's model-context chain. Its logical parent keeps
     // the earlier conversation available to history readers on this branch.
-    const parent = record?.type === 'system' && record.subtype === 'compact_boundary'
-      ? record.logicalParentUuid
-      : record?.parentUuid;
-    cursor = typeof parent === 'string' ? parent : undefined;
+    if (record?.type === 'system' && record.subtype === 'compact_boundary') {
+      const metadata = asObject(record.compactMetadata);
+      const segment = asObject(metadata?.preservedSegment);
+      const preserved = asObject(metadata?.preservedMessages);
+      // Native compaction can reparent the logical tail under the summary,
+      // making that edge cyclic. Explicit preserved UUIDs retain the old turns
+      // and their ancestors without admitting unrelated sibling branches.
+      for (const uuid of [record.logicalParentUuid, segment?.headUuid, segment?.tailUuid,
+        ...(Array.isArray(preserved?.uuids) ? preserved.uuids : []),
+        ...(Array.isArray(preserved?.allUuids) ? preserved.allUuids : []),
+      ]) {
+        if (typeof uuid === 'string') pendingUuids.push(uuid);
+      }
+    } else if (typeof record?.parentUuid === 'string') {
+      pendingUuids.push(record.parentUuid);
+    }
   }
   return activeUuids;
 }
