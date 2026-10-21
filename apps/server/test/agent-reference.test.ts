@@ -92,7 +92,7 @@ it('retains finished references and rejects closed, unregistered and disabled ag
   expect(() => new CoordinationService(db, { enabled: false, pilotPaths: [] }).conversationReference(session)).toThrow('disabled');
 });
 
-it.each(['codex', 'claude'] as const)('keeps a finished %s chat reference inert and reopens only its inbox on a new message', provider => {
+it.each(['codex', 'claude'] as const)('keeps a finished %s chat reference inert and accepts inbox messages without reopening work', provider => {
   const { session, assignmentId } = bind(provider);
   const sender = service.register({ provider, nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
   service.update(assignmentId, { continuation: 'unattended' });
@@ -101,7 +101,7 @@ it.each(['codex', 'claude'] as const)('keeps a finished %s chat reference inert 
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
   const message = { id: randomUUID(), recipientId: assignmentId, text: 'A new peer question, not a new work grant.' };
   expect(service.send(sender, message).queued).toBe(true);
-  expect(service.agentStatus(assignmentId).assignment).toMatchObject({ status: 'waiting', continuation: 'waiting_for_input' });
+  expect(service.agentStatus(assignmentId).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input' });
   expect(service.poll(assignmentId, 0).messages).toEqual([expect.objectContaining({ id: message.id, text: message.text })]);
   service.finish(assignmentId, 'Peer response is complete.');
   service.send(sender, message);
@@ -118,8 +118,9 @@ it.each(['closed', 'dead', 'full'] as const)('does not reopen a %s finished reci
     for (let i = 0; i < 100; i++) db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
       .run(randomUUID(), sender, assignmentId, 'Existing inbox entry', new Date().toISOString());
   })();
-  expect(() => service.send(sender, { id: randomUUID(), recipientId: assignmentId, text: 'New peer question' }))
-    .toThrow(condition === 'full' ? 'inbox is full' : 'finished');
+  const send = () => service.send(sender, { id: randomUUID(), recipientId: assignmentId, text: 'New peer question' });
+  if (condition === 'full') expect(send).toThrow('inbox is full');
+  else expect(send()).toMatchObject({ queued: true, delivery: 'on_resume', recipient: { status: 'stopped' } });
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
 });
 

@@ -250,7 +250,9 @@ export class CoordinationService {
         is_working: number; manual_suspended_at: string | null; pressure_suspended_at: string | null;
       }>;
     const session = sessions.length === 1 ? sessions[0] : undefined;
-    const stopped = !alive || Boolean(session?.manual_suspended_at || session?.pressure_suspended_at);
+    const hasBinding = this.db.sqlite.prepare('select 1 from bound_sessions where provider=? and (conversation_ref=? or resume_conversation_ref=?) limit 1')
+      .get(assignment.provider, assignment.nativeSessionId, assignment.nativeSessionId);
+    const stopped = !alive || (!session && Boolean(hasBinding)) || Boolean(session?.manual_suspended_at || session?.pressure_suspended_at);
     const status = stopped ? 'stopped' : (session ? Boolean(session.is_working) : assignment.status === 'active') ? 'working' : 'idle';
     const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
@@ -279,7 +281,7 @@ export class CoordinationService {
     }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'
-      ? `Queued, not received. The recipient process is stopped or suspended. ${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists.'} No process was started.`
+      ? `Queued, not received. The recipient process is stopped or suspended. ${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists.'} No process was started. The message is retained; no resend is needed.`
       : status === 'idle' ? 'Queued, not received. The live recipient is idle; delivery waits for its next turn. No turn was started.'
         : 'Queued, not received. Expected at the next supported tool or session hook; a long-running tool can delay delivery.';
     return { id: message.id, queued: true, recipient, delivery, note };
