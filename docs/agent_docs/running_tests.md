@@ -128,21 +128,23 @@ Owned helper close and completed inbox retention (#82): `NODE_ENV=test npm run t
 
 After `npm run build`, opt into real-provider verification with
 `node scripts/prove-session-close.mjs --run`. It uses a private project, SQLite
-database, runtime and tmux socket. For each provider it closes an owned helper,
-then finishes another helper's assignment and exits that disposable provider.
-Both histories must remain intact, the Work bindings must end, and reconciliation
-must not recover them. Pending helpers retry transcript adoption using their exact
+database, runtime and tmux socket. For each provider it explicitly closes an owned
+helper. Native history must remain intact, its Work binding must end, and
+reconciliation must not recover it. Finished inbox retention is covered separately
+by the proof below. Pending helpers retry transcript adoption using their exact
 registered native identity. Evidence remains under `/tmp/console-close-proof-*`.
 `PROOF_PROVIDERS=codex` or `claude` limits the run; provider authentication and
 tmux are required. The fixture releases only its own sessions during cleanup.
 
 Finished-agent inboxes: after building, run
 `PROOF_FINISHED_INBOX=1 node scripts/prove-peer-message-wake.mjs --run`.
-The private Codex/Claude fixtures finish their assignment, resolve its inert drag
-reference, keep historical unread messages asleep, and receive a fresh peer
-message. After finishing again, a second message must be acknowledged while the
-completed marker action stays completed. The proof preserves waiting permission,
-the native PID and a later manual Stop. Run each provider separately with
+The private Codex/Claude fixtures complete their marker action, finish their
+assignment, resolve its inert drag reference and simulate automatic sleep in their
+private bindings. A new inbox question must resume the native conversation and be
+acknowledged while the assignment stays finished and the marker action stays
+completed. The proof preserves waiting permission and a later manual Stop.
+Candidate hooks are isolated from installed coordination hooks for both providers.
+Run each provider separately with
 `PROOF_PROVIDERS=codex` or `claude` on a memory-constrained host. This variant is
 separate from `PROOF_UNATTENDED=1`.
 

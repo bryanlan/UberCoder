@@ -145,6 +145,10 @@ begin new work. Closed sessions retain messages until explicit resume and cannot
 wake without a current restorable binding. Finished supervisors also retain late
 result handoffs and overdue alerts.
 
+Claude control notices use literal text entry, as provider recovery does, so the
+final ownership check can match their actual contents before Enter. Bracketed
+paste can collapse even a single-line notice into an opaque native placeholder.
+
 ### Send receipts
 
 Declared supervisor handoffs create a durable inbox message with an acknowledgement ID, in

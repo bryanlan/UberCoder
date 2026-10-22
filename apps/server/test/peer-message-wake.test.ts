@@ -31,8 +31,9 @@ async function fixture(id: 'codex' | 'claude' = 'codex', options: Parameters<typ
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
   const selected = { ...(id === 'codex' ? provider : claudeProvider), ...(run ? { createRunMonitor: () => ({ read: async () => run, takeChildActivity: () => children.splice(0) }) } : {}) };
   tmux.paneText = id === 'codex' ? codexReady : claudeReady;
-  const paste = tmux.pasteText.bind(tmux), keys = tmux.sendKeys.bind(tmux);
+  const paste = tmux.pasteText.bind(tmux), literal = tmux.sendLiteralText.bind(tmux), keys = tmux.sendKeys.bind(tmux);
   tmux.pasteText = async (name, text) => { await paste(name, text); if (id === 'claude') tmux.paneText = tmux.paneText.replace('❯ ', '❯ ' + text); };
+  tmux.sendLiteralText = async (name, text) => { await literal(name, text); if (id === 'claude') tmux.paneText = tmux.paneText.replace('❯ ', '❯ ' + text); };
   tmux.sendKeys = async (name, input) => { await keys(name, input); if (id === 'claude' && input.includes('Enter')) tmux.paneText = claudeReady; };
   const manager = createRecoveryManager(db, tmux, root, new RealtimeEventBus(), selected, settings,
     { queueCodexNotice: async (_id, _settings, _cwd, prompt) => { tmux.sent.push(prompt); }, ...options });
@@ -73,7 +74,7 @@ describe('Queued human input after a staged automatic notice', () => {
   it('journals notice ownership before a failed paste without replaying it', async () => {
     const f = await fixture('claude');
     let calls = 0;
-    f.tmux.pasteText = async () => {
+    f.tmux.sendLiteralText = async () => {
       calls++;
       expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'pasting', pid: f.session.pid });
       throw new Error('Unconfirmed paste transport');
@@ -93,12 +94,12 @@ describe('Queued human input after a staged automatic notice', () => {
       signalContinuation(f.db, f.recipient, { key: 'ready', timestamp: new Date().toISOString(), source: f.sender, reason: 'Work ready' });
       await f.manager.wakePendingAssignments(); continuationDue(f.db, f.recipient);
     }
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     if (notice === 'peer') f.send();
     await f.manager.wakePendingAssignments();
     expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged' });
-    memory = 'MemAvailable: 8000000 kB'; f.tmux.pasteText = paste;
+    memory = 'MemAvailable: 8000000 kB'; f.tmux.sendLiteralText = paste;
     const submitted: string[] = [], keys = f.tmux.sendKeys.bind(f.tmux);
     f.tmux.sendKeys = async (name, input) => {
       if (input.includes('C-c')) f.tmux.paneText = claudeReady;
@@ -218,8 +219,8 @@ describe('Peer message wake and one-hour sleep', () => {
   it('waits for the complete Claude composer after a partial repaint before Enter', async () => {
     const f = await fixture('claude');
     f.service.update(f.recipient, { continuation: 'waiting_for_input' });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (name, text) => {
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (name, text) => {
       await paste(name, text);
       f.tmux.captureSequence = [claudeReady.replace('❯ ', '❯ ' + text.slice(0, 90)),
         claudeReady.replace('❯ ', '❯ ' + text)];
@@ -493,7 +494,7 @@ describe('Peer message wake and one-hour sleep', () => {
     }
     const message = f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
-    expect(f.tmux.sent[0]).toContain('If the assignment is unfinished, continuation is unattended and recovery is neither blocked nor stalled');
+    expect(f.tmux.sent[0]).toContain('If unfinished, unattended and recovery is neither blocked nor stalled');
     expect(f.tmux.sent[0]).toContain('continue the existing human-authorized assignment in this turn');
     expect(f.tmux.sent[0]).not.toContain('End when the inbox is handled');
     expect(continuationControl(f.db, f.recipient)).toEqual(before);
@@ -586,9 +587,9 @@ describe('Peer message wake and one-hour sleep', () => {
   it.each(['codex', 'claude'] as const)('settles a rejected %s wake without replaying it when a new message arrives', async (id) => {
     let reject = true;
     class RejectingTmux extends FakeTmux {
-      override async pasteText(sessionName: string, text: string): Promise<void> {
+      override async sendLiteralText(sessionName: string, text: string): Promise<void> {
         if (reject) throw new Error('input was not delivered');
-        await super.pasteText(sessionName, text);
+        await super.sendLiteralText(sessionName, text);
       }
     }
     const run: ProviderRunState = { turnId: 'prior-completed-turn', status: 'completed', timestamp: new Date(Date.now() - 130 * 60_000).toISOString() };
@@ -1022,9 +1023,9 @@ describe('Unattended assignment continuation', () => {
   });
 
   it('leaves a Claude continuation unsent when Stop arrives during paste', async () => {
-    const f = await fixture('claude'); const paste = f.tmux.pasteText.bind(f.tmux);
+    const f = await fixture('claude'); const paste = f.tmux.sendLiteralText.bind(f.tmux);
     let stop: Promise<unknown> | undefined;
-    f.tmux.pasteText = async (...args) => { await paste(...args); stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
     f.send(); await f.manager.wakePendingAssignments(); await stop;
     expect(f.tmux.sentKeys.some(keys => keys.includes('Enter'))).toBe(false);
     expect(continuationControl(f.db, f.recipient).continuation).toBe('waiting_for_input');
@@ -1051,8 +1052,8 @@ describe('Unattended assignment continuation', () => {
   });
 
   it('does not mistake a work-permission update during paste for a human pause', async () => {
-    const f = await fixture('claude'); const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => {
+    const f = await fixture('claude'); const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => {
       await paste(...args);
       f.service.update(f.recipient, { continuation: 'waiting_for_input', status: 'waiting' });
     };
@@ -1066,8 +1067,8 @@ describe('Unattended assignment continuation', () => {
   it('retains a confirmed unsent Claude notice through memory pressure and restart, then delivers later results once', async () => {
     let memory = 'MemAvailable: 8000000 kB';
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     const initial = f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys).toEqual([]);
     expect(peerWakePaused(f.db, f.recipient)).toBe(false);
@@ -1085,7 +1086,7 @@ describe('Unattended assignment continuation', () => {
       { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
     try {
       await restarted.wakePendingAssignments();
-      expect(f.tmux.pasted).toEqual([PEER_WAKE_PROMPT]);
+      expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
       expect(f.tmux.sentKeys).toEqual([['Enter']]);
       expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(initial.id))!)).toMatchObject({ status: 'submitted' });
       const received: string[] = [];
@@ -1108,8 +1109,8 @@ describe('Unattended assignment continuation', () => {
     f.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({ ...original, timestamp: new Date(Date.now() - 120_000).toISOString() }));
     const initial = f.db.meta.get(peerWakeAttemptKey(message.id));
     f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false, lastCompletedAt: new Date().toISOString() });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     await f.manager.wakePendingAssignments();
     expect(JSON.parse(f.db.meta.get(peerWakeFollowupKey(message.id))!)).toMatchObject({ status: 'deferred' });
     expect(f.tmux.sentKeys).toEqual([['Enter']]);
@@ -1117,15 +1118,15 @@ describe('Unattended assignment continuation', () => {
     await f.manager.wakePendingAssignments();
     expect(JSON.parse(f.db.meta.get(peerWakeFollowupKey(message.id))!)).toMatchObject({ status: 'submitted' });
     expect(f.db.meta.get(peerWakeAttemptKey(message.id))).toBe(initial);
-    expect(f.tmux.pasted).toHaveLength(2);
+    expect(f.tmux.sent).toHaveLength(2);
     expect(f.tmux.sentKeys).toEqual([['Enter'], ['Enter']]);
     f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false, lastCompletedAt: new Date().toISOString() });
     await f.manager.wakePendingAssignments(); expect(f.tmux.sentKeys).toHaveLength(2);
   });
 
   it('never submits unrelated text that appears in the composer during paste', async () => {
-    const f = await fixture('claude'); const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); f.tmux.paneText = claudeReady.replace('❯ ', '❯ HUMAN_DRAFT'); };
+    const f = await fixture('claude'); const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); f.tmux.paneText = claudeReady.replace('❯ ', '❯ HUMAN_DRAFT'); };
     f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys.some(keys => keys.includes('Enter'))).toBe(false);
     expect(f.tmux.paneText).toContain('HUMAN_DRAFT');
@@ -1135,21 +1136,21 @@ describe('Unattended assignment continuation', () => {
   it('preserves human text appended to a deferred notice instead of treating it as a retriable control', async () => {
     let memory = 'MemAvailable: 8000000 kB';
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     f.send(); await f.manager.wakePendingAssignments();
     f.tmux.paneText = claudeReady.replace('❯ ', '❯ ' + PEER_WAKE_PROMPT + ' HUMAN_DRAFT');
     memory = 'MemAvailable: 8000000 kB'; f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys).toEqual([]);
-    expect(f.tmux.pasted).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(f.tmux.paneText).toContain('HUMAN_DRAFT');
   });
 
   it.each([2, 3])('preserves native typing during staged resume ownership check %i', async check => {
     let memory = 'MemAvailable: 8000000 kB';
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     f.send(); await f.manager.wakePendingAssignments();
     memory = 'MemAvailable: 8000000 kB';
     const owner = f.tmux.getOption.bind(f.tmux); let reads = 0;
@@ -1160,7 +1161,7 @@ describe('Unattended assignment continuation', () => {
     await f.manager.wakePendingAssignments();
     expect(reads).toBeGreaterThanOrEqual(check);
     expect(f.tmux.sentKeys).toEqual([]);
-    expect(f.tmux.pasted).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(f.tmux.paneText).toContain('HUMAN_DRAFT_PENDING');
   });
 
@@ -1172,8 +1173,8 @@ describe('Unattended assignment continuation', () => {
     await f.manager.wakePendingAssignments();
     const control = continuationControl(f.db, f.recipient);
     control.recovery!.attempts = attempts - 1; saveContinuation(f.db, f.recipient, control); due(f);
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys).toEqual([]);
     expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged', notice: 'unattended' });
@@ -1185,7 +1186,7 @@ describe('Unattended assignment continuation', () => {
     try {
       await restarted.wakePendingAssignments();
       expect(f.tmux.sentKeys).toEqual([['Enter']]);
-      expect(f.tmux.pasted).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
+      expect(f.tmux.sent).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
       expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(handoff.id))!)).toMatchObject({ status: 'submitted' });
       expect(continuationControl(f.db, f.recipient).recovery).toMatchObject({ status: 'submitted', attempts });
       expect(continuationControl(f.db, f.recipient).signals).toEqual([]);
@@ -1196,8 +1197,8 @@ describe('Unattended assignment continuation', () => {
   it.each(['shutdown', 'stop'] as const)('rechecks %s after the final staged composer capture', async guard => {
     let memory = 'MemAvailable: 8000000 kB';
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     f.send(); await f.manager.wakePendingAssignments();
     memory = 'MemAvailable: 8000000 kB';
     const owner = f.tmux.getOption.bind(f.tmux), capture = f.tmux.capturePane.bind(f.tmux);
@@ -1214,7 +1215,7 @@ describe('Unattended assignment continuation', () => {
     await f.manager.wakePendingAssignments(); await command;
     expect(acted).toBe(true);
     expect(f.tmux.sentKeys.some(input => input.includes('Enter'))).toBe(false);
-    expect(f.tmux.pasted).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
   });
 
   it.each(['peer', 'unattended'] as const)('never repastes a staged %s notice when native input cleared its composer', async notice => {
@@ -1224,8 +1225,8 @@ describe('Unattended assignment continuation', () => {
       signalContinuation(f.db, f.recipient, { key: 'work-ready', timestamp: new Date().toISOString(), source: f.sender, reason: 'Work ready' });
       await f.manager.wakePendingAssignments(); due(f);
     }
-    const paste = f.tmux.pasteText.bind(f.tmux);
-    f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    const paste = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     if (notice === 'peer') f.send();
     await f.manager.wakePendingAssignments();
     expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged' });
@@ -1234,7 +1235,7 @@ describe('Unattended assignment continuation', () => {
     memory = 'MemAvailable: 8000000 kB'; f.tmux.paneText = claudeReady;
     f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys).toEqual([]);
-    expect(f.tmux.pasted).toEqual([notice === 'peer' ? PEER_WAKE_PROMPT : UNATTENDED_CONTINUATION_PROMPT]);
+    expect(f.tmux.sent).toEqual([notice === 'peer' ? PEER_WAKE_PROMPT : UNATTENDED_CONTINUATION_PROMPT]);
     expect(f.tmux.paneText).toBe(claudeReady);
   });
 
@@ -1244,9 +1245,9 @@ describe('Unattended assignment continuation', () => {
     const f = await fixture('claude', { pressureSuspendAvailableBytes: 3 * 1024 ** 3, readMemInfo: () => memory });
     signalContinuation(f.db, f.recipient, { key: 'work-ready', timestamp: new Date().toISOString(), source: f.sender, reason: 'Work ready' });
     await f.manager.wakePendingAssignments(); due(f);
-    const paste = f.tmux.pasteText.bind(f.tmux); const keys = f.tmux.sendKeys.bind(f.tmux);
+    const paste = f.tmux.sendLiteralText.bind(f.tmux); const keys = f.tmux.sendKeys.bind(f.tmux);
     if (guard === 'uncertain_enter') f.tmux.sendKeys = async () => { throw new Error('Uncertain Enter'); };
-    else f.tmux.pasteText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
+    else f.tmux.sendLiteralText = async (...args) => { await paste(...args); memory = 'MemAvailable: 1000 kB'; };
     await f.manager.wakePendingAssignments();
     memory = 'MemAvailable: 8000000 kB'; f.tmux.sendKeys = keys;
     if (guard === 'permission' || guard === 'renewal') f.service.update(f.recipient, { continuation: guard === 'permission' ? 'waiting_for_input' : 'unattended' });
@@ -1254,7 +1255,7 @@ describe('Unattended assignment continuation', () => {
     if (guard === 'draft') f.tmux.paneText = claudeReady.replace('❯ ', '❯ ' + UNATTENDED_CONTINUATION_PROMPT + ' HUMAN_DRAFT_PENDING');
     const result = f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys.some(input => input.includes('Enter'))).toBe(false);
-    expect(f.tmux.pasted).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
+    expect(f.tmux.sent).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
     expect(f.db.meta.get(peerWakeAttemptKey(result.id))).toBeUndefined();
   });
 
@@ -1269,7 +1270,7 @@ describe('Unattended assignment continuation', () => {
     f.tmux.sendKeys = keys;
     f.send(); await f.manager.wakePendingAssignments();
     expect(f.tmux.sentKeys).toEqual([]);
-    expect(f.tmux.pasted).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
   });
 
   it('keeps a late wake request that arrives after the current inbox selection', async () => {

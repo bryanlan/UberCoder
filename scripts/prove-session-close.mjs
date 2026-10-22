@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { buildApp } from '../apps/server/dist/app.js';
 
-if (!process.argv.includes('--run')) throw new Error('Use --run to opt into disposable real helper close/archive verification. Run npm run build first.');
+if (!process.argv.includes('--run')) throw new Error('Use --run to opt into disposable real helper close verification. Run npm run build first.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-close-proof-'));
 const project = path.join(root, 'projects', 'demo');
 fs.mkdirSync(project, { recursive: true });
@@ -85,7 +85,7 @@ try {
   return /gpt-\d/i.test(text);
  });
  await api('POST',`/api/sessions/${leadId}/model-profile`,{profile:'low'});
- const scope='This private Console verification authorizes launching, restarting and closing owned helpers in demo, including verifying that finished exited helpers are archived with history retained. No files or external actions are needed.';
+ const scope='This private Console verification authorizes launching, restarting and closing owned helpers in demo with history retained. No files or external actions are needed.';
  const submitted=await api('POST',`/api/sessions/${leadId}/input`,{text:scope+' Reply exactly CONTROL_READY and do not use tools.'});leadId=submitted.session.id;ids.push(leadId);
  assert(submitted.recordedUserInput?.id);
  const {grant}=await grantCall({action:'record',consoleSessionId:leadId,humanMessageId:submitted.recordedUserInput.id,
@@ -93,10 +93,8 @@ try {
  assert.equal(grant.status,'active');
  const {CODEX_COST_PROFILES,CLAUDE_COST_PROFILES}=await import('@agent-console/shared');
  for(const provider of (process.env.PROOF_PROVIDERS??'codex,claude').split(',')) {
-  for(const action of ['close','auto_archive']) {
-   const marker=`CLOSE_${provider}_${action}_${randomUUID().slice(0,8)}`, profile=provider==='codex'?CODEX_COST_PROFILES.low:CLAUDE_COST_PROFILES.low;
-   const prompt=action==='close'?`Reply exactly ${marker}. Do not use tools or edit files.`
-    :`This is a disposable session archival test. Use agent_coordination finish (or the canonical helper if MCP has not connected) with summary ${marker}, then reply exactly ${marker}. Do not edit files or use other tools.`;
+   const marker=`CLOSE_${provider}_close_${randomUUID().slice(0,8)}`, profile=provider==='codex'?CODEX_COST_PROFILES.low:CLAUDE_COST_PROFILES.low;
+   const prompt=`Reply exactly ${marker}. Do not use tools or edit files.`;
    const request=await grantCall({action:'launch',projectSlug:'demo',provider,model:profile.model,effort:profile.reasoningEffort,prompt,title:marker,grantId:grant.id});
    const requestId=request.requests[0].id,id=request.requests[0].sessionId;ids.push(id);
    await wait('real launched helper and completed marker',async()=>{
@@ -109,26 +107,18 @@ try {
     return screen.screen?.inputActive&&!screen.screen.inputText.trim()&&!screen.session.isWorking&&fs.readFileSync(file,'utf8').includes(marker);
    });
    const session=row(id),file=transcript(id),before=fs.readFileSync(file,'utf8');
-   if(action==='close'){
-    const closeId=randomUUID();await grantCall({action:'close',sessionId:id,requestId:closeId,grantId:grant.id});
-    await wait('owned close completed',async()=>{
-     const result=(await grantCall({action:'launch_status',requestId:closeId})).requests[0];
-     if(result.status==='failed'||result.status==='cancelled')throw Error(result.reason);
-     return result.status==='completed';
-    });
-    await grantCall({action:'close',sessionId:id,requestId:closeId,grantId:grant.id});
-    assert.equal(db.prepare("select count(*) as n from agent_session_requests where action='close_session' and id=?").get(closeId).n,1);
-   }else{
-    await wait('native finished assignment',()=>db.prepare("select id from coordination_assignments where provider=? and native_session_id=? and status='finished'").get(provider,session.conversation_ref));
-    execFileSync('tmux',['-L',socket,'kill-session','-t',session.tmux_session_name]);
-    const response=await app.inject({method:'GET',url:`/api/sessions/${id}/screen`,headers});assert.equal(response.statusCode,404);
-    await wait('finished exited helper archived',()=>!row(id).should_restore&&row(id).status==='ended');
-   }
+   const closeId=randomUUID();await grantCall({action:'close',sessionId:id,requestId:closeId,grantId:grant.id});
+   await wait('owned close completed',async()=>{
+    const result=(await grantCall({action:'launch_status',requestId:closeId})).requests[0];
+    if(result.status==='failed'||result.status==='cancelled')throw Error(result.reason);
+    return result.status==='completed';
+   });
+   await grantCall({action:'close',sessionId:id,requestId:closeId,grantId:grant.id});
+   assert.equal(db.prepare("select count(*) as n from agent_session_requests where action='close_session' and id=?").get(closeId).n,1);
    assert.equal(row(id).should_restore,0);assert.equal(row(id).status,'ended');assert.equal(row(id).pid,null);
    assert.ok(fs.readFileSync(file,'utf8').startsWith(before),'Previous native history must remain intact');
    assert.throws(()=>execFileSync('tmux',['-L',socket,'has-session','-t',session.tmux_session_name],{stdio:'pipe'}));
-   record({provider,action,sessionId:id,conversationRef:session.conversation_ref,requestId,historyPreserved:true,ended:true,shouldRestore:false,pid:null,tmuxAbsent:true});
-  }
+   record({provider,action:'close',sessionId:id,conversationRef:session.conversation_ref,requestId,historyPreserved:true,ended:true,shouldRestore:false,pid:null,tmuxAbsent:true});
  }
  await new Promise(resolve=>setTimeout(resolve,35000));
  for(const item of evidence){assert.equal(row(item.sessionId).should_restore,0);assert.equal(row(item.sessionId).status,'ended');}

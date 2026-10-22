@@ -785,7 +785,9 @@ export class SessionManager {
                 throw new Error('The provider composer changed before paste; existing text remains unsent.');
               saveComposer('pasting');
               pasteStarted = true;
-              await this.tmuxClient.pasteText(current!.tmuxSessionName, prompt);
+              // Match the exact visible notice. Bracketed paste can collapse into
+              // an opaque Claude placeholder even for a single-line control.
+              await this.sendLiteralTextToSession(current!.tmuxSessionName, prompt);
               entered = await this.waitForScreenMatch(current!, hashScreen(screen), combinedTextKeySettleWaitMs(prompt),
                 candidate => candidate.inputActive && screenInputMatchesText(candidate, prompt)) ?? screen;
             }

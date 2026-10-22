@@ -47,9 +47,23 @@ for (const id of ['codex', 'claude']) {
   config.providers[id] = structuredClone(installed.providers[id]);
   config.providers[id].commands.env = { ...config.providers[id].commands.env, AGENT_CONSOLE_CONFIG: configPath, AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_TMUX_SOCKET: socket };
 }
+// Keep hooks, MCP configuration and transcript discovery private. Reference the
+// existing login without copying credentials; cleanup removes only this link.
+const codexHome = path.join(root, 'codex');
+fs.mkdirSync(codexHome, { mode: 0o700 });
+const codexAuth = path.join(codexHome, 'auth.json');
+fs.symlinkSync(path.join(os.homedir(), '.codex/auth.json'), codexAuth);
+process.once('exit', () => fs.rmSync(codexAuth, { force: true }));
+fs.writeFileSync(path.join(codexHome, 'hooks.json'), JSON.stringify({ hooks: Object.fromEntries(
+  ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PostToolUse', 'Stop'].map(event => [event,
+    [{ hooks: [{ type: 'command', command: `node '${path.resolve('scripts/agent-coord.mjs').replaceAll("'", "'\\''")}' hook codex`, timeout: 3 }] }]])) }), { mode: 0o600 });
+config.providers.codex.discoveryRoot = codexHome;
+config.providers.codex.commands.env.CODEX_HOME = codexHome;
 for (const key of ['newCommand', 'resumeCommand', 'continueCommand']) {
   if (fixtureClaudeExecutable) config.providers.claude.commands[key][0] = fixtureClaudeExecutable;
-  config.providers.codex.commands[key].push('--dangerously-bypass-hook-trust', '-c',
+  config.providers.codex.commands[key].push('--no-daemon', '--dangerously-bypass-hook-trust', '-c',
+    'mcp_servers.agent_console_coordination.command="node"', '-c',
+    `mcp_servers.agent_console_coordination.args=${JSON.stringify([path.resolve('scripts/agent-coord.mjs'), 'mcp'])}`, '-c',
     `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(config.runtimeDir)}`);
   config.providers.claude.commands[key].push('--setting-sources', '', '--settings', JSON.stringify({ hooks: fixtureHooks }));
   config.providers.claude.commands[key].push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: {
@@ -60,6 +74,7 @@ process.env.AGENT_CONSOLE_TMUX_SOCKET = socket;
 fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
 const { app } = await buildApp({ configPath });
 await app.ready();
+app.log.level = 'warn';
 const db = new Database(config.databasePath, { readonly: true });
 const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } });
 assert.equal(login.statusCode, 200);
@@ -148,24 +163,6 @@ try {
     const recipientAuth = () => ({ assignmentId: native.id,
       token: JSON.parse(fs.readFileSync(path.join(config.runtimeDir, 'coordination/clients', `${clientKey}.json`), 'utf8')).token });
     let finishedEvidence;
-    if (finishedInbox) {
-      await rpc({ ...recipientAuth(), action: 'finish', summary: 'Disposable fixture completed its first task.' });
-      assert.equal(assignment().status, 'finished');
-      const reference = await api('GET', '/api/agent-reference?' + new URLSearchParams({
-        projectSlug: 'demo', provider, conversationRef: session().conversation_ref,
-      }));
-      assert.equal(reference.recipientId, native.id);
-      assert.equal(assignment().status, 'finished', 'Resolving a drag reference must be inert.');
-      finishedEvidence = { referenceResolved: true, originalPid: session().pid };
-      // Only this fixture's private pane and binding are changed. Reproduce the
-      // idle reaper's durable state, then exercise real native conversation resume.
-      execFileSync('tmux', ['-L', socket, 'kill-session', '-t', session().tmux_session_name]);
-      const writer = new Database(config.databasePath);
-      writer.prepare('update bound_sessions set idle_suspended_at=?,pid=null,is_working=0 where id=?')
-        .run(new Date().toISOString(), id);
-      writer.close();
-      Object.assign(finishedEvidence, { simulatedIdleSleep: true });
-    }
     const queued = await rpc({ ...senderAuth, action: 'send', messageId, recipientId: native.id, text: peerText });
     assert.equal(queued.delivery, 'wake_pending');
     await wait('real native acknowledgement and reply', () => db.prepare('select id from coordination_messages where sender_id=? and recipient_id=? and text=?').get(native.id, sender.assignmentId, marker));
@@ -175,13 +172,8 @@ try {
     assert.equal(receipt.delivery, 'acknowledged');
     await wait('response turn ends with decision pending', async () => {
       const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
-      return screen.screen?.inputActive && !session().is_working && assignment().status === (finishedInbox ? 'finished' : 'waiting');
+      return screen.screen?.inputActive && !session().is_working && assignment().status === 'waiting';
     });
-    if (finishedInbox) {
-      assert.equal(assignment().status, 'finished');
-      assert.equal(assignment().native_session_id, native.native_session_id);
-      finishedEvidence.restoredPid = session().pid;
-    }
     assert.equal(control().continuation, 'waiting_for_input');
     assert.equal(control().recovery, null);
     const events = fs.readFileSync(session().event_log_path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
@@ -217,8 +209,22 @@ try {
       restart = { targetAssignmentId: native.id, requestId, originalPid, replacementPid: session().pid, finishedAssignmentResumed: true, reply: restartMarker };
     }
     if (finishedInbox) {
-      await rpc({ ...recipientAuth(), action: 'finish', summary: 'Disposable fixture completed its peer response.' });
+      await rpc({ ...recipientAuth(), action: 'finish', summary: 'Disposable fixture completed its marker action.' });
       assert.equal(assignment().status, 'finished');
+      const reference = await api('GET', '/api/agent-reference?' + new URLSearchParams({
+        projectSlug: 'demo', provider, conversationRef: session().conversation_ref,
+      }));
+      assert.equal(reference.recipientId, native.id);
+      assert.equal(assignment().status, 'finished', 'Resolving a drag reference must be inert.');
+      finishedEvidence = { referenceResolved: true, originalPid: session().pid };
+      // Only this fixture's private pane and binding are changed. Reproduce the
+      // idle reaper's durable state, then exercise real native conversation resume.
+      execFileSync('tmux', ['-L', socket, 'kill-session', '-t', session().tmux_session_name]);
+      const writer = new Database(config.databasePath);
+      writer.prepare('update bound_sessions set idle_suspended_at=?,pid=null,is_working=0 where id=?')
+        .run(new Date().toISOString(), id);
+      writer.close();
+      Object.assign(finishedEvidence, { simulatedIdleSleep: true });
       const secondId = randomUUID();
       await rpc({ ...senderAuth, action: 'send', messageId: secondId, recipientId: native.id,
         text: 'This is a new second inbox question after your prior task finished. Acknowledge this message, preserve the completed marker action, and keep the A/B decision pending.' });
@@ -230,7 +236,8 @@ try {
       });
       assert.equal(control().continuation, 'waiting_for_input');
       assert.notEqual(session().pid, finishedEvidence.originalPid);
-      assert.equal(session().pid, finishedEvidence.restoredPid, 'The second inbox turn reuses the restored provider.');
+      assert.equal(assignment().native_session_id, native.native_session_id);
+      finishedEvidence.restoredPid = session().pid;
       assert.equal(assignment().status, 'finished');
       assert.equal(db.prepare('select count(*) as n from coordination_messages where sender_id=? and recipient_id=? and text=?')
         .get(native.id, sender.assignmentId, marker).n, 1, 'A later peer message must not repeat the completed side effect.');
