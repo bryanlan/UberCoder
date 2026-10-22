@@ -58,6 +58,56 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('registers a send-only service through the real helper and rejects new requests without filling its inbox', async () => {
+    const { root, checkout, db, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const result = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId,
+      pid: process.pid, cwd: checkout, acceptsMessages: false });
+    expect(result.code).toBe(0);
+    const serviceId = JSON.parse(result.stdout).assignmentId;
+    service.update(serviceId, { checkout, summary: 'Send-only completion service' });
+    const sender = register();
+    await expect(dispatchCoordination(service, { action: 'send', assignmentId: sender.id, token: sender.token,
+      messageId: randomUUID(), recipientId: serviceId, text: 'Please do this work' })).rejects.toMatchObject({ code: 'recipient_send_only' });
+    expect(service.agentStatus(sender.id).peers).toContainEqual(expect.objectContaining({ id: serviceId, acceptsMessages: false }));
+    expect(db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=?').get(serviceId)).toEqual({ n: 0 });
+  });
+
+  it('preserves accepted messages and their identities when a service becomes send-only', () => {
+    const { checkout, service, register } = fixture();
+    const sender = register(), target = register();
+    const input = { id: randomUUID(), recipientId: target.id, text: 'Historical retained message' };
+    service.send(sender.id, input);
+    service.register({ provider: 'codex', nativeSessionId: target.nativeSessionId, token: target.token,
+      pid: process.pid, cwd: checkout, acceptsMessages: false });
+    expect(service.send(sender.id, input)).toMatchObject({ id: input.id, queued: true, recipient: { acceptsMessages: false }, note: expect.stringContaining('no inbox reader') });
+    expect(service.poll(target.id, 0).messages).toMatchObject([{ id: input.id, acknowledgedAt: null }]);
+    expect(() => service.send(sender.id, { ...input, id: randomUUID() })).toThrow('send-only');
+  });
+
+  it.each(['stopped', 'paused'])('reports a finished %s lane and its supervisor without pretending retained work has an owner', state => {
+    const { db, service, register } = fixture();
+    const sender = register(), target = register(), parent = register();
+    service.update(target.id, { supervisorId: parent.id }); service.finish(target.id, 'Previous work complete');
+    db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(target.id);
+    if (state === 'paused') db.meta.set(`peer-wake-paused:${target.id}`, 'true');
+    const receipt = service.send(sender.id, { id: randomUUID(), recipientId: target.id, text: 'New work' });
+    expect(receipt).toMatchObject({ delivery: 'on_resume', recipient: { assignmentStatus: 'finished', supervisorId: parent.id } });
+    expect(receipt.note).toContain('finished'); expect(receipt.note).toContain(parent.id);
+    if (state === 'stopped') expect(receipt.note).toContain('human resume');
+    expect(receipt.note).not.toContain('no resend is needed');
+  });
+
+  it('persists an urgent send through dispatch and keeps its original priority on retries', async () => {
+    const { db, service, register } = fixture();
+    const sender = register(), target = register();
+    const input = { action: 'send', assignmentId: sender.id, token: sender.token, messageId: randomUUID(),
+      recipientId: target.id, text: 'Decision required', urgent: true };
+    const receipt = await dispatchCoordination(service, input);
+    expect(await dispatchCoordination(service, { ...input, urgent: false })).toEqual(receipt);
+    expect(db.meta.get(`inbox-urgent:${input.messageId}`)).toBe('true');
+  });
   it.each(['codex', 'claude'])('reopens the same finished %s agent reference on its next human prompt', async provider => {
     const { root, checkout, db, service } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
@@ -595,8 +645,9 @@ describe('assignment coordination', () => {
       expect(body.hookSpecificOutput.additionalContext).toContain('When documentation edits are allowed');
       expect(body.hookSpecificOutput.additionalContext).toContain('Unattended means permission to continue the existing human-authorized assignment');
       expect(body.hookSpecificOutput.additionalContext).toContain('Assignments start waiting_for_input');
-      expect(body.hookSpecificOutput.additionalContext).toContain('If a cached MCP tool lacks these update fields');
-      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs update with the same JSON on stdin');
+      expect(body.hookSpecificOutput.additionalContext).toContain('If a cached MCP tool lacks new fields');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Routine progress belongs in quiet update summaries');
+      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs update or send with the same JSON on stdin');
       expect(body.hookSpecificOutput.additionalContext).not.toContain('token');
       expect(service.snapshot().messages.find((m) => m.id === messageId)?.acknowledgedAt).toBeNull();
       const ack = await run(['ack'], { messageIds: [messageId] }); expect(ack.code, ack.stderr).toBe(0);
@@ -869,6 +920,8 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.checkout).toMatchObject({ maxLength: 4096 });
     expect(tool.inputSchema.properties.messageIds).toMatchObject({ maxItems: 100 });
     expect(tool.inputSchema.properties.awaiting).toMatchObject({ type: ['string', 'null'], maxLength: 500 });
+    expect(tool.inputSchema.properties.urgent).toMatchObject({ type: 'boolean' });
+    expect(tool.description).toContain('Routine progress belongs in update summaries');
     const wikiTool = JSON.parse(result.stdout).result.tools[1];
     expect(wikiTool.name).toBe('agent_wiki');
     expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);

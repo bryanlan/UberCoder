@@ -7,6 +7,7 @@ import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseD
 import { CONTINUATION_POLICY, continuationControl, endAwaiting, setAwaiting, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { GRANT_POLICY } from '../grants/schema.js';
+import { acceptsMessages, isUrgentMessage, routineInboxWakeAt, sendOnlyKey, urgentMessageKey } from './inbox-policy.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -22,7 +23,7 @@ export function processStart(pid: number): string {
   } catch { return ''; }
 }
 
-export interface CoordinationSettings { enabled: boolean; pilotPaths: string[] }
+export interface CoordinationSettings { enabled: boolean; pilotPaths: string[]; waitingInboxCooldownSeconds?: number }
 
 export const OUTSIDE_PILOT_NOTE = 'This repository is outside the coordination pilot, so it has no activity view. '
   + 'Your assignment and direct messages still work: call status without checkout to find peers, then send to their id.';
@@ -99,7 +100,7 @@ export class CoordinationService {
       conversationRef, title: summary?.title ?? session.title ?? pending?.title ?? conversationRef };
   }
 
-  register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string }): { enabled: boolean; assignmentId?: string } {
+  register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string; acceptsMessages?: boolean }): { enabled: boolean; assignmentId?: string } {
     // Assignment identity is independent of its launch directory. Announced scope
     // determines the repository activity views; it never grants editing permission.
     if (!this.settings.enabled) return { enabled: false };
@@ -126,6 +127,7 @@ export class CoordinationService {
         this.db.sqlite.prepare('insert into coordination_assignments values(?,?,?,?,?,?,?,?,?,?)')
           .run(id, input.provider, input.nativeSessionId, tokenHash, 'Assignment not yet described', 'active', input.pid, start, now, now);
       }
+      if (input.acceptsMessages !== undefined) this.db.meta.set(sendOnlyKey(id), String(!input.acceptsMessages));
       this.grants?.bindAssignment(id, input.consoleSessionId, input.cwd);
       this.event(id, null, existing ? 'resumed' : 'started', existing ? 'Resumed; refresh current scope and unfinished changes.' : 'Session registered; awaiting assignment scope.');
       return { enabled: true, assignmentId: id };
@@ -226,9 +228,9 @@ export class CoordinationService {
       where a.id!=? and a.status in ('active','waiting') ${repositoryFilter}
       order by case a.status when 'active' then 0 else 1 end, a.last_seen_at desc, a.id, s.checkout`)
       .all(id, ...repositories) as Array<{ id: string; provider: string; status: string; description: string; lastSeenAt: string; checkout: string; summary: string }>;
-    const peers: Array<{ id: string; provider: string; status: string; description: string; lastSeenAt: string; checkout: string; summary: string }> = [];
+    const peers: Array<{ id: string; provider: string; status: string; description: string; lastSeenAt: string; checkout: string; summary: string; acceptsMessages: boolean }> = [];
     for (const row of rows.slice(offset)) {
-      const peer = { ...row, description: compact(row.description, 120), checkout: compact(row.checkout, 220), summary: compact(row.summary, 220) };
+      const peer = { ...row, acceptsMessages: acceptsMessages(this.db, row.id), description: compact(row.description, 120), checkout: compact(row.checkout, 220), summary: compact(row.summary, 220) };
       if (JSON.stringify({ assignment, peers: [...peers, peer], totalPeerScopes: rows.length, pendingMessageCount }).length > 3400) break;
       peers.push(peer);
     }
@@ -254,14 +256,17 @@ export class CoordinationService {
       .get(assignment.provider, assignment.nativeSessionId, assignment.nativeSessionId);
     const stopped = !alive || (!session && Boolean(hasBinding)) || Boolean(session?.manual_suspended_at || session?.pressure_suspended_at);
     const status = stopped ? 'stopped' : (session ? Boolean(session.is_working) : assignment.status === 'active') ? 'working' : 'idle';
-    const recipient: CoordinationSendReceipt['recipient'] = { status, provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
+    const recipient: CoordinationSendReceipt['recipient'] = { status, assignmentStatus: assignment.status,
+      supervisorId: assignment.supervisorId, acceptsMessages: acceptsMessages(this.db, assignment.id), provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
     if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
+    if (!recipient.acceptsMessages) return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+      note: 'Historical message retained, but this participant is send-only and has no inbox reader. Reassign any work to an agent; retrying cannot make this service read it.' };
     if (peerWakePaused(this.db, assignment.id) && status !== 'working') {
       const details = this.db.meta.get(peerWakePauseDetailsKey(assignment.id));
       const reason = details ? (JSON.parse(details) as AutomaticInputPause).reason : 'The original pause reason was not captured.';
       return { id: message.id, queued: true, recipient, delivery: 'on_resume',
-        note: `Queued, not received. Automatic input is paused: ${reason} Peer wake resumes after the next accepted human turn.` };
+        note: `Queued, not received. Automatic input is paused: ${reason} Peer wake resumes after the next accepted human turn. ${assignment.status === 'finished' ? `This assignment is finished; new work needs a live owner.${assignment.supervisorId ? ` Contact supervisor ${assignment.supervisorId}.` : ''}` : ''}`.trim() };
     }
     if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
     const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
@@ -274,6 +279,12 @@ export class CoordinationService {
           : `Automatic wake was not confirmed and will not be replayed: ${attempt.reason ?? 'submission was interrupted'}. The message remains in the inbox.` };
     }
     if (this.requestWake && session && status !== 'working') {
+      const wakeNotBefore = !isUrgentMessage(this.db, message.id)
+        ? routineInboxWakeAt(this.db, assignment.id, assignment.continuation, (this.settings.waitingInboxCooldownSeconds ?? 600) * 1000) : undefined;
+      if (wakeNotBefore && !session.manual_suspended_at && !session.pressure_suspended_at) return {
+        id: message.id, queued: true, recipient, delivery: 'wake_pending', wakeNotBefore,
+        note: `Routine inbox wake batched until ${wakeNotBefore}; a normal turn or urgent handoff may deliver it earlier. No resend is needed. Use urgent only for a decision, blocker or awaited result.`,
+      };
       return { id: message.id, queued: true, recipient, delivery: session.manual_suspended_at ? 'on_resume' : 'wake_pending',
         note: session.manual_suspended_at ? 'Queued, not received. The recipient is manually suspended; automatic wake respects that pause.'
           : session.pressure_suspended_at ? 'Queued, not received. Console can wake the original conversation when sufficient memory is available.'
@@ -281,13 +292,13 @@ export class CoordinationService {
     }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'
-      ? `Queued, not received. The recipient process is stopped or suspended. ${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists.'} No process was started. The message is retained; no resend is needed.`
+      ? `Queued, not received. ${assignment.status === 'finished' ? 'This assignment is finished. ' : ''}${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists; delivery requires a human resume.'} No process was started. The message is retained. ${assignment.supervisorId ? `For reassignment, contact supervisor ${assignment.supervisorId}.` : 'New work needs a live owner; retained messages do not reassign it.'}`
       : status === 'idle' ? 'Queued, not received. The live recipient is idle; delivery waits for its next turn. No turn was started.'
         : 'Queued, not received. Expected at the next supported tool or session hook; a long-running tool can delay delivery.';
     return { id: message.id, queued: true, recipient, delivery, note };
   }
 
-  send(id: string, input: { id: string; recipientId: string; text: string }): CoordinationSendReceipt {
+  send(id: string, input: { id: string; recipientId: string; text: string; urgent?: boolean }): CoordinationSendReceipt {
     this.assignment(input.recipientId);
     const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
       .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
@@ -296,10 +307,13 @@ export class CoordinationService {
       this.requestWake?.();
       return this.sendReceipt(existing);
     }
+    if (!acceptsMessages(this.db, input.recipientId)) throw Object.assign(
+      new Error('Recipient is a send-only service without an inbox reader. Send requests to a coordinating agent instead.'), { code: 'recipient_send_only' });
     const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
     if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
     this.db.sqlite.transaction(() => {
       this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
+      if (input.urgent) this.db.meta.set(urgentMessageKey(input.id), 'true');
       endAwaiting(this.db, input.recipientId);
     })();
     this.requestWake?.();
@@ -453,6 +467,7 @@ export class CoordinationService {
       const blocked = count.n >= 100;
       this.db.meta.set(key, JSON.stringify({ messageId, recipientId: control.supervisorId, workerId: id, timestamp, text,
         ...(blocked ? { blockedReason: 'The supervisor inbox is full.' } : {}) }));
+      this.db.meta.set(urgentMessageKey(messageId), 'true');
       if (!blocked) {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(messageId, id, control.supervisorId, text, timestamp);

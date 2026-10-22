@@ -80,7 +80,8 @@ export const appConfigSchema = z.object({
   coordination: z.object({
     enabled: z.boolean().default(false),
     pilotPaths: z.array(z.string().min(1)).default([]),
-  }).default({ enabled: false, pilotPaths: [] }),
+    waitingInboxCooldownSeconds: z.number().int().min(1).max(900).default(600),
+  }).default({ enabled: false, pilotPaths: [], waitingInboxCooldownSeconds: 600 }),
   security: z.object({
     passwordHash: z.string().min(1),
     sessionSecret: z.string().min(32),

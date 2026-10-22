@@ -11,6 +11,8 @@ import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { dispatchCoordination } from '../src/coordination/transport.js';
+import { inboxWakeKey } from '../src/coordination/inbox-policy.js';
+import { deliveryWarnings } from '../src/coordination/delivery-warnings.js';
 import type { ProviderChildActivity, ProviderRunState } from '../src/providers/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
@@ -69,6 +71,107 @@ function backdate(db: AppDatabase, sessionId: string, minutes: number) {
   db.sqlite.prepare(`update bound_sessions set started_at=?, updated_at=?, last_activity_at=?, last_output_at=?, last_completed_at=?, last_response_at=?, is_working=0 where id=?`)
     .run(timestamp, timestamp, timestamp, timestamp, timestamp, timestamp, sessionId);
 }
+
+describe('Waiting inbox batching', () => {
+  it('wakes the first message immediately and durably records its cooldown', async () => {
+    const f = await fixture();
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    const message = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.db.meta.get(inboxWakeKey(f.recipient))).toBeTruthy();
+    f.service.poll(f.recipient, 0);
+    f.service.acknowledge(f.recipient, [message.id]);
+    expect(continuationControl(f.db, f.recipient).recovery).toBeNull();
+  });
+
+  it.each(['codex', 'claude'] as const)('batches %s messages until the deadline without spending work attempts', async providerId => {
+    const f = await fixture(providerId);
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    const started = new Date().toISOString(); f.db.meta.set(inboxWakeKey(f.recipient), started);
+    const one = f.send(), two = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.service.send(f.sender, one)).toMatchObject({ delivery: 'wake_pending',
+      wakeNotBefore: new Date(Date.parse(started) + 600_000).toISOString() });
+    expect(f.db.meta.get(peerWakeAttemptKey(one.id))).toBeUndefined();
+    expect(continuationControl(f.db, f.recipient).recovery).toBeNull();
+    expect(deliveryWarnings(f.db.sqlite, Date.now() + 7 * 60_000)).toEqual([]);
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date(Date.now() - 600_001).toISOString());
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    for (const message of [one, two]) expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ status: 'submitted' });
+    expect(f.service.poll(f.recipient, 0).messages.map(message => message.id).sort()).toEqual([one.id, two.id].sort());
+  });
+
+  it('delivers batched messages through a normal hook without waiting or acknowledging them automatically', async () => {
+    const f = await fixture();
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date().toISOString());
+    const message = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.service.poll(f.recipient, 0).messages).toMatchObject([{ id: message.id, acknowledgedAt: null }]);
+    f.service.acknowledge(f.recipient, [message.id]);
+    await f.manager.wakePendingAssignments(); expect(f.tmux.sent).toEqual([]);
+  });
+
+  it.each(['urgent', 'handoff', 'finish', 'overdue'] as const)('bypasses the cooldown for %s and includes queued routine messages', async kind => {
+    const f = await fixture();
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date().toISOString());
+    const routine = f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    if (kind === 'urgent') f.service.send(f.sender, { id: randomUUID(), recipientId: f.recipient, text: 'Decision needed now', urgent: true });
+    else {
+      f.service.update(f.sender, { supervisorId: f.recipient });
+      if (kind === 'handoff') f.service.update(f.sender, { summary: 'Reviewable result', notifySupervisor: true });
+      if (kind === 'finish') f.service.finish(f.sender, 'Final result');
+      if (kind === 'overdue') {
+        f.service.update(f.sender, { continuation: 'unattended', awaiting: 'External result' });
+        const control = continuationControl(f.db, f.sender);
+        control.awaiting!.startedAt = new Date(Date.now() - 5 * 60 * 60_000).toISOString();
+        saveContinuation(f.db, f.sender, control);
+      }
+    }
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(routine.id))!)).toMatchObject({ status: 'submitted' });
+  });
+
+  it('retains its deadline across a manager restart', async () => {
+    const f = await fixture();
+    f.service.update(f.recipient, { continuation: 'waiting_for_input' });
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date().toISOString());
+    const message = f.send(); await f.manager.wakePendingAssignments(); await f.manager.stop();
+    const restarted = createRecoveryManager(f.db, f.tmux, f.root, undefined, undefined, undefined,
+      { queueCodexNotice: async (_id, _settings, _cwd, prompt) => { f.tmux.sent.push(prompt); } });
+    try {
+      await restarted.wakePendingAssignments(); expect(f.tmux.sent).toEqual([]);
+      f.db.meta.set(inboxWakeKey(f.recipient), new Date(Date.now() - 600_001).toISOString());
+      await restarted.wakePendingAssignments(); expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+      expect(JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!)).toMatchObject({ status: 'submitted' });
+    } finally { await restarted.stop(); }
+  });
+
+  it('keeps unattended awaited-result timing and the continuation budget unchanged', async () => {
+    const f = await fixture();
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date().toISOString());
+    f.service.update(f.recipient, { awaiting: 'External workflow result' });
+    const before = continuationControl(f.db, f.recipient);
+    f.send(); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    const after = continuationControl(f.db, f.recipient);
+    expect(after.awaiting).toBeNull(); expect(after.recovery).toEqual(before.recovery);
+  });
+
+  it('keeps a human Stop effective even for urgent messages inside the cooldown', async () => {
+    const f = await fixture();
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    f.db.meta.set(inboxWakeKey(f.recipient), new Date().toISOString());
+    const message = { id: randomUUID(), recipientId: f.recipient, text: 'Urgent peer question', urgent: true };
+    f.service.send(f.sender, message); await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.service.send(f.sender, message)).toMatchObject({ delivery: 'on_resume' });
+    expect(f.db.meta.get(peerWakeAttemptKey(message.id))).toBeUndefined();
+  });
+});
 
 describe('Queued human input after a staged automatic notice', () => {
   it('journals notice ownership before a failed paste without replaying it', async () => {

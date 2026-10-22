@@ -17,6 +17,7 @@
     "runtimeCommand": ["~/.local/bin/agent-consult"]
   },
   "coordination": {
+    "waitingInboxCooldownSeconds": 600,
     "enabled": false,
     "pilotPaths": []
   },

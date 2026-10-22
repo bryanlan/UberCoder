@@ -62,12 +62,16 @@ export interface CoordinationSendReceipt {
   queued: boolean;
   recipient: {
     status: 'working' | 'idle' | 'stopped';
+    assignmentStatus: AssignmentStatus;
+    supervisorId: string | null;
+    acceptsMessages: boolean;
     provider: string;
     lastSeenAt: string;
     resumableInConsole: boolean;
   };
   delivery: 'next_step' | 'next_turn' | 'on_resume' | 'wake_pending' | 'wake_started' | 'wake_blocked' | 'offered' | 'acknowledged';
   note: string;
+  wakeNotBefore?: string;
 }
 
 export interface CoordinationSnapshot {

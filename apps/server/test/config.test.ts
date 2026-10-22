@@ -12,6 +12,19 @@ async function writeTempConfig(body: object): Promise<string> {
 }
 
 describe('ConfigService', () => {
+  it('defaults waiting inbox batching to ten minutes and validates its configurable bound', async () => {
+    const base = { projectsRoot: '/tmp/projects', providers: {}, security: { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) } };
+    const configPath = await writeTempConfig(base);
+    try {
+      expect(new ConfigService(configPath).getConfig().coordination.waitingInboxCooldownSeconds).toBe(600);
+      for (const value of [0, 901, 1.5]) {
+        await fs.writeFile(configPath, JSON.stringify({ ...base, coordination: { waitingInboxCooldownSeconds: value } }));
+        expect(() => new ConfigService(configPath)).toThrow();
+      }
+      await fs.writeFile(configPath, JSON.stringify({ ...base, coordination: { waitingInboxCooldownSeconds: 30 } }));
+      expect(new ConfigService(configPath).getConfig().coordination.waitingInboxCooldownSeconds).toBe(30);
+    } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
+  });
   it('persists the tracking switch across restart without adopting other pending settings', async () => {
     const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security: {
       passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) } });

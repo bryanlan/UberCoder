@@ -22,6 +22,7 @@ const inputSchema = z.object({
   provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   consoleSessionId: z.string().uuid().optional(),
+  acceptsMessages: z.boolean().optional(), urgent: z.boolean().optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
@@ -46,7 +47,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     if (value === undefined) throw new Error(`${name} is required.`);
     return value;
   };
-  if (input.action === 'register') return service.register({ provider: need(input.provider, 'provider'), nativeSessionId: need(input.nativeSessionId, 'nativeSessionId'), token: need(input.token, 'token'), pid: need(input.pid, 'pid'), cwd: need(input.cwd, 'cwd'), consoleSessionId: input.consoleSessionId });
+  if (input.action === 'register') return service.register({ provider: need(input.provider, 'provider'), nativeSessionId: need(input.nativeSessionId, 'nativeSessionId'), token: need(input.token, 'token'), pid: need(input.pid, 'pid'), cwd: need(input.cwd, 'cwd'), consoleSessionId: input.consoleSessionId, acceptsMessages: input.acceptsMessages });
   const id = need(input.assignmentId, 'assignmentId');
   service.authenticate(id, need(input.token, 'token'));
   switch (input.action) {
@@ -54,7 +55,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     case 'history': return service.history(id, need(input.checkout, 'checkout'), input.offset);
     case 'poll': return service.poll(id, input.after);
     case 'update': return service.update(id, input);
-    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text') });
+    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), urgent: input.urgent });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
     case 'finish': return service.finish(id, need(input.summary, 'summary'));
     case 'disconnect': return service.disconnect(id);
