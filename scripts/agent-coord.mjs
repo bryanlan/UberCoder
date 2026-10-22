@@ -314,14 +314,15 @@ async function serveMcp() {
   // neither socket access nor credential-file access to use this tool.
   const properties = {
     action: { type: 'string', enum: actions },
-    checkout: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, description: { type: 'string' }, summary: { type: 'string' },
+    checkout: { type: 'string', minLength: 1, maxLength: 4096 }, offset: { type: 'integer', minimum: 0 },
+    description: { type: 'string', minLength: 1, maxLength: 500 }, summary: { type: 'string', minLength: 1, maxLength: 2000 },
     status: { type: 'string', enum: ['active', 'waiting'] },
     continuation: { type: 'string', enum: ['unattended', 'waiting_for_input'], description: 'Unattended permits continuing existing human-authorized work without another prompt. It grants no new authority. Set waiting_for_input before asking for a human decision; Stop and new human input pause it.' },
     supervisorId: { type: ['string', 'null'], description: 'Explicit supervising assignment id; null clears it. A link never enables the supervisor or grants permission.' },
     awaiting: { type: ['string', 'null'], minLength: 1, maxLength: 500, description: 'Short description of an external result being awaited while unattended. Pauses automatic continuation without spending its budget until the next new peer message. Null cancels the wait.' },
     notifySupervisor: { type: 'boolean', description: 'Notify the declared supervisor that a result needs review.' },
-    recipientId: { type: 'string' }, messageId: { type: 'string' }, text: { type: 'string' },
-    messageIds: { type: 'array', items: { type: 'string' } },
+    recipientId: { type: 'string' }, messageId: { type: 'string' }, text: { type: 'string', minLength: 1, maxLength: 2000 },
+    messageIds: { type: 'array', maxItems: 100, items: { type: 'string' } },
   };
   const wikiProperties = {
     action: { type: 'string', enum: wikiActions }, checkout: { type: 'string' },

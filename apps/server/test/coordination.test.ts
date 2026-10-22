@@ -863,6 +863,11 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
+    expect(tool.inputSchema.properties.description).toMatchObject({ maxLength: 500 });
+    expect(tool.inputSchema.properties.summary).toMatchObject({ maxLength: 2000 });
+    expect(tool.inputSchema.properties.text).toMatchObject({ maxLength: 2000 });
+    expect(tool.inputSchema.properties.checkout).toMatchObject({ maxLength: 4096 });
+    expect(tool.inputSchema.properties.messageIds).toMatchObject({ maxItems: 100 });
     expect(tool.inputSchema.properties.awaiting).toMatchObject({ type: ['string', 'null'], maxLength: 500 });
     const wikiTool = JSON.parse(result.stdout).result.tools[1];
     expect(wikiTool.name).toBe('agent_wiki');
