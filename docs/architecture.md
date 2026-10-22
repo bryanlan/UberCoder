@@ -33,7 +33,11 @@ project/chat header and persistent Chats, Reply and Controls actions. Chats fill
 the screen and groups active conversations by project. Its default filter hides
 history, manual/pressure/idle suspensions and projects with no remaining chats.
 Show all and search provide access to hidden history; New chat includes every
-configured project. These are display filters and do not change session state.
+configured project. Show all offers a project selector and a 5, 20 or 50 chats
+per project limit, defaulting to all projects and 20. Each project's limit applies
+to its newest conversations across Codex and Claude together. These selectors
+are hidden during transcript search and new-chat selection; active-only browsing
+ignores them. These are display filters and do not change session state.
 Desktop navigation retains its existing Work/Browse filtering and sizing.
 
 Reply and Controls share one optional panel. Reply starts at one line, grows to

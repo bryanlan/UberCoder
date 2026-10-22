@@ -68,7 +68,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   await page.goto('/projects/demo/codex/first');
   await expect(page.getByTestId('conversation-scroll')).toBeVisible();
   await expect.poll(() => page.getByTestId('conversation-scroll').evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThanOrEqual(1);
-  return { calls, appendOutput() {
+  return { calls, projects, appendOutput() {
     messages.push({ ...messages.at(-1)!, id: 'new-output', text: 'New agent output while you read earlier messages.' });
     sessions[0] = { ...sessions[0], updatedAt: new Date().toISOString(), lastCompletedAt: new Date(Date.now() + 60_000).toISOString() };
   } };
@@ -97,15 +97,79 @@ test('starts in reading mode and switches chats in a full-screen filtered list',
   await expect(list.getByRole('heading', { name: 'Demo project' })).toBeVisible();
   await expect(list.getByRole('link', { name: /first conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeHidden();
-  await expect(list.getByText('Empty project', { exact: true })).toBeHidden();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath('mobile-chats.png') });
   await list.getByRole('button', { name: 'Show all', exact: true }).tap();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeVisible();
-  await expect(list.getByText('Empty project', { exact: true })).toBeVisible();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeVisible();
   await list.getByRole('link', { name: /second conversation/ }).tap();
   await expect(page).toHaveURL(/\/second$/);
   await expect(list).toBeHidden();
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeHidden();
+});
+
+test('filters all mobile chats by project and caps the newest chats across both providers per project', async ({ page }, testInfo) => {
+  const { projects } = await openMobile(page);
+  for (const project of projects) {
+    for (let index = 0; index < 55; index++) {
+      const provider = index % 2 === 0 ? 'claude' : 'codex';
+      project.providers[provider].conversations.push({
+        ref: `catalog-${index}`, projectSlug: project.slug, provider, kind: 'history',
+        title: `${project.slug} catalog chat ${index}`,
+        updatedAt: new Date(Date.now() + (index + 1) * 60_000).toISOString(),
+        isBound: false, degraded: false,
+      });
+    }
+  }
+  await page.reload();
+  await page.getByRole('button', { name: 'Chats', exact: true }).tap();
+  const list = page.getByRole('complementary', { name: 'Chats' });
+  await expect(list.getByRole('combobox')).toHaveCount(0);
+  await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  const projectFilter = list.getByRole('combobox', { name: 'Project', exact: true });
+  const limit = list.getByRole('combobox', { name: 'Chats per project', exact: true });
+  await expect(projectFilter).toHaveValue('');
+  await expect(limit).toHaveValue('20');
+  await expect(list.getByRole('link', { name: /demo catalog chat/ })).toHaveCount(20);
+  await expect(list.getByRole('link', { name: /empty catalog chat/ })).toHaveCount(20);
+  for (const count of [5, 20, 50]) {
+    await limit.selectOption(String(count));
+    for (const slug of ['demo', 'empty']) {
+      const chats = list.getByRole('link', { name: new RegExp(`${slug} catalog chat`) });
+      await expect(chats).toHaveCount(count);
+      await expect(chats.first()).toContainText(`${slug} catalog chat 54`);
+      await expect(chats.last()).toContainText(`${slug} catalog chat ${55 - count}`);
+    }
+  }
+  await projectFilter.selectOption('empty');
+  await expect(list.getByRole('heading', { name: 'Demo project' })).toBeHidden();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeVisible();
+  await expect(list.getByRole('link', { name: /demo catalog chat/ })).toHaveCount(0);
+  await expect(list.getByRole('link', { name: /empty catalog chat/ })).toHaveCount(50);
+  await limit.selectOption('5');
+  await page.setViewportSize({ width: 320, height: 568 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const select of [projectFilter, limit]) {
+    const box = (await select.boundingBox())!;
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(box.x + box.width).toBeLessThanOrEqual(320);
+  }
+  await page.screenshot({ path: testInfo.outputPath('mobile-all-chat-filters.png') });
+  await list.getByRole('button', { name: 'New chat', exact: true }).tap();
+  await expect(projectFilter).toBeHidden();
+  await expect(list.getByRole('button', { name: 'Codex', exact: true })).toHaveCount(2);
+  await list.getByRole('button', { name: 'Back to chats', exact: true }).tap();
+  await expect(projectFilter).toHaveValue('empty');
+  await expect(limit).toHaveValue('5');
+  await list.getByRole('button', { name: 'Active only', exact: true }).tap();
+  await expect(projectFilter).toBeHidden();
+  await expect(list.getByRole('link', { name: /first conversation/ })).toBeVisible();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
+  await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  await expect(projectFilter).toHaveValue('empty');
+  await projectFilter.selectOption('');
+  await expect(list.getByRole('link', { name: /demo catalog chat/ })).toHaveCount(5);
+  await expect(list.getByRole('link', { name: /empty catalog chat/ })).toHaveCount(5);
 });
 
 test('keeps a readable scroll area above a compact reply when the keyboard opens and pans', async ({ page }, testInfo) => {

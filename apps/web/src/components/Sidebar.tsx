@@ -787,6 +787,8 @@ export function Sidebar({
 }: SidebarProps) {
   const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
   const [mobileShowAll, setMobileShowAll] = useState(false);
+  const [mobileProjectFilter, setMobileProjectFilter] = useState('');
+  const [mobileChatsPerProject, setMobileChatsPerProject] = useState(20);
   const [newChatMode, setNewChatMode] = useState(false);
   useEffect(() => {
     if (!open) setNewChatMode(false);
@@ -833,13 +835,24 @@ export function Sidebar({
     setSearchQuery(value);
   }
 
-  const visibleProjects = useMemo(() => deriveSidebarProjects({
-    tree,
-    workMode: effectiveWorkMode,
-    recentActivitySortEnabled,
-    manualProjectOrder,
-    mobileActiveOnly: isMobile && !mobileShowAll,
-  }), [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll]);
+  const visibleProjects = useMemo(() => {
+    const projects = deriveSidebarProjects({
+      tree,
+      workMode: effectiveWorkMode,
+      recentActivitySortEnabled,
+      manualProjectOrder,
+      mobileActiveOnly: isMobile && !mobileShowAll,
+    });
+    if (!isMobile || !mobileShowAll) return projects;
+    return projects
+      .filter(project => !mobileProjectFilter || project.slug === mobileProjectFilter)
+      .map(project => ({
+        ...project,
+        combinedConversations: [...project.combinedConversations]
+          .sort((a, b) => b.activityTimestamp.localeCompare(a.activityTimestamp))
+          .slice(0, mobileChatsPerProject),
+      }));
+  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -865,7 +878,7 @@ export function Sidebar({
           <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4">
             <div>
               <div className="text-lg font-semibold">{isMobile ? newChatMode ? "New chat" : "Chats" : "Agent Console"}</div>
-              <div className="text-xs text-slate-400">{isMobile ? newChatMode ? "Choose a project and agent" : mobileShowAll ? "All projects and conversations" : "Active conversations by project" : "project → provider → conversation"}</div>
+              <div className="text-xs text-slate-400">{isMobile ? newChatMode ? "Choose a project and agent" : mobileShowAll ? "Browse conversations by project" : "Active conversations by project" : "project → provider → conversation"}</div>
             </div>
             <button
               type="button"
@@ -939,6 +952,33 @@ export function Sidebar({
               ) : null}
             </div>
           </div>
+          {isMobile && mobileShowAll && !newChatMode && !showingSubmittedSearchResults && (
+            <div className="grid grid-cols-2 gap-3 border-b border-slate-800 px-4 py-3">
+              <label className="min-w-0 text-xs text-slate-400">
+                Project
+                <select
+                  value={mobileProjectFilter}
+                  onChange={event => setMobileProjectFilter(event.target.value)}
+                  className="mt-1 min-h-11 w-full min-w-0 rounded-xl border border-slate-700 bg-slate-900 px-2 text-base text-slate-100"
+                >
+                  <option value="">All projects</option>
+                  {(tree?.projects ?? []).map(project => (
+                    <option key={project.slug} value={project.slug}>{project.displayName}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="min-w-0 text-xs text-slate-400">
+                Chats per project
+                <select
+                  value={mobileChatsPerProject}
+                  onChange={event => setMobileChatsPerProject(Number(event.target.value))}
+                  className="mt-1 min-h-11 w-full min-w-0 rounded-xl border border-slate-700 bg-slate-900 px-2 text-base text-slate-100"
+                >
+                  {[5, 20, 50].map(limit => <option key={limit} value={limit}>{limit}</option>)}
+                </select>
+              </label>
+            </div>
+          )}
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
             {isMobile && newChatMode ? (tree?.projects ?? []).map(project => (
               <section key={project.slug} className="mb-3 rounded-xl border border-slate-800 p-3">
