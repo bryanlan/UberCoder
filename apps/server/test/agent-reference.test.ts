@@ -114,10 +114,11 @@ it.each(['closed', 'dead', 'full'] as const)('does not reopen a %s finished reci
   service.finish(assignmentId, 'Prior task complete.');
   if (condition === 'closed') db.boundSessions.upsert({ ...session, shouldRestore: false });
   if (condition === 'dead') db.sqlite.prepare("update coordination_assignments set process_start='not-the-current-process' where id=?").run(assignmentId);
-  if (condition === 'full') db.sqlite.transaction(() => {
-    for (let i = 0; i < 100; i++) db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
-      .run(randomUUID(), sender, assignmentId, 'Existing inbox entry', new Date().toISOString());
-  })();
+  if (condition === 'full') {
+    for (let i = 0; i < 100; i++) service.send(sender, {
+      priority: 'P2', id: randomUUID(), recipientId: assignmentId, text: 'Existing inbox entry',
+    });
+  }
   const send = () => service.send(sender, { priority: 'P2', id: randomUUID(), recipientId: assignmentId, text: 'New peer question' });
   if (condition === 'full') expect(send).toThrow('inbox is full');
   else expect(send()).toMatchObject({ queued: true, delivery: 'on_resume', recipient: { status: 'stopped' } });
