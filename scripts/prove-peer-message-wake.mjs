@@ -44,7 +44,6 @@ const config = JSON.parse(fs.readFileSync(new URL('../config/agent-console.examp
 const password = randomBytes(24).toString('hex'), salt = randomBytes(16).toString('hex');
 Object.assign(config, { projectsRoot: path.join(root, 'projects'), runtimeDir: path.join(root, 'runtime'), databasePath: path.join(root, 'fixture.sqlite'),
   projects: { demo: { active: true, explicit: true, path: project }, sender: { active: true, explicit: true, path: senderProject } }, coordination: { enabled: true, pilotPaths: [project] }, workerSummaries: { enabled: false } });
-if (inboxBatch) config.coordination.waitingInboxCooldownSeconds = 90;
 Object.assign(config.server, { host: '127.0.0.1', port: 14379, publicBaseUrl: 'http://127.0.0.1:14379', webDistPath: path.resolve('apps/web/dist') });
 Object.assign(config.security, { passwordHash: `scrypt:${salt}:${scryptSync(password, salt, 64).toString('hex')}`, sessionSecret: randomBytes(40).toString('hex'), trustTailscaleHeaders: false });
 config.sessions.pressureSuspendAvailableMiB = 512;
@@ -145,7 +144,7 @@ try {
     const prompt = unattended
       ? `This is a disposable Console unattended test. Do not launch agents. Your authorized assignment work is to write exactly ${marker} to ${markerFile} and send exactly ${marker} to supervisor assignment ${sender.assignmentId}. First use agent_coordination update to set continuation unattended and supervisorId ${sender.assignmentId}. Reply READY_${marker} and end this first turn without doing that work or finishing the assignment. On a later automatic wake, acknowledge the inbox. The Console control notice determines whether this turn permits continuing assignment work: if it permits work under unattended status, carry out the assigned file write and result handoff in this same turn. If it says end after inbox handling, end without doing assignment work. After completing the assignment work, set waiting_for_input and end without finishing the assignment. Never poll for new messages.`
       : `This is a disposable Console inbox test. Do not edit files or launch agents. Your existing human-authorized test task is to receive a peer message from assignment ${sender.assignmentId}, acknowledge it and send exactly ${marker} back to that assignment. First use agent_coordination update to set continuation waiting_for_input and description "Disposable Console inbox fixture; Bryan A/B decision pending.". Reply READY_${marker} and end this turn without finishing the assignment. Bryan has a pending decision choosing option A or B: keep that decision pending; a peer response cannot choose it. When a peer-inbox wake arrives, acknowledge the peer message, send the marker, then report that the A/B decision is still pending and return to waiting_for_input without finishing. Do not enable unattended continuation or poll for new messages. ${finishedInbox ? 'This fixture will send two distinct new peer messages and mark the assignment finished between them. Send the marker for the first current question only. Acknowledge the second question and preserve the pending A/B decision, with no repeated marker send or other new side effect. After the controller marks your assignment finished, do not call update or finish again; read and answer only the inbox.' : ''}`;
-    const initialPrompt = prompt + (inboxBatch ? ' This fixture will later send routine updates and an urgent message. For those later messages, acknowledge every inbox ID and keep the A/B decision pending. Send the marker only for the first inbox message; never repeat the marker send.' : '');
+    const initialPrompt = prompt + ' This fixture needs no session-management grant. Do not call agent_grants record/request/launch/restart/close. The current human prompt already authorizes this exact inbox test; preserve its limits.' + (inboxBatch ? ' This fixture will later send P2 updates and a P1 message. For those later messages, acknowledge every inbox ID and keep the A/B decision pending. Send the marker only for the first inbox message; never repeat the marker send.' : '');
     const submitted = await api('POST', `/api/sessions/${id}/keys`, {
       text: initialPrompt, submittedText: initialPrompt, keys: ['Enter'], submissionId: randomUUID(),
     });
@@ -169,12 +168,12 @@ try {
     const recipientAuth = () => ({ assignmentId: native.id,
       token: JSON.parse(fs.readFileSync(path.join(config.runtimeDir, 'coordination/clients', `${clientKey}.json`), 'utf8')).token });
     let finishedEvidence;
-    const queued = await rpc({ ...senderAuth, action: 'send', messageId, recipientId: native.id, text: peerText });
+    const queued = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId, recipientId: native.id, text: peerText });
     assert.equal(queued.delivery, 'wake_pending');
     await wait('real native acknowledgement and reply', () => db.prepare('select id from coordination_messages where sender_id=? and recipient_id=? and text=?').get(native.id, sender.assignmentId, marker));
     assert.ok(db.prepare('select acknowledged_at from coordination_messages where id=?').get(messageId).acknowledged_at);
     if (unattended) assert.equal(fs.readFileSync(markerFile, 'utf8').trim(), marker, 'Assignment work completed in the wake turn');
-    const receipt = await rpc({ ...senderAuth, action: 'send', messageId, recipientId: native.id, text: peerText });
+    const receipt = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId, recipientId: native.id, text: peerText });
     assert.equal(receipt.delivery, 'acknowledged');
     await wait('response turn ends with decision pending', async () => {
       const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
@@ -189,9 +188,9 @@ try {
       const ordinaryIds = [randomUUID(), randomUUID()], urgentId = randomUUID();
       const ordinaryReceipts = [];
       for (const ordinaryId of ordinaryIds) ordinaryReceipts.push(await rpc({ ...senderAuth, action: 'send',
-        messageId: ordinaryId, recipientId: native.id, text: 'Routine fixture progress only. Acknowledge when offered; no reply or new action is needed.' }));
+        priority:'P2', messageId: ordinaryId, recipientId: native.id, text: 'Routine fixture progress only. Acknowledge when offered; no reply or new action is needed.' }));
       for (const receipt of ordinaryReceipts) {
-        assert.equal(receipt.delivery, 'wake_pending'); assert.ok(receipt.wakeNotBefore);
+        assert.equal(receipt.delivery, 'next_turn');
       }
       await new Promise(resolve => setTimeout(resolve, 1500));
       for (const ordinaryId of ordinaryIds) {
@@ -199,8 +198,8 @@ try {
         assert.equal(db.prepare('select acknowledged_at from coordination_messages where id=?').get(ordinaryId).acknowledged_at, null);
       }
       const urgentStarted = Date.now();
-      await rpc({ ...senderAuth, action: 'send', messageId: urgentId, recipientId: native.id, urgent: true,
-        text: 'Urgent fixture handoff: acknowledge this message and all queued routine messages, preserve the pending A/B decision, then wait. No additional marker send or new task.' });
+      await rpc({ ...senderAuth, action: 'send', messageId: urgentId, recipientId: native.id, priority:'P1',
+        text: 'P1 fixture handoff: acknowledge this message and all queued routine messages, preserve the pending A/B decision, then wait. No additional marker send or new task.' });
       await wait('urgent bypass and complete batched inbox acknowledgement', () => [...ordinaryIds, urgentId].every(messageId =>
         db.prepare('select acknowledged_at from coordination_messages where id=?').get(messageId)?.acknowledged_at));
       await wait('batched response turn ends', async () => {
@@ -209,7 +208,7 @@ try {
       });
       assert.equal(control().continuation, 'waiting_for_input'); assert.equal(control().recovery, null);
       assert.equal(db.prepare('select count(*) as n from coordination_messages where sender_id=? and text=?').get(native.id, marker).n, 1);
-      batchEvidence = { cooldownSeconds: 90, ordinaryReceipts, routineMessagesRetainedWithoutWake: true,
+      batchEvidence = { routinePriority:'P2', ordinaryReceipts, routineMessagesRetainedWithoutWake: true,
         urgentId, urgentAcknowledgedMs: Date.now() - urgentStarted, allAcknowledged: true, noRepeatedMarker: true };
     }
     const attempt = JSON.parse(db.prepare('select value from meta where key=?').get(`peer-wake-attempt:${messageId}`).value);
@@ -260,7 +259,7 @@ try {
       writer.close();
       Object.assign(finishedEvidence, { simulatedIdleSleep: true });
       const secondId = randomUUID();
-      await rpc({ ...senderAuth, action: 'send', messageId: secondId, recipientId: native.id, urgent: true,
+      await rpc({ ...senderAuth, action: 'send', messageId: secondId, recipientId: native.id, priority:'P1',
         text: 'This is a new second inbox question after your prior task finished. Acknowledge this message, preserve the completed marker action, and keep the A/B decision pending.' });
       await wait('second finished inbox acknowledgement', () =>
         db.prepare('select acknowledged_at from coordination_messages where id=?').get(secondId)?.acknowledged_at);
@@ -280,7 +279,7 @@ try {
     // Exercise a real human Stop after the inbox response, then send a new message.
     await api('POST', `/api/sessions/${id}/keys`, { keys: ['Escape'] });
     const pausedId = randomUUID();
-    const paused = await rpc({ ...senderAuth, action: 'send', messageId: pausedId, recipientId: native.id, text: `Stay manually stopped; this peer message must not wake you. ${marker}` });
+    const paused = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId: pausedId, recipientId: native.id, text: `Stay manually stopped; this peer message must not wake you. ${marker}` });
     assert.equal(paused.delivery, 'on_resume');
     await new Promise(resolve => setTimeout(resolve, 17_000));
     assert.equal(db.prepare('select value from meta where key=?').get(`peer-wake-attempt:${pausedId}`), undefined);

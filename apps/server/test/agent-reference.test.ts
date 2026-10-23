@@ -99,10 +99,10 @@ it.each(['codex', 'claude'] as const)('keeps a finished %s chat reference inert 
   service.finish(assignmentId, 'Prior human task complete.');
   expect(service.conversationReference(session).recipientId).toBe(assignmentId);
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
-  const message = { id: randomUUID(), recipientId: assignmentId, text: 'A new peer question, not a new work grant.' };
+  const message = { priority:'P2' as const, id: randomUUID(), recipientId: assignmentId, text: 'A new peer question, not a new work grant.' };
   expect(service.send(sender, message).queued).toBe(true);
   expect(service.agentStatus(assignmentId).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input' });
-  expect(service.poll(assignmentId, 0).messages).toEqual([expect.objectContaining({ id: message.id, text: message.text })]);
+  expect(service.poll(assignmentId).messages).toEqual([expect.objectContaining({ id: message.id, text: message.text })]);
   service.finish(assignmentId, 'Peer response is complete.');
   service.send(sender, message);
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
@@ -118,7 +118,7 @@ it.each(['closed', 'dead', 'full'] as const)('does not reopen a %s finished reci
     for (let i = 0; i < 100; i++) db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
       .run(randomUUID(), sender, assignmentId, 'Existing inbox entry', new Date().toISOString());
   })();
-  const send = () => service.send(sender, { id: randomUUID(), recipientId: assignmentId, text: 'New peer question' });
+  const send = () => service.send(sender, { priority: 'P2', id: randomUUID(), recipientId: assignmentId, text: 'New peer question' });
   if (condition === 'full') expect(send).toThrow('inbox is full');
   else expect(send()).toMatchObject({ queued: true, delivery: 'on_resume', recipient: { status: 'stopped' } });
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');

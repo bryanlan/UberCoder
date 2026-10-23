@@ -1,9 +1,10 @@
+// AGENT MAINTENANCE GUARD: Load waltium-cli-maintainer before changing this RPC contract.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import net from 'node:net';
 import fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { PROVIDERS } from '@agent-console/shared';
+import { BROADCAST_CATEGORIES, MESSAGE_PRIORITIES, PROVIDERS } from '@agent-console/shared';
 import type { AuthService } from '../security/auth-service.js';
 import { CoordinationService } from './service.js';
 import { WikiService } from '../wiki/service.js';
@@ -17,14 +18,16 @@ const text = z.string().trim().min(1);
 // so Grok is not launched, pasted into, or indexed as a Console conversation.
 const coordinationProviders = ['codex', 'claude', 'grok'] as const;
 const inputSchema = z.object({
-  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect']),
+  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   consoleSessionId: z.string().uuid().optional(),
-  acceptsMessages: z.boolean().optional(), urgent: z.boolean().optional(),
+  acceptsMessages: z.boolean().optional(), priority: z.enum(MESSAGE_PRIORITIES).optional(),
+  validFor: z.number().int().min(1).max(604800).optional(),
+  category: z.enum(BROADCAST_CATEGORIES).optional(), categories: z.array(z.enum(BROADCAST_CATEGORIES)).max(5).optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
-  status: z.enum(['active', 'waiting']).optional(), after: z.number().int().nonnegative().default(0),
+  status: z.enum(['active', 'waiting']).optional(),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
   notifySupervisor: z.boolean().optional(), awaiting: text.max(500).nullable().optional(),
   offset: z.number().int().nonnegative().default(0),
@@ -42,7 +45,9 @@ const wikiSchema = z.object({
 }).strict();
 
 export async function dispatchCoordination(service: CoordinationService, raw: unknown) {
+  if (raw && typeof raw === 'object' && 'urgent' in raw) throw new Error('urgent has been retired. Choose priority:P1/P2/P3 and optional validFor seconds. Use the canonical agent-coord.mjs CLI if MCP is cached.');
   const input = inputSchema.parse(raw);
+  if (input.action === 'broadcast' && input.priority !== undefined) throw new Error('Broadcast posts use P3 category awareness and never wake recipients. Omit priority.');
   const need = <T>(value: T | undefined, name: string): T => {
     if (value === undefined) throw new Error(`${name} is required.`);
     return value;
@@ -53,11 +58,15 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
   switch (input.action) {
     case 'status': return service.agentStatus(id, input.checkout, input.offset);
     case 'history': return service.history(id, need(input.checkout, 'checkout'), input.offset);
-    case 'poll': return service.poll(id, input.after);
+    case 'poll': return service.poll(id);
+    case 'mail': return service.mail(id);
+    case 'broadcast': return service.board.publish(id, { id: need(input.messageId,'messageId'), text: need(input.text,'text'), category: need(input.category,'category'), repository: input.checkout ? service.repository(input.checkout) : null, validFor: input.validFor });
+    case 'broadcasts': return service.board.list({ category: input.category, repository: input.checkout ? service.repository(input.checkout) : undefined, offset: input.offset }, id);
+    case 'subscribe': return service.board.subscribe(id, need(input.categories,'categories'), input.checkout ? service.repository(input.checkout) : null);
     case 'update': return service.update(id, input);
-    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), urgent: input.urgent });
+    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
-    case 'finish': return service.finish(id, need(input.summary, 'summary'));
+    case 'finish': return service.finish(id, need(input.summary, 'summary'), input);
     case 'disconnect': return service.disconnect(id);
   }
 }

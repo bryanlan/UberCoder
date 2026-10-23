@@ -104,11 +104,11 @@ describe('Granted real-session launch pipeline',()=>{
     expect(peerWakePaused(f.db, f.actor)).toBe(false);
     f.tmux.sent.length = 0;
     f.tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
-    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', notifySupervisor: true });
+    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', notifySupervisor: true, priority:'P1' });
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(continuationControl(f.db, f.actor).continuation).toBe('unattended');
-    const inbox = f.coordination.poll(f.actor, 0);
+    const inbox = f.coordination.poll(f.actor);
     expect(inbox.messages).toHaveLength(1);
     expect(inbox.messages[0]).toMatchObject({ senderId: worker, recipientId: f.actor });
     f.coordination.acknowledge(f.actor, [inbox.messages[0]!.id]);
@@ -350,9 +350,9 @@ describe('Granted real-session launch pipeline',()=>{
 
   it('attaches shared active grants to peer messages and drops revoked authority immediately',async()=>{
     const f=await fixture();await f.launch();const session=f.launches.status(f.actor).requests[0]!.session!;const worker=f.child(session.id);
-    const messageId=randomUUID();f.coordination.send(f.actor,{id:messageId,recipientId:worker,text:'Continue the broader planner task within our grant.'});
-    expect(f.coordination.poll(worker,0).messages[0]).toMatchObject({id:messageId,grantIds:[f.grant.id]});
+    const messageId=randomUUID();f.coordination.send(f.actor,{priority:'P2',id:messageId,recipientId:worker,text:'Continue the broader planner task within our grant.'});
+    expect(f.coordination.poll(worker).messages[0]).toMatchObject({id:messageId,grantIds:[f.grant.id]});
     f.grants.revoke(f.grant.id);expect(f.grants.grantsFor(worker)).toEqual([]);expect(continuationControl(f.db,worker).continuation).toBe('waiting_for_input');
-    expect(f.coordination.poll(worker,0,false).authority).toEqual([]);
+    expect(f.coordination.poll(worker,false).authority).toEqual([]);
   });
 });

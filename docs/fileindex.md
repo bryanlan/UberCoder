@@ -270,6 +270,7 @@ Test and verification anchors:
 - `docs/worker-panel.md` — operating and verification contract.
 
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
+- `apps/server/src/coordination/inbox-policy.ts` and `broadcasts.ts` — sender priority, validity, indexed expiry and idempotency receipts; shared opt-in category board and fifteen-minute new-mail notices.
 - `apps/server/src/coordination/continuation.ts` — explicit continuation permission, supervisor links, durable result signals and bounded idle recovery in SQLite metadata.
 - `apps/server/src/coordination/wake.ts` — independent peer-inbox and unattended notices, stable control-envelope classification, durable human pause, configured native queue transport and message attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.

@@ -73,7 +73,6 @@ export async function buildApp(options: AppOptions = {}) {
     providerRegistry,
   }, app.log, {
     coordinationEnabled: config.coordination.enabled,
-    waitingInboxCooldownMs: config.coordination.waitingInboxCooldownSeconds * 1000,
     eagerRestoreWindowMs: config.sessions.eagerRestoreHours * 60 * 60 * 1000,
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,

@@ -1,5 +1,10 @@
 export type AssignmentStatus = 'active' | 'waiting' | 'finished' | 'disconnected';
 export type AssignmentContinuation = 'unattended' | 'waiting_for_input';
+export const MESSAGE_PRIORITIES = ['P1', 'P2', 'P3'] as const;
+export type MessagePriority = typeof MESSAGE_PRIORITIES[number];
+export const BROADCAST_CATEGORIES = ['releases', 'resources', 'contracts', 'ownership', 'incidents'] as const;
+export type BroadcastCategory = typeof BROADCAST_CATEGORIES[number];
+export interface MessageOptions { priority?: MessagePriority; validFor?: number }
 /** Resolved by the backend from a Console conversation's current binding. */
 export interface AgentReference {
   recipientId: string;
@@ -46,6 +51,8 @@ export interface CoordinationEvent {
 }
 
 export interface CoordinationMessage {
+  priority: MessagePriority;
+  expiresAt: string;
   /** Shared active Bryan grants at delivery; peer text does not create authority. */
   grantIds?: string[];
   id: string;
@@ -69,9 +76,20 @@ export interface CoordinationSendReceipt {
     lastSeenAt: string;
     resumableInConsole: boolean;
   };
-  delivery: 'next_step' | 'next_turn' | 'on_resume' | 'wake_pending' | 'wake_started' | 'wake_blocked' | 'offered' | 'acknowledged';
+  delivery: 'next_step' | 'next_turn' | 'on_resume' | 'wake_pending' | 'wake_started' | 'wake_blocked' | 'offered' | 'acknowledged' | 'mailbox' | 'expired';
   note: string;
-  wakeNotBefore?: string;
+  priority: MessagePriority;
+  expiresAt: string;
+}
+
+export interface CoordinationBroadcast {
+  id: string;
+  senderId: string;
+  category: BroadcastCategory;
+  repository: string | null;
+  text: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 export interface CoordinationSnapshot {

@@ -1,13 +1,14 @@
 import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentReference, AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt } from '@agent-console/shared';
+import type { AgentReference, AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt, MessageOptions } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
-import { CONTINUATION_POLICY, continuationControl, endAwaiting, setAwaiting, saveContinuation, setContinuation, signalContinuation } from './continuation.js';
+import { CONTINUATION_POLICY, continuationControl, setAwaiting, saveContinuation, setContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
+import { BroadcastBoard } from './broadcasts.js';
 import { GRANT_POLICY } from '../grants/schema.js';
-import { acceptsMessages, isUrgentMessage, routineInboxWakeAt, sendOnlyKey, urgentMessageKey } from './inbox-policy.js';
+import { acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -23,14 +24,15 @@ export function processStart(pid: number): string {
   } catch { return ''; }
 }
 
-export interface CoordinationSettings { enabled: boolean; pilotPaths: string[]; waitingInboxCooldownSeconds?: number }
+export interface CoordinationSettings { enabled: boolean; pilotPaths: string[];  }
 
 export const OUTSIDE_PILOT_NOTE = 'This repository is outside the coordination pilot, so it has no activity view. '
   + 'Your assignment and direct messages still work: call status without checkout to find peers, then send to their id.';
 
 export class CoordinationService {
+  readonly board: BroadcastBoard;
   constructor(private readonly db: AppDatabase, readonly settings: CoordinationSettings,
-    private readonly requestWake?: () => void, private readonly grants?: GrantService) {}
+    private readonly requestWake?: () => void, private readonly grants?: GrantService) { migrateMessagePolicies(db); this.board = new BroadcastBoard(db); }
 
   private event(id: string, checkout: string | null, kind: string, text: string): void {
     this.db.sqlite.prepare('insert into coordination_events(assignment_id, checkout, kind, text, timestamp) values(?,?,?,?,?)')
@@ -60,6 +62,8 @@ export class CoordinationService {
     }
     return this.pilotCache.repositories;
   }
+
+  repository(directory: string) { return this.identity(directory).repository; }
 
   private identity(directory: string) {
     if (!this.settings.enabled) throw new Error('Coordination is disabled.');
@@ -159,7 +163,7 @@ export class CoordinationService {
   }
 
   update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
-    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean; awaiting?: string | null }) {
+    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean; awaiting?: string | null } & MessageOptions) {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
@@ -197,7 +201,7 @@ export class CoordinationService {
       if (identity || input.summary !== undefined || input.description !== undefined) {
         this.event(id, identity?.checkout ?? null, 'update', input.summary ?? input.description ?? 'Scope added');
       }
-      if (input.notifySupervisor) this.notifySupervisor(id, 'A supervised worker has a result ready for review.');
+      if (input.notifySupervisor) this.notifySupervisor(id, 'A supervised worker has a result ready for review.', input);
       this.requestWake?.();
       return { assignment: this.assignment(id) };
     }).immediate();
@@ -207,6 +211,7 @@ export class CoordinationService {
     if (!this.settings.enabled) {
       return { enabled: false, assignment: null, peers: [], unscoped: false, totalPeerScopes: 0, nextOffset: null, pendingMessageCount: 0 };
     }
+    expireMessages(this.db);
     this.reconcileProcesses();
     const current = this.assignment(id);
     const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
@@ -239,6 +244,8 @@ export class CoordinationService {
   }
 
   private sendReceipt(message: Pick<CoordinationMessage, 'id' | 'recipientId' | 'suppliedAt' | 'acknowledgedAt'>): CoordinationSendReceipt {
+    const { priority, expiresAt, expired, acknowledgedAt } = messagePolicy(this.db, message.id);
+    const policy = { priority, expiresAt };
     const assignment = this.assignment(message.recipientId);
     const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
       .get(message.recipientId) as { pid: number; process_start: string };
@@ -259,64 +266,57 @@ export class CoordinationService {
     const recipient: CoordinationSendReceipt['recipient'] = { status, assignmentStatus: assignment.status,
       supervisorId: assignment.supervisorId, acceptsMessages: acceptsMessages(this.db, assignment.id), provider: assignment.provider, lastSeenAt: assignment.lastSeenAt,
       resumableInConsole: Boolean(session) };
-    if (message.acknowledgedAt) return { id: message.id, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
-    if (!recipient.acceptsMessages) return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+    if (message.acknowledgedAt || acknowledgedAt) return { id: message.id, ...policy, queued: false, recipient, delivery: 'acknowledged', note: 'Recipient acknowledged receipt; this does not prove agreement or completed work.' };
+    if (expired) return { id: message.id, ...policy, queued: false, recipient, delivery: 'expired', note: 'Message expired before acknowledgement; its pending content was deleted. Do not retry the same message.' };
+    if (!recipient.acceptsMessages) return { id: message.id, ...policy, queued: true, recipient, delivery: 'on_resume',
       note: 'Historical message retained, but this participant is send-only and has no inbox reader. Reassign any work to an agent; retrying cannot make this service read it.' };
     if (peerWakePaused(this.db, assignment.id) && status !== 'working') {
       const details = this.db.meta.get(peerWakePauseDetailsKey(assignment.id));
       const reason = details ? (JSON.parse(details) as AutomaticInputPause).reason : 'The original pause reason was not captured.';
-      return { id: message.id, queued: true, recipient, delivery: 'on_resume',
+      return { id: message.id, ...policy, queued: true, recipient, delivery: 'on_resume',
         note: `Queued, not received. Automatic input is paused: ${reason} Peer wake resumes after the next accepted human turn. ${assignment.status === 'finished' ? `This assignment is finished; new work needs a live owner.${assignment.supervisorId ? ` Contact supervisor ${assignment.supervisorId}.` : ''}` : ''}`.trim() };
     }
-    if (message.suppliedAt) return { id: message.id, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
+    if (message.suppliedAt) return { id: message.id, ...policy, queued: true, recipient, delivery: 'offered', note: 'Offered to the recipient runtime; not yet acknowledged. Unacknowledged messages may be offered again.' };
     const attemptText = this.db.meta.get(peerWakeFollowupKey(message.id)) ?? this.db.meta.get(peerWakeAttemptKey(message.id));
     if (attemptText) {
       const attempt = JSON.parse(attemptText) as PeerWakeAttempt;
-      return { id: message.id, queued: true, recipient,
+      return { id: message.id, ...policy, queued: true, recipient,
         delivery: attempt.status === 'submitted' ? 'wake_started' : attempt.status === 'deferred' ? 'wake_pending' : 'wake_blocked',
         note: attempt.status === 'submitted' ? 'A coordination response turn was started; receipt still requires acknowledgement.'
           : attempt.status === 'deferred' ? `Wake deferred before submission: ${attempt.reason}. Console will recheck the delivery guards; the message remains queued.`
           : `Automatic wake was not confirmed and will not be replayed: ${attempt.reason ?? 'submission was interrupted'}. The message remains in the inbox.` };
     }
-    if (this.requestWake && session && status !== 'working') {
-      const wakeNotBefore = !isUrgentMessage(this.db, message.id)
-        ? routineInboxWakeAt(this.db, assignment.id, assignment.continuation, (this.settings.waitingInboxCooldownSeconds ?? 600) * 1000) : undefined;
-      if (wakeNotBefore && !session.manual_suspended_at && !session.pressure_suspended_at) return {
-        id: message.id, queued: true, recipient, delivery: 'wake_pending', wakeNotBefore,
-        note: `Routine inbox wake batched until ${wakeNotBefore}; a normal turn or urgent handoff may deliver it earlier. No resend is needed. Use urgent only for a decision, blocker or awaited result.`,
-      };
-      return { id: message.id, queued: true, recipient, delivery: session.manual_suspended_at ? 'on_resume' : 'wake_pending',
-        note: session.manual_suspended_at ? 'Queued, not received. The recipient is manually suspended; automatic wake respects that pause.'
-          : session.pressure_suspended_at ? 'Queued, not received. Console can wake the original conversation when sufficient memory is available.'
-            : 'Queued, not received. Console will wake the original conversation for a peer-inbox response when the provider is ready. Drafts are preserved and interactive prompts defer wake.' };
+    if (priority === 'P3') return { id: message.id, ...policy, queued: true, recipient, delivery: 'mailbox',
+      note: 'P3 awareness mail. No wake or direct body injection; a fifteen-minute new-mail notice is offered during an existing turn. The recipient chooses when to fetch it.' };
+    if (priority === 'P1' && this.requestWake && session && status !== 'working') {
+      return { id: message.id, ...policy, queued: true, recipient, delivery: 'wake_pending',
+        note: 'P1 queued for a guarded wake and batched delivery. Stop, drafts, interactive prompts and resource limits still apply.' };
     }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'
       ? `Queued, not received. ${assignment.status === 'finished' ? 'This assignment is finished. ' : ''}${session ? 'A resumable Console binding exists; reopening it may deliver the message.' : 'No unique resumable Console binding exists; delivery requires a human resume.'} No process was started. The message is retained. ${assignment.supervisorId ? `For reassignment, contact supervisor ${assignment.supervisorId}.` : 'New work needs a live owner; retained messages do not reassign it.'}`
       : status === 'idle' ? 'Queued, not received. The live recipient is idle; delivery waits for its next turn. No turn was started.'
         : 'Queued, not received. Expected at the next supported tool or session hook; a long-running tool can delay delivery.';
-    return { id: message.id, queued: true, recipient, delivery, note };
+    return { id: message.id, ...policy, queued: true, recipient, delivery, note };
   }
 
-  send(id: string, input: { id: string; recipientId: string; text: string; urgent?: boolean }): CoordinationSendReceipt {
+  send(id: string, input: { id: string; recipientId: string; text: string } & MessageOptions): CoordinationSendReceipt {
     this.assignment(input.recipientId);
-    const existing = this.db.sqlite.prepare(`select sender_id, recipient_id, text, ${messageColumns} from coordination_messages where id=?`)
-      .get(input.id) as CoordinationMessage & { sender_id: string; recipient_id: string } | undefined;
-    if (existing) {
-      if (existing.sender_id !== id || existing.recipient_id !== input.recipientId || existing.text !== input.text) throw new Error('Message ID already used for different content.');
-      this.requestWake?.();
-      return this.sendReceipt(existing);
+    expireMessages(this.db);
+    const stored = this.db.meta.get(messagePolicyKey(input.id));
+    if (stored) {
+      if (messagePolicy(this.db, input.id).hash !== messageHash(id, input.recipientId, input.text)) throw new Error('Message ID already used for different content.');
+      const existing = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where id=?`).get(input.id) as CoordinationMessage | undefined;
+      return this.sendReceipt(existing ?? { id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
     }
     if (!acceptsMessages(this.db, input.recipientId)) throw Object.assign(
       new Error('Recipient is a send-only service without an inbox reader. Send requests to a coordinating agent instead.'), { code: 'recipient_send_only' });
-    const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(input.recipientId) as { n: number };
-    if (count.n >= 100) throw new Error('Recipient inbox is full; wait for acknowledgements.');
+    if (!hasInboxSpace(this.db,input.recipientId,input.priority)) throw new Error('Recipient inbox is full; wait for acknowledgements or message expiry.');
     this.db.sqlite.transaction(() => {
       this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
-      if (input.urgent) this.db.meta.set(urgentMessageKey(input.id), 'true');
-      endAwaiting(this.db, input.recipientId);
+      setMessagePolicy(this.db, input.id, id, input.recipientId, input.text, input);
     })();
-    this.requestWake?.();
+    if (input.priority === 'P1') this.requestWake?.();
     return this.sendReceipt({ id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
   }
 
@@ -325,61 +325,51 @@ export class CoordinationService {
       for (const message of messages) {
         const result = this.db.sqlite.prepare('update coordination_messages set acknowledged_at=coalesce(acknowledged_at,?) where id=? and recipient_id=? and supplied_at is not null')
           .run(new Date().toISOString(), message, id);
-        if (!result.changes) throw new Error('Only the recipient can acknowledge a supplied message.');
+        const policyText=this.db.meta.get(messagePolicyKey(message));
+        const policy=policyText ? messagePolicy(this.db,message) : undefined;
+        if (!result.changes && (!policy?.expired || !policy.suppliedAt || policy.recipientId !== id)) throw new Error('Only the recipient can acknowledge a supplied message.');
+        this.db.meta.set(messagePolicyKey(message),JSON.stringify({...policy!,acknowledgedAt:new Date().toISOString()}));
+        this.db.sqlite.prepare('delete from meta where key=?').run(expiryKey(message,policy!.expiresAt));
       }
     })();
     this.flushSupervisorHandoffs();
     return { acknowledged: messages };
   }
 
-  poll(id: string, after: number, supply = true) {
+  private inbox(id: string, includeAwareness: boolean, supply: boolean) {
+    expireMessages(this.db);
+    const messages = (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
+      and (supplied_at is null or supplied_at<?) order by created_at,id`).all(id, new Date(Date.now() - 60_000).toISOString()) as CoordinationMessage[])
+      .map(m => withMessagePolicy(this.db, m)).filter(m => includeAwareness || m.priority !== 'P3')
+      .sort((a,b) => a.priority.localeCompare(b.priority) || a.createdAt.localeCompare(b.createdAt));
+    const ownGrants = this.grants?.grantsFor(id).map(grant => grant.id);
+    const batch = messages.slice(0, 20).map(message => ownGrants ? { ...message,
+      grantIds: ownGrants.filter(grantId => this.grants!.grantsFor(message.senderId).some(grant => grant.id === grantId)) } : message);
+    if (supply) for (const message of batch) {
+      const timestamp=new Date().toISOString();
+      this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(timestamp,message.id);
+      const policy=messagePolicy(this.db,message.id);
+      this.db.meta.set(messagePolicyKey(message.id),JSON.stringify({...policy,suppliedAt:policy.suppliedAt ?? timestamp}));
+    }
+    const count = this.db.sqlite.prepare(`select m.id from coordination_messages m where recipient_id=? and acknowledged_at is null`).all(id) as Array<{ id: string }>;
+    return { messages: batch, pendingMessageCount: count.filter(m => includeAwareness || messagePolicy(this.db,m.id).priority !== 'P3').length,
+      hasMore: messages.length > batch.length };
+  }
+
+  poll(id: string, supply = true) {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       this.db.sqlite.prepare('update coordination_assignments set last_seen_at=? where id=?').run(new Date().toISOString(), id);
-      const maximum = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events').get() as { seq: number };
-      // Automatic activity is a current summary, not a replay of every old update.
-      // Keep the original log intact for the browser, and include only updates in
-      // shared repositories (plus explicit assignment closeouts).
-      const candidates = this.db.sqlite.prepare(`with relevant as (
-        select e.* from coordination_events e where seq>? and seq<=? and assignment_id!=?
-        and kind in ('update','finished')
-        and not (kind='update' and checkout is null and text in ('Status: active','Status: waiting'))
-        and exists(select 1 from coordination_scopes mine join coordination_scopes theirs on mine.repository=theirs.repository
-          where mine.assignment_id=? and theirs.assignment_id=e.assignment_id
-          and (e.checkout is null or theirs.checkout=e.checkout))
-      ), latest as (
-        select assignment_id, max(seq) as seq, count(*) as updates from relevant group by assignment_id
-      ) select e.seq, e.assignment_id as assignmentId, e.checkout, e.kind, e.text, e.timestamp, a.status as assignmentStatus,
-        count(*) over () as peerCount, sum(latest.updates) over () as updateCount
-        from coordination_events e join latest on latest.seq=e.seq
-        join coordination_assignments a on a.id=e.assignment_id
-        order by e.seq desc limit 3`).all(after, maximum.seq, id, id) as Array<CoordinationEvent & {
-          assignmentStatus: string; peerCount: number; updateCount: number;
-        }>;
-      const queuedMessages = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
-        and (supplied_at is null or supplied_at<?) order by created_at limit 3`).all(id, new Date(Date.now() - 60_000).toISOString()) as CoordinationMessage[];
-      const ownGrants = this.grants?.grantsFor(id).map(grant => grant.id);
-      const messages = ownGrants ? queuedMessages.map(message => {
-        const senderGrants = this.grants!.grantsFor(message.senderId).map(grant => grant.id);
-        return { ...message, grantIds: ownGrants.filter(grantId => senderGrants.includes(grantId)) };
-      }) : queuedMessages;
-      const events: CoordinationEvent[] = candidates.map(({ assignmentStatus, peerCount, updateCount, ...event }) => ({
-        ...event,
-        // Never turn an abbreviated checkout into a path an agent might use.
-        checkout: event.checkout && event.checkout.length <= 200 ? event.checkout : null,
-        text: compact(`${assignmentStatus === 'disconnected' ? '[Session disconnected] ' : ''}${event.text.replace(/\s+/g, ' ')}`, 240),
-      }));
-      const latest = candidates[0];
-      const activitySummary = latest
-        ? `${latest.updateCount} activity updates from ${latest.peerCount} ${latest.peerCount === 1 ? 'assignment' : 'assignments'} summarized; showing ${events.length} latest. Use status for current scopes or history with checkout and offset for full activity.`
-        : null;
-      if (supply) for (const message of messages) this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(new Date().toISOString(), message.id);
-      const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
-      return { assignment: current, pendingMessageCount, continuationPolicy: CONTINUATION_POLICY,
+      const inbox = this.inbox(id, false, supply);
+      return { assignment: this.assignment(current.id), ...inbox, mailNotice: this.board.mailNotice(id, supply), continuationPolicy: CONTINUATION_POLICY,
         grantPolicy: this.grants ? GRANT_POLICY : undefined,
-        authority: this.grants?.authorityFor(id), latestHumanInput: this.grants?.latestHumanInput(id),
-        activitySummary, events, messages, cursor: Math.max(after, maximum.seq) };
+        authority: this.grants?.authorityFor(id), latestHumanInput: this.grants?.latestHumanInput(id) };
     }).immediate();
+  }
+
+  mail(id: string) {
+    this.assignment(id);
+    return this.db.sqlite.transaction(() => this.inbox(id, true, true)).immediate();
   }
 
   history(id: string, directory: string, offset = 0) {
@@ -395,14 +385,14 @@ export class CoordinationService {
       nextOffset: offset + events.length < totalEvents ? offset + events.length : null };
   }
 
-  finish(id: string, summary: string) {
+  finish(id: string, summary: string, options: MessageOptions = {}) {
     return this.db.sqlite.transaction(() => {
       if (this.assignment(id).status === 'finished') return { finished: true };
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.grants?.expireForAssignment(id);
       this.event(id, null, 'finished', summary);
-      this.notifySupervisor(id, 'A supervised worker completed its assignment.');
+      this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
       return { finished: true };
     }).immediate();
   }
@@ -418,6 +408,7 @@ export class CoordinationService {
 
   snapshot(directory?: string): CoordinationSnapshot {
     if (!this.settings.enabled || (directory && !this.eligible(directory))) return { enabled: false, assignments: [], scopes: [], events: [], messages: [], pendingMessageCount: 0 };
+    expireMessages(this.db);
     this.reconcileProcesses();
     const repository = directory ? checkoutIdentity(directory).repository : undefined;
     const scopes = this.db.sqlite.prepare(`select ${scopeColumns} from coordination_scopes`).all() as CoordinationScope[];
@@ -436,13 +427,13 @@ export class CoordinationService {
       events: this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where
         (? is null or exists(select 1 from coordination_scopes s where s.repository=? and s.assignment_id=e.assignment_id))
         order by seq desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationEvent[],
-      messages: this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m where ${messageFilter}
-        order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[],
+      messages: (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m where ${messageFilter}
+        order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[]).map(m => withMessagePolicy(this.db,m)),
       pendingMessageCount: pending.count,
     };
   }
 
-  private notifySupervisor(id: string, reason: string): void {
+  private notifySupervisor(id: string, reason: string, options: MessageOptions = {}): void {
     const control = continuationControl(this.db, id);
     if (!control.supervisorId) return;
     const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')
@@ -462,35 +453,30 @@ export class CoordinationService {
         : headline;
       // A handoff needs an acknowledged inbox identity even when its parent is
       // waiting_for_input. Continuation signals alone disappear on a pause.
-      const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null')
-        .get(control.supervisorId) as { n: number };
-      const blocked = count.n >= 100;
+      const blocked = !hasInboxSpace(this.db,control.supervisorId,options.priority);
       this.db.meta.set(key, JSON.stringify({ messageId, recipientId: control.supervisorId, workerId: id, timestamp, text,
         ...(blocked ? { blockedReason: 'The supervisor inbox is full.' } : {}) }));
-      this.db.meta.set(urgentMessageKey(messageId), 'true');
+      setMessagePolicy(this.db, messageId, id, control.supervisorId, text, {...options,origin:'handoff'});
       if (!blocked) {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(messageId, id, control.supervisorId, text, timestamp);
-        endAwaiting(this.db, control.supervisorId);
       }
-      signalContinuation(this.db, control.supervisorId, { key: `worker:${id}:${event.seq}:${reason}`, source: id, timestamp, reason: headline });
     }
-    this.requestWake?.();
+    if (options.priority === 'P1') this.requestWake?.();
   }
 
   private flushSupervisorHandoffs(): void {
+    expireMessages(this.db);
     const rows = this.db.sqlite.prepare("select key,value from meta where key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null")
       .all() as Array<{ key: string; value: string }>;
     for (const row of rows) {
       const handoff = JSON.parse(row.value) as { messageId: string; recipientId: string; workerId: string; timestamp: string; text: string; blockedReason?: string };
       const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(handoff.recipientId) as { status: string } | undefined;
       if (!parent) continue;
-      const count = this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(handoff.recipientId) as { n: number };
-      if (count.n >= 100) continue;
+      if (!hasInboxSpace(this.db,handoff.recipientId,messagePolicy(this.db,handoff.messageId).priority)) continue;
       this.db.sqlite.transaction(() => {
         this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
           .run(handoff.messageId, handoff.workerId, handoff.recipientId, handoff.text, handoff.timestamp);
-        endAwaiting(this.db, handoff.recipientId);
         delete handoff.blockedReason;
         this.db.meta.set(row.key, JSON.stringify(handoff));
       })();

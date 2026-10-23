@@ -17,6 +17,10 @@ export function deliveryWarnings(db: Database.Database, now = Date.now()): WakeW
   const warnings: WakeWarning[] = [];
   const observedAt = new Date(now).toISOString();
   for (const message of pending.filter(message => !fixture(message.sender_description, message.recipient_description))) {
+    const policyText = meta(`inbox-message:${message.id}`);
+    if (!policyText) continue;
+    const policy = JSON.parse(policyText);
+    if (policy.priority !== 'P1' || policy.expired || Date.parse(policy.expiresAt) <= now) continue;
     const attempts = [peerWakeAttemptKey(message.id), peerWakeFollowupKey(message.id)].flatMap(key => {
       const text = meta(key);
       if (!text) return [];
@@ -47,6 +51,10 @@ export function deliveryWarnings(db: Database.Database, now = Date.now()): WakeW
   const parents = new Map<string, { count: number; oldest: number; reason: string }>();
   for (const row of handoffs) {
     const handoff = JSON.parse(row.value) as { messageId: string; recipientId: string; timestamp: string; blockedReason?: string };
+    const policyText = meta(`inbox-message:${handoff.messageId}`);
+    if (!policyText) continue;
+    const policy = JSON.parse(policyText);
+    if (policy.priority !== 'P1' || policy.expired || Date.parse(policy.expiresAt) <= now) continue;
     const timestamp = Date.parse(handoff.timestamp);
     if (!Number.isFinite(timestamp)) throw new Error('Invalid stored supervisor handoff.');
     if (now - timestamp < SUPERVISOR_RESULT_ALERT_MS) continue;

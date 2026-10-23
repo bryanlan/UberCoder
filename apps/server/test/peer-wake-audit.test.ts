@@ -33,7 +33,7 @@ async function fixture() {
     if (options.fixture) db.sqlite.prepare('update coordination_assignments set description=? where id=?').run('Disposable deployment verification sender', selectedSender);
     for (let i = 0; i < (options.batch ?? 1); i++) {
       const id = randomUUID();
-      service.send(options.reverse ? recipient : selectedSender, { id, recipientId: options.reverse ? sender : recipient, text: 'PRIVATE_PEER_TEXT' });
+      service.send(options.reverse ? recipient : selectedSender, { priority:'P1', id, recipientId: options.reverse ? sender : recipient, text: 'PRIVATE_PEER_TEXT' });
       db.sqlite.prepare('update coordination_messages set created_at=?,acknowledged_at=? where id=?')
         .run(new Date(at - (options.old ? 120 * minute : 1000)).toISOString(), options.acknowledged ? new Date(at + 1000).toISOString() : null, id);
       db.meta.set(peerWakeAttemptKey(id), JSON.stringify({ sessionId: options.reverse ? reverse.id : session.id,
@@ -71,7 +71,7 @@ describe('Peer wake audit', () => {
 
   it('retains unread supervisor results and the exact pause reason after continuation changes and restart', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true });
+    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true, priority:'P1' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     const handoff = JSON.parse(row.value);
     const timestamp = new Date(now - 6 * minute).toISOString();
@@ -89,7 +89,7 @@ describe('Peer wake audit', () => {
     expect(JSON.stringify(report)).not.toContain('PRIVATE_PEER_TEXT');
     f.db.sqlite.pragma('query_only=OFF');
     const resumed = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
-    const inbox = resumed.poll(f.recipient, 0);
+    const inbox = resumed.poll(f.recipient);
     expect(inbox.messages.map(message => message.id)).toContain(handoff.messageId);
     resumed.acknowledge(f.recipient, [handoff.messageId]);
     expect((await auditPeerWakes(f.db.sqlite, { now })).warnings).toEqual([]);
@@ -97,7 +97,7 @@ describe('Peer wake audit', () => {
 
   it('pushes an overdue result once across backend restart, records delivery and retries an unavailable push', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true });
+    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true, priority:'P1' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     f.db.meta.set(row.key, JSON.stringify({ ...JSON.parse(row.value), timestamp: new Date(now - 6 * minute).toISOString() }));
     const send = vi.fn(async (_subscription: unknown, _payload?: string | Buffer | null) => ({ statusCode: 201, body: '', headers: {} }));
@@ -111,7 +111,7 @@ describe('Peer wake audit', () => {
     expect(JSON.parse(String(send.mock.calls[0]![1]))).toMatchObject({ warningKey: `supervisor-results:${f.recipient}`, title: 'Supervisor has unread worker results' });
     expect(JSON.parse(f.db.meta.get(`wake-push-delivery:supervisor-results:${f.recipient}`)!)).toMatchObject({ subscriptions: 1, accepted: 1, failed: 0 });
     await alerts().check(now + 6 * minute); expect(send).toHaveBeenCalledTimes(1);
-    const inbox = f.service.poll(f.recipient, 0);
+    const inbox = f.service.poll(f.recipient);
     f.service.acknowledge(f.recipient, inbox.messages.map(message => message.id));
     await alerts().check(now + 7 * minute);
     expect(JSON.parse(f.db.meta.get(`wake-alert:supervisor-results:${f.recipient}`)!)).toMatchObject({ active: false });
@@ -135,7 +135,7 @@ describe('Peer wake audit', () => {
     await check(now + 12 * minute);
     await check(now + 18 * minute);
     expect(send.mock.calls.map(([sub]) => sub.endpoint.split('/').at(-1))).toEqual(['desktop', 'phone', 'expired', 'phone', 'phone']);
-    const inbox = f.service.poll(f.recipient, 0);
+    const inbox = f.service.poll(f.recipient);
     f.service.acknowledge(f.recipient, inbox.messages.map(message => message.id));
     await check(now + 19 * minute);
     f.add(now + 17 * minute, { failed: true });

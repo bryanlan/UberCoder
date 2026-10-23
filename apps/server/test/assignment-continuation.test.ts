@@ -99,9 +99,9 @@ describe('Explicit unattended continuation contract', () => {
     expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
     f.service.update(f.parent.id, { continuation: 'unattended' });
     f.service.update(f.worker.id, { summary: 'A new candidate is ready', notifySupervisor: true });
-    expect(continuationControl(f.db, f.parent.id).signals[0]?.source).toBe(f.worker.id);
+    expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
     f.service.finish(f.worker.id, 'Done');
-    expect(continuationControl(f.db, f.parent.id).signals).toHaveLength(2);
+    expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
     expect(continuationControl(f.db, f.worker.id).continuation).toBe('waiting_for_input');
   });
 
@@ -109,14 +109,14 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture();
     f.service.update(f.worker.id, { description: 'Repair result delivery', supervisorId: f.parent.id,
       summary: 'Candidate ready. Seven checks pass. Next: integrate the change. Details: docs/result.md.', notifySupervisor: true });
-    const ready = f.service.poll(f.parent.id, 0).messages;
+    const ready = f.service.mail(f.parent.id).messages;
     expect(ready).toHaveLength(1);
     expect(ready[0]!.text).toContain('Latest update (activity event');
     expect(ready[0]!.text).toContain('Seven checks pass. Next: integrate the change. Details: docs/result.md.');
     f.service.acknowledge(f.parent.id, [ready[0]!.id]);
 
     f.service.finish(f.worker.id, 'Integrated and verified. Next: resume the dependent task. Details: docs/final.md.');
-    const final = f.service.poll(f.parent.id, 0).messages;
+    const final = f.service.mail(f.parent.id).messages;
     expect(final).toHaveLength(1);
     expect(final[0]!.text).toContain('Final summary (activity event');
     expect(final[0]!.text).toContain('Integrated and verified. Next: resume the dependent task. Details: docs/final.md.');
@@ -131,7 +131,7 @@ describe('Explicit unattended continuation contract', () => {
     f.service.update(f.worker.id, result);
     const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
     restarted.update(f.worker.id, { notifySupervisor: true });
-    const messages = restarted.poll(f.parent.id, 0).messages;
+    const messages = restarted.mail(f.parent.id).messages;
     expect(messages).toHaveLength(2);
     expect(new Set(messages.map(message => message.id)).size).toBe(2);
     expect(messages.every(message => message.text.includes(result.summary))).toBe(true);
@@ -142,7 +142,7 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture();
     const summary = 'Result and next action first. Details: docs/result.md. ' + 'supporting evidence '.repeat(120);
     f.service.update(f.worker.id, { supervisorId: f.parent.id, summary, notifySupervisor: true });
-    const message = f.service.poll(f.parent.id, 0).messages[0]!;
+    const message = f.service.mail(f.parent.id).messages[0]!;
     expect(message.text).toContain('Result and next action first. Details: docs/result.md.');
     expect(message.text).toContain('…');
     expect(message.text.length).toBeLessThanOrEqual(2000);
@@ -163,7 +163,7 @@ describe('Explicit unattended continuation contract', () => {
     expect(handoff.text).toContain('Actual result retained while the inbox is full.');
     expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(handoff.messageId)).toBeUndefined();
     const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
-    const inbox = restarted.poll(f.parent.id, 0);
+    const inbox = restarted.mail(f.parent.id);
     restarted.acknowledge(f.parent.id, inbox.messages.map(message => message.id));
     expect(f.db.sqlite.prepare('select id,text from coordination_messages where id=?').get(handoff.messageId))
       .toEqual({ id: handoff.messageId, text: handoff.text });
@@ -176,7 +176,8 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture(); f.service.update(f.parent.id, { continuation: 'unattended' });
     f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id });
     f.service.disconnect(f.worker.id);
-    expect(continuationControl(f.db, f.parent.id).signals[0]).toMatchObject({ source: f.worker.id, reason: expect.stringContaining('disconnected') });
+    expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
+    expect(f.service.mail(f.parent.id).messages[0]?.text).toContain('disconnected');
   });
 
   it('accepts await through RPC, freezes a spent budget across restart, then clears it for a new peer notice', async () => {
@@ -194,7 +195,9 @@ describe('Explicit unattended continuation contract', () => {
     const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
     expect(restarted.agentStatus(f.worker.id).assignment).toMatchObject({ continuation: 'unattended', awaiting: 'Desktop workflow result' });
     restarted.send(f.parent.id, { id: randomUUID(), recipientId: f.worker.id, text: 'Result is ready' });
-    expect(restarted.agentStatus(f.worker.id).assignment).toMatchObject({ awaiting: null, continuation: 'unattended', recovery: { attempts: 3 } });
+    expect(restarted.agentStatus(f.worker.id).assignment).toMatchObject({ awaiting: 'Desktop workflow result', continuation: 'unattended', recovery: { attempts: 3 } });
+    restarted.update(f.worker.id,{awaiting:null});
+    expect(restarted.agentStatus(f.worker.id).assignment?.awaiting).toBeNull();
   });
 
   it('does not clear a new wait on a message retry and rejects invalid waits atomically', async () => {
@@ -218,6 +221,7 @@ describe('Explicit unattended continuation contract', () => {
     saveContinuation(f.db, f.worker.id, control);
     f.service.update(f.worker.id, { awaiting: 'Job result' });
     f.service.send(f.parent.id, { id: randomUUID(), recipientId: f.worker.id, text: 'Ready' });
+    f.service.update(f.worker.id,{awaiting:null});
     expect(prepareContinuation(f.db, f.worker.id, undefined).recovery).toMatchObject({ status: status === 'submitting' ? 'blocked' : status, attempts: 3 });
   });
 
@@ -228,7 +232,7 @@ describe('Explicit unattended continuation contract', () => {
     vi.setSystemTime(Date.now() + AWAIT_ALERT_MS);
     expect(alertOverdueAwait(f.db, f.worker.id)).toBe(true);
     const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
-    const inbox = restarted.poll(f.parent.id, 0).messages;
+    const inbox = restarted.mail(f.parent.id).messages;
     expect(inbox).toHaveLength(1);
     expect(inbox[0]?.text).toContain('Desktop workflow result');
     expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS)).toBe(false);
@@ -240,24 +244,24 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture();
     f.service.update(f.worker.id, { continuation: 'unattended', supervisorId: f.parent.id, awaiting: 'Long job' });
     const ids = Array.from({ length: 100 }, () => randomUUID());
-    for (const id of ids) f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: 'Existing message' });
+    for (const id of ids) f.service.send(f.worker.id, { id, recipientId: f.parent.id, validFor:604800, text: 'Existing message' });
     vi.setSystemTime(Date.now() + AWAIT_ALERT_MS);
     expect(alertOverdueAwait(f.db, f.worker.id)).toBe(false);
-    f.service.acknowledge(f.parent.id, f.service.poll(f.parent.id, 0).messages.map(message => message.id));
+    f.service.acknowledge(f.parent.id, f.service.mail(f.parent.id).messages.map(message => message.id));
     f.service.update(f.parent.id, { continuation: 'unattended', awaiting: 'Child result' });
     expect(alertOverdueAwait(f.db, f.worker.id)).toBe(true);
-    expect(continuationControl(f.db, f.parent.id).awaiting).toBeNull();
+    expect(continuationControl(f.db, f.parent.id).awaiting).not.toBeNull();
     f.service.update(f.parent.id, { awaiting: 'Next child result' });
     f.service.update(f.worker.id, { notifySupervisor: true });
-    expect(continuationControl(f.db, f.parent.id).awaiting).toBeNull();
+    expect(continuationControl(f.db, f.parent.id).awaiting).not.toBeNull();
   });
 
   it('delivers result handoffs and overdue alerts to a finished supervisor without reopening it', () => {
     const f = fixture();
     f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', awaiting: 'Late result' });
     f.service.finish(f.parent.id, 'Supervisor work completed');
-    f.service.update(f.worker.id, { summary: 'A distinct late review result', notifySupervisor: true });
-    expect(f.service.poll(f.parent.id, 0).messages[0]?.text).toContain('A distinct late review result');
+    f.service.update(f.worker.id, { summary: 'A distinct late review result', validFor:604800, notifySupervisor: true });
+    expect(f.service.mail(f.parent.id).messages[0]?.text).toContain('A distinct late review result');
     expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS)).toBe(true);
     expect(f.service.agentStatus(f.parent.id).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input', recovery: null });
     expect(f.service.snapshot().messages.filter(m => m.recipientId === f.parent.id)).toHaveLength(2);

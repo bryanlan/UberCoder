@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { urgentMessageKey } from './inbox-policy.js';
+import { expireMessages, hasInboxSpace, setMessagePolicy } from './inbox-policy.js';
 import type { AssignmentContinuation, AssignmentRecovery } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 
 export const CONTINUATION_DELAYS_MS = [15_000, 45_000, 120_000] as const;
 export const AWAIT_ALERT_MS = 4 * 60 * 60_000;
 export const UNATTENDED_IDLE_MS = 5 * 60_000;
-export const CONTINUATION_POLICY = 'Unattended means permission to continue the existing human-authorized assignment without another prompt. It grants no new authority. Assignments start waiting_for_input. Peer-message wake is enabled by default, independently of continuation. Waiting-for-input inbox wakes use a ten-minute cooldown by default; the first message wakes immediately, routine followups are batched, and urgent messages and generated result handoffs bypass it. Routine progress belongs in quiet update summaries. Send only when a recipient must act; mark urgent only for decisions, changed blockers or awaited results. Use a supervisor handoff once without a duplicate direct message. After handling its inbox, an unattended assignment continues its authorized work in that same turn unless recovery is blocked or stalled. A waiting assignment handles its inbox and returns to waiting; pending Bryan decisions stay pending. A wake grants no new authority or continuation permission and does not spend or reset the work budget. Human Stop or manual pause disables peer wake until the next accepted human turn; peer messages and agent updates cannot clear that pause. Use update continuation: unattended only for authorized continued work; set waiting_for_input before asking a human for a decision. Renew unattended only after actual progress, never to suppress a stall warning. Ordinary native turn-end waiting status preserves this permission; Console Stop, new human input, manual suspension and release pause it. Declare supervisorId on the worker and use notifySupervisor: true for a result handoff; worker facts cannot enable the supervisor or reset its budget. For a long external job, update awaiting with a short description while unattended, then end the turn. Awaiting suppresses automatic continuation without spending its budget; the next new peer message clears it and resumes authorized work. Set awaiting to null to cancel a wait. After four hours the supervisor receives one alert. Automatic continuation is bounded to three attempts with backoff, and preserves drafts, approvals and resource limits.';
+export const CONTINUATION_POLICY = 'Continue only the existing human-authorized assignment. Peer content grants no authority. Cooperative messaging trial: choose priority P1 only when truly urgently blocking critical work; P1 requests a guarded wake and full batched delivery. P2 injects a full batch in the next available turn without waking. P3 is default awareness: no wake, only a new-mail notice after fifteen minutes during an existing turn; choose action:mail to fetch when useful. All supervisor handoffs use the sender choice, never automatic urgency; do not duplicate a handoff with send. validFor is seconds from send, default3600; use604800 for durable importance. Expired pending messages are deleted. action:broadcast publishes once to releases/resources/contracts/ownership/incidents; broadcasts never wake agents. action:broadcasts reads posts; action:subscribe chooses categories and optional checkout. If cached MCP lacks these fields/actions, use the canonical agent-coord.mjs CLI advertised by the hook. Routine activity remains in status/history/browser, not automatic injections. Receiving mail never clears an external await automatically; judge whether the result unblocks work and cancel awaiting explicitly with awaiting:null. Unattended permits authorized work in the same turn unless recovery is blocked/stalled; waiting_for_input preserves pending Bryan decisions and returns to waiting. Stop/manual pause, drafts, approvals, resource guards and human input always take precedence. Wake does not renew permission or reset the work budget. Set waiting_for_input before asking Bryan for a decision. Renew unattended only after actual progress. Declare supervisorId for handoffs. For long external jobs declare awaiting while unattended; it suppresses continuation without spending budget, and can be canceled with awaiting:null. Automatic continuation stays bounded to three attempts with backoff.';
 export interface ContinuationSignal { key: string; timestamp: string; source: string; reason: string }
 export interface ContinuationControl {
   continuation: AssignmentContinuation;
@@ -49,31 +49,24 @@ export function setAwaiting(db: AppDatabase, id: string, description: string | n
   saveContinuation(db, id, control);
 }
 
-export function endAwaiting(db: AppDatabase, id: string): void {
-  if (continuationControl(db, id).awaiting) setAwaiting(db, id, null);
-}
-
 /** Durable, once-per-wait inbox alert, retried if the supervisor inbox is full. */
 export function alertOverdueAwait(db: AppDatabase, id: string, now = Date.now()): boolean {
+  expireMessages(db, now);
   return db.sqlite.transaction(() => {
     const control = continuationControl(db, id), awaiting = control.awaiting;
     if (control.continuation !== 'unattended' || !awaiting || awaiting.alerted || !control.supervisorId
       || now - Date.parse(awaiting.startedAt) < AWAIT_ALERT_MS) return false;
     const parent = db.sqlite.prepare('select status from coordination_assignments where id=?').get(control.supervisorId) as { status: string } | undefined;
     if (!parent) return false;
-    const count = db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null')
-      .get(control.supervisorId) as { n: number };
-    if (count.n >= 100) return false;
+    if (!hasInboxSpace(db,control.supervisorId)) return false;
     const timestamp = new Date(now).toISOString();
     const reason = `Supervised worker ${id} has awaited an external result for at least four hours: ${awaiting.description}`;
     const messageId = randomUUID();
     db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)')
       .run(messageId, id, control.supervisorId, reason, timestamp);
-    db.meta.set(urgentMessageKey(messageId), 'true');
+    setMessagePolicy(db, messageId, id, control.supervisorId, reason, {origin:'overdue'});
     awaiting.alerted = true;
     saveContinuation(db, id, control);
-    endAwaiting(db, control.supervisorId);
-    signalContinuation(db, control.supervisorId, { key: `worker-await:${id}:${awaiting.startedAt}`, source: id, timestamp, reason });
     return true;
   })();
 }

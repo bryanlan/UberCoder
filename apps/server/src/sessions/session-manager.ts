@@ -60,7 +60,7 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { processStart } from '../coordination/service.js';
 import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerResumeAttemptKey, peerWakeComposerKey, peerWakePauseDetailsKey, queueCodexNotice, type PeerWakeAttempt, type PeerWakeComposer, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
-import { DEFAULT_WAITING_INBOX_COOLDOWN_MS, inboxWakeKey, isUrgentMessage, routineInboxWakeAt } from '../coordination/inbox-policy.js';
+import { expireMessages, messagePolicy, migrateMessagePolicies } from '../coordination/inbox-policy.js';
 import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
@@ -111,7 +111,6 @@ interface SessionRecoveryDependencies {
 
 interface SessionManagerOptions {
   coordinationEnabled?: boolean;
-  waitingInboxCooldownMs?: number;
   readLastUserInput?: typeof readLastUserInput;
   eagerRestoreWindowMs?: number;
   restoreGraceMs?: number;
@@ -289,7 +288,6 @@ export class SessionManager {
   private assignmentWakeRun?: Promise<void>;
   private wakeRequested = false;
   private readonly coordinationEnabled: boolean;
-  private readonly waitingInboxCooldownMs: number;
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private readonly launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
   private stopped = false;
@@ -304,7 +302,7 @@ export class SessionManager {
     options: SessionManagerOptions = {},
   ) {
     this.coordinationEnabled = options.coordinationEnabled ?? false;
-    this.waitingInboxCooldownMs = options.waitingInboxCooldownMs ?? DEFAULT_WAITING_INBOX_COOLDOWN_MS;
+    if (this.coordinationEnabled) migrateMessagePolicies(db);
     this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
     this.launchAuthorityContext = options.launchAuthorityContext;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
@@ -530,6 +528,7 @@ export class SessionManager {
   private async drainAssignments(): Promise<void> {
     // Historical unfinished assignments can vastly outnumber loaded bindings.
     // Read binding history once per pass, then revalidate each match under its lock.
+    expireMessages(this.db);
     const restorableSessions = this.listRestorableSessions();
     const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
       a.pid, a.process_start as processStart from coordination_assignments a
@@ -546,6 +545,7 @@ export class SessionManager {
       const session = sessions[0]!;
       await this.runtimes.run(session.id, 'assignmentWake', async () => {
         const pending = () => {
+          expireMessages(this.db);
           const state = this.db.boundSessions.getById(session.id);
           const stagedText = this.db.meta.get(peerWakeComposerKey(session.id));
           const staged = stagedText ? JSON.parse(stagedText) as PeerWakeComposer : undefined;
@@ -556,7 +556,7 @@ export class SessionManager {
               || (stagedKeys.has(key) && ['deferred', 'submitting'].includes(attempt.status)));
           const messages = this.db.sqlite.prepare(`select id, supplied_at as suppliedAt from coordination_messages
             where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string; suppliedAt: string | null }>;
-          const eligible = messages.flatMap((message) => {
+          const eligible = messages.filter(message => messagePolicy(this.db,message.id).priority === 'P1').flatMap((message) => {
             const initialKey = peerWakeAttemptKey(message.id), stored = this.db.meta.get(initialKey);
             if (!stored) return [{ id: message.id, key: initialKey }];
             const initial = JSON.parse(stored) as PeerWakeAttempt, key = peerWakeFollowupKey(message.id);
@@ -575,8 +575,6 @@ export class SessionManager {
               || (message.suppliedAt && Date.now() - Date.parse(message.suppliedAt) < 60_000)) return [];
             return [{ id: message.id, key }];
           });
-          if (routineInboxWakeAt(this.db, recipient.id, continuationControl(this.db, recipient.id).continuation, this.waitingInboxCooldownMs)
-            && !eligible.some(message => isUrgentMessage(this.db, message.id) || this.db.meta.get(message.key))) return [];
           return eligible;
         };
         let current = this.db.boundSessions.getById(session.id);
@@ -706,6 +704,9 @@ export class SessionManager {
           || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
         const submissionBlock = (): WakeBlock | undefined => {
           const latest = this.db.boundSessions.getById(session.id);
+          expireMessages(this.db);
+          if (!workResponse && !messages.some(m => !!this.db.sqlite.prepare('select 1 from coordination_messages where id=? and acknowledged_at is null').get(m.id)))
+            return {code:'inbox_settled',reason:'All P1 messages expired or were acknowledged before submission.'};
           if (this.stopped) return { code: 'shutdown', reason: 'The Console backend is stopping.' };
           if (peerWakePaused(this.db, recipient.id)) {
             const details = this.db.meta.get(peerWakePauseDetailsKey(recipient.id));
@@ -820,7 +821,6 @@ export class SessionManager {
             await this.tmuxClient.sendKeys(current!.tmuxSessionName, ['Enter']);
           });
           saveAttempt('submitted');
-          if (messages.length) this.db.meta.set(inboxWakeKey(recipient.id), nowIso());
           this.db.meta.set(peerWakeComposerKey(current.id), '');
           if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);

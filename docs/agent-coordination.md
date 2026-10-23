@@ -24,7 +24,7 @@ Agents use `agent_coordination` through the `agent_console_coordination` MCP ser
 - `status`: discover live peer scopes in the assignment's announced repositories. Before the first scope announcement, it shows live pilot work and marks the response `unscoped`. Pass `checkout` to focus on one repository and `offset` to continue when `nextOffset` is present. For a checkout outside the pilot, `status` still returns the assignment and pending-message count, with `checkoutInPilot: false` and a note that direct messages work. The agent reply is compact and excludes historical activity and other agents' messages; the browser retains the repository history view.
 - `history`: deliberately read full retained activity for an explicit `checkout`. Results contain ten original events, newest first, with `totalEvents` and `nextOffset`. Pass that offset to read older pages. History reads do not advance automatic delivery, offer messages, or acknowledge anything. The browser keeps its recent-activity view. Existing MCP processes need a reconnect to discover the new action; the same action is immediately available through `node scripts/agent-coord.mjs history` with a JSON request on stdin.
 - `update`: announce or revise `description`, `checkout` and `summary`; mention intended files in the summary. `status` may be `active` or `waiting`. Independent `continuation` permission is `unattended` or `waiting_for_input`; `supervisorId` links a worker to its parent (null clears it), and `notifySupervisor: true` announces a result handoff. The reply confirms the assignment without returning a repository snapshot.
-- `send`: exchange information with `recipientId` and `text`, and request a guarded response turn for an idle or automatically sleeping Console recipient. Direct messages reach any registered session, whichever repository either session is working in; repository enrollment controls activity views only. An optional `messageId` makes retries idempotent. The same receipt shape is returned on retries, derived from current message and recipient state.
+- `send`: exchange information with `recipientId` and `text`, with sender-chosen priority and validity. Only P1 requests a guarded response turn for an idle or automatically sleeping Console recipient. Direct messages reach any registered session, whichever repository either session is working in; repository enrollment controls activity views only. An optional `messageId` makes retries idempotent. The same receipt shape is returned on retries, derived from current message and recipient state.
 - `ack`: acknowledge delivered messages with `messageIds`; acknowledgement is receipt, not approval.
 - `finish`: record the outcome with `summary`. Mention unfinished work and next steps. Finishing never requires a clean checkout and never changes files.
 
@@ -62,7 +62,7 @@ It handles pending/resumed conversations and adopted pending aliases. Chats with
 no binding, unregistered agents or disabled coordination return an error while
 the composer retains its draft. A finished assignment remains referenceable.
 Resolving a reference does not start, resume or message the referenced agent.
-A new peer message reopens a finished assignment's inbox only when its original
+A new P1 peer message reopens a finished assignment's inbox only when its original
 registered process is alive and its current Console binding is unique. This keeps
 work continuation off and does not restore expired grants. Stopped or closed
 finished agents still require an explicit resume before a new message.
@@ -79,10 +79,9 @@ For an external job that will take time, keep unattended permission and declare
 `awaiting: "Desktop workflow <id> result"` through `update`, then end the turn.
 While awaiting, Console sends no automatic work nudges, spends no continuation
 attempts and does not mark the lane stalled. Awaiting is scheduling state and
-does not renew the budget. The next **new** peer message from any sender clears
-the await; its inbox wake continues the authorized work in the same turn. Message
-retries do not clear a later wait. Reconcile the notice and re-declare awaiting if
-the result is still pending. Use `awaiting: null` to cancel a wait explicitly.
+does not renew the budget. Receiving a message never clears the wait automatically.
+The agent judges whether the result unblocks work and uses `awaiting: null` to
+cancel the wait. Unrelated mail and retries cannot resume work accidentally.
 `status` and `update` show the current description. Existing blocked or stalled
 recovery remains blocked or stalled; awaiting does not repair uncertain input.
 
@@ -93,7 +92,7 @@ survive backend restarts. Console Stop, native cancellation, manual pause and
 human input clear the await and keep their existing automatic-input guards.
 Drafts, interactive prompts and memory limits still defer a result wake.
 
-Declare `supervisorId` on a separately registered worker. A worker's `finish`, native provider failure, exhausted continuation budget, unattended disconnect or explicit `notifySupervisor: true` handoff signals its parent. A native child completion in the parent's Codex `SubAgentActivity` or Claude `<task-notification>` stream also signals that parent. Only actual native envelopes count; quoted assistant prose does not. Links reject unknown, finished, self and cyclic supervisors. Signals cannot enable a waiting parent, change its authority or replenish its recovery budget. A long-running worker can hand off a reviewable result without declaring its assignment finished.
+Declare `supervisorId` on a separately registered worker. Worker finish, unattended disconnect and explicit handoff create inbox messages with the caller's priority (P3 by default). They do not create an independent continuation signal. Native provider failure and exhausted continuation budget remain bounded work-controller signals. A native child completion in the parent's Codex `SubAgentActivity` or Claude `<task-notification>` stream also signals that parent. Only actual native envelopes count; quoted assistant prose does not. Links reject unknown, finished, self and cyclic supervisors. Signals cannot enable a waiting parent, change its authority or replenish its recovery budget. A long-running worker can hand off a reviewable result without declaring its assignment finished.
 
 Use `update` with `summary` and `notifySupervisor: true` for an intermediate
 result, or `finish` with the final `summary` when the assignment is complete.
@@ -106,7 +105,37 @@ supervisor. Each result keeps its event identity, including later review rounds
 whose wording happens to match. Use this handoff instead of also sending a
 duplicate direct message or announcing ready immediately before finishing.
 
-The backend checks every 15 seconds. A ready unattended lead with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Fresh worker signals use that same first delay. For waiting_for_input recipients, the first peer message after a quiet period wakes immediately; further ordinary arrivals share a wake at the cooldown deadline. The default cooldown is ten minutes, configured by coordination.waitingInboxCooldownSeconds (1 to 900 seconds). The deadline persists across backend restart. Set urgent: true only for a decision, changed blocker or awaited dependency result. Console-generated supervisor handoffs and overdue-wait alerts bypass the cooldown. Native hooks may supply batched messages during any earlier ordinary turn. Batching delays scheduling, never durable delivery or acknowledgement. Unattended recipients keep immediate inbox wakes and their existing awaiting and continuation budgets; an unattended recipient handles the inbox and continues its authorized assignment in that same turn. Later continuations wait at least 45 and 120 seconds. Each permission generation permits three automatic continuation attempts. Active foreground turns and visible background work defer silent-idle continuation; a result signal can request reconciliation while other workers remain active. Typed transient failures use the separate bounded provider-failure controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery), never an additional generic retry budget.
+The backend checks every 15 seconds. A ready unattended assignment with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Native worker signals use that same first delay. Later continuations wait at least 45 and 120 seconds, with three attempts per permission generation. P2/P3 arrivals cannot start an extra turn or bypass that budget. Foreground work, native drafts, approvals, Stop and resource limits retain their guards. Typed provider failures use the separate bounded recovery controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery).
+
+### Cooperative priority trial
+
+The sender judges importance. There is no automatic urgency for supervisor handoffs, finish notices, disconnects, overdue waits or broadcasts. The old `urgent` field and waiting-inbox cooldown have been removed.
+
+| Priority | Wake | Delivery |
+| --- | --- | --- |
+| P1 | Guarded wake if asleep/idle | Full batch at the next safe hook; reserve for urgently blocking critical work |
+| P2 | Never | Full batch during the next available turn |
+| P3 (default) | Never | A brief new-mail notice after fifteen minutes during an existing turn; the agent chooses whether to fetch bodies |
+
+`send`, `update` with `notifySupervisor`, and `finish` accept `priority` and `validFor`. Validity is integer seconds from acceptance, independent of priority: default 3600 (one hour), with 604800 (one week) for durable importance. The sender can choose a shorter duration. Identical retries preserve the original priority and expiration. Expiry is checked before scheduling, final submission and injection; pending expired bodies are deleted without acknowledgement, while an `expired` receipt prevents retry resurrection. A message already injected cannot be removed from native conversation history. Late acknowledgement of previously supplied content is accepted against its receipt without restoring the expired body. Acknowledged history remains history. Existing mail is migrated to P3 with one hour from trial adoption to be read.
+
+Pending storage reserves one hundred P1 slots separately from one hundred P2/P3 slots, so ignored awareness mail cannot reject critical delivery. This bounds storage, not wake frequency. P1/P2 bodies are supplied together in priority order, at most twenty per hook, with a remaining direct-message count for further batches. A P1 arriving during an active turn does not add a redundant turn. P3 bodies never appear implicitly. `mail` deliberately fetches up to twenty pending messages; acknowledge supplied IDs after reading. This action never wakes another agent. The P3 notice clock is separate from P1/P2 injections and survives restart. Only new unread content generates a notice; unchanged mail does not repeat reminders. The fifteen-minute deadline makes a notice eligible, never starts a turn.
+
+Examples for `node scripts/agent-coord.mjs ACTION` with JSON on stdin:
+
+```json
+{"recipientId":"RECIPIENT_UUID","text":"Critical current work is blocked on this answer","priority":"P1","validFor":600}
+```
+
+```json
+{"recipientId":"RECIPIENT_UUID","text":"Reviewable result and details path","priority":"P2","validFor":604800}
+```
+
+`action:broadcast` publishes one shared post with `category`, `text`, optional `checkout`, and optional `validFor`. It creates no direct inbox copies and never wakes agents. Categories are `releases` (publication/integration), `resources` (shared execution capacity), `contracts` (interfaces/artifact formats), `ownership` (responsibility/handoffs), and `incidents` (runtime failures/recovery). `broadcasts` reads twenty posts with optional category/checkout and offset. A repository filter includes global posts. `subscribe` sets category notices and optional checkout; an empty categories array unsubscribes. Subscriptions are opt-in. Interested agents receive category counts through the same P3 notice and decide whether to browse. Broadcast expiry deletes the post body and retains only its idempotency receipt. Publish only shared operational context and references, not private client content.
+
+New hook processes adopt the trial immediately. Existing MCP connections can keep their cached schema; use the canonical CLI path supplied by the hook for priority/validity and new actions, or reconnect MCP. Retired fields fail with migration guidance, without restoring the old urgency behavior. Manual Stop and human decision boundaries apply to every priority.
+
+Trial measurement uses the read-only audit CLI (`--hours`, optionally `--usage`). Its `priorityTrial` section counts accepted priorities/origins and expiry without exposing message bodies. Compare actual model wakes over comparable work windows and inspect P1 next-action impact and blocking latency; transport acknowledgements do not prove efficiency or token savings.
 
 SQLite metadata stores permission, revision, deduplicated signals and attempts. Each input attempt is recorded before transport. Missing native acknowledgement after 30 seconds, an interrupted submission or ambiguous input blocks automatic replay across restart. A human pause during readiness or text entry prevents automatic input; a work-permission revision also prevents unattended-work Enter. Incoming wake requests received while a drain runs request another pass; new signals arriving during input remain pending. The continuation notice asks the agent to read its inbox, reconcile work and results, preserve all constraints and continue the assignment.
 
@@ -137,7 +166,7 @@ registration and backend restart; only the next accepted human conversation turn
 clears the peer-wake pause. Draft typing also defers wake until that human turn
 is submitted. An ordinary native end-of-turn Stop hook does not pause wake.
 Active turns, drafts, approval prompts, queued model changes, insufficient memory
-and uncertain session ownership still defer input. Completing an assignment leaves its inbox available. A late message can wake the
+and uncertain session ownership still defer input. Completing an assignment leaves its inbox available. A late P1 message can wake the
 original eligible conversation for inbox handling while the assignment stays
 finished and its work permission stays off. Registration and automatic prompt
 hooks preserve completion; a genuine human prompt or explicit active update can
@@ -203,9 +232,9 @@ The recipient reports working, idle or stopped, provider, last messaging contact
 - offered: already offered to the runtime, still unacknowledged.
 - acknowledged: the recipient confirmed receipt; queued is false. This does not imply agreement or completed work.
 
-A batched receipt includes wakeNotBefore, the ordinary wake deadline; an earlier native turn or urgent result can deliver it sooner. Retried message IDs retain their originally accepted urgency. Registration with acceptsMessages: false identifies a send-only service. New sends to it fail permanently with recipient_send_only before consuming inbox capacity. Existing messages remain intact and are never automatically acknowledged. Status peers and receipts expose acceptsMessages; receipts also expose assignmentStatus and supervisorId.
+Every receipt includes priority and expiresAt. P3 uses delivery:mailbox; expired pending messages use delivery:expired with queued:false. Retried message IDs retain their originally accepted priority and validity. Registration with acceptsMessages: false identifies a send-only service. New sends to it fail permanently with recipient_send_only before consuming inbox capacity. Existing messages remain intact and are never automatically acknowledged. Status peers and receipts expose acceptsMessages; receipts also expose assignmentStatus and supervisorId.
 
-Receipt generation never polls or acknowledges messages. Sending or retrying requests backend wake; identical retries never replay ambiguous input. Finished assignments retain durable messages. A finished lane without a resumable binding requires a human resume; its receipt names the assignment status and supervisor so the sender can reassign new work. The existing session-start/owner-change registration retains assignment and inbox identity when a provider is resumed. Manual suspensions stay paused. Automatically sleeping sessions can resume for messages when sufficient memory is available; they keep the original conversation and assignment identity.
+Receipt generation never polls or acknowledges messages. Only a new P1 requests backend wake; identical retries never replay ambiguous input. Finished assignments retain durable messages. A finished lane without a resumable binding requires a human resume; its receipt names the assignment status and supervisor so the sender can reassign new work. The existing session-start/owner-change registration retains assignment and inbox identity when a provider is resumed. Manual suspensions stay paused. Automatically sleeping sessions can resume for P1 messages when sufficient memory is available; they keep the original conversation and assignment identity.
 
 ## Delivery and availability
 
@@ -215,11 +244,11 @@ If Claude resumes into its exact native summary/full-session choice, peer wake s
 
 The private Unix socket and authenticated `/api/assignment-activity` browser route serve activity and inbox data. The former `/api/coordination` endpoint is removed: older tabs receive an ordinary request failure and show their existing status message, rather than rendering an incompatible payload. Refreshing loads the new panel; no automatic reload interrupts draft input. Direct messages request an immediate backend wake check, with a 15-second retry pass for deferred recipients. A fixed control notice requests inbox handling and conditionally resumes the existing authorized work according to current continuation status. Codex uses its native `codex queue --thread` command with the configured resume executable, merged provider environment and project directory, preserving the composer. Claude waits for the complete exact notice in its ready composer, including partial repaints, before the guarded Enter; peer text remains in the authenticated inbox and arrives through lifecycle and post-tool hooks. Native transcript adapters classify the notice as coordination status, never a human message. Browser drafts are not modified. A native terminal draft, working turn, queued model change, uncertain tmux ownership or other interactive prompt prevents submission. Codex native drafts defer the queue request as well. Long tools delay delivery until a supported boundary.
 
-Messages are queued, offered to the runtime, then explicitly acknowledged. Unacknowledged messages are offered again after 60 seconds. Each message ID permits an initial automatic input attempt and at most one guarded follow-up. The follow-up requires a successfully submitted initial attempt in the same binding, a later completed turn, at least 90 seconds since submission, an expired offer cooldown and all ordinary readiness, draft, ownership and resource guards. A failed or unconfirmed native submission is never replayed. A durable, exact, confirmed unsent notice may finish its original submission as described above. Separate durable attempt records are written before input, so restarting the backend or retrying a send cannot create a third attempt. Offered messages are not proof of acknowledgement. A continuation reads the current inbox batches, acknowledges their IDs, replies only when useful and then resumes the existing authorized work. It does not close unfinished assignments or send acknowledgement-only replies. Their text is delivered in full, independently of activity summaries. The browser pending count covers all relevant unacknowledged messages, independently of its 50-message display limit.
+Messages are queued, offered to the runtime, then explicitly acknowledged. Unacknowledged messages are offered again after 60 seconds. Each P1 message ID permits an initial automatic input attempt and at most one guarded follow-up. The follow-up requires a successfully submitted initial attempt in the same binding, a later completed turn, at least 90 seconds since submission, an expired offer cooldown and all ordinary readiness, draft, ownership and resource guards. A failed or unconfirmed native submission is never replayed. A durable, exact, confirmed unsent notice may finish its original submission as described above. Separate durable attempt records are written before input, so restarting the backend or retrying a send cannot create a third attempt. Offered messages are not proof of acknowledgement. A continuation reads the current inbox batches, acknowledges their IDs, replies only when useful and then resumes the existing authorized work. It does not close unfinished assignments or send acknowledgement-only replies. Their text is delivered in full, independently of activity summaries. The browser pending count covers all relevant unacknowledged messages, independently of its 50-message display limit.
 
-Automatic activity summarizes the backlog in one poll: at most three assignments' latest relevant updates, with each summary limited to 240 characters. It includes explicit closeouts and identifies disconnected owners, but skips automatic start/resume/status chatter and updates in unrelated repositories. The response states how many updates and assignments it summarized. The cursor advances past the entire summarized backlog, so later tools do not replay older batches. Original events remain in SQLite; use `history` with checkout and offset for full records and `status` for current scopes and complete current summaries.
+Routine activity is retained for `history`, `status` and the browser, and is not injected automatically. Hooks supply P1/P2 batches, current assignment/authority state and eligible P3 notices only.
 
-Only host hooks advance the event cursor. Hook delivery and registration for the same native session use Linux `flock` on a private descriptor while reading state, polling and saving the cursor. Overlapping hooks therefore deliver activity once. Process exit releases the descriptor automatically; the empty lock file is reusable and never controls repository edits or Git. The helper requires the standard util-linux `flock` executable. New hook processes adopt helper updates immediately. An already-running MCP stdio helper retains its loaded client code until its connection restarts; backend and hook changes require no provider restart.
+Host hooks serialize delivery and registration per native session with Linux `flock`. Overlapping hooks therefore supply a message batch once. Process exit releases the descriptor; the reusable empty lock file never controls repository edits or Git. New hook processes adopt helper updates immediately. An already-running MCP stdio helper retains its loaded client code until reconnection; provider processes need no restart.
 
 Automatic turn-start and turn-end status changes update the assignment without creating peer activity entries; old automatic entries are also skipped during hook delivery. Meaningful scope and description updates still appear in the activity feed. Direct messages remain private to their recipient's runtime inbox; the authenticated browser view can show repository message history.
 
@@ -237,7 +266,7 @@ fetch its text. Client failures are recorded independently of the backend. See
 [the audit contract](peer-wake-audit.md) for private transport measurements and warnings.
 
 Stop and SessionEnd hooks update only backend lifecycle state and do not take the
-inbox cursor lock or rewrite client state. Registration, polling and cursor writes
+inbox delivery lock or rewrite client state. Registration, polling and state writes
 remain serialized. A contended duplicate delivery hook coalesces behind the current
 owner and records deferred telemetry; it does not claim receipt or report a server
 outage. Real RPC failures remain visible. Large Claude transcript metadata passes

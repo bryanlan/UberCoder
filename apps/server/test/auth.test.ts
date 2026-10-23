@@ -11,7 +11,7 @@ import { AuthService } from '../src/security/auth-service.js';
 
 function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig {
   return {
-    coordination: { enabled: false, pilotPaths: [], waitingInboxCooldownSeconds: 600 },
+    coordination: { enabled: false, pilotPaths: [] },
     workerSummaries: { enabled: false, runtimeCommand: ['agent-consult'] },
     conversationTitles: { enabled: false, runtimeCommand: ['agent-consult'] },
     server: {

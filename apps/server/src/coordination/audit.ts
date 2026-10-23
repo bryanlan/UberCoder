@@ -97,14 +97,18 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
     union all
     select key,value,substr(key,length('peer-wake-followup:')+1),2 from meta where key like 'peer-wake-followup:%')
     select x.key,x.value,b.provider,s.project_slug,b.native_session_id as conversation_ref,i.transcript_path,
-    m.id,m.sender_id,m.recipient_id,m.created_at,m.acknowledged_at,x.attempt,
+    coalesce(m.id,x.message_id) id,coalesce(m.sender_id,json_extract(p.value,'$.senderId')) sender_id,
+    coalesce(m.recipient_id,json_extract(p.value,'$.recipientId')) recipient_id,
+    coalesce(m.created_at,json_extract(p.value,'$.createdAt')) created_at,coalesce(m.acknowledged_at,json_extract(p.value,'$.acknowledgedAt')) acknowledged_at,x.attempt,
     a.description as sender_description,b.description as recipient_description
-    from attempts x join coordination_messages m on m.id=x.message_id
+    from attempts x left join coordination_messages m on m.id=x.message_id
+    left join meta p on p.key='inbox-message:'||x.message_id
     left join bound_sessions s on s.id=json_extract(x.value,'$.sessionId')
-    join coordination_assignments a on a.id=m.sender_id join coordination_assignments b on b.id=m.recipient_id
+    join coordination_assignments a on a.id=coalesce(m.sender_id,json_extract(p.value,'$.senderId'))
+    join coordination_assignments b on b.id=coalesce(m.recipient_id,json_extract(p.value,'$.recipientId'))
     left join conversation_index i on i.project_slug=s.project_slug and i.provider=s.provider and i.ref=s.conversation_ref
     where json_extract(x.value,'$.timestamp')>=?
-    order by json_extract(x.value,'$.timestamp'),m.id`).all(iso(from - 60 * MINUTE)) as AttemptRow[];
+    order by json_extract(x.value,'$.timestamp'),coalesce(m.id,x.message_id)`).all(iso(from - 60 * MINUTE)) as AttemptRow[];
   const groups = new Map<string, AuditedWake>();
   const paths = new Map<string, string>();
   for (const r of rows) {
@@ -210,7 +214,19 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
     const first = offers.get(m.id)?.firstFinished;
     return first == null || !m.acknowledgedAt ? [] : [Date.parse(m.acknowledgedAt) - first];
   }).filter((ms) => ms >= 0);
-  return { schemaVersion: 1, from: iso(from), until: iso(now), policy: WAKE_AUDIT_POLICY,
+  const trialStart = (db.prepare("select value from meta where key='priority-trial-migrated'").get() as {value:string}|undefined)?.value;
+  const priorityTrial = trialStart ? {
+    startedAt:trialStart,
+    messages:db.prepare(`select json_extract(value,'$.priority') priority,json_extract(value,'$.origin') origin,
+      count(*) accepted,sum(coalesce(json_extract(value,'$.expired'),0)) expired
+      from meta where key>='inbox-message:' and key<'inbox-message;'
+      and json_extract(value,'$.createdAt')>=? and json_extract(value,'$.createdAt')<=? and json_extract(value,'$.origin')!='migrated'
+      group by priority,origin`).all(iso(from),iso(now)),
+    broadcasts: (db.prepare(`select count(*) n from meta where key>='coordination-broadcast:' and key<'coordination-broadcast;'
+      and json_extract(value,'$.createdAt')>=?`).get(iso(from)) as {n:number}).n,
+    note:'Priority and expiry counts measure transport, not usefulness or billing savings. Inspect P1 content and actual next actions.'
+  } : null;
+  return { priorityTrial, schemaVersion: 1, from: iso(from), until: iso(now), policy: WAKE_AUDIT_POLICY,
     counts: { submittedWakes: submitted.length, attemptedMessages: messages.length,
       clientTimeouts: transportMetrics.clientTimeouts,
       hookFailures: transportMetrics.hookFailures,

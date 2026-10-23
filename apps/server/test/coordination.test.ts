@@ -58,6 +58,18 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('exposes publish, subscribe and filtered broadcast reads through the actual CLI and socket', async()=>{
+    const {root,checkout,service}=fixture();const ipc=await startCoordinationSocket(service,root);cleanups.push(()=>ipc.close());
+    expect((await runHelper(root,checkout,['register'],{provider:'codex',nativeSessionId:randomUUID(),pid:process.pid,cwd:checkout})).code).toBe(0);
+    const published=await runHelper(root,checkout,['broadcast'],{category:'releases',checkout,text:'A shared release reference',validFor:604800});
+    expect(published.code,published.stderr).toBe(0);expect(JSON.parse(published.stdout).id).toBeTruthy();
+    const subscribed=await runHelper(root,checkout,['subscribe'],{categories:['releases'],checkout});
+    expect(JSON.parse(subscribed.stdout).subscription.categories).toEqual(['releases']);
+    const read=await runHelper(root,checkout,['broadcasts'],{category:'releases',checkout});
+    expect(JSON.parse(read.stdout).posts).toMatchObject([{text:'A shared release reference',category:'releases'}]);
+    expect(service.snapshot().messages).toEqual([]);
+  });
+
   it('registers a send-only service through the real helper and rejects new requests without filling its inbox', async () => {
     const { root, checkout, db, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
@@ -77,12 +89,12 @@ describe('assignment coordination', () => {
   it('preserves accepted messages and their identities when a service becomes send-only', () => {
     const { checkout, service, register } = fixture();
     const sender = register(), target = register();
-    const input = { id: randomUUID(), recipientId: target.id, text: 'Historical retained message' };
+    const input = { priority:'P2' as const, id: randomUUID(), recipientId: target.id, text: 'Historical retained message' };
     service.send(sender.id, input);
     service.register({ provider: 'codex', nativeSessionId: target.nativeSessionId, token: target.token,
       pid: process.pid, cwd: checkout, acceptsMessages: false });
     expect(service.send(sender.id, input)).toMatchObject({ id: input.id, queued: true, recipient: { acceptsMessages: false }, note: expect.stringContaining('no inbox reader') });
-    expect(service.poll(target.id, 0).messages).toMatchObject([{ id: input.id, acknowledgedAt: null }]);
+    expect(service.poll(target.id).messages).toMatchObject([{ id: input.id, acknowledgedAt: null }]);
     expect(() => service.send(sender.id, { ...input, id: randomUUID() })).toThrow('send-only');
   });
 
@@ -92,21 +104,21 @@ describe('assignment coordination', () => {
     service.update(target.id, { supervisorId: parent.id }); service.finish(target.id, 'Previous work complete');
     db.sqlite.prepare('update coordination_assignments set pid=2147483647 where id=?').run(target.id);
     if (state === 'paused') db.meta.set(`peer-wake-paused:${target.id}`, 'true');
-    const receipt = service.send(sender.id, { id: randomUUID(), recipientId: target.id, text: 'New work' });
+    const receipt = service.send(sender.id, { priority: 'P2', id: randomUUID(), recipientId: target.id, text: 'New work' });
     expect(receipt).toMatchObject({ delivery: 'on_resume', recipient: { assignmentStatus: 'finished', supervisorId: parent.id } });
     expect(receipt.note).toContain('finished'); expect(receipt.note).toContain(parent.id);
     if (state === 'stopped') expect(receipt.note).toContain('human resume');
     expect(receipt.note).not.toContain('no resend is needed');
   });
 
-  it('persists an urgent send through dispatch and keeps its original priority on retries', async () => {
+  it('persists a P1 send through dispatch and keeps its original priority on retries', async () => {
     const { db, service, register } = fixture();
     const sender = register(), target = register();
     const input = { action: 'send', assignmentId: sender.id, token: sender.token, messageId: randomUUID(),
-      recipientId: target.id, text: 'Decision required', urgent: true };
+      recipientId: target.id, text: 'Decision required', priority: 'P1' };
     const receipt = await dispatchCoordination(service, input);
-    expect(await dispatchCoordination(service, { ...input, urgent: false })).toEqual(receipt);
-    expect(db.meta.get(`inbox-urgent:${input.messageId}`)).toBe('true');
+    expect(await dispatchCoordination(service, { ...input, priority: 'P3' })).toEqual(receipt);
+    expect(JSON.parse(db.meta.get(`inbox-message:${input.messageId}`)!)).toMatchObject({ priority:'P1' });
   });
   it.each(['codex', 'claude'])('reopens the same finished %s agent reference on its next human prompt', async provider => {
     const { root, checkout, db, service } = fixture();
@@ -142,7 +154,7 @@ describe('assignment coordination', () => {
     await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'SessionStart' });
     expect(service.agentStatus(id).assignment?.status).toBe('finished');
     const sender = register();
-    service.send(sender.id, { id: randomUUID(), recipientId: id, text: 'Late question' });
+    service.send(sender.id, { priority: 'P2', id: randomUUID(), recipientId: id, text: 'Late question' });
     const hook = await runHelper(root, checkout, ['hook', provider], { session_id: nativeSessionId, cwd: checkout,
       hook_event_name: 'UserPromptSubmit', prompt: PEER_WAKE_PROMPT });
     expect(hook.code).toBe(0);
@@ -195,12 +207,12 @@ describe('assignment coordination', () => {
     const sender = register(), nativeSessionId = randomUUID();
     const registered = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
     const recipientId = JSON.parse(registered.stdout).assignmentId;
-    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId, text: 'PRIVATE_DELAYED_PEER' });
+    const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId, text: 'PRIVATE_DELAYED_PEER' });
     const originalUpdate = service.update.bind(service), originalPoll = service.poll.bind(service);
     const update = vi.spyOn(service, 'update').mockImplementation(((id: string, input: Parameters<typeof service.update>[1]) =>
       new Promise((resolve) => setTimeout(() => resolve(originalUpdate(id, input)), 1800))) as never);
-    const poll = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) =>
-      new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, after)), 1800))) as never);
+    const poll = vi.spyOn(service, 'poll').mockImplementation(((id: string, supply?: boolean) =>
+      new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, supply)), 1800))) as never);
     const started = performance.now();
     try {
       const result = await runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'UserPromptSubmit' });
@@ -218,10 +230,10 @@ describe('assignment coordination', () => {
   it('reports working and idle delivery expectations without polling or acknowledging the message', async () => {
     const { checkout, db, service, register } = fixture();
     const sender = register(); const recipient = register('claude');
-    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Direct coordination question' };
+    const input = { priority:'P2' as const, id: randomUUID(), recipientId: recipient.id, text: 'Direct coordination question' };
     const beforeSeen = service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt;
     const working = await dispatchCoordination(service, { action: 'send', assignmentId: sender.id, token: sender.token,
-      messageId: input.id, recipientId: input.recipientId, text: input.text }) as ReturnType<CoordinationService['send']>;
+      priority:'P2', messageId: input.id, recipientId: input.recipientId, text: input.text }) as ReturnType<CoordinationService['send']>;
     expect(working).toMatchObject({ id: input.id, queued: true, delivery: 'next_step', recipient: { status: 'working', provider: 'claude', resumableInConsole: false } });
     expect(working.note).toContain('not received');
     expect(service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt).toBe(beforeSeen);
@@ -231,7 +243,7 @@ describe('assignment coordination', () => {
     expect((db.sqlite.prepare('select supplied_at,acknowledged_at from coordination_messages where id=?').get(input.id))).toEqual({ supplied_at: null, acknowledged_at: null });
     expect(service.snapshot().assignments.find((a) => a.id === recipient.id)?.lastSeenAt).toBe(idleSeen);
     expect((db.sqlite.prepare('select count(*) as n from coordination_messages').get() as { n: number }).n).toBe(1);
-    service.poll(recipient.id, 0);
+    service.poll(recipient.id);
     expect(service.send(sender.id, input)).toMatchObject({ queued: true, delivery: 'offered' });
     service.acknowledge(recipient.id, [input.id]);
     expect(service.send(sender.id, input)).toMatchObject({ queued: false, delivery: 'acknowledged' });
@@ -247,7 +259,7 @@ describe('assignment coordination', () => {
     const sessionId = randomUUID(); const timestamp = new Date().toISOString();
     db.boundSessions.upsert({ id: sessionId, provider: 'claude', projectSlug: 'demo', conversationRef: recipient.nativeSessionId,
       tmuxSessionName: 'test-not-running', status: 'bound', shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: false });
-    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Please check current overlap' };
+    const input = { priority:'P2' as const, id: randomUUID(), recipientId: recipient.id, text: 'Please check current overlap' };
     // Registration can still say active while the authoritative Console knows
     // this session has no working turn.
     expect(service.send(sender.id, input)).toMatchObject({ delivery: 'next_turn', recipient: { status: 'idle', resumableInConsole: true } });
@@ -270,7 +282,7 @@ describe('assignment coordination', () => {
       tmuxSessionName: 'first', status: 'bound' as const, shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: true };
     db.boundSessions.upsert(first);
     db.sqlite.prepare('update coordination_assignments set process_start=? where id=?').run('not-the-current-process', recipient.id);
-    const input = { id: randomUUID(), recipientId: recipient.id, text: 'Queued for a stopped process' };
+    const input = { priority:'P2' as const, id: randomUUID(), recipientId: recipient.id, text: 'Queued for a stopped process' };
     expect(service.send(sender.id, input)).toMatchObject({ delivery: 'on_resume', recipient: { status: 'stopped', resumableInConsole: true } });
     db.boundSessions.upsert({ ...first, id: randomUUID(), projectSlug: 'two', tmuxSessionName: 'second' });
     expect(service.send(sender.id, input).recipient.resumableInConsole).toBe(false);
@@ -302,74 +314,14 @@ describe('assignment coordination', () => {
     service.authenticate(a.id, token);
   });
 
-  it('coalesces oversized history into the latest update without deleting original evidence', async () => {
-    const { checkout, db, service, register } = fixture();
-    const a = register(); const b = register('claude');
-    const cursor = service.poll(b.id, 0).cursor;
-    const paths = Array.from({ length: 85 }, (_, i) => `${i}-${'x'.repeat(100)}.txt`);
-    db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)').run(a.id, checkout, 'update', paths.join(', '), new Date().toISOString());
-    service.update(a.id, { checkout, summary: 'Later update must arrive' });
-    const result = service.poll(b.id, cursor);
-    expect(result.cursor).toBeGreaterThan(cursor);
-    expect(result.events.map((event) => event.text)).toEqual(['Later update must arrive']);
-    expect(result.activitySummary).toContain('2 activity updates from 1 assignment');
-    expect(JSON.stringify({ events: result.events, messages: result.messages }).length).toBeLessThan(2000);
-    expect(service.poll(b.id, result.cursor).events).toEqual([]);
-    expect((db.sqlite.prepare("select length(text) as n from coordination_events where length(text)>8000").get() as { n: number }).n).toBeGreaterThan(8000);
-  });
-
-  it('summarizes a large backlog in one bounded batch while preserving full direct messages and history', () => {
-    const { checkout, db, service, register } = fixture();
-    const receiver = register('claude');
-    const peers = Array.from({ length: 7 }, () => register());
-    const cursor = service.poll(receiver.id, 0).cursor;
-    for (const [i, peer] of peers.entries()) {
-      for (let j = 0; j < 40; j++) service.update(peer.id, { checkout, summary: `Peer ${i} update ${j}: ${'detail '.repeat(300)}` });
-      db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
-        .run(peer.id, null, 'resumed', 'Automatic lifecycle noise', new Date().toISOString());
-    }
-    const message = 'Full direct message: ' + 'x'.repeat(1900);
-    const messageId = randomUUID();
-    service.send(peers[0]!.id, { id: messageId, recipientId: receiver.id, text: message });
-    const result = service.poll(receiver.id, cursor);
-    expect(result.events).toHaveLength(3);
-    expect(new Set(result.events.map((event) => event.assignmentId)).size).toBe(3);
-    expect(result.events.every((event) => event.text.includes('update 39'))).toBe(true);
-    expect(result.activitySummary).toContain('280 activity updates from 7 assignments');
-    expect(JSON.stringify({ activitySummary: result.activitySummary, events: result.events }).length).toBeLessThan(2000);
-    expect(result.messages[0]?.text).toBe(message);
-    expect(service.poll(receiver.id, result.cursor).events).toEqual([]);
-    expect(service.snapshot(checkout).events.some((event) => event.text.includes('Automatic lifecycle noise'))).toBe(true);
-    expect((db.sqlite.prepare('select count(*) as n from coordination_events where seq>?').get(cursor) as { n: number }).n).toBe(287);
-    expect(service.acknowledge(receiver.id, [messageId])).toEqual({ acknowledged: [messageId] });
-  });
-
-  it('does not inject a shared peer\'s updates from an unrelated repository', () => {
-    const { root, checkout, service, register } = fixture();
-    const receiver = register(); const peer = register('claude');
-    const outside = path.join(root, 'other-repository'); fs.mkdirSync(outside); git(outside, ['init', '-q']);
-    service.settings.pilotPaths.push(outside);
-    const cursor = service.poll(receiver.id, 0).cursor;
-    service.update(peer.id, { checkout, summary: 'Shared repository work' });
-    service.update(peer.id, { checkout: outside, summary: 'Unrelated repository work' });
-    const result = service.poll(receiver.id, cursor);
-    expect(result.events.map((event) => event.text)).toEqual(['Shared repository work']);
-    expect(service.poll(receiver.id, result.cursor).events).toEqual([]);
-    expect(service.snapshot(outside).events[0]?.text).toBe('Unrelated repository work');
-  });
-
-  it('keeps explicit closeout summaries and reports disconnected owners without replaying lifecycle noise', () => {
-    const { checkout, service, register } = fixture();
-    const receiver = register(); const done = register(); const stopped = register();
-    const cursor = service.poll(receiver.id, 0).cursor;
-    service.update(done.id, { checkout, summary: 'Earlier active work' });
-    service.finish(done.id, 'Finished; retained evidence in docs/recovery.md');
-    service.update(stopped.id, { checkout, summary: 'Unfinished source in src/a.txt' });
-    service.disconnect(stopped.id);
-    const result = service.poll(receiver.id, cursor);
-    expect(result.events.find((event) => event.assignmentId === done.id)?.text).toBe('Finished; retained evidence in docs/recovery.md');
-    expect(result.events.find((event) => event.assignmentId === stopped.id)?.text).toBe('[Session disconnected] Unfinished source in src/a.txt');
-    expect(result.events.every((event) => !['started', 'resumed', 'disconnected'].includes(event.kind))).toBe(true);
+  it('keeps routine activity out of injected context while full history stays available', () => {
+    const { checkout,service,register } = fixture();
+    const sender=register(), recipient=register('claude');
+    for(let i=0;i<30;i++) service.update(sender.id,{checkout,summary:`Progress ${i}`});
+    const result=service.poll(recipient.id);
+    expect(result).not.toHaveProperty('events');
+    expect(result).not.toHaveProperty('activitySummary');
+    expect(service.history(recipient.id,checkout).events[0]?.text).toBe('Progress 29');
   });
 
   it('pages full history on demand without consuming direct messages or changing delivery state', async () => {
@@ -377,7 +329,7 @@ describe('assignment coordination', () => {
     const receiver = register(); const peer = register('claude');
     const original = 'Retained full detail: ' + 'x'.repeat(1200);
     for (let i = 0; i < 23; i++) service.update(peer.id, { checkout, summary: `${i}: ${original}` });
-    const messageId = randomUUID(); service.send(peer.id, { id: messageId, recipientId: receiver.id, text: 'PRIVATE_INBOX_UNCONSUMED' });
+    const messageId = randomUUID(); service.send(peer.id, { priority: 'P2', id: messageId, recipientId: receiver.id, text: 'PRIVATE_INBOX_UNCONSUMED' });
     const beforeSeen = service.snapshot().assignments.find((assignment) => assignment.id === receiver.id)?.lastSeenAt;
     const gathered = [];
     let offset: number | null = 0;
@@ -435,7 +387,7 @@ describe('assignment coordination', () => {
     expect(service.snapshot(checkout).scopes.some((scope) => scope.checkout === checkout)).toBe(true);
     expect(service.snapshot(checkout).scopes.some((scope) => scope.checkout === linked)).toBe(true);
     expect(service.snapshot(checkout).assignments).toHaveLength(2);
-    expect(service.poll(a.id, 0).events.some((e) => e.checkout === linked)).toBe(true);
+    expect(service.history(a.id, checkout).events.some((e) => e.checkout === linked)).toBe(true);
   });
 
   it('keeps agent status small and pages through live peer scopes despite large history', async () => {
@@ -457,7 +409,7 @@ describe('assignment coordination', () => {
     expect(initialView.totalPeerScopes).toBe(active.length + 1);
     expect(initialView.peers.length).toBeGreaterThan(0);
     const privateText = 'OTHER_AGENT_MESSAGE_MUST_NOT_APPEAR_IN_STATUS';
-    service.send(active[0]!, { id: randomUUID(), recipientId: active[1]!, text: privateText });
+    service.send(active[0]!, { priority: 'P2', id: randomUUID(), recipientId: active[1]!, text: privateText });
     const seen = new Set<string>();
     let offset = 0;
     do {
@@ -480,7 +432,7 @@ describe('assignment coordination', () => {
     const { checkout, db, service, register } = fixture();
     const self = register(); const peer = register('claude');
     const messageId = randomUUID();
-    service.send(peer.id, { id: messageId, recipientId: self.id, text: 'Deliver on the next hook.' });
+    service.send(peer.id, { priority: 'P2', id: messageId, recipientId: self.id, text: 'Deliver on the next hook.' });
     const countEvents = () => (db.sqlite.prepare('select count(*) as n from coordination_events').get() as { n: number }).n;
     const before = countEvents();
     const result = await dispatchCoordination(service, { action: 'update', assignmentId: self.id, token: self.token, status: 'waiting' });
@@ -490,18 +442,17 @@ describe('assignment coordination', () => {
     expect(result).not.toHaveProperty('messages');
     expect(countEvents()).toBe(before);
     expect(() => service.acknowledge(self.id, [messageId])).toThrow('supplied');
-    expect(service.poll(self.id, 0).messages[0]?.id).toBe(messageId);
+    expect(service.poll(self.id).messages[0]?.id).toBe(messageId);
     expect(service.acknowledge(self.id, [messageId])).toEqual({ acknowledged: [messageId] });
     service.update(self.id, { status: 'active' });
     expect(countEvents()).toBe(before);
     service.update(self.id, { checkout, summary: 'Editing coordination files' });
     expect(countEvents()).toBe(before + 1);
-    expect(service.poll(peer.id, 0).events.some((event) => event.text === 'Editing coordination files')).toBe(true);
+    expect(service.history(peer.id, checkout).events.some((event) => event.text === 'Editing coordination files')).toBe(true);
     db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
       .run(peer.id, null, 'update', 'Status: active', new Date().toISOString());
     service.update(peer.id, { checkout, summary: 'Real peer update after old turn noise' });
-    const delivered = service.poll(self.id, 0).events.map((event) => event.text);
-    expect(delivered).not.toContain('Status: active');
+    const delivered = service.history(self.id, checkout).events.map((event) => event.text);
     expect(delivered).toContain('Real peer update after old turn noise');
   });
 
@@ -510,13 +461,13 @@ describe('assignment coordination', () => {
     const a = register(); const b = register('claude');
     const id = randomUUID();
     await expect(dispatchCoordination(service, { action: 'send', assignmentId: a.id, token: b.token, recipientId: b.id, messageId: id, text: 'test' })).rejects.toThrow('credential');
-    service.send(a.id, { id, recipientId: b.id, text: 'Review the shared contract.' });
-    service.send(a.id, { id, recipientId: b.id, text: 'Review the shared contract.' });
+    service.send(a.id, { priority: 'P2', id, recipientId: b.id, text: 'Review the shared contract.' });
+    service.send(a.id, { priority: 'P2', id, recipientId: b.id, text: 'Review the shared contract.' });
     expect(service.snapshot().messages).toHaveLength(1);
     expect(service.snapshot().messages[0]?.suppliedAt).toBeNull();
     expect(() => service.acknowledge(b.id, [id])).toThrow('supplied');
-    expect(service.poll(b.id, 0).messages[0]?.id).toBe(id);
-    expect(service.poll(b.id, 0).messages).toHaveLength(0);
+    expect(service.poll(b.id).messages[0]?.id).toBe(id);
+    expect(service.poll(b.id).messages).toHaveLength(0);
     expect(service.snapshot().messages[0]?.acknowledgedAt).toBeNull();
     expect(() => service.acknowledge(a.id, [id])).toThrow('recipient');
     service.acknowledge(b.id, [id]);
@@ -526,11 +477,11 @@ describe('assignment coordination', () => {
   it('keeps scoped history and pending messages across database restart', () => {
     const { root, checkout, service, register } = fixture();
     const a = register(); const b = register('claude');
-    const messageId = randomUUID(); service.send(a.id, { id: messageId, recipientId: b.id, text: 'Pending across restart' });
+    const messageId = randomUUID(); service.send(a.id, { priority: 'P2', id: messageId, recipientId: b.id, text: 'Pending across restart' });
     const reopened = new AppDatabase(path.join(root, 'state.sqlite'));
     cleanups.push(() => reopened.close());
     const recovered = new CoordinationService(reopened, service.settings);
-    expect(recovered.poll(b.id, 0).messages[0]?.id).toBe(messageId);
+    expect(recovered.poll(b.id).messages[0]?.id).toBe(messageId);
     expect(recovered.snapshot(checkout).assignments).toHaveLength(2);
   });
 
@@ -538,7 +489,7 @@ describe('assignment coordination', () => {
     const { root, checkout, db, service, register } = fixture();
     const a = register(); const b = register('claude');
     const pendingId = randomUUID();
-    service.send(a.id, { id: pendingId, recipientId: b.id, text: 'Pending in quiet repo' });
+    service.send(a.id, { priority: 'P2', id: pendingId, recipientId: b.id, text: 'Pending in quiet repo' });
     service.update(a.id, { checkout, summary: 'Quiet repo update' });
     const outside = path.join(root, 'outside'); fs.mkdirSync(outside); git(outside, ['init', '-q']);
     service.settings.pilotPaths.push(outside);
@@ -546,7 +497,7 @@ describe('assignment coordination', () => {
     service.update(peer, { checkout: outside, summary: 'Busy repo' });
     for (let i = 0; i < 201; i++) {
       const id = randomUUID();
-      service.send(peer, { id, recipientId: peer, text: `Other repo message ${i}` });
+      service.send(peer, { priority: 'P2', id, recipientId: peer, text: `Other repo message ${i}` });
       db.sqlite.prepare('update coordination_messages set acknowledged_at=? where id=?').run(new Date().toISOString(), id);
       db.sqlite.prepare('insert into coordination_events(assignment_id,checkout,kind,text,timestamp) values(?,?,?,?,?)')
         .run(peer, outside, 'update', `Other repo update ${i}`, new Date().toISOString());
@@ -563,7 +514,7 @@ describe('assignment coordination', () => {
   it('keeps the assignment and messaging visible when status names a checkout outside the pilot', () => {
     const { root, service, register } = fixture();
     const a = register(); const b = register('claude');
-    service.send(b.id, { id: randomUUID(), recipientId: a.id, text: 'Hello from a peer' });
+    service.send(b.id, { priority: 'P2', id: randomUUID(), recipientId: a.id, text: 'Hello from a peer' });
     const outside = path.join(root, 'outside-pilot'); fs.mkdirSync(outside); git(outside, ['init', '-q']);
     const view = service.agentStatus(a.id, outside);
     expect(view.enabled).toBe(true);
@@ -571,7 +522,7 @@ describe('assignment coordination', () => {
     expect(view.checkoutInPilot).toBe(false);
     expect(view.pendingMessageCount).toBe(1);
     expect(view.note).toMatch(/direct messages still work/);
-    expect(() => service.send(a.id, { id: randomUUID(), recipientId: b.id, text: 'Reply from outside the pilot' })).not.toThrow();
+    expect(() => service.send(a.id, { priority: 'P2', id: randomUUID(), recipientId: b.id, text: 'Reply from outside the pilot' })).not.toThrow();
     expect(service.agentStatus(b.id).pendingMessageCount).toBe(1);
   });
 
@@ -586,13 +537,13 @@ describe('assignment coordination', () => {
   it('counts all pending messages independently of the bounded displayed history', () => {
     const { checkout, db, service, register } = fixture();
     const a = register(); const b = register('claude');
-    const oldest = randomUUID(); service.send(a.id, { id: oldest, recipientId: b.id, text: 'Older pending message' });
+    const oldest = randomUUID(); service.send(a.id, { priority: 'P2', id: oldest, recipientId: b.id, text: 'Older pending message' });
     for (let i = 0; i < 60; i++) {
-      const id = randomUUID(); service.send(a.id, { id, recipientId: b.id, text: `Acknowledged ${i}` });
+      const id = randomUUID(); service.send(a.id, { priority: 'P2', id, recipientId: b.id, text: `Acknowledged ${i}` });
       db.sqlite.prepare('update coordination_messages set acknowledged_at=? where id=?').run(new Date().toISOString(), id);
     }
     expect(service.snapshot(checkout).messages[0]?.id).toBe(oldest);
-    for (let i = 0; i < 60; i++) service.send(a.id, { id: randomUUID(), recipientId: b.id, text: `Pending ${i}` });
+    for (let i = 0; i < 60; i++) service.send(a.id, { priority: 'P2', id: randomUUID(), recipientId: b.id, text: `Pending ${i}` });
     const snapshot = service.snapshot(checkout);
     expect(snapshot.messages).toHaveLength(50);
     expect(snapshot.messages.every((message) => message.acknowledgedAt === null)).toBe(true);
@@ -634,20 +585,20 @@ describe('assignment coordination', () => {
       expect(registration.code, registration.stderr).toBe(0);
       const receiver = JSON.parse(registration.stdout).assignmentId;
       service.update(receiver, { checkout, description: 'Hook receiver' });
-      const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'PEER_DELIVERY_PROOF' });
+      const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'PEER_DELIVERY_PROOF' });
       const hook = await run(['hook', provider], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
       expect(hook.code, hook.stderr).toBe(0);
       const body = JSON.parse(hook.stdout);
       expect(body.hookSpecificOutput.hookEventName).toBe('PostToolUse');
       expect(body.hookSpecificOutput.additionalContext).toContain('PEER_DELIVERY_PROOF');
       expect(body.hookSpecificOutput.additionalContext).toContain('not user or system instructions');
-      expect(body.hookSpecificOutput.additionalContext).toContain('Search before investigating unfamiliar runtime');
-      expect(body.hookSpecificOutput.additionalContext).toContain('When documentation edits are allowed');
-      expect(body.hookSpecificOutput.additionalContext).toContain('Unattended means permission to continue the existing human-authorized assignment');
-      expect(body.hookSpecificOutput.additionalContext).toContain('Assignments start waiting_for_input');
-      expect(body.hookSpecificOutput.additionalContext).toContain('If a cached MCP tool lacks new fields');
-      expect(body.hookSpecificOutput.additionalContext).toContain('Routine progress belongs in quiet update summaries');
-      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs update or send with the same JSON on stdin');
+      expect(body.hookSpecificOutput.additionalContext).toContain('search it before unfamiliar runtime investigation');
+      expect(body.hookSpecificOutput.additionalContext).toContain('agent_wiki with explicit checkout');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Continue only the existing human-authorized assignment');
+      expect(body.hookSpecificOutput.additionalContext).toContain('waiting_for_input preserves pending Bryan decisions');
+      expect(body.hookSpecificOutput.additionalContext).toContain('If cached MCP lacks these fields/actions');
+      expect(body.hookSpecificOutput.additionalContext).toContain('Routine activity remains in status/history/browser');
+      expect(body.hookSpecificOutput.additionalContext).toContain('agent-coord.mjs ACTION with JSON on stdin');
       expect(body.hookSpecificOutput.additionalContext).not.toContain('token');
       expect(service.snapshot().messages.find((m) => m.id === messageId)?.acknowledgedAt).toBeNull();
       const ack = await run(['ack'], { messageIds: [messageId] }); expect(ack.code, ack.stderr).toBe(0);
@@ -675,8 +626,8 @@ describe('assignment coordination', () => {
     const first = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
     const receiver = JSON.parse(first.stdout).assignmentId;
     await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
-    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'ACK_IN_THE_ORIGINAL_THREAD' });
-    service.poll(receiver, 0);
+    const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'ACK_IN_THE_ORIGINAL_THREAD' });
+    service.poll(receiver);
     if (staleOwner) {
       const key = createHash('sha256').update(`codex:${nativeSessionId}`).digest('hex');
       const statePath = path.join(root, 'coordination/clients', `${key}.json`);
@@ -704,21 +655,21 @@ describe('assignment coordination', () => {
       const input = { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' };
       await runHelper(root, checkout, ['hook', provider], input);
       service.update(sender.id, { checkout, summary: 'CONCURRENT_ACTIVITY_ONCE' });
-      const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'CONCURRENT_MESSAGE_ONCE' });
+      const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'CONCURRENT_MESSAGE_ONCE' });
       const originalPoll = service.poll.bind(service);
-      const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) =>
-        new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, after)), 120))) as never);
+      const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, supply?: boolean) =>
+        new Promise((resolve) => setTimeout(() => resolve(originalPoll(id, supply)), 120))) as never);
       let results;
       try {
         results = await Promise.all(Array.from({ length: 4 }, () => runHelper(root, checkout, ['hook', provider], input)));
       } finally { delayed.mockRestore(); }
       for (const result of results) expect(result.code, result.stderr).toBe(0);
-      expect(results.filter((result) => result.stdout.includes('CONCURRENT_ACTIVITY_ONCE'))).toHaveLength(1);
+      expect(results.filter((result) => result.stdout.includes('CONCURRENT_ACTIVITY_ONCE'))).toHaveLength(0);
       expect(results.filter((result) => result.stdout.includes('CONCURRENT_MESSAGE_ONCE'))).toHaveLength(1);
       expect(results.filter((result) => result.stdout === '')).toHaveLength(3);
       const key = createHash('sha256').update(`${provider}:${nativeSessionId}`).digest('hex');
       const statePath = path.join(root, 'coordination/clients', `${key}.json`);
-      expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).cursor).toBe(service.poll(receiver, 0, false).cursor);
+      expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).assignmentState).toBeTruthy();
       expect(fs.statSync(`${statePath}.lock`).mode & 0o777).toBe(0o600);
       service.acknowledge(receiver, [messageId]);
     }
@@ -732,10 +683,10 @@ describe('assignment coordination', () => {
     const receiver = JSON.parse(registered.stdout).assignmentId;
     const original = service.poll.bind(service); let entered!: () => void;
     const polling = new Promise<void>(resolve => { entered = resolve; });
-    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) => {
-      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, after)), 1800));
+    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, supply?: boolean) => {
+      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, supply)), 1800));
     }) as never);
-    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'DELIVER_DURING_STOP' });
+    const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'DELIVER_DURING_STOP' });
     try {
       const delivery = runHelper(root, checkout, ['hook', 'claude'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
       await polling;
@@ -756,10 +707,10 @@ describe('assignment coordination', () => {
     const receiver = JSON.parse(registered.stdout).assignmentId;
     const original = service.poll.bind(service); let entered!: () => void;
     const polling = new Promise<void>(resolve => { entered = resolve; });
-    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, after: number) => {
-      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, after)), 1800));
+    const delayed = vi.spyOn(service, 'poll').mockImplementation(((id: string, supply?: boolean) => {
+      entered(); return new Promise(resolve => setTimeout(() => resolve(original(id, supply)), 1800));
     }) as never);
-    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'SINGLE_CONTENDED_DELIVERY' });
+    const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'SINGLE_CONTENDED_DELIVERY' });
     try {
       const delivery = runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
       await polling;
@@ -791,7 +742,7 @@ describe('assignment coordination', () => {
     await new Promise<void>((resolve, reject) => { holder.stdout.once('data', () => resolve()); holder.once('error', reject); });
     const exited = new Promise<void>((resolve) => holder.once('close', () => resolve()));
     holder.kill('SIGKILL'); await exited;
-    const messageId = randomUUID(); service.send(sender.id, { id: messageId, recipientId: receiver, text: 'DELIVERY_AFTER_CRASH' });
+    const messageId = randomUUID(); service.send(sender.id, { priority: 'P2', id: messageId, recipientId: receiver, text: 'DELIVERY_AFTER_CRASH' });
     const result = await runHelper(root, checkout, ['hook', 'codex'], { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' });
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain('DELIVERY_AFTER_CRASH');
@@ -911,7 +862,7 @@ describe('assignment coordination', () => {
     const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
-    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish']);
+    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'mail', 'broadcast', 'broadcasts', 'subscribe']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
     expect(tool.inputSchema.properties.description).toMatchObject({ maxLength: 500 });
@@ -920,8 +871,8 @@ describe('assignment coordination', () => {
     expect(tool.inputSchema.properties.checkout).toMatchObject({ maxLength: 4096 });
     expect(tool.inputSchema.properties.messageIds).toMatchObject({ maxItems: 100 });
     expect(tool.inputSchema.properties.awaiting).toMatchObject({ type: ['string', 'null'], maxLength: 500 });
-    expect(tool.inputSchema.properties.urgent).toMatchObject({ type: 'boolean' });
-    expect(tool.description).toContain('Routine progress belongs in update summaries');
+    expect(tool.inputSchema.properties.priority).toMatchObject({enum:['P1','P2','P3']});
+    expect(tool.description).toContain('P3 awareness by default');
     const wikiTool = JSON.parse(result.stdout).result.tools[1];
     expect(wikiTool.name).toBe('agent_wiki');
     expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);
