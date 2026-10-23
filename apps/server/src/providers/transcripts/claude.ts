@@ -53,6 +53,18 @@ function extractClaudeMessage(record: Record<string, unknown>): { role: Normaliz
   // instructions. They are not new turns and carry no conversation timestamp.
   if (record.type === 'api-request-blob') return undefined;
 
+  // Claude delivers human input received during a running turn as an attachment,
+  // rather than a user record. The attachment proves delivery; queue operations
+  // alone do not. Read the prompt, not its rendered system-reminder wrapper.
+  if (record.type === 'attachment') {
+    const attachment = asObject(record.attachment);
+    if (attachment?.type === 'queued_command' && attachment.commandMode === 'prompt'
+      && attachment.humanTurn === true && asObject(attachment.origin)?.kind === 'human') {
+      const text = extractClaudeText({ content: attachment.prompt }, 'user');
+      return text ? { role: 'user', text } : undefined;
+    }
+  }
+
   const progressEnvelope = asObject(asObject(record.data)?.message);
   if (progressEnvelope) {
     const nestedMessage = asObject(progressEnvelope.message) ?? progressEnvelope;

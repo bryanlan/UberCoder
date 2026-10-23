@@ -31,7 +31,7 @@ export interface ProviderConversation {
  * message filtering that affects titles/excerpts) so stale cached artifacts
  * from older parser code are re-derived instead of served forever.
  */
-export const TRANSCRIPT_PARSER_VERSION = 17;
+export const TRANSCRIPT_PARSER_VERSION = 18;
 
 /**
  * Persisted per-file parse artifacts keyed by (path, size, mtimeMs, parser

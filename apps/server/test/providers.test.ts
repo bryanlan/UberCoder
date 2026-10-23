@@ -7,6 +7,7 @@ import { CodexProvider } from '../src/providers/codex-provider.js';
 import { normalizeComparableText, stableTextHash } from '../src/lib/text.js';
 import { claudeOpeningUserText, parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
+import { mergeTimelineMessages } from '../src/sessions/timeline-merge.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import type { ActiveProject } from '../src/projects/project-service.js';
 
@@ -393,6 +394,97 @@ describe('provider history discovery', () => {
       'Latest branch A reply',
     ]);
     expect(parsed.summary.updatedAt).toBe('2026-03-07T00:00:05.000Z');
+  });
+
+  it('keeps delivered Claude mid-turn human questions after the assistant replies', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-midturn-'));
+    const filePath = path.join(tempDir, 'midturn.jsonl');
+    const prompt = 'Which strategies do you compare?\nHow do you reuse their simulations?';
+    const timestamp = '2026-10-23T13:44:51.955Z';
+    const delivered = {
+      type: 'attachment', uuid: 'midturn-human', parentUuid: 'working', timestamp,
+      attachment: { type: 'queued_command', prompt: `<pasted_content id="paste">\n${prompt}\n</pasted_content id="paste">`,
+        origin: { kind: 'human' }, commandMode: 'prompt', humanTurn: true },
+      renderedRole: 'system', rendered: [{ content: `<system-reminder>The user sent a new message: ${prompt}</system-reminder>` }],
+    };
+    try {
+      await fs.writeFile(filePath, [
+        { type: 'user', uuid: 'opening', parentUuid: null, timestamp: '2026-10-23T13:43:00.000Z',
+          message: { role: 'user', content: 'Explain the strategy search.' } },
+        { type: 'assistant', uuid: 'working', parentUuid: 'opening', timestamp: '2026-10-23T13:44:00.000Z',
+          message: { role: 'assistant', content: 'I am reading the search code.' } },
+        { type: 'queue-operation', operation: 'enqueue', timestamp, content: prompt },
+        { type: 'queue-operation', operation: 'remove', timestamp: '2026-10-23T13:45:13.295Z',
+          reason: 'absorbed_mid_turn', content: prompt },
+        delivered,
+        { type: 'assistant', uuid: 'answer', parentUuid: 'midturn-human', timestamp: '2026-10-23T13:45:50.851Z',
+          message: { role: 'assistant', content: 'Fair criticism. Here is the concrete strategy list.' } },
+        { type: 'api-request-blob', message: { role: 'user', content: prompt } },
+      ].map((record) => JSON.stringify(record)).join('\n'));
+      const parsed = await parseClaudeConversationFile({ filePath, provider: 'claude', projectSlug: 'demo', conversationRef: 'midturn' });
+      expect(parsed.displayMessages.map((message) => [message.role, message.text])).toEqual([
+        ['user', 'Explain the strategy search.'], ['assistant', 'I am reading the search code.'],
+        ['user', prompt], ['assistant', 'Fair criticism. Here is the concrete strategy list.'],
+      ]);
+      expect(parsed.displayMessages[2]).toMatchObject({ timestamp, source: 'history-file', lifecycle: 'durable' });
+      expect(parsed.summary.rawMetadata).toMatchObject({ lastUserAt: timestamp, lastUserTextHash: stableTextHash(normalizeComparableText(prompt)) });
+      expect(claudeOpeningUserText(delivered)).toBe(prompt);
+      const merged = mergeTimelineMessages({ allMessages: parsed.messages, visibleMessages: parsed.displayMessages,
+        liveMessages: [{ id: 'live-question', provider: 'claude', role: 'user', text: prompt,
+          timestamp: '2026-10-23T13:44:52.013Z', conversationRef: 'midturn', source: 'user-input', lifecycle: 'pending' }] });
+      expect(merged.mergedMessages.filter((message) => message.text === prompt)).toEqual([parsed.displayMessages[2]]);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('selects a Claude branch ending in a delivered human question without reviving sibling questions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-midturn-branch-'));
+    const filePath = path.join(tempDir, 'branches.jsonl');
+    const question = (uuid: string, parentUuid: string, prompt: string, timestamp: string) => ({
+      type: 'attachment', uuid, parentUuid, timestamp,
+      attachment: { type: 'queued_command', origin: { kind: 'human' }, humanTurn: true, commandMode: 'prompt', prompt },
+    });
+    try {
+      await fs.writeFile(filePath, [
+        { type: 'user', uuid: 'opening', parentUuid: null, timestamp: '2026-10-23T13:43:00.000Z', message: { role: 'user', content: 'Opening question' } },
+        question('sibling', 'opening', 'Abandoned question', '2026-10-23T13:44:00.000Z'),
+        { type: 'assistant', uuid: 'old-answer', parentUuid: 'sibling', timestamp: '2026-10-23T13:45:00.000Z', message: { role: 'assistant', content: 'Abandoned answer' } },
+        question('selected', 'opening', 'Current question', '2026-10-23T13:46:00.000Z'),
+      ].map((record) => JSON.stringify(record)).join('\n'));
+      const parsed = await parseClaudeConversationFile({ filePath, provider: 'claude', projectSlug: 'demo', conversationRef: 'branches' });
+      expect(parsed.displayMessages.map((message) => message.text)).toEqual(['Opening question', 'Current question']);
+      expect(parsed.summary.excerpt).toBe('Current question');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not promote Claude queue operations or automated attachments into human history', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-claude-queued-internal-'));
+    const filePath = path.join(tempDir, 'internal.jsonl');
+    const attachments = [
+      { type: 'queued_command', prompt: 'Task result', origin: { kind: 'task-notification' }, commandMode: 'task-notification' },
+      { type: 'queued_command', prompt: 'Automation', origin: { kind: 'automation' }, commandMode: 'prompt', humanTurn: true },
+      { type: 'queued_command', prompt: 'No human marker', origin: { kind: 'human' }, commandMode: 'prompt' },
+      { type: 'queued_command', prompt: 'Not a human turn', origin: { kind: 'human' }, commandMode: 'prompt', humanTurn: false },
+      { type: 'queued_command', prompt: 'No origin', commandMode: 'prompt', humanTurn: true },
+      { type: 'hook_additional_context', prompt: 'Hook prose', origin: { kind: 'human' }, commandMode: 'prompt', humanTurn: true },
+    ];
+    try {
+      await fs.writeFile(filePath, [
+        { type: 'user', uuid: 'opening', parentUuid: null, timestamp: '2026-10-23T13:43:00.000Z', message: { role: 'user', content: 'Real question' } },
+        ...attachments.map((attachment, index) => ({ type: 'attachment', uuid: `internal-${index}`,
+          parentUuid: index ? `internal-${index - 1}` : 'opening', timestamp: '2026-10-23T13:44:00.000Z', attachment })),
+        { type: 'assistant', uuid: 'answer', parentUuid: `internal-${attachments.length - 1}`, timestamp: '2026-10-23T13:45:00.000Z', message: { role: 'assistant', content: 'Real answer' } },
+        { type: 'queue-operation', operation: 'enqueue', timestamp: '2026-10-23T13:46:00.000Z', content: 'Unsent question' },
+      ].map((record) => JSON.stringify(record)).join('\n'));
+      const parsed = await parseClaudeConversationFile({ filePath, provider: 'claude', projectSlug: 'demo', conversationRef: 'internal' });
+      expect(parsed.messages.map((message) => message.text)).toEqual(['Real question', 'Real answer']);
+      expect(parsed.summary.updatedAt).toBe('2026-10-23T13:45:00.000Z');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it.each([false, true])('ignores Claude API request copies without changing the active branch (copy UUIDs: %s)', async (copyUuids) => {

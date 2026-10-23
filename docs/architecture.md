@@ -221,6 +221,15 @@ prompt matching. They cannot supply prompt hashes, excerpts or conversation acti
 The parser version invalidates persisted transcript summaries and search entries after this
 filter changes; provider transcript files remain unchanged.
 
+Claude records human messages delivered during a running turn as `attachment`
+records with `queued_command`, `commandMode: prompt`, `humanTurn: true` and
+`origin.kind: human`. The adapter reads their prompt as a durable user message,
+using the native timestamp and the selected parent-linked branch. The rendered
+system-reminder wrapper stays out of the chat. Bare queue operations do not prove
+delivery, and automated attachments do not become user messages. These delivered
+questions remain visible after the assistant replies, when the temporary live
+input copy is removed. Parser versioning refreshes existing summaries and search.
+
 Claude compaction summaries are provider bookkeeping, not submitted prompts. The Claude
 history parser follows `logicalParentUuid` at `compact_boundary` records to retain earlier
 messages on the selected branch. It displays `isCompactSummary` records as durable
