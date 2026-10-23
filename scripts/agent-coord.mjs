@@ -64,18 +64,24 @@ function hookSession(input) {
 }
 
 function writePrivate(file, value, createOnly = false) {
+  const content = `${JSON.stringify(value)}\n`;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   for (const candidate of [directory, path.dirname(file)]) {
     if (fs.lstatSync(candidate).isSymbolicLink()) throw new Error('Coordination state directory must not be a symlink.');
   }
   try {
-    if (fs.lstatSync(file).isSymbolicLink()) throw new Error('Coordination state file must not be a symlink.');
+    const stat = fs.lstatSync(file);
+    if (stat.isSymbolicLink()) throw new Error('Coordination state file must not be a symlink.');
     if (createOnly) return;
-    if (value.token && !createOnly && JSON.parse(fs.readFileSync(file, 'utf8')).token !== value.token) throw new Error('Session credential changed while this hook ran.');
+    const previous = fs.readFileSync(file, 'utf8');
+    if (value.token && JSON.parse(previous).token !== value.token) throw new Error('Session credential changed while this hook ran.');
+    // Stable owner locators and delivery state need no rename or durable sync.
+    // Repeated syncs can spend the hook deadline before its first inbox RPC.
+    if (previous === content && (stat.mode & 0o777) === 0o600) return;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const temporary = `${file}.${randomUUID()}.tmp`;
   const fd = fs.openSync(temporary, 'wx', 0o600);
-  try { fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  try { fs.writeFileSync(fd, content); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   try {
     if (createOnly) {
       // Publish one complete seed atomically, before making the first RPC.

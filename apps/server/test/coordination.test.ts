@@ -20,12 +20,12 @@ function git(cwd: string, args: string[]): string {
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function runHelper(root: string, checkout: string, args: string[], input: unknown) {
+function runHelper(root: string, checkout: string, args: string[], input: unknown, environment: NodeJS.ProcessEnv = {}) {
   const helper = process.env.AGENT_COORD_HELPER ?? path.resolve('..', '..', 'scripts', 'agent-coord.mjs');
   const configPath = path.join(root, 'host-config.json');
   fs.writeFileSync(configPath, JSON.stringify({ runtimeDir: root, coordination: { enabled: true, pilotPaths: [checkout] } }));
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, [helper, ...args], { env: { ...process.env, CODEX_THREAD_ID: '', AGENT_COORD_RUNTIME: root, AGENT_CONSOLE_CONFIG: configPath }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [helper, ...args], { env: { ...process.env, CODEX_THREAD_ID: '', AGENT_COORD_RUNTIME: root, AGENT_CONSOLE_CONFIG: configPath, ...environment }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject); child.on('close', (code) => resolve({ code, stdout, stderr })); child.stdin.end(JSON.stringify(input));
@@ -58,6 +58,37 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('keeps unchanged hooks free of durable state writes while persisting changed delivery state', async () => {
+    const { root, checkout, service } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID();
+    const registration = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    const receiver = JSON.parse(registration.stdout).assignmentId;
+    const counter = path.join(root, 'sync-count.txt'), preload = path.join(root, 'count-syncs.mjs');
+    fs.writeFileSync(preload, `import fs from 'node:fs'; const sync=fs.fsyncSync;
+      fs.fsyncSync=(fd)=>{fs.appendFileSync(${JSON.stringify(counter)},'sync\\n');return sync(fd);};`);
+    const environment = { NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${preload}` };
+    const input = { session_id: nativeSessionId, cwd: checkout, hook_event_name: 'PostToolUse' };
+    const count = () => fs.existsSync(counter) ? fs.readFileSync(counter, 'utf8').trim().split('\n').length : 0;
+    const first = await runHelper(root, checkout, ['hook', 'codex'], input, environment);
+    expect(first.code, first.stderr).toBe(0);
+    const initialSyncs = count(); expect(initialSyncs).toBeGreaterThan(0);
+    const statePath = path.join(root, 'coordination/clients', createHash('sha256').update(`codex:${nativeSessionId}`).digest('hex') + '.json');
+    const credential = JSON.parse(fs.readFileSync(statePath, 'utf8')).token;
+    const quiet = await runHelper(root, checkout, ['hook', 'codex'], input, environment);
+    expect(quiet.code, quiet.stderr).toBe(0); expect(quiet.stdout).toBe(''); expect(count()).toBe(initialSyncs);
+    fs.chmodSync(statePath, 0o644);
+    const repaired = await runHelper(root, checkout, ['hook', 'codex'], input, environment);
+    expect(repaired.code, repaired.stderr).toBe(0); expect(count()).toBeGreaterThan(initialSyncs);
+    expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
+    const beforeChange = count();
+    service.update(receiver, { continuation: 'unattended' });
+    const changed = await runHelper(root, checkout, ['hook', 'codex'], input, environment);
+    expect(changed.code, changed.stderr).toBe(0); expect(count()).toBeGreaterThan(beforeChange);
+    expect(JSON.parse(fs.readFileSync(statePath, 'utf8')).token).toBe(credential);
+    expect(fs.statSync(statePath).mode & 0o777).toBe(0o600);
+  });
+
   it('exposes publish, subscribe and filtered broadcast reads through the actual CLI and socket', async()=>{
     const {root,checkout,service}=fixture();const ipc=await startCoordinationSocket(service,root);cleanups.push(()=>ipc.close());
     expect((await runHelper(root,checkout,['register'],{provider:'codex',nativeSessionId:randomUUID(),pid:process.pid,cwd:checkout})).code).toBe(0);

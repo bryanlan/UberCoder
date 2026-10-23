@@ -158,6 +158,11 @@ default one-hour expiry is for transient awareness.
 
 New hook processes adopt the trial immediately. Existing MCP connections can keep their cached schema; use the canonical CLI path supplied by the hook for priority/validity and new actions, or reconnect MCP. Retired fields fail with migration guidance, without restoring the old urgency behavior. Manual Stop and human decision boundaries apply to every priority.
 
+Hooks leave byte-identical owner locators and delivery state untouched. Actual state
+changes still use private atomic publication and durable sync, preserving credentials
+and delivery serialization. This keeps repeated disk syncs from consuming the hook
+deadline before its inbox request begins.
+
 Trial measurement uses the read-only audit CLI (`--hours`, optionally `--usage`). Its `priorityTrial` section counts accepted priorities/origins and expiry without exposing message bodies. Compare actual model wakes over comparable work windows and inspect P1 next-action impact and blocking latency; transport acknowledgements do not prove efficiency or token savings.
 
 SQLite metadata stores permission, revision, deduplicated signals and attempts. Each input attempt is recorded before transport. Missing native acknowledgement after 30 seconds, an interrupted submission or ambiguous input blocks automatic replay across restart. A human pause during readiness or text entry prevents automatic input; a work-permission revision also prevents unattended-work Enter. Incoming wake requests received while a drain runs request another pass; new signals arriving during input remain pending. The continuation notice asks the agent to read its inbox, reconcile work and results, preserve all constraints and continue the assignment.
