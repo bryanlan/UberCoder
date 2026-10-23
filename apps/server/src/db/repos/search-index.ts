@@ -81,6 +81,10 @@ export class SearchIndexRepo {
   private readonly deleteConversationRowsStatement: Database.Statement;
   private readonly deleteConversationStateStatement: Database.Statement;
   private readonly upsertConversationStateStatement: Database.Statement;
+  private readonly conversationChunksStatement: Database.Statement;
+  private readonly deleteChunkStatement: Database.Statement;
+  private readonly deleteRowStatement: Database.Statement;
+  private readonly updateConversationMetadataStatement: Database.Statement;
 
   constructor(private readonly sqlite: Database.Database) {
     this.reader = new ReadQueryWorker(sqlite.name);
@@ -116,6 +120,19 @@ export class SearchIndexRepo {
         size = excluded.size,
         mtime_ms = excluded.mtime_ms
     `);
+    this.conversationChunksStatement = sqlite.prepare(`select rowid,message_id,role,timestamp,text
+      from conversation_search_fts where rowid in (select fts_rowid from conversation_search_rows
+        where project_slug=? and provider=? and conversation_ref=?)`);
+    this.deleteChunkStatement = sqlite.prepare('delete from conversation_search_fts where rowid=?');
+    this.deleteRowStatement = sqlite.prepare('delete from conversation_search_rows where fts_rowid=?');
+    // Conversation metadata belongs to the lowest owned row. Other rows carry
+    // message content, so an appended message need not reindex the whole history.
+    this.updateConversationMetadataStatement = sqlite.prepare(`update conversation_search_fts set
+      conversation_title=@conversation_title,project_display_name=@project_display_name,
+      project_tags=@project_tags,project_path=@project_path,conversation_kind=@conversation_kind,
+      conversation_updated_at=@conversation_updated_at,is_bound=@is_bound
+      where rowid=(select min(fts_rowid) from conversation_search_rows
+        where project_slug=@project_slug and provider=@provider and conversation_ref=@conversation_ref)`);
   }
 
   hasRows(): boolean {
@@ -190,11 +207,30 @@ export class SearchIndexRepo {
     state: ConversationSearchStateRow,
   ): void {
     const tx = this.sqlite.transaction(() => {
-      this.deleteConversationChunksStatement.run(projectSlug, provider, conversationRef);
-      this.deleteConversationRowsStatement.run(projectSlug, provider, conversationRef);
-      for (const chunk of chunks) {
-        this.insertChunk(chunk);
+      const remaining = new Map<string, number[]>();
+      const identity = (messageId: unknown, role: unknown, timestamp: unknown, text: unknown) =>
+        JSON.stringify([messageId, role, timestamp, text]);
+      for (const row of this.conversationChunksStatement.all(projectSlug, provider, conversationRef) as SqliteRow[]) {
+        const key = identity(row.message_id, row.role, row.timestamp, row.text);
+        const matches = remaining.get(key) ?? [];
+        matches.push(Number(row.rowid)); remaining.set(key, matches);
       }
+      for (const chunk of chunks) {
+        const matches = remaining.get(identity(chunk.messageId, chunk.role, chunk.timestamp, chunk.text));
+        if (matches?.length) matches.pop();
+        else this.insertChunk(chunk);
+      }
+      for (const matches of remaining.values()) for (const rowid of matches) {
+        this.deleteChunkStatement.run(rowid); this.deleteRowStatement.run(rowid);
+      }
+      const metadata = chunks[0];
+      if (metadata) this.updateConversationMetadataStatement.run({
+        project_slug: projectSlug, provider, conversation_ref: conversationRef,
+        conversation_title: metadata.conversationTitle, project_display_name: metadata.projectDisplayName,
+        project_tags: metadata.projectTags.join(' '), project_path: metadata.projectPath ?? null,
+        conversation_kind: metadata.conversationKind, conversation_updated_at: metadata.conversationUpdatedAt,
+        is_bound: boolAsInt(metadata.isBound),
+      });
       this.upsertConversationStateStatement.run(
         projectSlug,
         provider,
@@ -220,7 +256,7 @@ export class SearchIndexRepo {
     this.sqlite.prepare(`
       update conversation_search_fts
       set conversation_title = ?
-      where rowid in (select fts_rowid from conversation_search_rows
+      where rowid = (select min(fts_rowid) from conversation_search_rows
         where project_slug = ? and provider = ? and conversation_ref = ?)
     `).run(title, projectSlug, provider, conversationRef);
   }
@@ -234,7 +270,8 @@ export class SearchIndexRepo {
     this.sqlite.prepare(`
       update conversation_search_fts
       set project_display_name = ?, project_path = ?, project_tags = ?
-      where rowid in (select fts_rowid from conversation_search_rows where project_slug = ?)
+      where rowid in (select min(fts_rowid) from conversation_search_rows where project_slug = ?
+        group by provider,conversation_ref)
     `).run(input.displayName, input.path, input.tags.join(' '), input.projectSlug);
   }
 
@@ -255,26 +292,29 @@ export class SearchIndexRepo {
         select
           conversation_search_fts.rowid as fts_rowid,
           conversation_search_fts.project_slug,
-          conversation_search_fts.project_display_name,
-          conversation_search_fts.project_path,
+          metadata.project_display_name,
+          metadata.project_path,
           conversation_search_fts.provider,
           conversation_search_fts.conversation_ref,
-          conversation_search_fts.conversation_kind,
-          conversation_search_fts.conversation_title,
-          conversation_search_fts.conversation_updated_at,
-          conversation_search_fts.is_bound,
+          metadata.conversation_kind,
+          metadata.conversation_title,
+          metadata.conversation_updated_at,
+          metadata.is_bound,
           conversation_search_fts.role,
           conversation_search_fts.timestamp,
           case
-            when julianday(?) - julianday(conversation_search_fts.conversation_updated_at) < 5 then 0
-            when julianday(?) - julianday(conversation_search_fts.conversation_updated_at) < 15 then 1
-            when julianday(?) - julianday(conversation_search_fts.conversation_updated_at) < 30 then 2
-            when julianday(?) - julianday(conversation_search_fts.conversation_updated_at) < 60 then 3
+            when julianday(?) - julianday(metadata.conversation_updated_at) < 5 then 0
+            when julianday(?) - julianday(metadata.conversation_updated_at) < 15 then 1
+            when julianday(?) - julianday(metadata.conversation_updated_at) < 30 then 2
+            when julianday(?) - julianday(metadata.conversation_updated_at) < 60 then 3
             else 4
           end as recency_bucket,
-          bm25(conversation_search_fts, 3.0, 2.0, 1.5, 1.0) as rank
+          bm25(conversation_search_fts.conversation_search_fts, 3.0, 2.0, 1.5, 1.0) as rank
         from conversation_search_fts
-        where conversation_search_fts match ?
+        join conversation_search_fts metadata on metadata.rowid=(select min(fts_rowid)
+          from conversation_search_rows where project_slug=conversation_search_fts.project_slug
+            and provider=conversation_search_fts.provider and conversation_ref=conversation_search_fts.conversation_ref)
+        where conversation_search_fts.conversation_search_fts match ?
         ${projectFilter}
       ),
       ranked_matches as (
@@ -300,7 +340,7 @@ export class SearchIndexRepo {
         ranked_matches.timestamp,
         ranked_matches.recency_bucket,
         conversation_search_fts.text as matched_text,
-        snippet(conversation_search_fts, 3, '', '', ' ... ', 40) as snippet,
+        snippet(conversation_search_fts.conversation_search_fts, 3, '', '', ' ... ', 40) as snippet,
         ranked_matches.rank,
         bs.id as bound_session_id
       from ranked_matches

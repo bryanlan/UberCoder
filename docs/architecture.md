@@ -68,6 +68,15 @@ whole-table update scan. Refreshes commit and yield between conversations. Searc
 derived state in the existing database; private-copy performance evidence gates activation.
 Keep a consistent SQLite backup before migration: older binaries reject schema 15.
 
+Conversation refreshes retain text rows with the same message ID, role, timestamp and
+content, removing only vanished rows and inserting only changed or new chunks. The
+lowest owned FTS row holds the current shared conversation metadata. Search reads
+title, project metadata and recency from that row even when another chunk matched;
+appending a message therefore updates metadata once instead of rewriting all historical
+text. Ownership, content and the file fingerprint commit atomically. Existing indexes
+already have a valid metadata owner, so this change needs no schema migration. An older
+binary needs a full search refresh after rollback to restore its duplicated metadata.
+
 FTS searches use one lazy, read-only SQLite worker connection, so cold queries cannot
 block the server's coordination and session event loop. The owning connection still
 performs all writes. Each connection has a 64 MiB page-cache budget; the read worker

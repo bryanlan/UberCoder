@@ -111,6 +111,15 @@ The backend checks every 15 seconds. A ready unattended assignment with unfinish
 
 The sender judges importance. There is no automatic urgency for supervisor handoffs, finish notices, disconnects, overdue waits or broadcasts. The old `urgent` field and waiting-inbox cooldown have been removed.
 
+Choose P1 when the recipient must act now to unblock critical work, and state the
+blocker and needed action. A new commit, ordinary progress, a finished job or a result
+ready for review does not by itself justify a wake. Use P2 for the next available
+turn and P3 for optional awareness. For example, a decision needed to release a blocked
+critical deployment can be P1; a passing test run or reviewable branch normally uses
+P2; unchanged background status belongs in activity or P3. Batch related information
+and do not resend unchanged status. Before awaiting a critical external result,
+explicitly select P1 for its future notification; P2 cannot start an idle turn.
+
 | Priority | Wake | Delivery |
 | --- | --- | --- |
 | P1 | Guarded wake if asleep/idle | Full batch at the next safe hook; reserve for urgently blocking critical work |
@@ -132,6 +141,20 @@ Examples for `node scripts/agent-coord.mjs ACTION` with JSON on stdin:
 ```
 
 `action:broadcast` publishes one shared post with `category`, `text`, optional `checkout`, and optional `validFor`. It creates no direct inbox copies and never wakes agents. Categories are `releases` (publication/integration), `resources` (shared execution capacity), `contracts` (interfaces/artifact formats), `ownership` (responsibility/handoffs), and `incidents` (runtime failures/recovery). `broadcasts` reads twenty posts with optional category/checkout and offset. A repository filter includes global posts. `subscribe` sets category notices and optional checkout; an empty categories array unsubscribes. Subscriptions are opt-in. Interested agents receive category counts through the same P3 notice and decide whether to browse. Broadcast expiry deletes the post body and retains only its idempotency receipt. Publish only shared operational context and references, not private client content.
+
+At assignment start, choose relevant category subscriptions, optionally scoped to its
+checkout. Shared compute users choose `resources`; release owners choose `releases`;
+shared-interface work uses `contracts`. Choose `ownership` or `incidents` when relevant.
+Use `categories:[]` to opt out explicitly. Hooks and tool help explain this choice;
+the broker never silently enrolls an agent. For example:
+
+```json
+{"categories":["resources","contracts"],"checkout":"/absolute/checkout"}
+```
+
+Send this request to `node scripts/agent-coord.mjs subscribe`. Use week-long validity
+for a result, decision or handoff that must remain useful after an hour away; the
+default one-hour expiry is for transient awareness.
 
 New hook processes adopt the trial immediately. Existing MCP connections can keep their cached schema; use the canonical CLI path supplied by the hook for priority/validity and new actions, or reconnect MCP. Retired fields fail with migration guidance, without restoring the old urgency behavior. Manual Stop and human decision boundaries apply to every priority.
 

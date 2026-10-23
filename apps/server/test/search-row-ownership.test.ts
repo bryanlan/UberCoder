@@ -74,7 +74,66 @@ it('rolls back FTS, mapping and file state together when an insert fails', () =>
   const before = db.sqlite.prepare('select rowid,* from conversation_search_fts').all();
   db.sqlite.exec(`create trigger reject_new_mapping before insert on conversation_search_rows
     begin select raise(abort,'fixture insert rejected'); end`);
-  expect(() => db.searchIndex.replaceConversation('demo', 'codex', 'a', [chunk('a')], { size: 2 })).toThrow('fixture insert rejected');
+  expect(() => db.searchIndex.replaceConversation('demo', 'codex', 'a', [{ ...chunk('a'), text: 'replacement content' }], { size: 2 })).toThrow('fixture insert rejected');
+  expect(db.sqlite.prepare('select rowid,* from conversation_search_fts').all()).toEqual(before);
+  expect(db.searchIndex.getConversationStates('demo', 'codex').get('a')?.size).toBe(1);
+  assertOwnership(db);
+});
+
+it('preserves existing text rows on append and uses current metadata even for an old matching chunk', async () => {
+  const db = fixture();
+  const original = { ...chunk('a'), conversationUpdatedAt: '2020-01-01T00:00:00Z' };
+  const anchor = { ...original, messageId: 'anchor', text: 'Unrelated anchor content' };
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [anchor, original], { size: 2 });
+  const first = db.sqlite.prepare("select rowid from conversation_search_fts where message_id='a'").get();
+  const current = { ...original, conversationTitle: 'Current title', conversationUpdatedAt: '2026-10-23T00:00:00Z' };
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [{ ...current, messageId: 'anchor', text: anchor.text }, current,
+    { ...current, messageId: 'new', text: 'New unrelated message' }], { size: 3 });
+  expect(db.sqlite.prepare("select rowid from conversation_search_fts where message_id='a'").get()).toEqual(first);
+  const result = (await db.searchIndex.search('evidence', 10, { now: '2026-10-23T00:00:00Z' }))[0];
+  expect(result).toMatchObject({ conversationTitle: 'Current title', conversationUpdatedAt: current.conversationUpdatedAt,
+    recencyBucket: '0-5-days' });
+  expect(db.searchIndex.getConversationStates('demo', 'codex').get('a')?.size).toBe(3);
+  assertOwnership(db);
+});
+
+it('moves metadata ownership when the first chunk is removed and refreshes metadata for retained matches', async () => {
+  const db = fixture();
+  const original = { ...chunk('a'), conversationUpdatedAt: '2026-10-23T00:00:00Z' };
+  const retained = { ...original, messageId: 'retained', text: 'retained needle' };
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [original, retained], { size: 2 });
+  const row = db.sqlite.prepare("select rowid from conversation_search_fts where message_id='retained'").get();
+  const current = { ...retained, conversationTitle: 'After truncation', conversationUpdatedAt: '2020-01-01T00:00:00Z' };
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [current], { size: 1 });
+  expect(db.sqlite.prepare('select rowid from conversation_search_fts').get()).toEqual(row);
+  expect((await db.searchIndex.search('needle', 10, { now: '2026-10-23T00:00:00Z' }))[0])
+    .toMatchObject({ conversationTitle: 'After truncation', conversationUpdatedAt: current.conversationUpdatedAt,
+      recencyBucket: '60-plus-days' });
+  expect(await db.searchIndex.search('evidence', 10)).toEqual([]);
+  assertOwnership(db);
+});
+
+it('retains duplicate content identities without leaking stale removed rows', () => {
+  const db = fixture();
+  const original = chunk('a');
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [original, original], { size: 2 });
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [original], { size: 1 });
+  expect(db.sqlite.prepare('select count(*) n from conversation_search_fts').get()).toEqual({ n: 1 });
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [], { size: 0 });
+  expect(db.sqlite.prepare('select count(*) n from conversation_search_fts').get()).toEqual({ n: 0 });
+  assertOwnership(db);
+});
+
+it('rolls back retained metadata, new chunks and ownership when file-state publication fails', () => {
+  const db = fixture();
+  const original = chunk('a');
+  db.searchIndex.replaceConversation('demo', 'codex', 'a', [original], { size: 1 });
+  const before = db.sqlite.prepare('select rowid,* from conversation_search_fts').all();
+  db.sqlite.exec(`create trigger reject_file_state before update on conversation_search_state
+    begin select raise(abort,'fixture state rejected'); end`);
+  const current = { ...original, conversationTitle: 'New title' };
+  expect(() => db.searchIndex.replaceConversation('demo', 'codex', 'a',
+    [current, { ...current, messageId: 'new', text: 'new evidence' }], { size: 2 })).toThrow('fixture state rejected');
   expect(db.sqlite.prepare('select rowid,* from conversation_search_fts').all()).toEqual(before);
   expect(db.searchIndex.getConversationStates('demo', 'codex').get('a')?.size).toBe(1);
   assertOwnership(db);
