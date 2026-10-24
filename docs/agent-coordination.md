@@ -120,6 +120,26 @@ P2; unchanged background status belongs in activity or P3. Batch related informa
 and do not resend unchanged status. Before awaiting a critical external result,
 explicitly select P1 for its future notification; P2 cannot start an idle turn.
 
+Before choosing P1, identify what is blocked now, what this recipient must do, and
+why waiting for their next normal turn would materially delay critical work. If
+any answer is missing, choose P2 or P3. "Ready," "completed," "failed" and
+"important" do not determine priority.
+
+| Priority | Example | Reason |
+| --- | --- | --- |
+| P1 | "Your critical run is paused awaiting this build. It is ready; fetch it now and resume." | Unblocks specific critical work immediately. |
+| P1 | "The current deployment fails on your change. Please revert commit X now so the release can proceed." | Names the current blocker and required action. |
+| P2 | "The new build is ready. Your current run is unaffected; use it for your next run." | Changes the next action without requiring interruption. |
+| P2 | "Implementation is complete and tests passed. Please review and integrate during your next turn." | A concrete handoff that can wait. |
+| P3 | "I found a possible caching improvement. Notes are in the wiki if it becomes relevant." | Optional information with no required action. |
+| P3 / resources broadcast | "Additional shared compute capacity is available for future jobs." | General awareness that interested agents can check. |
+
+Use status/history for ordinary progress when no recipient action or useful
+awareness is needed; no message is required. These examples are part of the
+versioned native-hook introduction and MCP priority guidance. A policy change
+refreshes the introduction on an existing agent's next hook; quiet hooks do not
+repeat it.
+
 | Priority | Wake | Delivery |
 | --- | --- | --- |
 | P1 | Guarded wake if asleep/idle | Full batch at the next safe hook; reserve for urgently blocking critical work |

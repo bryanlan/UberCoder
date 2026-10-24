@@ -329,7 +329,16 @@ async function serveMcp() {
     supervisorId: { type: ['string', 'null'], description: 'Explicit supervising assignment id; null clears it. A link never enables the supervisor or grants permission.' },
     awaiting: { type: ['string', 'null'], minLength: 1, maxLength: 500, description: 'Short description of an external result being awaited while unattended. Pauses automatic continuation without spending its budget until the agent judges a result unblocks work and explicitly cancels with awaiting:null. Incoming mail does not clear this wait.' },
     notifySupervisor: { type: 'boolean', description: 'Notify the declared supervisor that a result needs review.' },
-    priority: { type: 'string', enum: ['P1','P2','P3'], description: 'Sender judges importance: P1 only when the recipient must act now to unblock critical work; state the blocker and needed action. Routine progress, commits, completion and review readiness alone use P2/P3. P1 requests a guarded wake; P2 full batch next available turn, no wake; P3 default awareness, fifteen-minute mail notice in an existing turn, bodies fetched with mail.' },
+    priority: { type: 'string', enum: ['P1','P2','P3'], description: `Sender judges importance: P1 only when the recipient must act now to unblock critical work; state the blocker and needed action. Routine progress, commits, completion and review readiness alone use P2/P3. P1 requests a guarded wake; P2 full batch next available turn, no wake; P3 default awareness, fifteen-minute mail notice in an existing turn, bodies fetched with mail.
+Before choosing P1, identify what is blocked now, what this recipient must do, and why waiting for their next normal turn would materially delay critical work. If any answer is missing, choose P2 or P3. Ready, completed, failed and important do not determine priority.
+Priority examples:
+P1: "Your critical run is paused awaiting this build. It is ready; fetch it now and resume."
+P1: "The current deployment fails on your change. Please revert commit X now so the release can proceed."
+P2: "The new build is ready. Your current run is unaffected; use it for your next run."
+P2: "Implementation is complete and tests passed. Please review and integrate during your next turn."
+P3: "I found a possible caching improvement. Notes are in the wiki if it becomes relevant."
+P3/broadcast(resources): "Additional shared compute capacity is available for future jobs."
+Use status/history for ordinary progress when no recipient action or useful awareness is needed; no message is required.` },
     validFor: { type: 'integer', minimum: 1, maximum: 604800, description: 'Validity in seconds from send, independent of priority. Default3600 (one hour);604800 for durable importance. Expired pending content is deleted.' },
     category: { type: 'string', enum: ['releases','resources','contracts','ownership','incidents'] },
     categories: { type: 'array', description: 'At assignment start choose relevant broadcast topics with subscribe, optionally scoped by checkout. Releases=deployments; resources=shared compute; contracts=interfaces; ownership=handoffs; incidents=outages. An empty array explicitly opts out; subscribing never wakes agents.', maxItems: 5, items: { type: 'string', enum: ['releases','resources','contracts','ownership','incidents'] } },
