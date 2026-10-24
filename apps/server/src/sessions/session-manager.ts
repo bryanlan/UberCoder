@@ -2199,7 +2199,8 @@ export class SessionManager {
     if (payload.keys?.some(key => key === 'Escape' || key === 'C-c')) this.cancelQueuedInputs(sessionId);
     if (!payload.submissionId && payload.keys?.length) this.inputQueue.stage(sessionId, undefined);
     if (payload.submissionId) {
-      const run = this.runtimes.run(sessionId, 'queueInput', () => this.queueInputInternal(sessionId, payload));
+      const revision = this.inputQueue.revision(sessionId);
+      const run = this.runtimes.run(sessionId, 'queueInput', () => this.queueInputInternal(sessionId, payload, revision));
       this.activeInputCommands.add(run);
       try { return await run; } finally { this.activeInputCommands.delete(run); }
     }
@@ -2284,7 +2285,7 @@ export class SessionManager {
     return true;
   }
 
-  private async queueInputInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+  private async queueInputInternal(sessionId: string, payload: KeystrokeSendPayload, revision: number): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
     const text = payload.submittedText?.trim();
     if (!text || payload.keys?.length !== 1 || payload.keys[0] !== 'Enter') {
@@ -2292,14 +2293,17 @@ export class SessionManager {
     }
     let record = this.inputQueue.get(sessionId, payload.submissionId!);
     if (record && record.text !== text) throw new SessionInputRejectedError('This submission ID already belongs to another message.');
+    const interrupted = revision !== this.inputQueue.revision(sessionId);
     if (!record) {
       if (!session.shouldRestore || !['bound', 'starting'].includes(session.status)) {
         throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
       }
       record = { requestId: payload.submissionId!, text, initialText: payload.text?.trim() === text ? undefined : payload.text,
-        requestedAt: nowIso(), state: 'queued', reason: 'Waiting for the session to accept the message.' };
+        requestedAt: nowIso(), state: interrupted ? 'cancelled' : 'queued',
+        reason: interrupted ? 'Stopped before submission.' : 'Waiting for the session to accept the message.' };
       this.saveQueuedInput(sessionId, record);
     }
+    if (interrupted) throw new SessionInputRejectedError('This send was cancelled by a later Stop or native input. The draft was not submitted.');
     await this.drainQueuedInputInternal(sessionId);
     record = this.inputQueue.get(sessionId, record.requestId)!;
     this.scheduleInputDrain(sessionId);
@@ -2509,8 +2513,21 @@ export class SessionManager {
         }
         return;
       }
-      this.runtimeState(sessionId).submittedTurnAt = nowIso();
+      const previousSubmission = this.runtimeState(sessionId).submittedTurnAt;
+      const submittedAt = nowIso();
+      this.runtimeState(sessionId).submittedTurnAt = submittedAt;
       await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['Enter']));
+      // Enter can edit the native draft (for example Claude's backslash-newline
+      // shortcut). A successful key transport alone does not confirm submission.
+      const accepted = await this.waitForScreenMatch(session, hashScreen(finalScreen), combinedTextKeySettleWaitMs(record.text),
+        candidate => candidate.inputActive && !candidate.inputText.trim());
+      if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
+      if (!accepted?.inputActive || accepted.inputText.trim()) {
+        if (this.runtimeState(sessionId).submittedTurnAt === submittedAt) {
+          this.runtimeState(sessionId).submittedTurnAt = previousSubmission;
+        }
+        throw new Error('Enter did not clear the native composer.');
+      }
       const inputAt = nowIso();
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
       if (updated.conversationRef.startsWith('pending:')) {

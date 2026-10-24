@@ -83,6 +83,43 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
 }
 
 for (const provider of ['claude', 'codex'] as const) {
+  for (const mobile of [false, true]) {
+    test(`${provider} ${mobile ? 'mobile' : 'desktop'} Stop bypasses a pending send and preserves its draft`, async ({ page }, testInfo) => {
+      if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+      const calls = await openConversation(page, provider, 'queue');
+      let release!: () => void;
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const pending: SessionKeystrokeRequest[] = [];
+      await page.route('**/api/sessions/*/keys', async route => {
+        const body = route.request().postDataJSON() as SessionKeystrokeRequest;
+        if (!body.keys?.includes('Enter')) return route.fallback();
+        pending.push(body);
+        await blocked;
+        await route.fulfill({ status: 409, json: { error: 'This send was cancelled by a later Stop.' } });
+      });
+      const textbox = page.getByRole('textbox');
+      const draft = 'Keep this message while I interrupt';
+      await textbox.fill(draft);
+      if (mobile) await page.getByRole('button', { name: 'Send message' }).click();
+      else await textbox.press('Enter');
+      await expect.poll(() => pending.length).toBe(1);
+      await expect(textbox).toHaveAttribute('readonly', '');
+      try {
+        const stop = page.getByRole('button', { name: 'Interrupt session' });
+        await expect(stop).toBeVisible();
+        await expect(stop).toBeEnabled();
+        await stop.click();
+        await expect.poll(() => calls.inputCalls).toEqual([{ sessionId: 'original-session', body: { keys: ['Escape'] } }]);
+        expect(calls.bindCalls).toEqual([]);
+        expect(calls.releaseCalls).toEqual([]);
+        await page.screenshot({ path: testInfo.outputPath('interrupt-pending-send.png') });
+      } finally { release(); }
+      await expect(textbox).toHaveValue(draft);
+      await expect(textbox).toBeEditable();
+      expect(pending).toHaveLength(1);
+    });
+  }
+
   test(`${provider} input rejection preserves the draft and live binding without restarting or replaying`, async ({ page }) => {
     const calls = await openConversation(page, provider);
     const draft = 'keep building; here is my answer';

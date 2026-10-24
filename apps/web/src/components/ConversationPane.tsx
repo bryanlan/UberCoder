@@ -297,6 +297,7 @@ function LiveSessionInputBridge({
   const resizeSessionRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const inputGenerationRef = useRef(0);
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
   const bypassPreviewTextRef = useRef<string | undefined>(undefined);
@@ -458,6 +459,7 @@ function LiveSessionInputBridge({
   }, [bridgeText, textBypassEnabled]);
 
   function queueKeystrokes(payload: SessionKeystrokeRequest, attachImages = true): Promise<boolean> {
+    const generation = inputGenerationRef.current;
     const withImages = attachImages && payload.keys?.includes('Enter') && clipboardImages.items.length > 0;
     if (withImages && !clipboardImages.ready) {
       setImageSubmitError('Wait for the images to upload, or retry/remove failed images before sending.');
@@ -467,7 +469,9 @@ function LiveSessionInputBridge({
     const request = withImages ? { ...payload, imageIds: clipboardImages.images.map(image => image.id) } : payload;
     const task = keyQueueRef.current
       .then(async () => {
+        if (generation !== inputGenerationRef.current) return false;
         const response = await onSendKeystrokes(sessionId, request);
+        if (generation !== inputGenerationRef.current) return false;
         if (response?.queuedInput && textBypassEnabled) stopTextBypassForQueue();
         if (response && withImages) clipboardImages.clear();
         if (response && mobileCollapsible && mobileInputPanel === 'reply' && captureRef.current
@@ -792,13 +796,15 @@ function LiveSessionInputBridge({
 
   async function submitTextBypassEnter(): Promise<void> {
     await runBridgeAction(async () => {
+      const generation = inputGenerationRef.current;
       const submittedText = (bypassPreviewTextRef.current ?? '').trim();
       keepBypassSelectionPinnedRef.current = true;
       const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
       const optimisticMessage = !nativeSelectionActive && submittedText && !submittedText.startsWith('/')
         ? onLocalSubmittedText(sessionId, submittedText) : undefined;
       const restore = () => {
-        restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
+        if (generation !== inputGenerationRef.current) restoreDraftSubmitPreview(previewBeforeSubmit);
+        else restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
         if (optimisticMessage) {
           onDiscardLocalSubmittedText(optimisticMessage.id);
         }
@@ -823,6 +829,16 @@ function LiveSessionInputBridge({
   }
 
   async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
+    if (specialKey === 'Escape') {
+      // Stop must reach the server even while a previous send is pending.
+      // Never paste a held draft or flush buffered typing before interruption.
+      inputGenerationRef.current += 1;
+      if (textBypassEnabled) stopTextBypassForQueue();
+      const stop = onSendKeystrokes(sessionId, { keys: ['Escape'] });
+      keyQueueRef.current = stop.then(() => undefined, () => undefined);
+      await stop;
+      return;
+    }
     // Keep held chat drafts separate from explicit numeric menu choices.
     // Text Bypass retains its ordered flush and consumed-preview handling below.
     if (source === 'button' && (nativeSelectionActive || (mobileCollapsible && mobileInputPanel === 'controls')) && !textBypassEnabled) {
@@ -998,15 +1014,21 @@ function LiveSessionInputBridge({
     window.addEventListener('pointercancel', endResize);
   }
 
+  const stopButton = <button type="button" aria-label="Interrupt session" title="Stop the active turn without sending your draft"
+    onPointerDown={event => event.preventDefault()} onClick={() => { void handleSpecialKey('Escape'); }}
+    className="min-h-11 rounded-xl border border-red-400/40 px-3 text-xs font-medium text-red-200 hover:bg-red-950">Stop</button>;
+
   function renderBridgeHeader(title: string, summary?: string): ReactNode {
     if (mobileCollapsible) {
       return <div className="flex h-12 items-center justify-between px-3">
         <span className="text-xs text-slate-400">{mobileInputPanel === 'controls' ? 'Session controls' : textBypassEnabled ? 'Reply · Text Bypass' : 'Reply'}</span>
+        {stopButton}
         <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-10 w-11 items-center justify-center text-slate-300"><X className="h-4 w-4" /></button>
       </div>;
     }
     return <div className="mb-2 flex items-center justify-between gap-3 py-1">
       <div className="min-w-0 flex-1"><div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>{summary && <div className="mt-1 truncate text-sm text-slate-200">{summary}</div>}</div>
+      {stopButton}
       <button type="button" aria-expanded={bridgeOpen} aria-label={bridgeOpen ? 'Collapse live input bridge' : 'Expand live input bridge'} onClick={() => { void handleToggleBridgePanel(); }} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', bridgeOpen && 'rotate-180')} /></button>
       <button type="button" aria-label={mobileChromeHidden ? 'Show banners' : 'Hide banners'} onClick={onToggleMobileChrome} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', !mobileChromeHidden && 'rotate-180')} /></button>
     </div>;
@@ -1196,6 +1218,11 @@ function LiveSessionInputBridge({
               }
             }}
             onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                void handleSpecialKey('Escape');
+                return;
+              }
               if (bridgeBusy) {
                 event.preventDefault();
                 return;
@@ -1273,6 +1300,7 @@ function LiveSessionInputBridge({
             )}
           />
           {mobileCollapsible && <button type="button" aria-label="Send message" disabled={bridgeBusy || (!bridgeText.trim() && clipboardImages.items.length === 0)} onPointerDown={event => event.preventDefault()} onClick={() => { void handleSpecialKey('Enter', 'button'); }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-500 text-slate-950 disabled:opacity-40"><Send className="h-5 w-5" /></button>}
+          {mobileCollapsible && stopButton}
           {mobileCollapsible && <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-11 w-8 shrink-0 items-center justify-center text-slate-400"><ChevronDown className="h-5 w-5" /></button>}
           </div>}
           {(!mobileCollapsible || mobileInputPanel === 'controls') && (
@@ -1281,7 +1309,7 @@ function LiveSessionInputBridge({
                 <button
                   key={button.label}
                   type="button"
-                  disabled={bridgeBusy}
+                  disabled={bridgeBusy && button.keys[0] !== 'Escape'}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => {
                     void handleSpecialKey(button.keys[0]!, 'button');

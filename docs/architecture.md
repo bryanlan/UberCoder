@@ -347,6 +347,13 @@ Restart may resume observation of typed text, but an interrupted or uncertain En
 the conversation and never causes automatic replay. Queue state is projected on
 the bound session and is excluded from transcript/search content until submission.
 Pending human messages defer automatic peer input and automatic session sleep.
+Stop and Escape send only the interrupt key, without synchronizing a local draft
+or flushing buffered Text Bypass input. They remain available during a pending send.
+The browser cancels unsent commands from before the interrupt; the server also
+cancels human sends still waiting to enter the session command queue. After Enter,
+the human-message journal confirms an empty native composer before recording
+delivery. If Enter leaves text in the composer, delivery requires review and is
+never retried automatically.
 A confirmed unsent Console notice may yield to a queued human message only with
 matching staged proof, binding, ownership and exact composer text. On an idle
 Claude prompt, its native clear-input control removes the entire notice; line

@@ -529,6 +529,79 @@ describe('ConversationPane live input bridge', () => {
 
   const nativeModelMenu = 'Select model\n❯ 1. Default\n2. Opus\nEnter to confirm · Esc to cancel';
 
+  it.each(['Esc', 'keyboard', 'Interrupt session'])('%s interrupts without sending or changing a held draft', async control => {
+    const send = vi.fn().mockResolvedValue({ session: boundSession() });
+    renderPane({ onSendKeystrokes: send });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'Keep this draft local' } });
+    if (control === 'keyboard') fireEvent.keyDown(textbox, { key: 'Escape' });
+    else fireEvent.click(screen.getByRole('button', { name: control }));
+    await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith('session-1', { keys: ['Escape'] }));
+    expect(textbox).toHaveValue('Keep this draft local');
+    expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.change(textbox, { target: { value: '' } });
+  });
+
+  it.each(['Esc', 'keyboard', 'Interrupt session'])('%s remains available during a pending send', async control => {
+    const pending = deferred<SessionInputResponse>();
+    const send = vi.fn().mockImplementation((_session, request) => request.keys?.includes('Escape')
+      ? Promise.resolve({ session: boundSession() }) : pending.promise);
+    renderPane({ onSendKeystrokes: send });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'A pending message' } });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(textbox).toHaveAttribute('readonly');
+    if (control === 'keyboard') fireEvent.keyDown(textbox, { key: 'Escape' });
+    else {
+      expect(screen.getByRole('button', { name: control })).toBeEnabled();
+      fireEvent.click(screen.getByRole('button', { name: control }));
+    }
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(send).toHaveBeenLastCalledWith('session-1', { keys: ['Escape'] });
+    pending.resolve({ session: boundSession() });
+    await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+    expect(textbox).toHaveValue('A pending message');
+    fireEvent.change(textbox, { target: { value: '' } });
+  });
+
+  it('interrupts Text Bypass without flushing buffered text or a queued Enter', async () => {
+    const pending = deferred<SessionInputResponse>();
+    const send = vi.fn().mockImplementation((_session, request) => request.keys?.includes('Escape')
+      ? Promise.resolve({ session: boundSession() }) : pending.promise);
+    renderPane({ onSendKeystrokes: send });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.keyDown(textbox, { key: 'x' });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt session' }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    pending.resolve({ session: boundSession() });
+    await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+    expect(send.mock.calls.map(call => call[1])).toEqual([{ text: 'x', deferScreenUpdate: true }, { keys: ['Escape'] }]);
+    expect(textbox).toHaveValue('x');
+    expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.change(textbox, { target: { value: '' } });
+  });
+
+  it('keeps unflushed Text Bypass input as an editable local draft after Stop', async () => {
+    const send = vi.fn().mockResolvedValue({ session: boundSession() });
+    renderPane({ onSendKeystrokes: send });
+    const textbox = screen.getByRole('textbox');
+    fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.keyDown(textbox, { key: 'x' });
+    fireEvent.click(screen.getByRole('button', { name: 'Interrupt session' }));
+    await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith('session-1', { keys: ['Escape'] }));
+    expect(screen.getByRole('button', { name: 'Text Bypass' })).toHaveAttribute('aria-pressed', 'false');
+    expect(textbox).toHaveValue('x');
+    fireEvent.change(textbox, { target: { value: 'edited locally' } });
+    expect(send).toHaveBeenCalledTimes(1);
+    fireEvent.change(textbox, { target: { value: '' } });
+  });
+
   it.each(['claude', 'codex'] as const)('%s menu buttons send only keys and retain the separate draft', async (provider) => {
     const send = vi.fn().mockResolvedValue({ session: boundSession() });
     const view = renderPane({ sessionOverrides: { provider }, onSendKeystrokes: send, inputActive: false,
@@ -656,7 +729,7 @@ describe('ConversationPane live input bridge', () => {
     } finally { vi.useRealTimers(); upload.mockRestore(); }
   });
 
-  it('flushes buffered bypass text before cancelling a menu', async () => {
+  it('cancels a menu without flushing buffered bypass text', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       const send = vi.fn().mockResolvedValue({ session: boundSession() });
@@ -665,12 +738,10 @@ describe('ConversationPane live input bridge', () => {
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Text Bypass' })); });
       fireEvent.keyDown(textbox, { key: '2' });
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Esc' })); });
-      expect(send.mock.calls.map(call => call[1])).toEqual([
-        { text: '2', deferScreenUpdate: true }, { keys: ['Escape'] },
-      ]);
-      expect(textbox).toHaveValue('');
+      expect(send.mock.calls.map(call => call[1])).toEqual([{ keys: ['Escape'] }]);
+      expect(textbox).toHaveValue('2');
       await act(async () => { await vi.advanceTimersByTimeAsync(45); });
-      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenCalledTimes(1);
     } finally { vi.useRealTimers(); }
   });
 

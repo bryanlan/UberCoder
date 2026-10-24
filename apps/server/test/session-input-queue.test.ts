@@ -17,6 +17,7 @@ const approval = 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel ·
 class InputTmux extends FakeTmux {
   acceptText = true;
   failEnter = false;
+  acceptEnter = true;
   clearInput = true;
   pid = 4241;
   onText?: () => Promise<void>;
@@ -42,7 +43,7 @@ class InputTmux extends FakeTmux {
     if (this.clearInput && keys.includes('C-c') && /^› ?\S/m.test(this.paneText)) this.paneText = ready();
     if (keys.includes('Enter')) {
       await this.onEnter?.();
-      this.paneText = busy;
+      this.paneText = this.acceptEnter ? busy : this.paneText.replace(/\\(?=\n)/, '');
       if (this.failEnter) throw new Error('transport disconnected after Enter');
     }
   }
@@ -93,6 +94,50 @@ async function fixture(providerId: 'codex' | 'claude' = 'codex', recovery = fals
 }
 
 describe('durable human input queue', () => {
+  it.each(['codex', 'claude'] as const)('does not report %s delivery or replay Enter when the message remains in the composer', async providerId => {
+    const f = await fixture(providerId);
+    f.tmux.acceptEnter = false;
+    const id = randomUUID();
+    const result = await f.submit('a message ending in \\', id);
+    expect(result.recordedUserInput).toBeUndefined();
+    expect(result.queuedInput?.state).toBe('needs_review');
+    expect(f.tmux.paneText).toContain('a message ending in');
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+    await f.restart();
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(f.tmux.sentKeys).toEqual([['Enter']]);
+    expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs?.[0]?.state).toBe('needs_review');
+  });
+
+  it('Stop cancels a human send that has not yet acquired the session command lock', async () => {
+    const f = await fixture();
+    let release!: () => void;
+    let captured!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { captured = resolve; });
+    const capture = f.tmux.capturePane.bind(f.tmux);
+    vi.spyOn(f.tmux, 'capturePane').mockImplementationOnce(async () => {
+      captured();
+      await blocked;
+      return capture();
+    });
+    const earlier = f.manager.sendKeystrokes(f.session.id, { keys: ['Left'] });
+    await started;
+    const requestId = randomUUID();
+    const pending = f.submit('must not arrive after Stop', requestId);
+    const cancelled = expect(pending).rejects.toThrow('cancelled by a later Stop');
+    const stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    release();
+    await Promise.all([earlier, cancelled, stop]);
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.tmux.sentKeys).toEqual([['Left'], ['Escape']]);
+    expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
+    // Retrying the same request ID cannot resurrect the cancelled request.
+    await f.submit('must not arrive after Stop', requestId);
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.tmux.sentKeys).toEqual([['Left'], ['Escape']]);
+  });
+
   it.each(['codex', 'claude'] as const)('hands %s human follow-ups to the running native turn once and in order', async (providerId) => {
     const f = await fixture(providerId, false, new InputTmux(), true);
     const active = (text = '') => providerId === 'codex'
