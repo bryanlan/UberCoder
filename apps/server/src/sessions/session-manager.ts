@@ -1,3 +1,4 @@
+import { assignmentTask, dispatchEligible } from '../coordination/tasks.js';
 import fs from 'node:fs';
 import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
@@ -556,11 +557,13 @@ export class SessionManager {
               || (stagedKeys.has(key) && ['deferred', 'submitting'].includes(attempt.status)));
           const messages = this.db.sqlite.prepare(`select id, supplied_at as suppliedAt from coordination_messages
             where recipient_id=? and acknowledged_at is null order by created_at, id`).all(recipient.id) as Array<{ id: string; suppliedAt: string | null }>;
-          const eligible = messages.filter(message => messagePolicy(this.db,message.id).priority === 'P1').flatMap((message) => {
+          const eligible = messages.filter(message => messagePolicy(this.db,message.id).priority === 'P1'
+            || (!message.suppliedAt && dispatchEligible(this.db, message.id))).flatMap((message) => {
             const initialKey = peerWakeAttemptKey(message.id), stored = this.db.meta.get(initialKey);
             if (!stored) return [{ id: message.id, key: initialKey }];
             const initial = JSON.parse(stored) as PeerWakeAttempt, key = peerWakeFollowupKey(message.id);
             if (retryable(initial, initialKey)) return [{ id: message.id, key: initialKey }];
+            if (messagePolicy(this.db, message.id).origin === 'dispatch') return []; // Explicit dispatch starts at most one turn.
             const followupText = this.db.meta.get(key);
             if (initial.status === 'submitted' && followupText) {
               return retryable(JSON.parse(followupText) as PeerWakeAttempt, key) ? [{ id: message.id, key }] : [];
@@ -609,6 +612,7 @@ export class SessionManager {
         // A confirmed unsent work notice finishes its original attempt, even
         // after restart or when that attempt is the last one in the budget.
         const peerResponse = pending().length > 0;
+        if ((!peerResponse || stagedWork) && ['done', 'blocked'].includes(assignmentTask(this.db, recipient.id)?.state ?? '')) return;
         // Inbox turns do not advance the work budget while delivering the result.
         // Preserve uncertain work submissions as blocked even on an inbox turn.
         const preserveWorkBudget = stagedWork || (peerResponse && priorControl.recovery?.status !== 'submitting');
@@ -705,8 +709,9 @@ export class SessionManager {
         const submissionBlock = (): WakeBlock | undefined => {
           const latest = this.db.boundSessions.getById(session.id);
           expireMessages(this.db);
-          if (!workResponse && !messages.some(m => !!this.db.sqlite.prepare('select 1 from coordination_messages where id=? and acknowledged_at is null').get(m.id)))
-            return {code:'inbox_settled',reason:'All P1 messages expired or were acknowledged before submission.'};
+          if (!workResponse && !messages.some(m => !!this.db.sqlite.prepare('select 1 from coordination_messages where id=? and acknowledged_at is null').get(m.id)
+            && (messagePolicy(this.db, m.id).priority === 'P1' || dispatchEligible(this.db, m.id))))
+            return {code:'inbox_settled',reason:'All wake messages expired, were acknowledged or lost dispatch eligibility before submission.'};
           if (this.stopped) return { code: 'shutdown', reason: 'The Console backend is stopping.' };
           if (peerWakePaused(this.db, recipient.id)) {
             const details = this.db.meta.get(peerWakePauseDetailsKey(recipient.id));
@@ -714,7 +719,8 @@ export class SessionManager {
             return { code: pause?.code ?? 'paused_without_reason', reason: pause?.reason ?? 'Automatic input is paused; the existing record predates pause-reason capture.' };
           }
           const permission = continuationControl(this.db, recipient.id);
-          if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision))
+          if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision
+            || ['done', 'blocked'].includes(assignmentTask(this.db, recipient.id)?.state ?? '')))
             return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
           const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
           if (!state || (workResponse && state.status === 'finished')) return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };

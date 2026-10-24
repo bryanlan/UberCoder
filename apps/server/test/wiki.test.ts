@@ -266,7 +266,10 @@ describe('repository wiki', () => {
     const token = randomUUID();
     const assignmentId = coordination.register({ provider: 'codex', nativeSessionId: randomUUID(), token, pid: process.pid, cwd: checkout }).assignmentId!;
     const input = { action: 'write', assignmentId, token, checkout, title: 'Home', body: 'From an agent', baseRevision: null };
-    expect(dispatchWiki(coordination, wiki, input)).toMatchObject({ page: { body: 'From an agent' } });
+    const saved = dispatchWiki(coordination, wiki, input);
+    expect(saved).toMatchObject({ status: 'saved', page: { title: input.title, revision: expect.any(Number) } });
+    expect(saved).not.toHaveProperty('page.body');
+    expect(dispatchWiki(coordination, wiki, { ...input, action: 'read' })).toMatchObject({ page: { body: 'From an agent' } });
     expect(() => dispatchWiki(coordination, wiki, { ...input, token: randomUUID(), body: 'Tampered' })).toThrow('credential');
     expect(() => dispatchWiki(coordination, wiki, { ...input, baseRevision: undefined, body: 'Changed' })).toThrow('baseRevision is required');
     expect(() => dispatchWiki(coordination, wiki, { ...input, checkout: undefined, body: 'Changed' })).toThrow();

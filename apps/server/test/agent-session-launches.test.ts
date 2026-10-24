@@ -88,7 +88,7 @@ describe('Granted real-session launch pipeline',()=>{
     expect(f.tmux.created).toHaveLength(0);
   });
 
-  it('wakes a supervisor after granted worker launches, an ordinary turn end and notifySupervisor', async () => {
+  it('wakes a supervisor after granted worker launches, an ordinary turn end and action-needed BLOCKED', async () => {
     const f = await fixture();
     await f.launch({ title: 'Lane one', supervisorId: f.actor }); await f.launch({ title: 'Lane two', supervisorId: f.actor });
     const sessions = f.launches.status(f.actor).requests.map(request => request.session!);
@@ -104,7 +104,7 @@ describe('Granted real-session launch pipeline',()=>{
     expect(peerWakePaused(f.db, f.actor)).toBe(false);
     f.tmux.sent.length = 0;
     f.tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
-    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', notifySupervisor: true, priority:'P1' });
+    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(continuationControl(f.db, f.actor).continuation).toBe('unattended');

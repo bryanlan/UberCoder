@@ -18,7 +18,7 @@ const text = z.string().trim().min(1);
 // so Grok is not launched, pasted into, or indexed as a Console conversation.
 const coordinationProviders = ['codex', 'claude', 'grok'] as const;
 const inputSchema = z.object({
-  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe']),
+  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
@@ -29,7 +29,8 @@ const inputSchema = z.object({
   description: text.max(500).optional(), summary: text.max(2000).optional(),
   status: z.enum(['active', 'waiting']).optional(),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
-  notifySupervisor: z.boolean().optional(), awaiting: text.max(500).nullable().optional(),
+  task: z.object({ deliverable: text.max(500).optional(), doneWhen: text.max(500).optional(), evidencePath: text.max(1000).optional(), state: z.enum(['working', 'blocked', 'done']).optional(), actionNeeded: text.max(500).nullable().optional() }).strict().optional(),
+  expectedTaskRevision: z.number().int().nonnegative().optional(), awaiting: text.max(500).nullable().optional(),
   offset: z.number().int().nonnegative().default(0),
   recipientId: z.string().uuid().optional(), messageId: z.string().uuid().optional(),
   text: text.max(2000).optional(), messageIds: z.array(z.string().uuid()).max(100).optional(),
@@ -46,7 +47,12 @@ const wikiSchema = z.object({
 
 export async function dispatchCoordination(service: CoordinationService, raw: unknown) {
   if (raw && typeof raw === 'object' && 'urgent' in raw) throw new Error('urgent has been retired. Choose priority:P1/P2/P3 and optional validFor seconds. Use the canonical agent-coord.mjs CLI if MCP is cached.');
+  if (raw && typeof raw === 'object' && 'notifySupervisor' in raw) throw new Error('notifySupervisor has been retired. Use update with a complete task record and task.state:done or blocked with actionNeeded. Routine progress stays in status/history. Use canonical agent-coord.mjs if MCP is cached.');
   const input = inputSchema.parse(raw);
+  if (input.action === 'dispatch' && (input.priority !== undefined || input.validFor !== undefined
+    || (input.task?.state !== undefined && input.task.state !== 'working') || input.task?.actionNeeded)) {
+    throw new Error('Dispatch activates a working task once within existing authority. Omit priority, validFor and blocked/done state; informational mail uses send.');
+  }
   if (input.action === 'broadcast' && input.priority !== undefined) throw new Error('Broadcast posts use P3 category awareness and never wake recipients. Omit priority.');
   const need = <T>(value: T | undefined, name: string): T => {
     if (value === undefined) throw new Error(`${name} is required.`);
@@ -63,6 +69,8 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     case 'broadcast': return service.board.publish(id, { id: need(input.messageId,'messageId'), text: need(input.text,'text'), category: need(input.category,'category'), repository: input.checkout ? service.repository(input.checkout) : null, validFor: input.validFor });
     case 'broadcasts': return service.board.list({ category: input.category, repository: input.checkout ? service.repository(input.checkout) : undefined, offset: input.offset }, id);
     case 'subscribe': return service.board.subscribe(id, need(input.categories,'categories'), input.checkout ? service.repository(input.checkout) : null);
+    case 'tasks': return service.taskBoard(id, input.offset);
+    case 'dispatch': return service.dispatch(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), expectedTaskRevision: need(input.expectedTaskRevision, 'expectedTaskRevision'), task: input.task });
     case 'update': return service.update(id, input);
     case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
@@ -85,10 +93,10 @@ export function dispatchWiki(coordination: CoordinationService, wiki: WikiServic
     case 'search': return { notice, ...wiki.search(input.checkout, need(input.query, 'query'), actor) };
     case 'read': return { notice, page: wiki.read(input.checkout, need(input.title, 'title'), actor, input.revision) };
     case 'history': return { notice, ...wiki.history(input.checkout, need(input.title, 'title'), actor, input.offset) };
-    case 'write': return { notice, page: wiki.write(input.checkout, {
+    case 'write': { const page = wiki.write(input.checkout, {
       title: need(input.title, 'title'), body: need(input.body, 'body'),
       baseRevision: need(input.baseRevision, 'baseRevision'), summary: input.summary,
-    }, actor) };
+    }, actor); return { notice, page: { title: page.title, revision: page.revision }, status: 'saved' }; }
   }
 }
 

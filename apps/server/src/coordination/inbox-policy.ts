@@ -19,7 +19,7 @@ export function hasInboxSpace(db: AppDatabase, recipientId: string, priority: Me
 export const messageHash = (senderId: string, recipientId: string, text: string) =>
   createHash('sha256').update(JSON.stringify([senderId, recipientId, text])).digest('hex');
 
-export interface MessagePolicy { senderId: string; recipientId: string; createdAt: string; origin: 'direct'|'handoff'|'overdue'|'migrated'; priority: MessagePriority; expiresAt: string; hash: string; suppliedAt?:string; acknowledgedAt?:string; expired?: boolean }
+export interface MessagePolicy { senderId: string; recipientId: string; createdAt: string; origin: 'direct'|'handoff'|'overdue'|'migrated'|'dispatch'; priority: MessagePriority; expiresAt: string; hash: string; suppliedAt?:string; acknowledgedAt?:string; expired?: boolean }
 export function messagePolicy(db: AppDatabase, id: string): MessagePolicy {
   const value = db.meta.get(messagePolicyKey(id));
   if (!value) throw new Error(`Missing message policy for ${id}.`);

@@ -16,7 +16,7 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
   const data = query.data;
   if (!data?.enabled) return null;
   const activeAssignments = data.assignments.filter((assignment) => assignment.status === 'active' || assignment.status === 'waiting'
-    || (assignment.status === 'disconnected' && assignment.recovery));
+    || (assignment.status === 'disconnected' && assignment.recovery) || !!assignment.task);
   const label = (id: string) => {
     const assignment = data.assignments.find((item) => item.id === id);
     return assignment ? `${assignment.provider}: ${assignment.description}` : id.slice(0, 8);
@@ -34,6 +34,13 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
               <div><strong>{assignment.description}</strong> <span className="text-slate-400">· {assignment.provider} · {assignment.status}</span></div>
               <div className="text-xs text-slate-400">{assignment.continuation === 'unattended' ? 'Unattended continuation enabled' : 'Waiting for human input'}
                 {assignment.supervisorId && <> · Supervisor: {label(assignment.supervisorId)}</>}</div>
+              {assignment.task && <div className="mt-1 rounded border border-slate-700 p-2 text-xs" aria-label="Worker task">
+                <div><strong>{assignment.task.state}</strong> · {assignment.task.deliverable}</div>
+                <div>Done when: {assignment.task.doneWhen}</div>
+                <div className="break-all">Evidence: {assignment.task.evidencePath}</div>
+                {assignment.task.actionNeeded && <div className="text-amber-200">Action needed: {assignment.task.actionNeeded}</div>}
+                <div className="text-slate-400">Owner: {label(assignment.task.ownerId)} · Last moved: {new Date(assignment.task.updatedAt).toLocaleString()} · Revision {assignment.task.revision}</div>
+              </div>}
               {assignment.recovery && <p role={assignment.recovery.status === 'stalled' ? 'alert' : 'status'} className="text-xs text-amber-200">
                 {assignment.recovery.reason} · {assignment.recovery.attempts}/3 continuations
               </p>}
@@ -42,10 +49,10 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
           ))}
         </ul>
         {data.messages.length > 0 && <div>
-          <p className="mb-2 font-medium">Peer messages</p>
+          <p className="mb-2 font-medium">Coordination messages</p>
           <ul className="space-y-3" aria-label="Peer messages">
             {data.messages.map((message) => <li key={message.id} className="rounded-lg bg-slate-800 p-2">
-              <div className="text-xs text-slate-400">{label(message.senderId)} → {label(message.recipientId)}</div>
+              <div className="text-xs text-slate-400">{message.channel === 'worker' ? 'Worker report' : message.channel === 'supervisor' ? 'Supervisor instruction' : 'Peer message'} · {message.priority} · {label(message.senderId)} → {label(message.recipientId)}</div>
               <p className="whitespace-pre-wrap break-words">{message.text}</p>
               <div className="text-xs text-slate-400">{new Date(message.createdAt).toLocaleTimeString()} · {message.acknowledgedAt ? 'Acknowledged' : message.suppliedAt ? 'Offered to runtime; awaiting acknowledgement' : 'Queued'}</div>
             </li>)}

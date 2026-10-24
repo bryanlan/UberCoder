@@ -96,12 +96,60 @@ describe('Cooperative inbox priority scheduling', () => {
   });
   it('does not automatically promote supervisor results or finish notices',async()=>{
     const f=await fixture();f.service.update(f.recipient,{continuation:'waiting_for_input'});
-    f.service.update(f.sender,{supervisorId:f.recipient,summary:'Progress',notifySupervisor:true});
+    f.service.update(f.sender,{supervisorId:f.recipient,summary:'Progress',task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }});
     f.service.finish(f.sender,'Finished result');
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([]);
-    expect(f.service.poll(f.recipient).messages).toEqual([]);
-    expect(f.service.mail(f.recipient).messages).toHaveLength(2);
+    expect(f.service.poll(f.recipient).messages).toHaveLength(2);
+    expect(f.service.mail(f.recipient).messages).toHaveLength(0);
+  });
+  it('keeps blocked task state from scheduling continuation or changing its recovery budget', async () => {
+    const f = await fixture(); backdate(f.db, f.session.id, 10);
+    f.service.update(f.recipient, { task: { deliverable: 'Existing repair', doneWhen: 'Proof accepted', evidencePath: 'docs/proof.md', state: 'blocked', actionNeeded: 'Provide missing build' } });
+    const before = continuationControl(f.db, f.recipient);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(continuationControl(f.db, f.recipient)).toEqual(before);
+  });
+  it.each(['codex', 'claude'] as const)('activates %s once for explicit task dispatch without P1 or a restart', async providerId => {
+    const f = await fixture(providerId);
+    f.service.update(f.recipient, { supervisorId: f.sender });
+    const control = continuationControl(f.db, f.recipient);
+    const command = { id: randomUUID(), recipientId: f.recipient, expectedTaskRevision: 0,
+      task: { deliverable: 'Complete existing assigned work', doneWhen: 'Proof saved', evidencePath: 'docs/proof.md' } };
+    f.service.dispatch(f.sender, command);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(continuationControl(f.db, f.recipient)).toEqual(control);
+    expect(f.db.boundSessions.getById(f.session.id)?.pid).toBe(f.session.pid);
+    f.service.dispatch(f.sender, command);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(f.service.poll(f.recipient).messages[0]).toMatchObject({ channel: 'supervisor', priority: 'P2' });
+  });
+  it('rechecks dispatch authority immediately before Enter and preserves a changed human decision', async () => {
+    const f = await fixture('claude'); f.service.update(f.recipient, { supervisorId: f.sender });
+    const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    quiet.dispatch(f.sender, { id: randomUUID(), recipientId: f.recipient, expectedTaskRevision: 0,
+      task: { deliverable: 'Existing work', doneWhen: 'Proof', evidencePath: 'docs/proof.md' } });
+    const literal = f.tmux.sendLiteralText.bind(f.tmux);
+    f.tmux.sendLiteralText = async (...args) => {
+      await literal(...args); quiet.update(f.recipient, { continuation: 'waiting_for_input' });
+    };
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).not.toContain('Enter');
+    expect(continuationControl(f.db, f.recipient).continuation).toBe('waiting_for_input');
+  });
+  it('does not dispatch through Stop or provider drafts', async () => {
+    const f = await fixture('claude'); f.service.update(f.recipient, { supervisorId: f.sender });
+    const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    quiet.dispatch(f.sender, { id: randomUUID(), recipientId: f.recipient, expectedTaskRevision: 0,
+      task: { deliverable: 'Existing work', doneWhen: 'Proof', evidencePath: 'docs/proof.md' } });
+    f.tmux.paneText = claudeReady.replace('❯ ', '❯ Human draft');
+    await f.manager.wakePendingAssignments(); expect(f.tmux.sent).toEqual([]);
+    f.tmux.paneText = claudeReady;
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    await f.manager.wakePendingAssignments(); expect(f.tmux.sent).not.toContain(PEER_WAKE_PROMPT);
   });
   it('does not submit Enter when the last P1 expires during literal entry',async()=>{
     const f=await fixture('claude');f.service.update(f.recipient,{continuation:'waiting_for_input'});
@@ -1240,7 +1288,7 @@ describe('Unattended assignment continuation', () => {
     expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged', notice: 'unattended' });
     expect(continuationControl(f.db, f.recipient).recovery).toMatchObject({ status: 'scheduled', attempts });
     await f.manager.stop(); memory = 'MemAvailable: 8000000 kB';
-    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
     const handoff = f.db.sqlite.prepare('select id from coordination_messages where recipient_id=?').get(f.recipient) as { id: string };
     const restarted = createRecoveryManager(f.db, f.tmux, f.root, new RealtimeEventBus(), claudeProvider, providerSettings, options);
     try {

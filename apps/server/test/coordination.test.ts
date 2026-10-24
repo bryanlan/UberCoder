@@ -101,6 +101,27 @@ describe('assignment coordination', () => {
     expect(service.snapshot().messages).toEqual([]);
   });
 
+  it('exposes the task board and dispatch through the real CLI and MCP without generating urgent mail', async () => {
+    const { root, checkout, service, register } = fixture();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const registration = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
+    const parent = JSON.parse(registration.stdout).assignmentId, worker = register();
+    service.update(worker.id, { supervisorId: parent });
+    const input = { recipientId: worker.id, expectedTaskRevision: 0,
+      task: { deliverable: 'Complete authorized repair', doneWhen: 'Verification saved', evidencePath: 'docs/proof.md' } };
+    const dispatched = await runHelper(root, checkout, ['dispatch'], input);
+    expect(dispatched.code, dispatched.stderr).toBe(0);
+    expect(JSON.parse(dispatched.stdout)).toMatchObject({ priority: 'P2', id: expect.any(String) });
+    const board = await runHelper(root, checkout, ['tasks'], {});
+    expect(JSON.parse(board.stdout).workers[0].task).toMatchObject({ ...input.task, ownerId: worker.id, revision: 1 });
+    const next = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'agent_coordination', arguments: { action: 'dispatch', recipientId: worker.id, expectedTaskRevision: 1, task: { deliverable: 'Apply the reviewed next step' } },
+    } });
+    const result = JSON.parse(next.stdout).result;
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ priority: 'P2', id: expect.any(String) });
+  });
+
   it('registers a send-only service through the real helper and rejects new requests without filling its inbox', async () => {
     const { root, checkout, db, service, register } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
@@ -474,7 +495,7 @@ describe('assignment coordination', () => {
     expect(countEvents()).toBe(before);
     expect(() => service.acknowledge(self.id, [messageId])).toThrow('supplied');
     expect(service.poll(self.id).messages[0]?.id).toBe(messageId);
-    expect(service.acknowledge(self.id, [messageId])).toEqual({ acknowledged: [messageId] });
+    expect(service.acknowledge(self.id, [messageId])).toEqual({ acknowledged: [messageId], expiredUnread: [] });
     service.update(self.id, { status: 'active' });
     expect(countEvents()).toBe(before);
     service.update(self.id, { checkout, summary: 'Editing coordination files' });
@@ -893,9 +914,12 @@ describe('assignment coordination', () => {
     const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
-    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'mail', 'broadcast', 'broadcasts', 'subscribe']);
+    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
+    expect(tool.inputSchema.properties).not.toHaveProperty('notifySupervisor');
+    expect(tool.inputSchema.properties).toHaveProperty('task');
+    expect(tool.inputSchema.properties).toHaveProperty('expectedTaskRevision');
     expect(tool.inputSchema.properties.description).toMatchObject({ maxLength: 500 });
     expect(tool.inputSchema.properties.summary).toMatchObject({ maxLength: 2000 });
     expect(tool.inputSchema.properties.text).toMatchObject({ maxLength: 2000 });

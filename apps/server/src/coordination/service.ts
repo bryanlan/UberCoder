@@ -6,9 +6,10 @@ import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
 import { CONTINUATION_POLICY, continuationControl, setAwaiting, saveContinuation, setContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
+import { assignmentTask, dispatchEligible, updateTask, type TaskInput } from './tasks.js';
 import { BroadcastBoard } from './broadcasts.js';
 import { GRANT_POLICY } from '../grants/schema.js';
-import { acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
+import { MAIL_NOTICE_INTERVAL_MS, acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -43,7 +44,7 @@ export class CoordinationService {
     const row = this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments where id=?`).get(id) as CoordinationAssignment | undefined;
     if (!row) throw Object.assign(new Error('Unknown assignment.'), { code: 'unknown_assignment' });
     const control = continuationControl(this.db, id);
-    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, awaiting: control.awaiting?.description ?? null, recovery: control.recovery };
+    return { ...row, continuation: control.continuation, supervisorId: control.supervisorId, awaiting: control.awaiting?.description ?? null, recovery: control.recovery, task: assignmentTask(this.db, id) };
   }
 
   private pilotCache: { key: string; repositories: Set<string> } | null = null;
@@ -156,24 +157,23 @@ export class CoordinationService {
         if (processStart(row.pid) === row.process_start) continue;
         this.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(row.id);
         this.event(row.id, null, 'disconnected', 'Process ended. Activity history remains available; inspect unfinished files before continuing work.');
-        if (continuationControl(this.db, row.id).continuation === 'unattended') this.notifySupervisor(row.id, 'An unattended supervised worker disconnected.');
+        if (this.hasUnfinishedWork(row.id)) this.notifySupervisor(row.id, 'An unattended supervised worker disconnected.');
       }
     })();
     this.flushSupervisorHandoffs();
   }
 
   update(id: string, input: { description?: string; checkout?: string; summary?: string; status?: 'active' | 'waiting';
-    continuation?: AssignmentContinuation; supervisorId?: string | null; notifySupervisor?: boolean; awaiting?: string | null } & MessageOptions) {
+    continuation?: AssignmentContinuation; supervisorId?: string | null; task?: TaskInput; awaiting?: string | null } & MessageOptions) {
     const identity = input.checkout ? this.identity(input.checkout) : undefined;
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       if (current.status === 'finished' && input.status !== 'active' && input.continuation !== 'unattended'
         && [input.description, input.checkout, input.summary, input.supervisorId,
-          input.notifySupervisor, input.awaiting].every(value => value === undefined)) return { assignment: current };
+          input.task, input.awaiting].every(value => value === undefined)) return { assignment: current };
       // Registration restores a process, not completed work. An explicit active
       // update (including a real human prompt) can begin another assignment.
       if ((current.status === 'finished' && input.status !== 'active') || current.status === 'disconnected') throw new Error('Resume this assignment before updating it.');
-      if (input.notifySupervisor && !(input.supervisorId === undefined ? current.supervisorId : input.supervisorId)) throw new Error('Declare a supervisor before notifying it.');
       if (input.supervisorId) {
         const visited = new Set([id]); let next: string | null = input.supervisorId;
         while (next) {
@@ -201,7 +201,16 @@ export class CoordinationService {
       if (identity || input.summary !== undefined || input.description !== undefined) {
         this.event(id, identity?.checkout ?? null, 'update', input.summary ?? input.description ?? 'Scope added');
       }
-      if (input.notifySupervisor) this.notifySupervisor(id, 'A supervised worker has a result ready for review.', input);
+      if (input.task) {
+        const task = updateTask(this.db, id, input.task);
+        if (task.state !== current.task?.state || (task.state === 'blocked' && task.actionNeeded !== current.task?.actionNeeded)) {
+          if (task.state === 'done') {
+            this.notifySupervisor(id, 'A supervised worker completed its task.', input);
+            setContinuation(this.db, id, 'waiting_for_input');
+          }
+          if (task.state === 'blocked') this.notifySupervisor(id, `A supervised worker needs action: ${task.actionNeeded}`, input);
+        }
+      }
       this.requestWake?.();
       return { assignment: this.assignment(id) };
     }).immediate();
@@ -216,7 +225,7 @@ export class CoordinationService {
     const current = this.assignment(id);
     const pendingMessageCount = (this.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=? and acknowledged_at is null').get(id) as { n: number }).n;
     const assignment = { id: current.id, provider: current.provider, status: current.status, description: compact(current.description, 160),
-      continuation: current.continuation, supervisorId: current.supervisorId, awaiting: current.awaiting, recovery: current.recovery };
+      continuation: current.continuation, supervisorId: current.supervisorId, awaiting: current.awaiting, recovery: current.recovery, task: current.task };
     // A checkout outside the pilot has no activity view, but the assignment and direct messages
     // still work. Say so explicitly; an empty "disabled" reply reads as "messaging is unavailable".
     if (directory && !this.eligible(directory)) {
@@ -288,9 +297,9 @@ export class CoordinationService {
     }
     if (priority === 'P3') return { id: message.id, ...policy, queued: true, recipient, delivery: 'mailbox',
       note: 'P3 awareness mail. No wake or direct body injection; a fifteen-minute new-mail notice is offered during an existing turn. The recipient chooses when to fetch it.' };
-    if (priority === 'P1' && this.requestWake && session && status !== 'working') {
+    if ((priority === 'P1' || dispatchEligible(this.db, message.id)) && this.requestWake && session && status !== 'working') {
       return { id: message.id, ...policy, queued: true, recipient, delivery: 'wake_pending',
-        note: 'P1 queued for a guarded wake and batched delivery. Stop, drafts, interactive prompts and resource limits still apply.' };
+        note: 'Queued for a guarded wake and batched delivery. Stop, drafts, interactive prompts and resource limits still apply.' };
     }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'
@@ -321,30 +330,91 @@ export class CoordinationService {
   }
 
   acknowledge(id: string, messages: string[]) {
+    const acknowledged: string[] = [], expiredUnread: string[] = [];
     this.db.sqlite.transaction(() => {
+      expireMessages(this.db);
       for (const message of messages) {
+        const policyText = this.db.meta.get(messagePolicyKey(message));
+        const policy = policyText ? messagePolicy(this.db, message) : undefined;
+        if (!policy || policy.recipientId !== id) throw new Error('Only the recipient can acknowledge a supplied message.');
+        if (policy.expired && !policy.suppliedAt) { expiredUnread.push(message); continue; }
+        const timestamp = new Date().toISOString();
         const result = this.db.sqlite.prepare('update coordination_messages set acknowledged_at=coalesce(acknowledged_at,?) where id=? and recipient_id=? and supplied_at is not null')
-          .run(new Date().toISOString(), message, id);
-        const policyText=this.db.meta.get(messagePolicyKey(message));
-        const policy=policyText ? messagePolicy(this.db,message) : undefined;
-        if (!result.changes && (!policy?.expired || !policy.suppliedAt || policy.recipientId !== id)) throw new Error('Only the recipient can acknowledge a supplied message.');
-        this.db.meta.set(messagePolicyKey(message),JSON.stringify({...policy!,acknowledgedAt:new Date().toISOString()}));
-        this.db.sqlite.prepare('delete from meta where key=?').run(expiryKey(message,policy!.expiresAt));
+          .run(timestamp, message, id);
+        if (!result.changes && (!policy.expired || !policy.suppliedAt)) throw new Error('Message has not been supplied. Read it before acknowledging.');
+        this.db.meta.set(messagePolicyKey(message), JSON.stringify({ ...policy, acknowledgedAt: policy.acknowledgedAt ?? timestamp }));
+        this.db.sqlite.prepare('delete from meta where key=?').run(expiryKey(message, policy.expiresAt));
+        acknowledged.push(message);
       }
     })();
     this.flushSupervisorHandoffs();
-    return { acknowledged: messages };
+    return { acknowledged, expiredUnread };
+  }
+
+  private messageChannel(message: Pick<CoordinationMessage, 'senderId' | 'recipientId'>): 'supervisor' | 'worker' | 'peer' {
+    if (continuationControl(this.db, message.recipientId).supervisorId === message.senderId) return 'supervisor';
+    if (continuationControl(this.db, message.senderId).supervisorId === message.recipientId) return 'worker';
+    return 'peer';
+  }
+
+  taskBoard(id: string, offset = 0) {
+    const workers = (this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments order by last_seen_at desc`).all() as CoordinationAssignment[])
+      .filter(row => continuationControl(this.db, row.id).supervisorId === id);
+    return { assignment: this.assignment(id), workers: workers.slice(offset, offset + 20).map(row => this.assignment(row.id)),
+      nextOffset: offset + 20 < workers.length ? offset + 20 : null };
+  }
+
+  dispatch(id: string, input: { id: string; recipientId: string; expectedTaskRevision: number; task?: TaskInput }) {
+    expireMessages(this.db);
+    return this.db.sqlite.transaction(() => {
+      const priorDispatch = this.db.meta.get(`task-dispatch:${input.id}`);
+      const fingerprint = digest(JSON.stringify([id, input.recipientId, input.expectedTaskRevision, input.task ?? null]));
+      if (priorDispatch) {
+        if (JSON.parse(priorDispatch).fingerprint !== fingerprint) throw new Error('Dispatch ID already used for different content.');
+        const existing = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where id=?`).get(input.id) as CoordinationMessage | undefined;
+        return this.sendReceipt(existing ?? { id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
+      }
+      const worker = this.assignment(input.recipientId), control = continuationControl(this.db, input.recipientId);
+      if (worker.supervisorId !== id) throw new Error('Only the declared supervisor can dispatch this worker.');
+      if (this.assignment(id).status === 'finished' || worker.status === 'finished' || worker.continuation !== 'unattended'
+        || control.awaiting || ['blocked', 'stalled'].includes(control.recovery?.status ?? '') || peerWakePaused(this.db, worker.id)) {
+        throw new Error('Worker dispatch is paused. Preserve Stop, pending decisions, external waits and blocked/stalled recovery; resolve them through their existing owner.');
+      }
+      if ((worker.task?.revision ?? 0) !== input.expectedTaskRevision) throw new Error('Task revision changed. Read the task board before dispatching.');
+      const task = updateTask(this.db, worker.id, { ...input.task, state: 'working' });
+      // A new ID cannot activate the same unchanged task twice.
+      const revisionKey = `task-dispatched:${worker.id}:${task.revision}`;
+      if (this.db.meta.get(revisionKey)) throw new Error('This task revision was already dispatched. Use the original receipt; do not restart or resend.');
+      if (!acceptsMessages(this.db, worker.id) || !hasInboxSpace(this.db, worker.id, 'P2')) throw new Error('Worker inbox is unavailable or full.');
+      const text = `Supervisor task dispatch revision ${task.revision}, within existing human authority. Deliver: ${compact(task.deliverable, 200)}\nDone when: ${compact(task.doneWhen, 200)}\nEvidence: ${compact(task.evidencePath, 400)}\nRead the current task board. Ignore this command if its revision is no longer current. Preserve pending human decisions and permissions.`;
+      this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, worker.id, text, new Date().toISOString());
+      setMessagePolicy(this.db, input.id, id, worker.id, text, { priority: 'P2', validFor: 604800, origin: 'dispatch' });
+      this.db.meta.set(`task-dispatch:${input.id}`, JSON.stringify({ fingerprint, taskRevision: task.revision }));
+      this.db.meta.set(revisionKey, input.id);
+      this.event(id, null, 'task-dispatch', `Dispatched task revision ${task.revision} to ${worker.id}.`);
+      this.requestWake?.();
+      return this.sendReceipt({ id: input.id, recipientId: worker.id, suppliedAt: null, acknowledgedAt: null });
+    }).immediate();
   }
 
   private inbox(id: string, includeAwareness: boolean, supply: boolean) {
     expireMessages(this.db);
-    const messages = (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
+    const digestDue = Date.now() - Number(this.db.meta.get(`supervisor-digest:${id}`) ?? 0) >= MAIL_NOTICE_INTERVAL_MS;
+    const digestMembers = new Set<string>(JSON.parse(this.db.meta.get(`supervisor-digest-members:${id}`) ?? '[]'));
+    const available = (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where recipient_id=? and acknowledged_at is null
       and (supplied_at is null or supplied_at<?) order by created_at,id`).all(id, new Date(Date.now() - 60_000).toISOString()) as CoordinationMessage[])
-      .map(m => withMessagePolicy(this.db, m)).filter(m => includeAwareness || m.priority !== 'P3')
+      .map(m => ({ ...withMessagePolicy(this.db, m), channel: this.messageChannel(m) }));
+    const urgentBatch = available.some(m => m.priority === 'P1');
+    const messages = available.filter(m => includeAwareness || (m.priority !== 'P3' && (m.priority === 'P1' || m.channel !== 'worker'
+        || digestDue || urgentBatch || (!m.suppliedAt && digestMembers.has(m.id)))))
       .sort((a,b) => a.priority.localeCompare(b.priority) || a.createdAt.localeCompare(b.createdAt));
     const ownGrants = this.grants?.grantsFor(id).map(grant => grant.id);
     const batch = messages.slice(0, 20).map(message => ownGrants ? { ...message,
       grantIds: ownGrants.filter(grantId => this.grants!.grantsFor(message.senderId).some(grant => grant.id === grantId)) } : message);
+    if (supply && (digestDue || urgentBatch) && batch.some(m => m.channel === 'worker' && m.priority === 'P2')) {
+      this.db.meta.set(`supervisor-digest:${id}`, String(Date.now()));
+      this.db.meta.set(`supervisor-digest-members:${id}`, JSON.stringify(messages.filter(m => m.channel === 'worker' && m.priority === 'P2').map(m => m.id)));
+    }
     if (supply) for (const message of batch) {
       const timestamp=new Date().toISOString();
       this.db.sqlite.prepare('update coordination_messages set supplied_at=? where id=?').run(timestamp,message.id);
@@ -387,21 +457,24 @@ export class CoordinationService {
 
   finish(id: string, summary: string, options: MessageOptions = {}) {
     return this.db.sqlite.transaction(() => {
-      if (this.assignment(id).status === 'finished') return { finished: true };
+      const current = this.assignment(id);
+      if (current.status === 'finished') return { finished: true };
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.grants?.expireForAssignment(id);
       this.event(id, null, 'finished', summary);
-      this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
+      if (current.task) updateTask(this.db, id, { state: 'done' });
+      if (current.task?.state !== 'done') this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
       return { finished: true };
     }).immediate();
   }
 
   disconnect(id: string) {
-    if (this.assignment(id).status !== 'finished') {
+    const status = this.assignment(id).status;
+    if (status !== 'finished' && status !== 'disconnected') {
       this.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(id);
       this.event(id, null, 'disconnected', 'Session ended; activity history retained.');
-      if (continuationControl(this.db, id).continuation === 'unattended') this.notifySupervisor(id, 'An unattended supervised worker disconnected.');
+      if (this.hasUnfinishedWork(id)) this.notifySupervisor(id, 'An unattended supervised worker disconnected.');
     }
     return { disconnected: true };
   }
@@ -428,29 +501,37 @@ export class CoordinationService {
         (? is null or exists(select 1 from coordination_scopes s where s.repository=? and s.assignment_id=e.assignment_id))
         order by seq desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationEvent[],
       messages: (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m where ${messageFilter}
-        order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[]).map(m => withMessagePolicy(this.db,m)),
+        order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[]).map(m => ({ ...withMessagePolicy(this.db,m), channel: this.messageChannel(m) })),
       pendingMessageCount: pending.count,
     };
   }
 
+  private hasUnfinishedWork(id: string): boolean {
+    const assignment = this.assignment(id);
+    return assignment.continuation === 'unattended' && assignment.task?.state !== 'done';
+  }
+
   private notifySupervisor(id: string, reason: string, options: MessageOptions = {}): void {
+    options = { priority: options.priority ?? 'P2', validFor: options.validFor ?? 604800 };
     const control = continuationControl(this.db, id);
     if (!control.supervisorId) return;
     const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')
       .get(id) as { seq: number };
     const parent = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(control.supervisorId) as { status: string } | undefined;
     if (!parent) return;
-    const key = `supervisor-handoff:${id}:${event.seq}:${reason}`;
+    const key = `supervisor-handoff:${id}:${event.seq}:${assignmentTask(this.db, id)?.revision ?? 0}:${reason}`;
     if (!this.db.meta.get(key)) {
       const messageId = randomUUID(), timestamp = new Date().toISOString();
-      const headline = `${reason} Worker ${id}: ${compact(this.assignment(id).description, 120)}`;
+      const headline = `${compact(reason, 300)} Worker ${id}: ${compact(this.assignment(id).description, 120)}`;
       const result = this.db.sqlite.prepare(`select seq, checkout, kind, text from coordination_events
         where assignment_id=? and kind in ('update','finished') order by seq desc limit 1`)
         .get(id) as { seq: number; checkout: string | null; kind: string; text: string } | undefined;
       const location = result?.checkout ? `; checkout ${compact(result.checkout, 220)}` : '';
-      const text = result?.text.trim()
-        ? `${headline}\n${result.kind === 'finished' ? 'Final summary' : 'Latest update'} (activity event ${result.seq}${location}):\n${compact(result.text.trim(), 1200)}`
-        : headline;
+      const task = assignmentTask(this.db, id);
+      const detail = task ? `\nTask: ${compact(task.deliverable, 200)}\nDone when: ${compact(task.doneWhen, 200)}\nEvidence: ${compact(task.evidencePath, 400)}\nState: ${task.state}` : '';
+      const text = (result?.text.trim()
+        ? `${headline}\n${result.kind === 'finished' ? 'Final summary' : 'Latest update'} (activity event ${result.seq}${location}):\n${compact(result.text.trim(), 600)}`
+        : headline) + detail;
       // A handoff needs an acknowledged inbox identity even when its parent is
       // waiting_for_input. Continuation signals alone disappear on a pause.
       const blocked = !hasInboxSpace(this.db,control.supervisorId,options.priority);

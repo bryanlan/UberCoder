@@ -94,11 +94,11 @@ describe('Explicit unattended continuation contract', () => {
 
   it('notifies an explicit supervisor on handoff and finish without enabling it', async () => {
     const f = fixture();
-    await dispatchCoordination(f.service, { action: 'update', assignmentId: f.worker.id, token: f.worker.token, supervisorId: f.parent.id, notifySupervisor: true });
+    await dispatchCoordination(f.service, { action: 'update', assignmentId: f.worker.id, token: f.worker.token, supervisorId: f.parent.id, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
     expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
     f.service.update(f.parent.id, { continuation: 'unattended' });
-    f.service.update(f.worker.id, { summary: 'A new candidate is ready', notifySupervisor: true });
+    f.service.update(f.worker.id, { summary: 'A new candidate is ready', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
     f.service.finish(f.worker.id, 'Done');
     expect(continuationControl(f.db, f.parent.id).signals).toEqual([]);
@@ -108,7 +108,7 @@ describe('Explicit unattended continuation contract', () => {
   it('delivers the actual result and final summary without a separate direct message', () => {
     const f = fixture();
     f.service.update(f.worker.id, { description: 'Repair result delivery', supervisorId: f.parent.id,
-      summary: 'Candidate ready. Seven checks pass. Next: integrate the change. Details: docs/result.md.', notifySupervisor: true });
+      summary: 'Candidate ready. Seven checks pass. Next: integrate the change. Details: docs/result.md.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     const ready = f.service.mail(f.parent.id).messages;
     expect(ready).toHaveLength(1);
     expect(ready[0]!.text).toContain('Latest update (activity event');
@@ -124,24 +124,23 @@ describe('Explicit unattended continuation contract', () => {
     expect(continuationControl(f.db, f.parent.id).continuation).toBe('waiting_for_input');
   });
 
-  it('preserves distinct result events even when their wording matches and deduplicates a retry', () => {
+  it('deduplicates unchanged blocked state across status updates and restart', () => {
     const f = fixture();
-    const result = { summary: 'Review complete. Ready for the next round.', notifySupervisor: true };
+    const result = { summary: 'Review complete. Ready for the next round.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } };
     f.service.update(f.worker.id, { supervisorId: f.parent.id, ...result });
     f.service.update(f.worker.id, result);
     const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
-    restarted.update(f.worker.id, { notifySupervisor: true });
+    restarted.update(f.worker.id, { task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     const messages = restarted.mail(f.parent.id).messages;
-    expect(messages).toHaveLength(2);
-    expect(new Set(messages.map(message => message.id)).size).toBe(2);
+    expect(messages).toHaveLength(1);
+    expect(new Set(messages.map(message => message.id)).size).toBe(1);
     expect(messages.every(message => message.text.includes(result.summary))).toBe(true);
-    expect(messages[0]!.text).not.toBe(messages[1]!.text);
   });
 
   it('bounds a handoff while retaining its full result and activity reference', () => {
     const f = fixture();
     const summary = 'Result and next action first. Details: docs/result.md. ' + 'supporting evidence '.repeat(120);
-    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary, notifySupervisor: true });
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     const message = f.service.mail(f.parent.id).messages[0]!;
     expect(message.text).toContain('Result and next action first. Details: docs/result.md.');
     expect(message.text).toContain('…');
@@ -156,7 +155,7 @@ describe('Explicit unattended continuation contract', () => {
   it('retains a supervisor handoff behind a full inbox and queues it when acknowledgements open space', () => {
     const f = fixture();
     for (let i = 0; i < 100; i++) f.service.send(f.worker.id, { id: randomUUID(), recipientId: f.parent.id, text: 'Existing peer result.' });
-    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary: 'Actual result retained while the inbox is full.', notifySupervisor: true });
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, summary: 'Actual result retained while the inbox is full.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     const saved = f.db.sqlite.prepare("select value from meta where key like 'supervisor-handoff:%'").get() as { value: string };
     const handoff = JSON.parse(saved.value);
     expect(handoff.blockedReason).toContain('inbox is full');
@@ -252,7 +251,7 @@ describe('Explicit unattended continuation contract', () => {
     expect(alertOverdueAwait(f.db, f.worker.id)).toBe(true);
     expect(continuationControl(f.db, f.parent.id).awaiting).not.toBeNull();
     f.service.update(f.parent.id, { awaiting: 'Next child result' });
-    f.service.update(f.worker.id, { notifySupervisor: true });
+    f.service.update(f.worker.id, { task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     expect(continuationControl(f.db, f.parent.id).awaiting).not.toBeNull();
   });
 
@@ -260,7 +259,7 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture();
     f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', awaiting: 'Late result' });
     f.service.finish(f.parent.id, 'Supervisor work completed');
-    f.service.update(f.worker.id, { summary: 'A distinct late review result', validFor:604800, notifySupervisor: true });
+    f.service.update(f.worker.id, { summary: 'A distinct late review result', validFor:604800, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked' as const, actionNeeded: 'Review this result to unblock the assigned task' } });
     expect(f.service.mail(f.parent.id).messages[0]?.text).toContain('A distinct late review result');
     expect(alertOverdueAwait(f.db, f.worker.id, Date.now() + AWAIT_ALERT_MS)).toBe(true);
     expect(f.service.agentStatus(f.parent.id).assignment).toMatchObject({ status: 'finished', continuation: 'waiting_for_input', recovery: null });
@@ -271,10 +270,111 @@ describe('Explicit unattended continuation contract', () => {
     const f = fixture();
     expect(() => f.service.update(f.worker.id, { supervisorId: randomUUID() })).toThrow('Unknown');
     expect(() => f.service.update(f.worker.id, { supervisorId: f.worker.id })).toThrow('cycle');
-    expect(() => f.service.update(f.worker.id, { notifySupervisor: true })).toThrow('Declare');
+    expect(() => f.service.update(f.worker.id, { task: { state: 'blocked' } })).toThrow('deliverable');
     f.service.update(f.worker.id, { supervisorId: f.parent.id });
     expect(() => f.service.update(f.parent.id, { supervisorId: f.worker.id })).toThrow('cycle');
     f.service.finish(f.parent.id, 'Finished');
     expect(() => f.service.update(f.worker.id, { supervisorId: f.parent.id })).toThrow('finished');
+  });
+});
+
+
+describe('Supervisor task workflow', () => {
+  const task = { deliverable: 'Repair notification delivery', doneWhen: 'Verified behavior and reviewed change', evidencePath: 'docs/proof.md', state: 'working' as const };
+  it('keeps ordinary progress silent, emits blocked/done once and suppresses disconnect after done', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', task });
+    for (let i = 0; i < 5; i++) f.service.update(f.worker.id, { summary: `Progress ${i}` });
+    expect(f.service.poll(f.parent.id).messages).toEqual([]);
+    f.service.update(f.worker.id, { task: { state: 'blocked', actionNeeded: 'Provide the missing build' } });
+    f.service.update(f.worker.id, { summary: 'Still blocked', task: { state: 'blocked', actionNeeded: 'Provide the missing build' } });
+    const blocked = f.service.poll(f.parent.id).messages;
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]).toMatchObject({ channel: 'worker', priority: 'P2' });
+    f.service.acknowledge(f.parent.id, blocked.map(m => m.id));
+    f.service.update(f.worker.id, { task: { state: 'done' } });
+    f.service.finish(f.worker.id, 'Final evidence');
+    f.service.disconnect(f.worker.id);
+    expect(f.service.mail(f.parent.id).messages).toHaveLength(1);
+    expect(f.service.taskBoard(f.parent.id).workers[0]?.task).toMatchObject({ ...task, state: 'done' });
+  });
+  it('batches worker P2 reports once per fifteen minutes without holding P1, peer P2 or injecting P3', () => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id });
+    const send = (priority: 'P1'|'P2'|'P3') => {
+      const id = randomUUID(); f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: priority, priority }); return id;
+    };
+    const first = send('P2'); expect(f.service.poll(f.parent.id).messages.map(m => m.id)).toEqual([first]);
+    f.service.acknowledge(f.parent.id, [first]);
+    const flushed = send('P2'), awareness = send('P3');
+    expect(f.service.poll(f.parent.id).messages).toEqual([]);
+    const urgent = send('P1');
+    const peer = f.register(); const peerId = randomUUID();
+    f.service.send(peer.id, { id: peerId, recipientId: f.parent.id, text: 'Peer result', priority: 'P2' });
+    expect(f.service.poll(f.parent.id).messages.map(m => m.id).sort()).toEqual([urgent, peerId, flushed].sort());
+    f.service.acknowledge(f.parent.id, [urgent, peerId, flushed]);
+    const held = send('P2');
+    vi.setSystemTime(Date.now() + 15 * 60_000 - 1);
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    expect(restarted.poll(f.parent.id).messages).toEqual([]);
+    vi.setSystemTime(Date.now() + 1);
+    expect(restarted.poll(f.parent.id).messages.map(m => m.id)).toEqual([held]);
+    expect(restarted.mail(f.parent.id).messages.map(m => m.id)).toContain(awareness);
+  });
+  it('does not let reused SQLite row IDs bypass a held digest', () => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id });
+    const first = randomUUID();
+    f.service.send(f.worker.id, { id: first, recipientId: f.parent.id, text: 'First result', priority: 'P2', validFor: 1 });
+    f.service.poll(f.parent.id); vi.setSystemTime(Date.now() + 1001); f.service.poll(f.parent.id);
+    f.service.send(f.worker.id, { id: randomUUID(), recipientId: f.parent.id, text: 'New result after expiry', priority: 'P2' });
+    expect(f.service.poll(f.parent.id).messages).toEqual([]);
+  });
+  it('reports a later genuine blocked transition even when the needed action is unchanged', () => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id, task });
+    f.service.update(f.worker.id, { task: { state: 'blocked', actionNeeded: 'Review build' } });
+    f.service.update(f.worker.id, { task: { state: 'working' } });
+    f.service.update(f.worker.id, { task: { state: 'blocked', actionNeeded: 'Review build' } });
+    expect(f.service.mail(f.parent.id).messages).toHaveLength(2);
+  });
+  it('drains all messages from an open digest across twenty-message hook batches', () => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id });
+    for (let i = 0; i < 25; i++) f.service.send(f.worker.id, { id: randomUUID(), recipientId: f.parent.id, text: 'Worker result', priority: 'P2' });
+    expect(f.service.poll(f.parent.id).messages).toHaveLength(20);
+    expect(f.service.poll(f.parent.id).messages).toHaveLength(5);
+    expect(f.service.poll(f.parent.id).messages).toHaveLength(0);
+  });
+  it('returns expiredUnread for expired unsupplied content without claiming acknowledgement', () => {
+    const f = fixture(), id = randomUUID();
+    f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: 'Expired awareness', priority: 'P3', validFor: 1 });
+    vi.setSystemTime(Date.now() + 1001);
+    expect(f.service.acknowledge(f.parent.id, [id])).toEqual({ acknowledged: [], expiredUnread: [id] });
+    expect(() => f.service.acknowledge(f.worker.id, [id])).toThrow('recipient');
+    expect(f.db.meta.get(`inbox-message:${id}`)).not.toContain('acknowledgedAt');
+  });
+  it('dispatches only a supervised authorized task once, with revision checks and idempotent receipt', async () => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended' });
+    const command = { action: 'dispatch', assignmentId: f.parent.id, token: f.parent.token, messageId: randomUUID(), recipientId: f.worker.id, expectedTaskRevision: 0, task };
+    await expect(dispatchCoordination(f.service, command)).resolves.toMatchObject({ priority: 'P2' });
+    await expect(dispatchCoordination(f.service, command)).resolves.toMatchObject({ id: command.messageId });
+    await expect(dispatchCoordination(f.service, { ...command, messageId: randomUUID(), expectedTaskRevision: 1 })).rejects.toThrow('already dispatched');
+    await expect(dispatchCoordination(f.service, { ...command, messageId: randomUUID(), assignmentId: f.worker.id, token: f.worker.token })).rejects.toThrow('declared supervisor');
+    await expect(dispatchCoordination(f.service, { ...command, messageId: randomUUID() })).rejects.toThrow('revision changed');
+    expect(f.service.poll(f.worker.id).messages[0]).toMatchObject({ channel: 'supervisor' });
+  });
+  it.each(['waiting', 'awaiting', 'blocked', 'stalled', 'finished'] as const)('refuses dispatch across %s permission/recovery state', condition => {
+    const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended' });
+    if (condition === 'waiting') f.service.update(f.worker.id, { continuation: 'waiting_for_input' });
+    if (condition === 'awaiting') f.service.update(f.worker.id, { awaiting: 'External job' });
+    if (condition === 'finished') f.service.finish(f.worker.id, 'Complete');
+    if (condition === 'blocked' || condition === 'stalled') {
+      const control = continuationControl(f.db, f.worker.id);
+      control.recovery = { status: condition, reason: 'Requires owner', attempts: 3, startedAt: new Date().toISOString(), nextAttemptAt: new Date().toISOString() };
+      saveContinuation(f.db, f.worker.id, control);
+    }
+    expect(() => f.service.dispatch(f.parent.id, { id: randomUUID(), recipientId: f.worker.id, expectedTaskRevision: 0, task })).toThrow('paused');
+    expect(f.service.taskBoard(f.parent.id).workers[0]?.task).toBeNull();
+  });
+  it('rejects retired notification fields with actionable guidance', async () => {
+    const f = fixture();
+    await expect(dispatchCoordination(f.service, { action: 'update', assignmentId: f.worker.id, token: f.worker.token, notifySupervisor: true })).rejects.toThrow('retired');
   });
 });

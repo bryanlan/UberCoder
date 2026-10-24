@@ -71,7 +71,7 @@ describe('Peer wake audit', () => {
 
   it('retains unread supervisor results and the exact pause reason after continuation changes and restart', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     const handoff = JSON.parse(row.value);
     const timestamp = new Date(now - 6 * minute).toISOString();
@@ -79,7 +79,7 @@ describe('Peer wake audit', () => {
     f.db.sqlite.prepare('update coordination_messages set created_at=? where id=?').run(timestamp, handoff.messageId);
     setPeerWakePaused(f.db, f.recipient, true, { sessionId: f.session.id, timestamp, code: 'native_cancellation', reason: 'The native provider cancelled turn proof-turn.' });
     expect(f.service.send(f.sender, { id: handoff.messageId, recipientId: f.recipient,
-      text: 'A supervised worker has a result ready for review. Worker ' + f.sender + ': Assignment not yet described' }).note).toContain('cancelled turn proof-turn');
+      text: handoff.text }).note).toContain('cancelled turn proof-turn');
     f.service.update(f.recipient, { continuation: 'waiting_for_input', status: 'waiting' });
     f.db.sqlite.pragma('query_only=ON');
     const report = await auditPeerWakes(f.db.sqlite, { now, hours: 1 });
@@ -97,7 +97,7 @@ describe('Peer wake audit', () => {
 
   it('pushes an overdue result once across backend restart, records delivery and retries an unavailable push', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, notifySupervisor: true, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     f.db.meta.set(row.key, JSON.stringify({ ...JSON.parse(row.value), timestamp: new Date(now - 6 * minute).toISOString() }));
     const send = vi.fn(async (_subscription: unknown, _payload?: string | Buffer | null) => ({ statusCode: 201, body: '', headers: {} }));

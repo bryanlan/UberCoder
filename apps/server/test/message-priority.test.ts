@@ -64,7 +64,7 @@ describe('Cooperative messaging trial',()=>{
     expect(f.db.sqlite.prepare('select * from coordination_messages where id=?').get(input.id)).toBeUndefined();
     expect(f.service.send(f.sender.id,input)).toMatchObject({delivery:'expired',queued:false});
     expect(f.db.meta.get(messagePolicyKey(input.id))).not.toContain(input.text);
-    expect(()=>f.service.acknowledge(f.recipient.id,[input.id])).toThrow('supplied');
+    expect(f.service.acknowledge(f.recipient.id,[input.id])).toEqual({ acknowledged: [], expiredUnread: [input.id] });
   });
   it('retains wake accounting after an unacknowledged message body expires',async()=>{
     const f=fixture();const {input}=f.send({priority:'P1',validFor:1});
@@ -79,7 +79,7 @@ describe('Cooperative messaging trial',()=>{
     const f=fixture();const {input}=f.send({priority:'P2',validFor:10});f.service.poll(f.recipient.id);
     vi.advanceTimersByTime(10000);f.service.poll(f.recipient.id);
     expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(input.id)).toBeUndefined();
-    expect(f.service.acknowledge(f.recipient.id,[input.id])).toEqual({acknowledged:[input.id]});
+    expect(f.service.acknowledge(f.recipient.id,[input.id])).toEqual({acknowledged:[input.id],expiredUnread:[]});
     expect(f.service.send(f.sender.id,input)).toMatchObject({delivery:'acknowledged',queued:false});
     expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(input.id)).toBeUndefined();
   });
@@ -92,7 +92,7 @@ describe('Cooperative messaging trial',()=>{
   });
   it('expires queued handoff content and never flushes it after inbox capacity becomes available',()=>{
     const f=fixture();for(let i=0;i<100;i++)f.send();
-    f.service.update(f.sender.id,{supervisorId:f.recipient.id,notifySupervisor:true,summary:'Obsolete held result',validFor:1});
+    f.service.update(f.sender.id,{supervisorId:f.recipient.id,task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' },summary:'Obsolete held result',validFor:1});
     vi.advanceTimersByTime(2000);f.service.poll(f.recipient.id);
     const stored=f.db.sqlite.prepare("select value from meta where key like 'supervisor-handoff:%'").all() as Array<{value:string}>;
     expect(stored).toHaveLength(1);expect(stored[0]!.value).not.toContain('Obsolete held result');

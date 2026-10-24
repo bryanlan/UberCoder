@@ -5,6 +5,17 @@ export type MessagePriority = typeof MESSAGE_PRIORITIES[number];
 export const BROADCAST_CATEGORIES = ['releases', 'resources', 'contracts', 'ownership', 'incidents'] as const;
 export type BroadcastCategory = typeof BROADCAST_CATEGORIES[number];
 export interface MessageOptions { priority?: MessagePriority; validFor?: number }
+export interface AssignmentTask {
+  ownerId: string;
+  deliverable: string;
+  doneWhen: string;
+  evidencePath: string;
+  state: 'working' | 'blocked' | 'done';
+  /** A blocked task needs a specific action from its supervisor. External waits stay working. */
+  actionNeeded: string | null;
+  revision: number;
+  updatedAt: string;
+}
 /** Resolved by the backend from a Console conversation's current binding. */
 export interface AgentReference {
   recipientId: string;
@@ -32,6 +43,7 @@ export interface CoordinationAssignment {
   supervisorId: string | null;
   awaiting: string | null;
   recovery: AssignmentRecovery | null;
+  task?: AssignmentTask | null;
 }
 
 export interface CoordinationScope {
@@ -51,6 +63,7 @@ export interface CoordinationEvent {
 }
 
 export interface CoordinationMessage {
+  channel?: 'supervisor' | 'worker' | 'peer';
   priority: MessagePriority;
   expiresAt: string;
   /** Shared active Bryan grants at delivery; peer text does not create authority. */
