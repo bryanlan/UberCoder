@@ -326,11 +326,11 @@ export class SessionManager {
     this.runRecovery = new RunRecovery({
       db: this.db,
       runExclusive: (id, fn) => this.runtimes.run(id, 'runRecovery', fn),
-      mayRecover: (session) => this.unattendedAssignment(session) !== undefined,
+      mayRecover: (session) => this.hasUnattendedWork(session),
       canRetry: async (session) => {
         if (this.stopped || this.getCurrentRestorableSession(session)?.id !== session.id
           || (session.status !== 'bound' && !(session.status === 'error' && session.runFailure?.code === 'process_exited'))) return 'This session no longer owns the conversation.';
-        if (!this.unattendedAssignment(session)) return 'Unattended continuation is disabled for this assignment.';
+        if (!this.hasUnattendedWork(session)) return 'Unattended recovery requires unfinished work.';
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where provider=? and native_session_id=?')
           .get(session.provider, session.conversationRef) as { status: string } | undefined;
         if (assignment?.status === 'finished') return 'This assignment is finished.';
@@ -346,6 +346,7 @@ export class SessionManager {
           const owner = this.db.sqlite.prepare('select pid,process_start as processStart from coordination_assignments where provider=? and native_session_id=?')
             .get(session.provider, session.conversationRef) as { pid: number; processStart: string } | undefined;
           if (owner && processStart(owner.pid) === owner.processStart) return 'The original provider still has a live owner outside this binding.';
+          if (!this.hasUnattendedWork(session)) return 'Unattended recovery requires unfinished work.';
           if (!await this.restoreSession(session)) return 'The original provider conversation could not be restored.';
         }
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) return 'Session ownership could not be verified.';
@@ -357,7 +358,7 @@ export class SessionManager {
         }
         if (!screen.inputActive || screen.inputText.trim() || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen) || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
           || (session.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return 'The provider is busy, has an unsent draft, or needs your input.';
-        return undefined;
+        return this.hasUnattendedWork(session) ? undefined : 'Unattended recovery requires unfinished work.';
       },
       submit: async (session, text, isCurrent) => {
         const ownsRecovery = () => {
@@ -366,7 +367,7 @@ export class SessionManager {
             .get(session.provider, session.conversationRef) as { status: string } | undefined;
           const available = this.pressureSuspendAvailableBytes === undefined ? undefined : this.availableMemoryBytes();
           return isCurrent() && !this.stopped && this.getCurrentRestorableSession(session)?.id === session.id
-            && this.unattendedAssignment(session) !== undefined
+            && this.hasUnattendedWork(session)
             && current?.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt && !current.idleSuspendedAt && !current.modelProfileRequest && !current.queuedInputs?.length
             && assignment?.status !== 'finished'
             && (this.pressureSuspendAvailableBytes === undefined || (available !== undefined && available >= this.pressureSuspendAvailableBytes));
@@ -498,6 +499,11 @@ export class SessionManager {
     if (session.launchContext && this.hasActiveLaunchAuthority && !this.hasActiveLaunchAuthority(session)) return undefined;
     const assignment = this.coordinationEnabled && this.assignmentForSession(session);
     return assignment && assignment.status !== 'finished' && continuationControl(this.db, assignment.id).continuation === 'unattended' ? assignment : undefined;
+  }
+
+  private hasUnattendedWork(session: BoundSession): boolean {
+    const assignment = this.unattendedAssignment(session);
+    return !!assignment && assignmentTask(this.db, assignment.id)?.state !== 'done';
   }
 
   private pauseAutomaticInput(sessionId: string, code: AutomaticInputPause['code'], reason: string): void {

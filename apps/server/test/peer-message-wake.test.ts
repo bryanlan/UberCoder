@@ -26,7 +26,10 @@ const claudeResumeChoice = ['Claude Code', 'This session is 22h 53m old and 423.
   '  2. Resume full session as-is', "  3. Don't ask me again", 'Enter to confirm · Esc to cancel',
   '⏵⏵ bypass permissions on (shift+tab to cycle)'].join('\n');
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  try { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }
+  finally { vi.useRealTimers(); vi.restoreAllMocks(); }
+});
 
 async function fixture(id: 'codex' | 'claude' = 'codex', options: Parameters<typeof createRecoveryManager>[6] = {}, tmux = new FakeTmux(), run?: ProviderRunState, settings = providerSettings, children: ProviderChildActivity[] = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-wake-'));
@@ -157,6 +160,58 @@ describe('Cooperative inbox priority scheduling', () => {
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(continuationControl(f.db, f.recipient)).toEqual(control);
   });
+  it.each(['codex', 'claude'] as const)('recovers unfinished %s tasks after a transient provider failure', async providerId => {
+    // Recovery captures this callback before binding finishes and fake timers begin.
+    vi.spyOn(Date, 'now').mockImplementation(() => new Date().getTime());
+    const run: ProviderRunState = { turnId: 'existing-turn', status: 'running', timestamp: new Date().toISOString() };
+    const f = await fixture(providerId, {}, new FakeTmux(), run);
+    vi.useFakeTimers();
+    run.status = 'failed'; run.timestamp = new Date().toISOString();
+    run.error = { code: 'server_overloaded', message: 'Provider is at capacity.' };
+    await f.manager['runRecovery'].refresh(f.session.id);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(f.tmux.sent).toHaveLength(1);
+    expect(f.tmux.sent[0]).toContain('Automatic recovery after a transient provider failure.');
+    expect(f.db.boundSessions.getById(f.session.id)?.runFailure).toMatchObject({ status: 'retrying', attempts: 1 });
+  });
+  it.each((['codex', 'claude'] as const).flatMap(providerId =>
+    (['before-failure', 'before-retry', 'readiness', 'submission'] as const).map(completedAt => ({ providerId, completedAt }))))(
+    'keeps completed $providerId tasks out of provider recovery when completion occurs at $completedAt', async ({ providerId, completedAt }) => {
+      vi.spyOn(Date, 'now').mockImplementation(() => new Date().getTime());
+      const run: ProviderRunState = { turnId: 'existing-turn', status: 'running', timestamp: new Date().toISOString() };
+      const f = await fixture(providerId, {}, new FakeTmux(), run);
+      const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+      quiet.update(f.recipient, { supervisorId: f.sender,
+        task: { deliverable: 'Assigned task', doneWhen: 'Proof saved', evidencePath: 'docs/proof.md' } });
+      const control = continuationControl(f.db, f.recipient);
+      const complete = () => quiet.update(f.recipient, { task: { state: 'done' } });
+      const created = f.tmux.created.length;
+      vi.useFakeTimers();
+      if (completedAt === 'before-failure') complete();
+      run.status = 'failed'; run.timestamp = new Date().toISOString();
+      run.error = { code: 'server_overloaded', message: 'Provider is at capacity.' };
+      await f.manager['runRecovery'].refresh(f.session.id);
+      if (completedAt === 'before-retry') complete();
+      if (completedAt === 'readiness' || completedAt === 'submission') {
+        const getOption = f.tmux.getOption.bind(f.tmux);
+        let ownershipChecks = 0;
+        f.tmux.getOption = async (name, option) => {
+          const value = await getOption(name, option);
+          if (option === '@agent_console_session_id' && ++ownershipChecks === (completedAt === 'readiness' ? 1 : 2)) complete();
+          return value;
+        };
+      }
+      await vi.advanceTimersByTimeAsync(15_000);
+      await f.manager.wakePendingAssignments();
+      expect(f.tmux.sent).toEqual([]);
+      expect(f.tmux.sentKeys).toEqual([]);
+      expect(f.tmux.created).toHaveLength(created);
+      expect(f.db.boundSessions.getById(f.session.id)?.runFailure).toMatchObject({
+        status: 'stopped', attempts: completedAt === 'submission' ? 1 : 0,
+      });
+      expect(quiet.taskBoard(f.sender).workers[0]?.task?.state).toBe('done');
+      expect(continuationControl(f.db, f.recipient)).toEqual(control);
+    });
   it('rechecks dispatch authority immediately before Enter and preserves a changed human decision', async () => {
     const f = await fixture('claude'); f.service.update(f.recipient, { supervisorId: f.sender });
     const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
