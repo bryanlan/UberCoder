@@ -17,6 +17,12 @@ it does not query the live Console database.
   and cached-index backfill coverage.
 
 ## Targeted Test Patterns
+- Automatic conversation titles: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- conversation-titles workers`.
+  Private SQLite fixtures and fake model runners cover first-message generation, pending adoption,
+  rename precedence, failure state and title response validation without provider calls.
+- Engineering metadata export: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- engineering-summary export-redaction`.
+  Private SQLite, Git and process fixtures cover source failures, provenance, configured project
+  paths and credential redaction, including the source CLI, without opening live databases.
 - Mobile layout: `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane sidebar-projects Sidebar`;
   browser checks: `NODE_ENV=test npm run test:e2e -- apps/web/e2e/mobile-conversation.spec.ts apps/web/e2e/input-rejection.spec.ts apps/web/e2e/sidebar.spec.ts`.
   Use free E2E ports. These fixtures mock provider input and simulate a visualViewport-only
@@ -91,8 +97,11 @@ The fixtures occupy port 14381 and close their own sessions and browser context 
 They preserve the shared browser. Evidence remains under `/tmp/console-grants-proof-*`
 or `/tmp/console-launch-proof-*`.
 The launch proof injects a capacity failure envelope into its disposable provider transcript,
-then verifies native recovery, granted restart, a Claude helper and relayed scope under one grant.
-Use [the separate recovery proof](../../scripts/prove-session-recovery.mjs) for actual killed-process recovery.
+then attempts to verify native recovery, granted restart, a Claude helper and relayed scope under one grant.
+Its peer requests omit priority and default to P3, whose bodies automatic polling excludes.
+It can therefore stall while awaiting requested actions and does not currently establish those checks.
+Use [the separate recovery proof](../../scripts/prove-session-recovery.mjs) for actual killed-process recovery,
+subject to the peer-delivery limitation below.
 
 ## Assignment coordination
 
@@ -122,7 +131,9 @@ and Claude conversations through a private Console runtime, with its own SQLite
 file, project and tmux server. Each provider receives a simulated native capacity
 failure envelope and a real SIGKILL in separate conversations. The normal backend
 must recover without another human input, deliver and acknowledge a queued peer
-message, and clear the retry notice. The script faults only its own transcripts
+message, and clear the retry notice. The queued peer message omits priority and defaults to P3.
+Automatic polling excludes its body, so the script can stall awaiting the response and acknowledgement.
+It does not currently establish automatic peer delivery. The script faults only its own transcripts
 and process identities, releases its sessions, and retains `proof.json` under its
 printed temporary evidence directory. `PROOF_PROVIDERS=codex` or `claude` narrows
 the run. Native hooks and MCP must point to that private runtime. Do not use a

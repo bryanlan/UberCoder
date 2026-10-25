@@ -31,6 +31,8 @@
 
 - `apps/server/src/engineering/summary.ts` and `summary-cli.ts` — read-only Console
   and wiki engineering metadata projection and standalone JSON CLI.
+- `apps/server/src/engineering/export-redaction.ts` and `export_redaction.v1.json` -
+  versioned credential-redaction rules for exported engineering metadata.
 - `apps/server/test/engineering-summary.test.ts` — private SQLite, privacy,
   ownership, partial-source and real Git provenance checks.
 - `docs/engineering-summary.md` — invocation, version 1 output and metric limits.
@@ -52,7 +54,7 @@
 - `apps/server/src/routes/auth.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - project tree reads and explicit refresh orchestration,
-  including the opt-in eight-hour scan for recent unbound Codex/Claude conversations.
+  including the opt-in eight-hour scan for recent unbound Codex conversations.
 - `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and durable Codex/Claude model-profile request/cancel routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
@@ -94,8 +96,8 @@
   hashes and timestamps use provider-filtered visible user prompts, excluding injected context.
 - `apps/server/test/pending-codex-context.test.ts` - original-URL recovery of completed Codex
   transcripts after midnight context injection, including invalidation of older cached summaries.
-- `apps/server/src/db/database.ts` - SQLite schema and persistence methods for
-  `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
+- `apps/server/src/db/schema.ts` and `apps/server/src/db/repos/` - SQLite schema and persistence
+  methods for `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper and internal memory-citation records, and
   event/response duplicate preference.
@@ -272,6 +274,8 @@ Test and verification anchors:
 - `apps/server/src/coordination/{schema,service,git,transport}.ts` — assignment activity, peer inboxes, read-only repository discovery, private agent RPC and authenticated browser views; migration 7 retires enforcement.
 - `apps/server/src/coordination/inbox-policy.ts` and `broadcasts.ts` — sender priority, validity, indexed expiry and idempotency receipts; shared opt-in category board and fifteen-minute new-mail notices.
 - `apps/server/src/coordination/continuation.ts` — explicit continuation permission, supervisor links, durable result signals and bounded idle recovery in SQLite metadata.
+- `apps/server/src/coordination/tasks.ts` - supervised task records, revisioned state transitions
+  and dispatch eligibility checks.
 - `apps/server/src/coordination/wake.ts` — independent peer-inbox and unattended notices, stable control-envelope classification, durable human pause, configured native queue transport and message attempt contract; SessionManager owns wake/resume/sleep under its per-session command queue.
 - `apps/server/src/coordination/{audit,audit-cli}.ts` — read-only grouped wake measurements, warning conditions and deterministic command for Waltium reporting.
 - `apps/server/src/coordination/delivery-warnings.ts` — read-only failed-wake and overdue-supervisor-result conditions shared by audit and browser alerts.

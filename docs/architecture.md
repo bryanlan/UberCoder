@@ -18,7 +18,7 @@ First-class runtime surfaces:
 - Fastify conversation search API and index: `apps/server/src/routes/search.ts`,
   `apps/server/src/search/conversation-search.ts`,
   `apps/server/src/indexing/indexing-service.ts`, and the SQLite `conversation_search_fts` table in
-  `apps/server/src/db/database.ts`.
+  `apps/server/src/db/schema.ts`.
 - Fastify session input API: `apps/server/src/routes/sessions.ts`.
 - Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-runtime.ts`, `timeline-merge.ts`, `session-screen.ts`, `live-output/reader.ts`, `screen-heuristics.ts`, `working-state.ts`, `transcript-watcher.ts`, `tmux-health.ts`, and `tmux-client.ts`.
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
@@ -32,8 +32,9 @@ the app opens conversations in reading mode with a compact
 project/chat header and persistent Chats, Reply and Controls actions. Chats fills
 the screen and groups active conversations by project. Its default filter hides
 history, manual/pressure/idle suspensions and projects with no remaining chats.
-Show all and search provide access to hidden history; New chat includes every
-configured project. Show all offers a project selector and a 5, 20 or 50 chats
+Show all and search provide access to hidden history; New chat includes active
+configured projects with existing directories, including projects hidden by the
+active-chat display filter. Show all offers a project selector and a 5, 20 or 50 chats
 per project limit, defaulting to all projects and 20. Each project's limit applies
 to its newest conversations across Codex and Claude together. These selectors
 are hidden during transcript search and new-chat selection; active-only browsing
@@ -268,8 +269,9 @@ exists. For Codex that tail contributes submitted user input only, never termina
 text. Transcript-backed live sessions intentionally ignore assistant `live-output` fragments for
 search, because the durable transcript is the source for those conversations.
 
-`IndexingService` owns search-index refresh and repair. Normal indexing replaces FTS rows from
-provider conversations, while `backfillMissingSearchIndexRows()` fills missing FTS rows from the
+`IndexingService` owns search-index refresh and repair. Normal indexing reconciles FTS rows with
+provider conversations, retaining unchanged message chunks.
+`backfillMissingSearchIndexRows()` fills missing FTS rows from the
 cached conversation index on startup or when cached projects become active without re-listing the
 provider tree. The existing metadata store records the transcript parser version for each
 project/provider search index after its refresh completes. A missing or outdated version
@@ -445,7 +447,7 @@ user's actual prompt.
   An unbound chat with this history is Closed and offers Resume directly, including Claude chats.
   Claude history without a recorded Console close still requires the existing handoff confirmation;
   that confirmation does not assert that a terminal process is currently running.
-- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 216 hours. This gives a completed response seven full days in purple. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 216 hours (nine days) without user or agent activity, removing them from Work mode. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. The one-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
+- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 216 hours. This gives a completed response seven full days in purple. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 216 hours (nine days) without user or agent activity, removing them from Work mode. Finished assignments whose tmux session has exited retain their restorable inbox and bypass this release check. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. The one-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
 - Manual Suspend keeps an established conversation bound and visible in Work while stopping its tmux session. The server stores the suspension marker in SQLite, skips that session during reconciliation and automatic Work release, and resumes it only through the authenticated resume action when the conversation is selected. Peer-message wake preserves manual pauses. The suspend action verifies tmux ownership and a readable screen, and rejects running work, native drafts, provider-queued input and queued model changes. Untyped Console messages are cancelled only after tmux stops and the suspension is persisted; a rejected pause preserves them. An empty composer does not need a recognized model footer. A native completed turn can be paused while its restored screen is still repainting. A recognized native selection can be paused without answering it, including a turn whose working/assignment labels remain active while awaiting the selection. Outside that input wait, active coordination assignments still block manual suspension. The browser submits the request even when the cached working label is set; the server owns the decision. Assignment records remain available for resume. Suspension preserves the normal response-age dot color; the separate Suspended badge and tooltip identify sessions that need resuming. Release still ends the Work binding.
 - Completed assignments retain their restorable inbox after the provider exits. Reconciliation and polling leave the provider asleep; a pending message can request a guarded inbox-only restore. Completion and expired grants stay unchanged. Explicit close makes a binding ended and non-restorable, retaining queued messages until explicit resume. The authenticated agent `close` action still requires current `close_session` authority and exact stored launcher ownership, rechecks both under the session command lock, and uses the normal release path.
 - Under low available memory, reconciliation can suspend one finished session idle for at least 60 minutes per pass, oldest first. The default trigger is less than 3072 MiB `MemAvailable` in two consecutive 30-second passes; both the threshold and idle window are configurable under `sessions`. A finished session whose tmux process is already gone is not relaunched after the first low reading; it is marked suspended after the second. Live-session pressure suspension requires an idle provider with a ready prompt, no draft, interactive selection, background work or queued input, verified tmux ownership and no active coordination assignment. It then rechecks available memory immediately before stopping tmux. Its separate SQLite marker keeps the session stopped when memory recovers or the backend restarts; selecting the conversation or a pending direct message restores it when sufficient memory is available. A restored session gets at least another pressure idle window because eligibility also checks its latest state update. Pressure-suspended sessions remain eligible for the nine-day Work release. The ordinary idle suspension and restore grace both default to one hour. If `/proc/meminfo` cannot be read, pressure suspension does nothing.
@@ -464,7 +466,7 @@ user's actual prompt.
 - Desktop sidebar width is a browser-local preference managed by `useSidebarWidth`. Its right-edge
   separator supports pointer dragging, arrow keys, and double-click reset. Width defaults to 352px,
   stays between 280px and 640px, and leaves at least 480px for content on desktop. A smaller viewport
-  clamps the displayed width without overwriting the saved preference; mobile keeps its existing drawer.
+  clamps the displayed width without overwriting the saved preference; mobile uses the full-screen Chats view.
 - Conversation rename opens a focused, empty field. Saving a nonempty name uses the existing
   server-owned title override; cancelling leaves the current title intact.
 - A chat created with New Codex/Claude conversation starts with `titleGeneration: awaiting_message`
@@ -602,8 +604,7 @@ Controls remain visible when mobile controls are otherwise hidden. Enter in a
 chat draft retains the normal guarded submission behavior; quoted menu text
 above an active composer does not change how its buttons submit chat.
 
-The input's saved height is capped at 30% of the visible viewport on mobile,
-including viewport changes when the keyboard opens, and 60% on desktop. Its
+The desktop input's saved height is capped at 60% of the window height. Its
 44-pixel touch resize handle and visible Smaller button let the user reduce it;
 Smaller resets the input to 96 pixels without changing its draft.
 
@@ -701,6 +702,7 @@ dot. Screen polling and passive ensure calls leave an idle sleeper stopped, incl
 older browser builds. Selection, human input, queued messages, model changes and eligible peer
 messages may restore the same conversation. Successful restoration or release clears the idle
 marker. Ordinary idle sleepers remain eligible for the existing nine-day Work release.
+Finished assignments whose tmux session has exited retain their inbox and bypass that release.
 
 Reconciliation resolves recorded pending conversations before applying idle rules. Exact registered
 identity is preferred for both human-created and agent-created sessions. An idle pending Codex session
