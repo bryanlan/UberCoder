@@ -206,7 +206,8 @@ export class CoordinationService {
         if (task.state !== current.task?.state || (task.state === 'blocked' && task.actionNeeded !== current.task?.actionNeeded)) {
           if (task.state === 'done') {
             this.notifySupervisor(id, 'A supervised worker completed its task.', input);
-            setContinuation(this.db, id, 'waiting_for_input');
+            // Task state suppresses idle continuation. Preserve permission and
+            // recovery controls so the supervisor can dispatch the next task.
           }
           if (task.state === 'blocked') this.notifySupervisor(id, `A supervised worker needs action: ${task.actionNeeded}`, input);
         }

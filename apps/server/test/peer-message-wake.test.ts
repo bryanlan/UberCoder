@@ -127,6 +127,36 @@ describe('Cooperative inbox priority scheduling', () => {
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(f.service.poll(f.recipient).messages[0]).toMatchObject({ channel: 'supervisor', priority: 'P2' });
   });
+  it.each(['codex', 'claude'] as const)('keeps completed %s tasks idle and dispatches the next task in the same session', async providerId => {
+    const f = await fixture(providerId);
+    const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    quiet.update(f.recipient, { supervisorId: f.sender,
+      task: { deliverable: 'First assigned task', doneWhen: 'Proof saved', evidencePath: 'docs/proof.md' } });
+    const control = continuationControl(f.db, f.recipient);
+    control.recovery = { status: 'scheduled', reason: 'Existing recovery', attempts: 1,
+      startedAt: new Date().toISOString(), nextAttemptAt: new Date(Date.now() - 1).toISOString() };
+    saveContinuation(f.db, f.recipient, control);
+    quiet.update(f.recipient, { task: { state: 'done' }, status: 'waiting' });
+    backdate(f.db, f.session.id, 10);
+    const binding = f.db.boundSessions.getById(f.session.id)!;
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([]);
+    expect(continuationControl(f.db, f.recipient)).toEqual(control);
+    const command = { id: randomUUID(), recipientId: f.recipient, expectedTaskRevision: 2,
+      task: { deliverable: 'Second assigned task' } };
+    quiet.dispatch(f.sender, command);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(continuationControl(f.db, f.recipient)).toEqual(control);
+    expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ pid: binding.pid, startedAt: binding.startedAt });
+    quiet.dispatch(f.sender, command);
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    quiet.update(f.recipient, { task: { state: 'done' } });
+    await f.manager.wakePendingAssignments();
+    expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
+    expect(continuationControl(f.db, f.recipient)).toEqual(control);
+  });
   it('rechecks dispatch authority immediately before Enter and preserves a changed human decision', async () => {
     const f = await fixture('claude'); f.service.update(f.recipient, { supervisorId: f.sender });
     const quiet = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });

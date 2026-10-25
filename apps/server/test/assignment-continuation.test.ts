@@ -360,6 +360,48 @@ describe('Supervisor task workflow', () => {
     await expect(dispatchCoordination(f.service, { ...command, messageId: randomUUID() })).rejects.toThrow('revision changed');
     expect(f.service.poll(f.worker.id).messages[0]).toMatchObject({ channel: 'supervisor' });
   });
+  it('dispatches the next task after completion without renewing permission or its recovery budget', () => {
+    const f = fixture();
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', task });
+    const control = continuationControl(f.db, f.worker.id);
+    control.recovery = { status: 'scheduled', reason: 'Existing recovery', attempts: 2,
+      startedAt: new Date().toISOString(), nextAttemptAt: new Date().toISOString() };
+    saveContinuation(f.db, f.worker.id, control);
+    f.service.update(f.worker.id, { task: { state: 'done' } });
+    f.service.update(f.worker.id, { status: 'waiting' });
+    const restarted = new CoordinationService(f.db, { enabled: true, pilotPaths: [] });
+    expect(continuationControl(f.db, f.worker.id)).toEqual(control);
+    const command = { id: randomUUID(), recipientId: f.worker.id, expectedTaskRevision: 2,
+      task: { deliverable: 'Verify the next assigned change' } };
+    expect(restarted.dispatch(f.parent.id, command)).toMatchObject({ id: command.id, priority: 'P2' });
+    expect(restarted.taskBoard(f.parent.id).workers[0]?.task).toMatchObject({
+      deliverable: command.task.deliverable, state: 'working', revision: 3,
+    });
+    expect(continuationControl(f.db, f.worker.id)).toEqual(control);
+    expect(restarted.dispatch(f.parent.id, command)).toMatchObject({ id: command.id });
+    expect(() => restarted.dispatch(f.parent.id, { ...command, id: randomUUID() })).toThrow('revision changed');
+  });
+  it.each(['waiting', 'awaiting', 'blocked', 'stalled', 'finished'] as const)('preserves %s across task completion and rejects the next dispatch', condition => {
+    const f = fixture();
+    f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended', task });
+    if (condition === 'waiting') f.service.update(f.worker.id, { continuation: 'waiting_for_input' });
+    if (condition === 'awaiting') f.service.update(f.worker.id, { awaiting: 'External job' });
+    if (condition === 'blocked' || condition === 'stalled') {
+      const control = continuationControl(f.db, f.worker.id);
+      control.recovery = { status: condition, reason: 'Requires owner', attempts: 3,
+        startedAt: new Date().toISOString(), nextAttemptAt: new Date().toISOString() };
+      saveContinuation(f.db, f.worker.id, control);
+    }
+    const before = continuationControl(f.db, f.worker.id);
+    f.service.update(f.worker.id, { task: { state: 'done' } });
+    expect(continuationControl(f.db, f.worker.id)).toEqual(before);
+    if (condition === 'finished') f.service.finish(f.worker.id, 'Assignment closed');
+    const control = continuationControl(f.db, f.worker.id);
+    expect(() => f.service.dispatch(f.parent.id, { id: randomUUID(), recipientId: f.worker.id,
+      expectedTaskRevision: 2, task: { deliverable: 'Next task' } })).toThrow('paused');
+    expect(f.service.taskBoard(f.parent.id).workers[0]?.task).toMatchObject({ state: 'done', revision: 2 });
+    expect(continuationControl(f.db, f.worker.id)).toEqual(control);
+  });
   it.each(['waiting', 'awaiting', 'blocked', 'stalled', 'finished'] as const)('refuses dispatch across %s permission/recovery state', condition => {
     const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id, continuation: 'unattended' });
     if (condition === 'waiting') f.service.update(f.worker.id, { continuation: 'waiting_for_input' });
