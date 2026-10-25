@@ -37,6 +37,34 @@ function fixture() {
 }
 
 describe('repository wiki', () => {
+  it('preserves replacement history, ranks current guidance first and rejects broken replacement chains', () => {
+    const { checkout, wiki, actor } = fixture();
+    const current = wiki.write(checkout, { title: 'Current release procedure', body: 'Worker deployment is verified here.', baseRevision: null }, actor);
+    const old = wiki.write(checkout, { title: 'Worker deployment', body: 'Old procedure retained for history.', baseRevision: null }, actor);
+    const replaced = wiki.write(checkout, { title: old.title, body: old.body, baseRevision: old.revision, supersededBy: current.title }, actor);
+    expect(replaced.revision).not.toBe(old.revision);
+    expect(replaced.supersededBy).toBe(current.title);
+    expect(wiki.read(checkout, old.title, actor, old.revision)?.supersededBy).toBeNull();
+    expect(wiki.search(checkout, 'worker deployment', actor).results.map(r => r.title)).toEqual([current.title, old.title]);
+    expect(wiki.search(checkout, 'old procedure', actor).results[0]?.supersededBy).toBe(current.title);
+    expect(() => wiki.write(checkout, { title: current.title, body: current.body, baseRevision: current.revision, supersededBy: old.title }, actor)).toThrow('cycle');
+    expect(() => wiki.write(checkout, { title: old.title, body: old.body, baseRevision: replaced.revision, supersededBy: 'Missing page' }, actor)).toThrow('must exist');
+    const revised = wiki.write(checkout, { title: old.title, body: old.body + ' Historical detail.', baseRevision: replaced.revision }, actor);
+    expect(revised.supersededBy).toBe(current.title);
+    expect(() => wiki.write(checkout, { title: old.title, body: revised.body, baseRevision: replaced.revision, supersededBy: null }, actor)).toThrow(WikiConflictError);
+    const restored = wiki.write(checkout, { title: old.title, body: revised.body, baseRevision: revised.revision, supersededBy: null }, actor);
+    expect(restored.supersededBy).toBeNull();
+  });
+  it('migrates version 2 without changing historical pages or access records', () => {
+    const { checkout, wiki, actor, wikiPath } = fixture();
+    const page = wiki.write(checkout, { title: 'Original page', body: 'Original text.', baseRevision: null }, actor);
+    wiki.sqlite.exec('alter table wiki_revisions drop column superseded_by');
+    wiki.sqlite.pragma('user_version=2'); wiki.close();
+    const reopened = new WikiService(wikiPath); cleanups.push(() => reopened.close());
+    expect(reopened.sqlite.pragma('user_version', { simple: true })).toBe(3);
+    expect(reopened.read(checkout, page.title, actor)).toMatchObject({ revision: page.revision, body: page.body, supersededBy: null });
+    expect(reopened.sqlite.prepare("select count(*) n from wiki_access where action='write'").get()).toEqual({ n: 1 });
+  });
   it('finds reordered query words and favors an exact title over a body phrase', () => {
     const { checkout, wiki, actor } = fixture();
     wiki.write(checkout, { title: 'Worker deployment', body: 'Operational procedure.', baseRevision: null }, actor);
@@ -190,6 +218,7 @@ describe('repository wiki', () => {
     wiki.sqlite.exec(`alter table wiki_access drop column page_title;
       alter table wiki_access drop column query;
       alter table wiki_access drop column revision;
+      alter table wiki_revisions drop column superseded_by;
       pragma user_version=1;`);
     const pages = wiki.sqlite.prepare('select * from wiki_pages').all();
     const revisions = wiki.sqlite.prepare('select * from wiki_revisions').all();
@@ -197,9 +226,9 @@ describe('repository wiki', () => {
     wiki.close();
     const upgraded = new WikiService(wikiPath);
     cleanups.push(() => { if (upgraded.sqlite.open) upgraded.close(); });
-    expect(upgraded.sqlite.pragma('user_version', { simple: true })).toBe(2);
+    expect(upgraded.sqlite.pragma('user_version', { simple: true })).toBe(3);
     expect(upgraded.sqlite.prepare('select * from wiki_pages').all()).toEqual(pages);
-    expect(upgraded.sqlite.prepare('select * from wiki_revisions').all()).toEqual(revisions);
+    expect(upgraded.sqlite.prepare('select * from wiki_revisions').all()).toEqual(revisions.map(row => ({ ...(row as object), superseded_by: null })));
     expect(upgraded.sqlite.prepare('select * from wiki_access').all()).toEqual(accesses.map((row) => ({
       ...(row as object), page_title: null, query: null, revision: null,
     })));

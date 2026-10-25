@@ -25,6 +25,36 @@ function fixture(){
 }
 
 describe('Cooperative messaging trial',()=>{
+  it('requires an explicit sender wake reason for a new P1 and preserves accepted policy on retries', () => {
+    const f = fixture(), id = randomUUID();
+    const input = { id, recipientId: f.recipient.id, text: 'Intervene in the critical run', priority: 'P1' as const };
+    expect(() => f.service.send(f.sender.id, input)).toThrow('wakeReason');
+    expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(id)).toBeUndefined();
+    const wakeReason = 'The active critical run is paused for your build; deliver it now before its reserved slot ends.';
+    f.service.send(f.sender.id, { ...input, wakeReason });
+    const policy = f.db.meta.get(messagePolicyKey(id));
+    f.service.send(f.sender.id, input); // A receipt lookup does not resurrect or reinterpret accepted mail.
+    f.service.send(f.sender.id, { ...input, wakeReason: 'A different reason on a retry' });
+    expect(f.db.meta.get(messagePolicyKey(id))).toBe(policy);
+    expect(f.service.poll(f.recipient.id).messages[0]?.wakeReason).toBe(wakeReason);
+  });
+  it.each(['', ' ', 'line one\nline two', 'x'.repeat(301)])('rejects invalid P1 reason without changing assignment completion: %s', wakeReason => {
+    const f = fixture(); f.service.update(f.sender.id, { supervisorId: f.recipient.id });
+    const before = f.service.agentStatus(f.sender.id).assignment;
+    expect(() => f.service.finish(f.sender.id, 'Finished task', { priority: 'P1', wakeReason })).toThrow('wakeReason');
+    expect(f.service.agentStatus(f.sender.id).assignment).toEqual(before);
+  });
+  it('purges the P1 reason together with expired pending content', () => {
+    const f = fixture(), id = randomUUID(), wakeReason = 'Private blocked-work detail that must expire with its message.';
+    f.service.send(f.sender.id, { id, recipientId: f.recipient.id, text: 'Short-lived result', priority: 'P1', wakeReason, validFor: 1 });
+    vi.advanceTimersByTime(1001); f.service.poll(f.recipient.id);
+    expect(f.db.meta.get(messagePolicyKey(id))).not.toContain(wakeReason);
+    expect(f.db.sqlite.prepare('select id from coordination_messages where id=?').get(id)).toBeUndefined();
+  });
+  it('does not turn a reason attached to P2 into an implicit wake', () => {
+    const f = fixture();
+    expect(() => f.service.send(f.sender.id, { id: randomUUID(), recipientId: f.recipient.id, text: 'Ordinary update', priority: 'P2', wakeReason: 'Claimed urgency' })).toThrow('wakeReason');
+  });
   it('defaults awareness to P3 and one hour without an immediate body, state leak or wake',()=>{
     const f=fixture();const {input,receipt}=f.send();
     expect(receipt).toMatchObject({priority:'P3',delivery:'mailbox',expiresAt:'2026-10-23T02:00:00.000Z'});
@@ -38,7 +68,7 @@ describe('Cooperative messaging trial',()=>{
     expect(f.db.sqlite.prepare('select acknowledged_at from coordination_messages where id=?').get(input.id)).toEqual({acknowledged_at:null});
   });
   it('batches P1 and P2 bodies in priority order while P3 waits for explicit retrieval',()=>{
-    const f=fixture();const p2=f.send({priority:'P2'}),p3=f.send(),p1=f.send({priority:'P1'});
+    const f=fixture();const p2=f.send({priority:'P2'}),p3=f.send(),p1=f.send({priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.'});
     expect(f.wake).toHaveBeenCalledTimes(1);
     expect(f.service.poll(f.recipient.id).messages.map(m=>m.id)).toEqual([p1.input.id,p2.input.id]);
     expect(f.service.mail(f.recipient.id).messages.map(m=>m.id)).toEqual([p3.input.id]);
@@ -52,7 +82,7 @@ describe('Cooperative messaging trial',()=>{
   it('preserves accepted priority and expiry on retries, including after database reopen',()=>{
     const f=fixture();const {input,receipt}=f.send({priority:'P2',validFor:604800});
     vi.advanceTimersByTime(1000);
-    expect(f.service.send(f.sender.id,{...input,priority:'P1',validFor:1})).toMatchObject({priority:'P2',expiresAt:receipt.expiresAt});
+    expect(f.service.send(f.sender.id,{...input,priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.',validFor:1})).toMatchObject({priority:'P2',expiresAt:receipt.expiresAt});
     const reopened=new AppDatabase(path.join(f.root,'db.sqlite'));cleanup.push(()=>reopened.close());
     const restored=new CoordinationService(reopened,{enabled:true,pilotPaths:[]});
     expect(restored.send(f.sender.id,input)).toMatchObject({priority:'P2',expiresAt:receipt.expiresAt});
@@ -67,7 +97,7 @@ describe('Cooperative messaging trial',()=>{
     expect(f.service.acknowledge(f.recipient.id,[input.id])).toEqual({ acknowledged: [], expiredUnread: [input.id] });
   });
   it('retains wake accounting after an unacknowledged message body expires',async()=>{
-    const f=fixture();const {input}=f.send({priority:'P1',validFor:1});
+    const f=fixture();const {input}=f.send({priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.',validFor:1});
     f.db.meta.set(`peer-wake-attempt:${input.id}`,JSON.stringify({sessionId:randomUUID(),timestamp:new Date().toISOString(),status:'submitted'}));
     vi.advanceTimersByTime(2000);f.service.poll(f.recipient.id);
     const audit=await auditPeerWakes(f.db.sqlite);
@@ -86,7 +116,7 @@ describe('Cooperative messaging trial',()=>{
   it('reserves critical storage so ignored awareness mail cannot reject a P1',()=>{
     const f=fixture();for(let i=0;i<100;i++)f.send();
     expect(()=>f.send()).toThrow('inbox is full');
-    expect(f.send({priority:'P1'}).receipt.priority).toBe('P1');
+    expect(f.send({priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.'}).receipt.priority).toBe('P1');
     expect(f.wake).toHaveBeenCalledTimes(1);
     expect(f.service.poll(f.recipient.id).messages).toHaveLength(1);
   });

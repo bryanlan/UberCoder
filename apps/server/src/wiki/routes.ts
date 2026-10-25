@@ -13,6 +13,7 @@ const listQuerySchema = z.object({ offset: z.coerce.number().int().nonnegative()
 const searchQuerySchema = z.object({ query: z.string().trim().min(1).max(160) });
 const writeSchema = z.object({
   title: z.string().min(1).max(160), body: z.string().max(65_536),
+  supersededBy: z.string().trim().min(1).max(160).nullable().optional(),
   baseRevision: z.number().int().positive().nullable(), summary: z.string().max(200).optional(),
 }).strict();
 

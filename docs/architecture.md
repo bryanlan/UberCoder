@@ -716,3 +716,5 @@ then confirmation (`staged`) and Enter invocation (`submitting`). An exact owned
 notice may be discarded by successful sleep or retired by the existing guarded human-input path.
 Partial, clipped, mixed or unowned drafts, uncertain Enter and interrupted retirement remain
 protected. The ordinary ready-prompt, working-turn, background-task and ownership guards still apply.
+
+Wiki replacements are revisioned with `supersededBy` in wiki schema 3. Current matching pages rank ahead of superseded matches, and readers retain access to historical revisions and replacement links. New P1 messages and supervisor handoffs require an explicit sender-chosen `wakeReason`; validation adds no classifier or automatic urgency. Expired pending wake reasons are purged with message bodies.

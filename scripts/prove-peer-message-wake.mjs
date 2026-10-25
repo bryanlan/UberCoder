@@ -168,12 +168,12 @@ try {
     const recipientAuth = () => ({ assignmentId: native.id,
       token: JSON.parse(fs.readFileSync(path.join(config.runtimeDir, 'coordination/clients', `${clientKey}.json`), 'utf8')).token });
     let finishedEvidence;
-    const queued = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId, recipientId: native.id, text: peerText });
+    const queued = await rpc({ ...senderAuth, action: 'send', priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.', messageId, recipientId: native.id, text: peerText });
     assert.equal(queued.delivery, 'wake_pending');
     await wait('real native acknowledgement and reply', () => db.prepare('select id from coordination_messages where sender_id=? and recipient_id=? and text=?').get(native.id, sender.assignmentId, marker));
     assert.ok(db.prepare('select acknowledged_at from coordination_messages where id=?').get(messageId).acknowledged_at);
     if (unattended) assert.equal(fs.readFileSync(markerFile, 'utf8').trim(), marker, 'Assignment work completed in the wake turn');
-    const receipt = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId, recipientId: native.id, text: peerText });
+    const receipt = await rpc({ ...senderAuth, action: 'send', priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.', messageId, recipientId: native.id, text: peerText });
     assert.equal(receipt.delivery, 'acknowledged');
     await wait('response turn ends with decision pending', async () => {
       const screen = await api('GET', `/api/sessions/${id}/screen?lines=120`);
@@ -198,7 +198,7 @@ try {
         assert.equal(db.prepare('select acknowledged_at from coordination_messages where id=?').get(ordinaryId).acknowledged_at, null);
       }
       const urgentStarted = Date.now();
-      await rpc({ ...senderAuth, action: 'send', messageId: urgentId, recipientId: native.id, priority:'P1',
+      await rpc({ ...senderAuth, action: 'send', messageId: urgentId, recipientId: native.id, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.',
         text: 'P1 fixture handoff: acknowledge this message and all queued routine messages, preserve the pending A/B decision, then wait. No additional marker send or new task.' });
       await wait('urgent bypass and complete batched inbox acknowledgement', () => [...ordinaryIds, urgentId].every(messageId =>
         db.prepare('select acknowledged_at from coordination_messages where id=?').get(messageId)?.acknowledged_at));
@@ -259,7 +259,7 @@ try {
       writer.close();
       Object.assign(finishedEvidence, { simulatedIdleSleep: true });
       const secondId = randomUUID();
-      await rpc({ ...senderAuth, action: 'send', messageId: secondId, recipientId: native.id, priority:'P1',
+      await rpc({ ...senderAuth, action: 'send', messageId: secondId, recipientId: native.id, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.',
         text: 'This is a new second inbox question after your prior task finished. Acknowledge this message, preserve the completed marker action, and keep the A/B decision pending.' });
       await wait('second finished inbox acknowledgement', () =>
         db.prepare('select acknowledged_at from coordination_messages where id=?').get(secondId)?.acknowledged_at);
@@ -279,7 +279,7 @@ try {
     // Exercise a real human Stop after the inbox response, then send a new message.
     await api('POST', `/api/sessions/${id}/keys`, { keys: ['Escape'] });
     const pausedId = randomUUID();
-    const paused = await rpc({ ...senderAuth, action: 'send', priority:'P1', messageId: pausedId, recipientId: native.id, text: `Stay manually stopped; this peer message must not wake you. ${marker}` });
+    const paused = await rpc({ ...senderAuth, action: 'send', priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.', messageId: pausedId, recipientId: native.id, text: `Stay manually stopped; this peer message must not wake you. ${marker}` });
     assert.equal(paused.delivery, 'on_resume');
     await new Promise(resolve => setTimeout(resolve, 17_000));
     assert.equal(db.prepare('select value from meta where key=?').get(`peer-wake-attempt:${pausedId}`), undefined);

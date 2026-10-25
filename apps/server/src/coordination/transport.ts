@@ -24,6 +24,7 @@ const inputSchema = z.object({
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
   consoleSessionId: z.string().uuid().optional(),
   acceptsMessages: z.boolean().optional(), priority: z.enum(MESSAGE_PRIORITIES).optional(),
+  wakeReason: text.max(300).optional(),
   validFor: z.number().int().min(1).max(604800).optional(),
   category: z.enum(BROADCAST_CATEGORIES).optional(), categories: z.array(z.enum(BROADCAST_CATEGORIES)).max(5).optional(),
   description: text.max(500).optional(), summary: text.max(2000).optional(),
@@ -40,6 +41,7 @@ const wikiSchema = z.object({
   action: z.enum(['list', 'search', 'read', 'history', 'write']),
   assignmentId: z.string().uuid(), token: z.string().min(32).max(256),
   checkout: text.max(4096), title: text.max(160).optional(),
+  supersededBy: text.max(160).nullable().optional(),
   query: text.max(160).optional(), body: z.string().max(65_536).optional(),
   summary: z.string().max(200).optional(), baseRevision: z.number().int().positive().nullable().optional(),
   revision: z.number().int().positive().optional(), offset: z.number().int().nonnegative().default(0),
@@ -49,7 +51,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
   if (raw && typeof raw === 'object' && 'urgent' in raw) throw new Error('urgent has been retired. Choose priority:P1/P2/P3 and optional validFor seconds. Use the canonical agent-coord.mjs CLI if MCP is cached.');
   if (raw && typeof raw === 'object' && 'notifySupervisor' in raw) throw new Error('notifySupervisor has been retired. Use update with a complete task record and task.state:done or blocked with actionNeeded. Routine progress stays in status/history. Use canonical agent-coord.mjs if MCP is cached.');
   const input = inputSchema.parse(raw);
-  if (input.action === 'dispatch' && (input.priority !== undefined || input.validFor !== undefined
+  if (input.action === 'dispatch' && (input.priority !== undefined || input.validFor !== undefined || input.wakeReason !== undefined
     || (input.task?.state !== undefined && input.task.state !== 'working') || input.task?.actionNeeded)) {
     throw new Error('Dispatch activates a working task once within existing authority. Omit priority, validFor and blocked/done state; informational mail uses send.');
   }
@@ -72,7 +74,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     case 'tasks': return service.taskBoard(id, input.offset);
     case 'dispatch': return service.dispatch(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), expectedTaskRevision: need(input.expectedTaskRevision, 'expectedTaskRevision'), task: input.task });
     case 'update': return service.update(id, input);
-    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor });
+    case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor, wakeReason: input.wakeReason });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
     case 'finish': return service.finish(id, need(input.summary, 'summary'), input);
     case 'disconnect': return service.disconnect(id);
@@ -95,8 +97,8 @@ export function dispatchWiki(coordination: CoordinationService, wiki: WikiServic
     case 'history': return { notice, ...wiki.history(input.checkout, need(input.title, 'title'), actor, input.offset) };
     case 'write': { const page = wiki.write(input.checkout, {
       title: need(input.title, 'title'), body: need(input.body, 'body'),
-      baseRevision: need(input.baseRevision, 'baseRevision'), summary: input.summary,
-    }, actor); return { notice, page: { title: page.title, revision: page.revision }, status: 'saved' }; }
+      baseRevision: need(input.baseRevision, 'baseRevision'), summary: input.summary, supersededBy: input.supersededBy,
+    }, actor); return { notice, page: { title: page.title, revision: page.revision, supersededBy: page.supersededBy }, status: 'saved' }; }
   }
 }
 

@@ -19,25 +19,34 @@ export function hasInboxSpace(db: AppDatabase, recipientId: string, priority: Me
 export const messageHash = (senderId: string, recipientId: string, text: string) =>
   createHash('sha256').update(JSON.stringify([senderId, recipientId, text])).digest('hex');
 
-export interface MessagePolicy { senderId: string; recipientId: string; createdAt: string; origin: 'direct'|'handoff'|'overdue'|'migrated'|'dispatch'; priority: MessagePriority; expiresAt: string; hash: string; suppliedAt?:string; acknowledgedAt?:string; expired?: boolean }
+export interface MessagePolicy { senderId: string; recipientId: string; createdAt: string; origin: 'direct'|'handoff'|'overdue'|'migrated'|'dispatch'; priority: MessagePriority; wakeReason?: string; expiresAt: string; hash: string; suppliedAt?:string; acknowledgedAt?:string; expired?: boolean }
 export function messagePolicy(db: AppDatabase, id: string): MessagePolicy {
   const value = db.meta.get(messagePolicyKey(id));
   if (!value) throw new Error(`Missing message policy for ${id}.`);
   return JSON.parse(value) as MessagePolicy;
 }
-export function setMessagePolicy(db: AppDatabase, id: string, sender: string, recipient: string, text: string,
-  options: MessageOptions & {origin?: MessagePolicy['origin']; createdAt?:string} = {}, now = Date.now(), pending = true): MessagePolicy {
+export function validateMessageOptions(options: MessageOptions): string | undefined {
   if (options.priority && !['P1','P2','P3'].includes(options.priority)) throw new Error('Invalid message priority.');
   if (options.validFor !== undefined && (!Number.isInteger(options.validFor) || options.validFor < 1 || options.validFor > DURABLE_VALID_FOR)) throw new Error('validFor must be seconds from1 to604800.');
-  const policy = { senderId:sender, recipientId:recipient, createdAt:options.createdAt ?? new Date(now).toISOString(), origin:options.origin ?? 'direct', priority: options.priority ?? 'P3', expiresAt: new Date(now + (options.validFor ?? DEFAULT_VALID_FOR) * 1000).toISOString(),
+  const wakeReason = options.wakeReason?.trim();
+  if ((options.priority === 'P1' && (!wakeReason || wakeReason.length > 300 || /[\r\n]/.test(wakeReason)))
+    || (options.wakeReason !== undefined && options.priority !== 'P1')) {
+    throw Object.assign(new Error('P1 requires wakeReason: one short line (1-300 characters) stating what is blocked now, the recipient action and why waiting for its next normal turn is too late. Use P2 for routine updates; use dispatch for an assigned task. If MCP is cached, use canonical agent-coord.mjs.'), { code: 'p1_wake_reason_required' });
+  }
+  return wakeReason;
+}
+export function setMessagePolicy(db: AppDatabase, id: string, sender: string, recipient: string, text: string,
+  options: MessageOptions & {origin?: MessagePolicy['origin']; createdAt?:string} = {}, now = Date.now(), pending = true): MessagePolicy {
+  const wakeReason = validateMessageOptions(options);
+  const policy = { ...(wakeReason ? { wakeReason } : {}), senderId:sender, recipientId:recipient, createdAt:options.createdAt ?? new Date(now).toISOString(), origin:options.origin ?? 'direct', priority: options.priority ?? 'P3', expiresAt: new Date(now + (options.validFor ?? DEFAULT_VALID_FOR) * 1000).toISOString(),
     hash: messageHash(sender, recipient, text) };
   db.meta.set(messagePolicyKey(id), JSON.stringify(policy));
   if (pending) db.meta.set(expiryKey(id, policy.expiresAt), id);
   return policy;
 }
 export function withMessagePolicy(db: AppDatabase, message: Omit<CoordinationMessage, 'priority' | 'expiresAt'>): CoordinationMessage {
-  const { priority, expiresAt } = messagePolicy(db, message.id);
-  return { ...message, priority, expiresAt };
+  const { priority, expiresAt, wakeReason } = messagePolicy(db, message.id);
+  return { ...message, priority, expiresAt, ...(wakeReason ? { wakeReason } : {}) };
 }
 
 /** One-time migration. Existing mail gets P3 and one hour from trial adoption to be read. */
@@ -70,7 +79,8 @@ export function expireMessages(db: AppDatabase, now = Date.now()): void {
       const ack = db.sqlite.prepare('select acknowledged_at acknowledgedAt from coordination_messages where id=?').get(id) as {acknowledgedAt:string|null}|undefined;
       if (!ack?.acknowledgedAt) {
         db.sqlite.prepare('delete from coordination_messages where id=?').run(id);
-        db.meta.set(messagePolicyKey(id), JSON.stringify({ ...policy, expired: true }));
+        const { wakeReason: _deletedReason, ...receipt } = policy;
+        db.meta.set(messagePolicyKey(id), JSON.stringify({ ...receipt, expired: true }));
         ids.add(id);
       }
       db.sqlite.prepare('delete from meta where key=?').run(row.key);

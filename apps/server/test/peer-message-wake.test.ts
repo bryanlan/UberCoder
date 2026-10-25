@@ -39,7 +39,7 @@ async function fixture(id: 'codex' | 'claude' = 'codex', options: Parameters<typ
   const paste = tmux.pasteText.bind(tmux), literal = tmux.sendLiteralText.bind(tmux), keys = tmux.sendKeys.bind(tmux);
   tmux.pasteText = async (name, text) => { await paste(name, text); if (id === 'claude') tmux.paneText = tmux.paneText.replace('❯ ', '❯ ' + text); };
   tmux.sendLiteralText = async (name, text) => { await literal(name, text); if (id === 'claude') tmux.paneText = tmux.paneText.replace('❯ ', '❯ ' + text); };
-  tmux.sendKeys = async (name, input) => { await keys(name, input); if (id === 'claude' && input.includes('Enter')) tmux.paneText = claudeReady; };
+  tmux.sendKeys = async (name, input) => { await keys(name, input); if (id === 'claude' && (input.includes('Enter') || input.includes('C-c'))) tmux.paneText = claudeReady; };
   const manager = createRecoveryManager(db, tmux, root, new RealtimeEventBus(), selected, settings,
     { queueCodexNotice: async (_id, _settings, _cwd, prompt) => { tmux.sent.push(prompt); }, ...options });
   const service = new CoordinationService(db, { enabled: true, pilotPaths: [] }, () => { void manager.wakePendingAssignments(); });
@@ -56,7 +56,7 @@ async function fixture(id: 'codex' | 'claude' = 'codex', options: Parameters<typ
   }
   const session = await manager.bindConversation({ project, provider: selected, providerSettings: settings, conversationRef: native, title: 'Existing task', kind: 'history' });
   const send = () => {
-    const message = { priority:'P1' as const, id: randomUUID(), recipientId: recipient, text: 'Please answer the existing assignment question.' };
+    const message = { priority:'P1' as const, wakeReason: 'A critical assigned run is paused; answer now before its reserved slot expires.', id: randomUUID(), recipientId: recipient, text: 'Please answer the existing assignment question.' };
     service.send(sender, message);
     return message;
   };
@@ -239,7 +239,7 @@ describe('Cooperative inbox priority scheduling', () => {
   it('does not submit Enter when the last P1 expires during literal entry',async()=>{
     const f=await fixture('claude');f.service.update(f.recipient,{continuation:'waiting_for_input'});
     const quiet=new CoordinationService(f.db,{enabled:true,pilotPaths:[]});
-    const m={id:randomUUID(),recipientId:f.recipient,text:'Deadline-sensitive question',priority:'P1' as const};
+    const m={id:randomUUID(),recipientId:f.recipient,text:'Deadline-sensitive question',priority:'P1' as const, wakeReason: 'A critical run is paused; intervene now before its reserved slot expires.'};
     quiet.send(f.sender,m);
     const literal=f.tmux.sendLiteralText.bind(f.tmux);
     f.tmux.sendLiteralText=async(...args)=>{
@@ -253,7 +253,7 @@ describe('Cooperative inbox priority scheduling', () => {
   });
   it('expires a P1 before scheduling a wake and rejects resurrection through retry',async()=>{
     const f=await fixture();f.service.update(f.recipient,{continuation:'waiting_for_input'});
-    const m={id:randomUUID(),recipientId:f.recipient,text:'Obsolete request',priority:'P1' as const};
+    const m={id:randomUUID(),recipientId:f.recipient,text:'Obsolete request',priority:'P1' as const, wakeReason: 'A critical run is paused; intervene now before its reserved slot expires.'};
     // Queue without the request callback to expire before the scheduler observes it.
     const quiet=new CoordinationService(f.db,{enabled:true,pilotPaths:[]});quiet.send(f.sender,m);
     const policy=JSON.parse(f.db.meta.get(messagePolicyKey(m.id))!);policy.expiresAt=new Date(Date.now()-1).toISOString();
@@ -444,7 +444,7 @@ describe('Peer message wake and one-hour sleep', () => {
     const sender = f.service.register({ provider: id === 'codex' ? 'claude' : 'codex', nativeSessionId: randomUUID(),
       token: randomUUID(), pid: process.pid, cwd: otherProject }).assignmentId!;
     const control = continuationControl(f.db, f.recipient);
-    const message = { priority:'P1' as const, id: randomUUID(), recipientId: f.recipient, text: 'Result for your existing assignment; the human decision is still pending.' };
+    const message = { priority:'P1' as const, wakeReason: 'A critical assigned run is paused; answer now before its reserved slot expires.', id: randomUUID(), recipientId: f.recipient, text: 'Result for your existing assignment; the human decision is still pending.' };
     expect(f.service.send(sender, message).delivery).toBe('wake_pending');
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
@@ -1373,7 +1373,7 @@ describe('Unattended assignment continuation', () => {
     expect(JSON.parse(f.db.meta.get(peerWakeComposerKey(f.session.id))!)).toMatchObject({ status: 'staged', notice: 'unattended' });
     expect(continuationControl(f.db, f.recipient).recovery).toMatchObject({ status: 'scheduled', attempts });
     await f.manager.stop(); memory = 'MemAvailable: 8000000 kB';
-    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' });
     const handoff = f.db.sqlite.prepare('select id from coordination_messages where recipient_id=?').get(f.recipient) as { id: string };
     const restarted = createRecoveryManager(f.db, f.tmux, f.root, new RealtimeEventBus(), claudeProvider, providerSettings, options);
     try {

@@ -11,10 +11,10 @@ export type WikiActor = { kind: 'agent' | 'user'; id: string; provider?: string 
 type PageRow = { repository: string; title_key: string; title: string; current_revision: number; updated_at: string };
 type RevisionRow = {
   id: number; title: string; body: string; summary: string; author: string;
-  checkout: string; branch: string | null; head_commit: string | null; created_at: string;
+  checkout: string; branch: string | null; head_commit: string | null; created_at: string; superseded_by: string | null;
 };
 
-type SearchPage = { title: string; revision: number; updatedAt: string; body: string };
+type SearchPage = { title: string; revision: number; updatedAt: string; body: string; supersededBy?: string | null };
 type SearchHit = { start: number; end: number; term: number };
 const searchStopwords = new Set('an and are as at be by for from how in is it of on or that the this to was were what when where which with'.split(' '));
 const searchText = (text: string) => text.normalize('NFKC').replace(/\s+/g, ' ').trim();
@@ -107,14 +107,14 @@ export function searchWikiPages(pages: SearchPage[], queryInput: string): WikiSe
       : Math.max(0, windowStart > title.length ? windowStart - title.length - 1 : (bodyHits[0]?.start ?? title.length + 1) - title.length - 1);
     const start = Math.max(0, Math.min(focus - 60, body.length - 220));
     const snippet = `${start ? '…' : ''}${body.slice(start, start + 220)}${start + 220 < body.length ? '…' : ''}`;
-    return [{ result: { title: page.title, revision: page.revision, updatedAt: page.updatedAt, snippet,
+    return [{ result: { title: page.title, revision: page.revision, updatedAt: page.updatedAt, supersededBy: page.supersededBy ?? null, snippet,
       matchedTerms: terms.filter((_, i) => matched.has(i)) }, fullMatch, titlePhrase, coverage,
       bodyPhrase: Number(bodyPhraseAt >= 0), titleTerms, span }];
   });
   const complete = ranked.filter((page) => page.fullMatch);
   const bestPartialCoverage = ranked.reduce((best, page) => Math.max(best, page.coverage), 0);
   const selected = complete.length ? complete : ranked.filter((page) => page.coverage === bestPartialCoverage);
-  selected.sort((a, b) => b.titlePhrase - a.titlePhrase || b.coverage - a.coverage || b.bodyPhrase - a.bodyPhrase
+  selected.sort((a, b) => Number(!!a.result.supersededBy) - Number(!!b.result.supersededBy) || b.titlePhrase - a.titlePhrase || b.coverage - a.coverage || b.bodyPhrase - a.bodyPhrase
     || b.titleTerms - a.titleTerms || a.span - b.span || b.result.updatedAt.localeCompare(a.result.updatedAt)
     || a.result.title.localeCompare(b.result.title));
   return { pageCount: pages.length, results: selected.slice(0, complete.length ? 8 : 3).map((page) => page.result) };
@@ -181,7 +181,7 @@ export class WikiService {
     this.backupPath = path.join(directory, 'agent-wiki.backup.sqlite');
     this.sqlite.pragma('journal_mode = WAL');
     const version = this.sqlite.pragma('user_version', { simple: true }) as number;
-    if (version > 2) { this.sqlite.close(); throw new Error(`Wiki schema version ${version} is newer than this Console supports.`); }
+    if (version > 3) { this.sqlite.close(); throw new Error(`Wiki schema version ${version} is newer than this Console supports.`); }
     this.sqlite.transaction(() => {
       this.sqlite.exec(`
         create table if not exists wiki_pages (
@@ -209,6 +209,10 @@ export class WikiService {
           alter table wiki_access add column revision integer;
         `);
         this.sqlite.pragma('user_version = 2');
+      }
+      if (version < 3) {
+        this.sqlite.exec('alter table wiki_revisions add column superseded_by text');
+        this.sqlite.pragma('user_version = 3');
       }
     }).immediate();
   }
@@ -259,7 +263,7 @@ export class WikiService {
       .map((candidate) => candidate.title).slice(0, 30);
     return { revision: row.id, title: page.title, body: row.body, summary: row.summary,
       author: row.author, checkout: row.checkout, branch: row.branch, headCommit: row.head_commit,
-      createdAt: row.created_at, links, backlinks };
+      createdAt: row.created_at, supersededBy: row.superseded_by, links, backlinks };
   }
 
   read(checkout: string, titleInput: string, actor: WikiActor, revision?: number): WikiPage | null {
@@ -276,9 +280,9 @@ export class WikiService {
   list(checkout: string, actor: WikiActor, offset = 0) {
     const { repository } = wikiIdentity(checkout);
     const pages = this.sqlite.prepare(`select p.title, p.current_revision as revision, p.updated_at as updatedAt,
-      substr(r.author,1,80) as author, substr(r.summary,1,100) as summary
+      r.superseded_by as supersededBy, substr(r.author,1,80) as author, substr(r.summary,1,100) as summary
       from wiki_pages p join wiki_revisions r on r.id=p.current_revision
-      where p.repository=? order by p.updated_at desc, p.title_key limit 8 offset ?`)
+      where p.repository=? order by (r.superseded_by is not null), p.updated_at desc, p.title_key limit 8 offset ?`)
       .all(repository, offset) as WikiPageSummary[];
     const total = (this.sqlite.prepare('select count(*) as n from wiki_pages where repository=?').get(repository) as { n: number }).n;
     this.access(repository, actor, 'list', pages.length);
@@ -289,7 +293,7 @@ export class WikiService {
     const { repository } = wikiIdentity(checkout);
     const query = queryInput.trim();
     if (!query || query.length > 160) throw new Error('Wiki search query must be 1–160 characters.');
-    const pages = this.sqlite.prepare(`select p.title, p.current_revision as revision, p.updated_at as updatedAt, r.body from wiki_pages p
+    const pages = this.sqlite.prepare(`select p.title, p.current_revision as revision, p.updated_at as updatedAt, r.superseded_by as supersededBy, r.body from wiki_pages p
       join wiki_revisions r on r.id=p.current_revision where p.repository=?
       order by p.title_key`).all(repository) as SearchPage[];
     const result = searchWikiPages(pages, query);
@@ -306,7 +310,7 @@ export class WikiService {
       return { revisions: [], total: 0, nextOffset: null };
     }
     const revisions = this.sqlite.prepare(`select id as revision, summary, author, checkout, branch,
-      head_commit as headCommit, created_at as createdAt from wiki_revisions
+      head_commit as headCommit, created_at as createdAt, superseded_by as supersededBy from wiki_revisions
       where repository=? and title_key=? order by id desc limit 10 offset ?`)
       .all(repository, key, offset) as WikiHistoryEntry[];
     const total = (this.sqlite.prepare('select count(*) as n from wiki_revisions where repository=? and title_key=?')
@@ -315,7 +319,7 @@ export class WikiService {
     return { revisions, total, nextOffset: offset + revisions.length < total ? offset + revisions.length : null };
   }
 
-  write(checkout: string, input: { title: string; body: string; baseRevision: number | null; summary?: string }, actor: WikiActor): WikiPage {
+  write(checkout: string, input: { title: string; body: string; baseRevision: number | null; summary?: string; supersededBy?: string | null }, actor: WikiActor): WikiPage {
     const { checkout: canonical, repository } = wikiIdentity(checkout);
     const { title, key } = titleParts(input.title);
     if (input.body.length > 65_536) throw new Error('Wiki page exceeds 64 KiB. Split it into linked pages.');
@@ -325,13 +329,27 @@ export class WikiService {
     const result = this.sqlite.transaction(() => {
       const page = this.page(repository, key);
       const current = page && this.revision(page.current_revision);
-      if (page && current?.body === input.body) return this.result(repository, page, current);
+      const supersededBy = input.supersededBy === undefined ? current?.superseded_by ?? null
+        : input.supersededBy === null ? null : titleParts(input.supersededBy).title;
+      if (supersededBy) {
+        const visited = new Set([key]);
+        let next: string | null = supersededBy;
+        while (next) {
+          const targetKey = titleParts(next).key;
+          if (visited.has(targetKey)) throw new Error('Wiki replacements cannot contain a cycle or replace themselves.');
+          visited.add(targetKey);
+          const target = this.page(repository, targetKey);
+          if (!target) throw new Error('The replacement page must exist in this repository.');
+          next = this.revision(target.current_revision)?.superseded_by ?? null;
+        }
+      }
+      if (page && current?.body === input.body && current.superseded_by === supersededBy) return this.result(repository, page, current);
       if ((page?.current_revision ?? null) !== input.baseRevision) throw new WikiConflictError(page?.current_revision ?? null);
       const now = new Date().toISOString();
       const inserted = this.sqlite.prepare(`insert into wiki_revisions
-        (repository,title_key,title,body,summary,author,checkout,branch,head_commit,created_at)
-        values(?,?,?,?,?,?,?,?,?,?)`)
-        .run(repository, key, title, input.body, summary, this.actorName(actor), canonical, source.branch, source.headCommit, now);
+        (repository,title_key,title,body,summary,author,checkout,branch,head_commit,created_at,superseded_by)
+        values(?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(repository, key, title, input.body, summary, this.actorName(actor), canonical, source.branch, source.headCommit, now, supersededBy);
       const revision = Number(inserted.lastInsertRowid);
       this.sqlite.prepare(`insert into wiki_pages(repository,title_key,title,current_revision,updated_at)
         values(?,?,?,?,?) on conflict(repository,title_key) do update set

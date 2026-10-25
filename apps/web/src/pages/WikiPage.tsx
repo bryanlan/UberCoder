@@ -5,7 +5,7 @@ import type { WikiPage as WikiPageData } from '@agent-console/shared';
 import { api, ApiError } from '../lib/api';
 import { renderMessageMarkdown } from '../features/conversation/markdown';
 
-type Draft = { title: string; body: string; summary: string; baseRevision: number | null };
+type Draft = { title: string; body: string; summary: string; baseRevision: number | null; supersededBy: string | null };
 
 export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug: string; projectName: string; csrfToken?: string }) {
   const queryClient = useQueryClient();
@@ -18,6 +18,7 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
   const [showHistory, setShowHistory] = useState(false);
   const [historyOffset, setHistoryOffset] = useState(0);
   const [draft, setDraft] = useState<Draft>();
+  const [replacementEdited, setReplacementEdited] = useState(false);
   const [newTitle, setNewTitle] = useState('');
 
   const list = useQuery({ queryKey: ['wiki-list', projectSlug, offset], queryFn: () => api.wikiList(projectSlug, offset) });
@@ -34,6 +35,7 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
       setRevision(undefined);
       setSearchParams({ page: result.page.title });
       await queryClient.invalidateQueries({ queryKey: ['wiki-list', projectSlug] });
+      await queryClient.invalidateQueries({ queryKey: ['wiki-search', projectSlug] });
       await queryClient.invalidateQueries({ queryKey: ['wiki-page', projectSlug, result.page.title] });
       await queryClient.invalidateQueries({ queryKey: ['wiki-history', projectSlug, result.page.title] });
     },
@@ -52,7 +54,8 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
   }
 
   function edit(value: WikiPageData | null, nextTitle = title) {
-    setDraft({ title: nextTitle, body: value?.body ?? '', summary: '', baseRevision: latest.data?.page?.revision ?? null });
+    setReplacementEdited((value?.supersededBy ?? null) !== (latest.data?.page?.supersededBy ?? null));
+    setDraft({ title: nextTitle, body: value?.body ?? '', summary: '', supersededBy: value?.supersededBy ?? null, baseRevision: latest.data?.page?.revision ?? null });
     write.reset();
   }
 
@@ -71,11 +74,11 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
           <div className="mb-2 text-xs uppercase text-slate-400">Results for “{searchTerm}”</div>
           {search.isLoading && <p className="text-sm">Searching…</p>}
           {search.data?.results.length === 0 && <p className="text-sm text-slate-400">No pages found.</p>}
-          <ul className="space-y-2">{search.data?.results.map((item) => <li key={item.title}><button onClick={() => openPage(item.title)} className="text-left text-sm text-sky-300 hover:underline">{item.title}</button><div className="line-clamp-2 text-xs text-slate-500">{item.snippet}</div></li>)}</ul>
+          <ul className="space-y-2">{search.data?.results.map((item) => <li key={item.title}><button onClick={() => openPage(item.title)} className="text-left text-sm text-sky-300 hover:underline">{item.title}</button><div className="line-clamp-2 text-xs text-slate-500">{item.snippet}</div>{item.supersededBy && <div className="text-xs text-amber-200">Superseded by <button onClick={() => openPage(item.supersededBy!)} className="underline">{item.supersededBy}</button></div>}</li>)}</ul>
         </div>}
         <div className="mt-5 mb-2 text-xs uppercase text-slate-400">Recent pages · {list.data?.total ?? 0}</div>
         {list.isError && <p role="alert" className="text-sm text-rose-300">Could not load pages.</p>}
-        <ul className="space-y-1">{list.data?.pages.map((item) => <li key={item.title}><button onClick={() => openPage(item.title)} className="text-left text-sm text-sky-300 hover:underline">{item.title}</button><div className="text-xs text-slate-500">{new Date(item.updatedAt).toLocaleDateString()}</div></li>)}</ul>
+        <ul className="space-y-1">{list.data?.pages.map((item) => <li key={item.title}><button onClick={() => openPage(item.title)} className="text-left text-sm text-sky-300 hover:underline">{item.title}</button><div className="text-xs text-slate-500">{new Date(item.updatedAt).toLocaleDateString()}{item.supersededBy && ` · Superseded by ${item.supersededBy}`}</div></li>)}</ul>
         <div className="mt-3 flex gap-3 text-xs">
           {offset > 0 && <button onClick={() => setOffset(Math.max(0, offset - 8))} className="text-sky-300">Previous</button>}
           {list.data?.nextOffset !== null && list.data?.nextOffset !== undefined && <button onClick={() => setOffset(list.data!.nextOffset!)} className="text-sky-300">More</button>}
@@ -100,6 +103,7 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
             </div>
           </div>
           {revision !== undefined && <div className="mb-4 rounded border border-amber-700/50 bg-amber-950/30 p-3 text-sm">Viewing an older revision. <button onClick={() => setRevision(undefined)} className="text-sky-300">Show latest</button> · <button onClick={() => edit(page ?? null)} className="text-sky-300">Restore by editing</button></div>}
+          {page?.supersededBy && <p role="status" className="mb-4 rounded border border-amber-700/50 p-3 text-sm text-amber-200">This page is superseded. Read <button onClick={() => openPage(page.supersededBy!)} className="underline">{page.supersededBy}</button> for current guidance.</p>}
           {page ? <>
             <article className="max-w-4xl break-words leading-7 text-slate-200">{renderMessageMarkdown(page.body, (target, label, key) => <button key={key} onClick={() => openPage(target)} className="text-sky-300 underline underline-offset-2">{label}</button>)}</article>
             {page.backlinks.length > 0 && <div className="mt-8 border-t border-slate-800 pt-3 text-sm text-slate-400">Linked from: {page.backlinks.map((link, index) => <span key={link}>{index > 0 && ', '}<button onClick={() => openPage(link)} className="text-sky-300">{link}</button></span>)}</div>}
@@ -108,7 +112,7 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
             <div className="mt-3 flex gap-3 text-xs">{historyOffset > 0 && <button onClick={() => setHistoryOffset(Math.max(0, historyOffset - 10))} className="text-sky-300">Newer</button>}{history.data?.nextOffset !== null && history.data?.nextOffset !== undefined && <button onClick={() => setHistoryOffset(history.data!.nextOffset!)} className="text-sky-300">Older</button>}</div>
           </div>}
         </>}
-        {draft && <form onSubmit={(event) => { event.preventDefault(); write.mutate(draft); }} className="max-w-4xl space-y-4">
+        {draft && <form onSubmit={(event) => { event.preventDefault(); write.mutate({ ...draft, supersededBy: draft.supersededBy?.trim() || null }); }} className="max-w-4xl space-y-4">
           <h2 className="text-xl font-semibold">Edit {draft.title}</h2>
           <label className="block text-sm">Page text <span className="text-slate-400">(Markdown and [[wiki links]])</span>
             <textarea aria-label="Page text" value={draft.body} onChange={(event) => setDraft({ ...draft, body: event.target.value })} rows={18} className="mt-2 w-full rounded border border-slate-700 bg-slate-900 p-3 font-mono text-sm" />
@@ -116,10 +120,14 @@ export function WikiPage({ projectSlug, projectName, csrfToken }: { projectSlug:
           <label className="block text-sm">Edit summary
             <input aria-label="Edit summary" value={draft.summary} onChange={(event) => setDraft({ ...draft, summary: event.target.value })} className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm" />
           </label>
+          <label className="block text-sm">Superseded by (leave empty for current guidance)
+            <input aria-label="Superseded by" value={draft.supersededBy ?? ''} onChange={(event) => { setReplacementEdited(true); setDraft({ ...draft, supersededBy: event.target.value || null }); }} className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm" />
+          </label>
           {write.error && <div role="alert" className="rounded border border-rose-700/50 p-3 text-sm text-rose-200">{write.error.message}{write.error instanceof ApiError && write.error.status === 409 && latest.data?.page && <div className="mt-2">
             <p>The latest page is revision {latest.data.page.revision}. Your draft is still here.</p>
+            <p>Latest replacement: {latest.data.page.supersededBy ?? 'None (current guidance)'}. Your draft replacement: {draft.supersededBy?.trim() || 'None (current guidance)'}. Review the replacement field above before continuing.</p>
             <details className="my-2"><summary className="cursor-pointer text-sky-300">Read the latest text</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-3">{latest.data.page.body}</pre></details>
-            <button type="button" onClick={() => { setDraft({ ...draft, baseRevision: latest.data!.page!.revision }); write.reset(); }} className="text-sky-300">I merged the changes; use this revision as the base</button>
+            <button type="button" onClick={() => { setDraft({ ...draft, baseRevision: latest.data!.page!.revision, supersededBy: replacementEdited ? draft.supersededBy : latest.data!.page!.supersededBy ?? null }); write.reset(); }} className="text-sky-300">I merged the changes; use this revision as the base</button>
           </div>}</div>}
           <div className="flex gap-4"><button disabled={write.isPending} type="submit" className="rounded bg-sky-700 px-4 py-2 text-sm disabled:opacity-50">Save revision</button><button type="button" onClick={() => setDraft(undefined)} className="text-sm text-slate-300">Cancel</button></div>
         </form>}

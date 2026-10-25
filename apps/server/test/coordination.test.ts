@@ -167,10 +167,10 @@ describe('assignment coordination', () => {
     const { db, service, register } = fixture();
     const sender = register(), target = register();
     const input = { action: 'send', assignmentId: sender.id, token: sender.token, messageId: randomUUID(),
-      recipientId: target.id, text: 'Decision required', priority: 'P1' };
+      recipientId: target.id, text: 'Decision required', priority: 'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' };
     const receipt = await dispatchCoordination(service, input);
     expect(await dispatchCoordination(service, { ...input, priority: 'P3' })).toEqual(receipt);
-    expect(JSON.parse(db.meta.get(`inbox-message:${input.messageId}`)!)).toMatchObject({ priority:'P1' });
+    expect(JSON.parse(db.meta.get(`inbox-message:${input.messageId}`)!)).toMatchObject({ priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' });
   });
   it.each(['codex', 'claude'])('reopens the same finished %s agent reference on its next human prompt', async provider => {
     const { root, checkout, db, service } = fixture();

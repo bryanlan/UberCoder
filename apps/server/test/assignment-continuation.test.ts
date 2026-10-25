@@ -301,7 +301,7 @@ describe('Supervisor task workflow', () => {
   it('batches worker P2 reports once per fifteen minutes without holding P1, peer P2 or injecting P3', () => {
     const f = fixture(); f.service.update(f.worker.id, { supervisorId: f.parent.id });
     const send = (priority: 'P1'|'P2'|'P3') => {
-      const id = randomUUID(); f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: priority, priority }); return id;
+      const id = randomUUID(); f.service.send(f.worker.id, { id, recipientId: f.parent.id, text: priority, priority, ...(priority === 'P1' ? { wakeReason: 'A critical run is paused; intervene now before its reserved slot ends.' } : {}) }); return id;
     };
     const first = send('P2'); expect(f.service.poll(f.parent.id).messages.map(m => m.id)).toEqual([first]);
     f.service.acknowledge(f.parent.id, [first]);

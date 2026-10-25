@@ -475,6 +475,7 @@ export interface ApiErrorShape {
 }
 
 export interface WikiPage {
+  supersededBy?: string | null;
   revision: number;
   title: string;
   body: string;
@@ -489,6 +490,7 @@ export interface WikiPage {
 }
 
 export interface WikiPageSummary {
+  supersededBy?: string | null;
   title: string;
   revision: number;
   updatedAt: string;
@@ -497,6 +499,7 @@ export interface WikiPageSummary {
 }
 
 export interface WikiHistoryEntry {
+  supersededBy?: string | null;
   revision: number;
   summary: string;
   author: string;
@@ -520,7 +523,7 @@ export interface WikiHistoryResponse {
 
 export interface WikiSearchResponse {
   pageCount: number;
-  results: Array<{ title: string; revision: number; updatedAt: string; snippet: string; matchedTerms: string[] }>;
+  results: Array<{ title: string; revision: number; updatedAt: string; supersededBy?: string | null; snippet: string; matchedTerms: string[] }>;
 }
 
 export type AgentGrantAction = 'launch_session' | 'restart_session' | 'close_session';

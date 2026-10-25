@@ -151,7 +151,7 @@ export const api = {
   wikiHistory: (projectSlug: string, title: string, offset = 0) => request<WikiHistoryResponse>(
     `/api/wiki/${encodeURIComponent(projectSlug)}/history?${new URLSearchParams({ title, offset: String(offset) })}`,
   ),
-  wikiWrite: (projectSlug: string, body: { title: string; body: string; baseRevision: number | null; summary?: string }, csrfToken?: string) =>
+  wikiWrite: (projectSlug: string, body: { title: string; body: string; baseRevision: number | null; summary?: string; supersededBy?: string | null }, csrfToken?: string) =>
     request<{ page: WikiPage }>(`/api/wiki/${encodeURIComponent(projectSlug)}/page`,
       { method: 'PUT', body: JSON.stringify(body) }, csrfToken),
   searchConversations: (query: string, options: { limit?: number; signal?: AbortSignal } = {}) => {

@@ -4,7 +4,7 @@ export const MESSAGE_PRIORITIES = ['P1', 'P2', 'P3'] as const;
 export type MessagePriority = typeof MESSAGE_PRIORITIES[number];
 export const BROADCAST_CATEGORIES = ['releases', 'resources', 'contracts', 'ownership', 'incidents'] as const;
 export type BroadcastCategory = typeof BROADCAST_CATEGORIES[number];
-export interface MessageOptions { priority?: MessagePriority; validFor?: number }
+export interface MessageOptions { priority?: MessagePriority; validFor?: number; wakeReason?: string }
 export interface AssignmentTask {
   ownerId: string;
   deliverable: string;
@@ -63,6 +63,7 @@ export interface CoordinationEvent {
 }
 
 export interface CoordinationMessage {
+  wakeReason?: string;
   channel?: 'supervisor' | 'worker' | 'peer';
   priority: MessagePriority;
   expiresAt: string;

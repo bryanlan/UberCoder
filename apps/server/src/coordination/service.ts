@@ -9,7 +9,7 @@ import type { GrantService } from '../grants/service.js';
 import { assignmentTask, dispatchEligible, updateTask, type TaskInput } from './tasks.js';
 import { BroadcastBoard } from './broadcasts.js';
 import { GRANT_POLICY } from '../grants/schema.js';
-import { MAIL_NOTICE_INTERVAL_MS, acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
+import { MAIL_NOTICE_INTERVAL_MS, acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, validateMessageOptions, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
 
 const assignmentColumns = `id, provider, native_session_id as nativeSessionId, description, status, started_at as startedAt, last_seen_at as lastSeenAt`;
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
@@ -319,6 +319,7 @@ export class CoordinationService {
       const existing = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages where id=?`).get(input.id) as CoordinationMessage | undefined;
       return this.sendReceipt(existing ?? { id: input.id, recipientId: input.recipientId, suppliedAt: null, acknowledgedAt: null });
     }
+    validateMessageOptions(input);
     if (!acceptsMessages(this.db, input.recipientId)) throw Object.assign(
       new Error('Recipient is a send-only service without an inbox reader. Send requests to a coordinating agent instead.'), { code: 'recipient_send_only' });
     if (!hasInboxSpace(this.db,input.recipientId,input.priority)) throw new Error('Recipient inbox is full; wait for acknowledgements or message expiry.');
@@ -460,6 +461,7 @@ export class CoordinationService {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       if (current.status === 'finished') return { finished: true };
+      if (current.supervisorId && current.task?.state !== 'done') validateMessageOptions(options);
       setContinuation(this.db, id, 'waiting_for_input');
       this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(id);
       this.grants?.expireForAssignment(id);
@@ -513,7 +515,7 @@ export class CoordinationService {
   }
 
   private notifySupervisor(id: string, reason: string, options: MessageOptions = {}): void {
-    options = { priority: options.priority ?? 'P2', validFor: options.validFor ?? 604800 };
+    options = { priority: options.priority ?? 'P2', validFor: options.validFor ?? 604800, wakeReason: options.wakeReason };
     const control = continuationControl(this.db, id);
     if (!control.supervisorId) return;
     const event = this.db.sqlite.prepare('select coalesce(max(seq),0) as seq from coordination_events where assignment_id=?')

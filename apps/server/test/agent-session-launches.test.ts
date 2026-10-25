@@ -104,7 +104,7 @@ describe('Granted real-session launch pipeline',()=>{
     expect(peerWakePaused(f.db, f.actor)).toBe(false);
     f.tmux.sent.length = 0;
     f.tmux.paneText = 'OpenAI Codex\n\nCompleted response.\n› Ask Codex to do anything\ngpt-6.1-sol xhigh · 98% left · ~/demo';
-    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
+    f.coordination.update(worker, { summary: 'Lane one completed its requested work.', task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' });
     await f.manager.wakePendingAssignments();
     expect(f.tmux.sent).toEqual([PEER_WAKE_PROMPT]);
     expect(continuationControl(f.db, f.actor).continuation).toBe('unattended');

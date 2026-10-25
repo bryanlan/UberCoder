@@ -6,7 +6,7 @@ import type { AppDatabase } from '../db/database.js';
 export const CONTINUATION_DELAYS_MS = [15_000, 45_000, 120_000] as const;
 export const AWAIT_ALERT_MS = 4 * 60 * 60_000;
 export const UNATTENDED_IDLE_MS = 5 * 60_000;
-const PRIORITY_EXAMPLES = `Before choosing P1, identify what is blocked now, what this recipient must do, and why waiting for their next normal turn would materially delay critical work. If any answer is missing, choose P2 or P3. Ready, completed, failed and important do not determine priority.
+const PRIORITY_EXAMPLES = `For each new P1 message or handoff, supply wakeReason as one short line (1-300 characters): what is blocked now, the recipient action and why the next normal turn is too late. Put that reason in the field once, with supporting detail in text. Sender judgment chooses urgency; no classifier or automatic escalation. Use dispatch for assigned worker tasks. Ordinary API-ready and contract coordination updates use P2 unless an immediate critical blocker requires intervention. Before choosing P1, identify what is blocked now, what this recipient must do, and why waiting for their next normal turn would materially delay critical work. If any answer is missing, choose P2 or P3. Ready, completed, failed and important do not determine priority.
 Priority examples:
 P1: "Your critical run is paused awaiting this build. It is ready; fetch it now and resume."
 P1: "The current deployment fails on your change. Please revert commit X now so the release can proceed."

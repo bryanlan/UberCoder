@@ -54,6 +54,7 @@ export function CoordinationPanel({ checkout }: { checkout: string }) {
             {data.messages.map((message) => <li key={message.id} className="rounded-lg bg-slate-800 p-2">
               <div className="text-xs text-slate-400">{message.channel === 'worker' ? 'Worker report' : message.channel === 'supervisor' ? 'Supervisor instruction' : 'Peer message'} · {message.priority} · {label(message.senderId)} → {label(message.recipientId)}</div>
               <p className="whitespace-pre-wrap break-words">{message.text}</p>
+              {message.wakeReason && <p className="text-xs text-amber-200">Wake reason: {message.wakeReason}</p>}
               <div className="text-xs text-slate-400">{new Date(message.createdAt).toLocaleTimeString()} · {message.acknowledgedAt ? 'Acknowledged' : message.suppliedAt ? 'Offered to runtime; awaiting acknowledgement' : 'Queued'}</div>
             </li>)}
           </ul>

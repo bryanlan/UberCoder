@@ -33,7 +33,7 @@ async function fixture() {
     if (options.fixture) db.sqlite.prepare('update coordination_assignments set description=? where id=?').run('Disposable deployment verification sender', selectedSender);
     for (let i = 0; i < (options.batch ?? 1); i++) {
       const id = randomUUID();
-      service.send(options.reverse ? recipient : selectedSender, { priority:'P1', id, recipientId: options.reverse ? sender : recipient, text: 'PRIVATE_PEER_TEXT' });
+      service.send(options.reverse ? recipient : selectedSender, { priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.', id, recipientId: options.reverse ? sender : recipient, text: 'PRIVATE_PEER_TEXT' });
       db.sqlite.prepare('update coordination_messages set created_at=?,acknowledged_at=? where id=?')
         .run(new Date(at - (options.old ? 120 * minute : 1000)).toISOString(), options.acknowledged ? new Date(at + 1000).toISOString() : null, id);
       db.meta.set(peerWakeAttemptKey(id), JSON.stringify({ sessionId: options.reverse ? reverse.id : session.id,
@@ -71,7 +71,7 @@ describe('Peer wake audit', () => {
 
   it('retains unread supervisor results and the exact pause reason after continuation changes and restart', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     const handoff = JSON.parse(row.value);
     const timestamp = new Date(now - 6 * minute).toISOString();
@@ -97,7 +97,7 @@ describe('Peer wake audit', () => {
 
   it('pushes an overdue result once across backend restart, records delivery and retries an unavailable push', async () => {
     const f = await fixture();
-    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1' });
+    f.service.update(f.sender, { supervisorId: f.recipient, task: { deliverable: 'Complete assigned change', doneWhen: 'Reviewed and verified', evidencePath: 'docs/result.md', state: 'blocked', actionNeeded: 'Review this result to unblock the assigned task' }, priority:'P1', wakeReason: 'The critical assigned run is paused for this result; act now so it can resume before its waiting window ends.' });
     const row = f.db.sqlite.prepare("select key,value from meta where key like 'supervisor-handoff:%'").get() as { key: string; value: string };
     f.db.meta.set(row.key, JSON.stringify({ ...JSON.parse(row.value), timestamp: new Date(now - 6 * minute).toISOString() }));
     const send = vi.fn(async (_subscription: unknown, _payload?: string | Buffer | null) => ({ statusCode: 201, body: '', headers: {} }));
