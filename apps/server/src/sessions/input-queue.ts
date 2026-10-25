@@ -100,6 +100,8 @@ export class InputQueue {
 
   put(sessionId: string, record: QueuedInputRecord): void {
     this.sqlite.transaction(() => {
+      // A late observation or transport failure cannot revive an abandoned send.
+      if (this.get(sessionId, record.requestId)?.state === 'cancelled') return;
       const ids = this.pendingIds(sessionId).filter(id => id !== record.requestId || pending(record));
       if (pending(record) && !ids.includes(record.requestId)) ids.push(record.requestId);
       const put = this.sqlite.prepare('insert into meta (key, value) values (?, ?) on conflict(key) do update set value = excluded.value');

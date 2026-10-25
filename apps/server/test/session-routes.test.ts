@@ -32,7 +32,7 @@ describe('session routes', () => {
       const accepted = await app.inject({ method: 'POST', url: '/api/sessions/queued-session/keys', payload });
       expect(accepted.statusCode).toBe(200);
       expect(accepted.json()).toEqual({ session, queuedInput });
-      expect(sendKeystrokes).toHaveBeenCalledWith(session.id, payload);
+      expect(sendKeystrokes).toHaveBeenCalledWith(session.id, payload, 0);
       const invalid = await app.inject({ method: 'POST', url: '/api/sessions/queued-session/keys', payload: { ...payload, keys: ['Escape'] } });
       expect(invalid.statusCode).toBe(400);
       expect(sendKeystrokes).toHaveBeenCalledTimes(1);
@@ -133,7 +133,7 @@ describe('session routes', () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-large', { text: largeText });
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-large', { text: largeText }, 0);
     } finally {
       await app.close();
       db.close();
@@ -515,7 +515,7 @@ describe('session routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { keys: ['Enter'], submittedText: '/model' });
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { keys: ['Enter'], submittedText: '/model' }, 0);
       expect(db.pendingConversations.get('pending:slash-command')?.rawMetadata?.lastUserInputPreview).toBeUndefined();
     } finally {
       await app.close();
@@ -579,7 +579,7 @@ describe('session routes', () => {
       expect(response.statusCode).toBe(200);
       expect(allowsLiteralSelectionKeystroke).toHaveBeenCalledWith('session-pending', '1');
       expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: '1', keys: ['Enter'] });
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: '1', keys: ['Enter'] }, 0);
       expect(db.pendingConversations.get('pending:selection')?.boundSessionId).toBe('session-pending');
     } finally {
       await app.close();
@@ -639,7 +639,7 @@ describe('session routes', () => {
 
       expect(response.statusCode).toBe(200);
       expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: 'buffered bridge text' });
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: 'buffered bridge text' }, 0);
     } finally {
       await app.close();
       db.close();

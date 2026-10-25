@@ -10,6 +10,7 @@ import { SessionInputRejectedError, SessionManager, type SessionCommandResult } 
 import { MAX_PROMPT_IMAGES, type BoundSession, type SessionInputResponse } from '@agent-console/shared';
 import { ImageStore, ImageUploadError } from '../images/store.js';
 import { imagePromptSuffix } from '../images/prompt.js';
+import { InputQueue } from '../sessions/input-queue.js';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
 const RAW_OUTPUT_TAIL_BYTES = 256 * 1024;
@@ -98,6 +99,8 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
   sessions: SessionManager;
   session: BoundSession;
   text: string;
+  inputRevision?: number;
+  submissionId?: string;
 }): Promise<PendingCodexFirstTurnRestartResult> {
   const pendingConversation = input.session.conversationRef.startsWith('pending:')
     ? input.db.pendingConversations.get(input.session.conversationRef)
@@ -122,6 +125,8 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
     provider,
     providerSettings,
     initialPrompt: input.text,
+    inputRevision: input.inputRevision,
+    submissionId: input.submissionId,
   });
   return { kind: 'restarted', result: restarted };
 }
@@ -388,6 +393,8 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
+    // Capture before image/native preflight, which can finish after a later Stop.
+    const inputRevision = new InputQueue(db.sqlite).revision(sessionId);
     if (parsed.data.imageIds) {
       if (!images) throw new Error('Image storage was not configured.');
       const caption = (parsed.data.submittedText ?? parsed.data.text ?? '').trim();
@@ -411,25 +418,27 @@ export async function registerSessionRoutes(
       : false;
     // Native choices and slash commands remain explicit controls.
     if (isLiteralSelectionKeystroke || submittedPromptText?.startsWith('/')) delete parsed.data.submissionId;
-    if (submittedPromptText && shouldRestartFromSubmittedPrompt && !isLiteralSelectionKeystroke) {
-      const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
-        db,
-        projectService,
-        providerRegistry,
-        sessions,
-        session,
-        text: submittedPromptText,
-      });
-      if (pendingRestart.kind === 'project-not-found') {
-        reply.code(404).send({ error: 'Project not found.' });
-        return;
-      }
-      if (pendingRestart.kind === 'restarted') {
-        return sessionInputResponse(pendingRestart.result);
-      }
-    }
     try {
-      return sessionInputResponse(await sessions.sendKeystrokes(sessionId, parsed.data));
+      if (submittedPromptText && shouldRestartFromSubmittedPrompt && !isLiteralSelectionKeystroke) {
+        const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
+          db,
+          projectService,
+          providerRegistry,
+          sessions,
+          session,
+          text: submittedPromptText,
+          inputRevision,
+          submissionId: parsed.data.submissionId,
+        });
+        if (pendingRestart.kind === 'project-not-found') {
+          reply.code(404).send({ error: 'Project not found.' });
+          return;
+        }
+        if (pendingRestart.kind === 'restarted') {
+          return sessionInputResponse(pendingRestart.result);
+        }
+      }
+      return sessionInputResponse(await sessions.sendKeystrokes(sessionId, parsed.data, inputRevision));
     } catch (error) {
       if (error instanceof SessionInputRejectedError) {
         reply.code(error.statusCode).send({ error: error.message });

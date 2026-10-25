@@ -2,10 +2,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionManager } from '../src/sessions/session-manager.js';
+import { InputQueue } from '../src/sessions/input-queue.js';
+import { registerSessionRoutes } from '../src/routes/sessions.js';
 import { PEER_WAKE_PROMPT, peerWakeComposerKey } from '../src/coordination/wake.js';
 import { createRecoveryManager, enableUnattendedRecovery, FakeTmux, project, provider, claudeProvider, providerSettings } from './helpers/session-fixtures.js';
 
@@ -94,6 +97,180 @@ async function fixture(providerId: 'codex' | 'claude' = 'codex', recovery = fals
 }
 
 describe('durable human input queue', () => {
+  it('rejects a cancelled native menu choice even after preflight removes its submission ID', async () => {
+    const f = await fixture();
+    const revision = new InputQueue(f.db.sqlite).revision(f.session.id);
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    await expect(f.manager.sendKeystrokes(f.session.id, { text: '1', submittedText: '1', keys: ['Enter'] }, revision))
+      .rejects.toThrow('cancelled by a later Stop');
+    expect(f.tmux.sent).toEqual([]);
+    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    // An explicit interrupt remains available even when its snapshot is old.
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }, revision);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['Escape']]);
+  });
+  it.each(['codex', 'claude'] as const)('waits for the %s Stop repaint before clearing an unchanged mixed draft', async providerId => {
+    const f = await fixture(providerId);
+    const text = 'mixed old native prefix';
+    f.tmux.paneText = ready(text);
+    await f.submit('blocked message');
+    const sendKeys = f.tmux.sendKeys.bind(f.tmux);
+    vi.spyOn(f.tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+      await sendKeys(name, keys);
+      if (keys.includes('Escape')) f.tmux.captureSequence = [busy.replace('› ', `› ${text}`), ready(text)];
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c']]);
+    expect((await f.submit('next explicit message')).recordedUserInput?.text).toBe('next explicit message');
+    expect(f.tmux.sent).toEqual(['next explicit message']);
+  });
+
+  it('preserves a native draft changed during the Stop repaint wait', async () => {
+    const f = await fixture();
+    const sendKeys = f.tmux.sendKeys.bind(f.tmux);
+    vi.spyOn(f.tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+      await sendKeys(name, keys);
+      if (keys.includes('Escape')) f.tmux.captureSequence = [busy.replace('› ', '› old draft'), ready('new human draft')];
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.paneText).toContain('new human draft');
+  });
+
+  it.each(['native-selection', 'images', 'pending-project'] as const)('cancels an HTTP send held in %s preflight before Stop', async phase => {
+    const f = await fixture();
+    if (phase === 'pending-project') {
+      const ref = 'pending:cancelled-first-turn';
+      f.db.boundSessions.upsert({ ...f.session, conversationRef: ref });
+      f.db.pendingConversations.put({ ref, kind: 'pending', projectSlug: project.slug, provider: 'codex',
+        title: 'Pending', createdAt: f.session.startedAt, updatedAt: f.session.updatedAt,
+        isBound: true, boundSessionId: f.session.id, degraded: false, rawMetadata: { pending: true } });
+    }
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let first = true;
+    const hold = async () => { if (first) { first = false; entered(); await held; } };
+    if (phase === 'native-selection') {
+      const allows = f.manager.allowsLiteralSelectionKeystroke.bind(f.manager);
+      vi.spyOn(f.manager, 'allowsLiteralSelectionKeystroke').mockImplementation(async (...args) => {
+        await hold(); return allows(...args);
+      });
+    }
+    const app = fastify();
+    await registerSessionRoutes(app, { ensureAuthenticated: async () => undefined } as never, f.db,
+      { getProjectBySlug: async () => { await hold(); return project; },
+        getMergedProviderSettings: () => providerSettings } as never,
+      { get: () => provider } as never, f.manager,
+      { resolve: async () => { await hold(); return []; } } as never);
+    const payload = { text: 'abandoned request', submittedText: 'abandoned request', keys: ['Enter'], submissionId: randomUUID(),
+      ...(phase === 'images' ? { imageIds: [randomUUID()] } : {}) };
+    const send = () => app.inject({ method: 'POST', url: `/api/sessions/${f.session.id}/keys`, payload });
+    const pending = send().then(response => response);
+    try {
+      await started;
+      expect((await app.inject({ method: 'POST', url: `/api/sessions/${f.session.id}/keys`, payload: { keys: ['Escape'] } })).statusCode).toBe(200);
+      release();
+      expect((await pending).statusCode).toBe(409);
+      expect(f.tmux.sent).toEqual([]);
+      expect(f.tmux.sentKeys).toEqual([['Escape']]);
+      expect(JSON.parse(f.db.meta.get(`session-input:${f.session.id}:${payload.submissionId}`)!).state).toBe('cancelled');
+      expect((await send()).statusCode).toBe(200);
+      expect(f.tmux.sent).toEqual([]);
+      expect((await f.submit('next explicit message')).recordedUserInput?.text).toBe('next explicit message');
+      expect(f.tmux.sent).toEqual(['next explicit message']);
+      expect(f.tmux.created).toHaveLength(1);
+    } finally { release(); await pending; await app.close(); }
+  });
+
+  it.each(['Stop', 'cancel'] as const)('keeps cancellation terminal when an expired paste capture races %s', async action => {
+    const f = await fixture();
+    const queue = new InputQueue(f.db.sqlite), requestId = randomUUID();
+    const text = 'an unconfirmed message';
+    queue.put(f.session.id, { requestId, text, state: 'awaiting_input', reason: 'Waiting for input.',
+      baselineInput: '', panePid: f.session.pid!, nativeRevision: queue.revision(f.session.id),
+      requestedAt: f.session.startedAt, typedAt: new Date(Date.now() - 31_000).toISOString() });
+    f.tmux.paneText = ready('unrecognized native paste');
+    let cancelled: Promise<unknown> | undefined;
+    const capture = f.tmux.capturePane.bind(f.tmux);
+    vi.spyOn(f.tmux, 'capturePane').mockImplementationOnce(async () => {
+      const screen = await capture();
+      cancelled = action === 'Stop' ? f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] })
+        : f.manager.cancelQueuedInput(f.session.id, requestId);
+      return screen;
+    });
+    await f.submit(text, requestId);
+    await cancelled;
+    expect(queue.get(f.session.id, requestId)?.state).toBe('cancelled');
+    expect(queue.list(f.session.id)).toEqual([]);
+    if (action === 'Stop') expect((await f.submit('next explicit message')).recordedUserInput?.text).toBe('next explicit message');
+    else expect(f.tmux.paneText).toContain('unrecognized native paste');
+  });
+
+  it.each(['codex', 'claude'] as const)('Escape clears an abandoned %s native draft and allows the next message once', async providerId => {
+    const f = await fixture(providerId);
+    f.tmux.paneText = ready('an older draft that does not match the queued message');
+    const id = randomUUID();
+    expect((await f.submit('the blocked message', id)).queuedInput?.state).toBe('queued');
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.paneText).toBe(ready());
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
+    const next = randomUUID();
+    expect((await f.submit('the next message', next)).recordedUserInput?.text).toBe('the next message');
+    await f.submit('the next message', next);
+    expect(f.tmux.sent).toEqual(['the next message']);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c'], ['Escape'], ['Enter']]);
+    expect(f.db.boundSessions.getById(f.session.id)?.pid).toBe(f.session.pid);
+  });
+
+  it('Escape cancels reviewable sends without leaving a queue barrier', async () => {
+    const f = await fixture();
+    f.tmux.acceptEnter = false;
+    const id = randomUUID();
+    expect((await f.submit('not accepted', id)).queuedInput?.state).toBe('needs_review');
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    f.tmux.acceptEnter = true;
+    expect((await f.submit('fresh message')).recordedUserInput?.text).toBe('fresh message');
+    await f.submit('not accepted', id);
+    expect(f.tmux.sent.filter(text => text === 'not accepted')).toHaveLength(1);
+  });
+
+  it.each(['draft', 'owner'] as const)('does not clear a %s that changes during Stop ownership checks', async changed => {
+    const f = await fixture();
+    f.tmux.paneText = ready('old native text');
+    const getOption = f.tmux.getOption.bind(f.tmux);
+    vi.spyOn(f.tmux, 'getOption').mockImplementation(async (name, option) => {
+      const value = await getOption(name, option);
+      if (option !== '@agent_console_session_id' || !f.tmux.sentKeys.some(keys => keys.includes('Escape'))) return value;
+      if (changed === 'draft') f.tmux.paneText = ready('a new human draft');
+      return changed === 'owner' ? 'another binding' : value;
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.paneText).toContain(changed === 'draft' ? 'a new human draft' : 'old native text');
+  });
+
+  it.each([false, true])('Stop during Enter releases the queue without replaying ambiguous input (transport failure %s)', async failEnter => {
+    const f = await fixture();
+    const id = randomUUID();
+    let stop: Promise<unknown> | undefined;
+    f.tmux.failEnter = failEnter;
+    f.tmux.onEnter = async () => {
+      f.tmux.onEnter = undefined;
+      stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    };
+    await f.submit('possibly submitted', id);
+    await stop;
+    expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
+    f.tmux.failEnter = false;
+    f.tmux.paneText = ready();
+    expect((await f.submit('new explicit message')).recordedUserInput?.text).toBe('new explicit message');
+    await f.submit('possibly submitted', id);
+    expect(f.tmux.sent.filter(text => text === 'possibly submitted')).toHaveLength(1);
+  });
+
   it.each(['codex', 'claude'] as const)('does not report %s delivery or replay Enter when the message remains in the composer', async providerId => {
     const f = await fixture(providerId);
     f.tmux.acceptEnter = false;
@@ -468,7 +645,7 @@ describe('durable human input queue', () => {
     expect(f.tmux.sent).toEqual([]);
   });
 
-  it.each(['cancel', 'Stop', 'restart'] as const)('clears cancelled live-staged text after %s without interrupting a running turn', async action => {
+  it.each(['cancel', 'Stop', 'restart'] as const)('clears live-staged text after %s, with immediate clearance only for human Stop', async action => {
     const f = await fixture('claude');
     const text = 'the already answered approval', requestId = randomUUID();
     await f.manager.sendKeystrokes(f.session.id, { text, deferScreenUpdate: true });
@@ -479,8 +656,9 @@ describe('durable human input queue', () => {
     if (action === 'Stop') await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
     else await f.manager.cancelQueuedInput(f.session.id, requestId);
     await new Promise(resolve => setTimeout(resolve, 100));
-    expect(f.tmux.sentKeys).toEqual(action === 'Stop' ? [['Escape']] : []);
-    expect(f.tmux.paneText).toContain(text);
+    expect(f.tmux.sentKeys).toEqual(action === 'Stop' ? [['Escape'], ['C-c']] : []);
+    if (action === 'Stop') expect(f.tmux.paneText).toBe(ready());
+    else expect(f.tmux.paneText).toContain(text);
     if (action === 'restart') await f.restart();
     f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(f.session.id)!, isWorking: false });
     const result = await f.submit('the next message');
@@ -587,22 +765,22 @@ describe('durable human input queue', () => {
     expect(f.tmux.paneText).toContain('my own words cancel me');
   });
 
-  it.each([false, true])('after Stop, clears unchanged queued text even after a navigation key (%s)', async navigate => {
+  it.each([false, true])('Stop clears the draft before the next input, including navigation (%s)', async navigate => {
     const f = await fixture();
     let stop: Promise<unknown> | undefined;
     f.tmux.onText = async () => { f.tmux.onText = undefined; stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
     await f.submit('stranded by Stop');
     await stop;
-    expect(f.tmux.paneText).toContain('stranded by Stop');
-    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.paneText).toBe(ready());
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c']]);
     if (navigate) await f.manager.sendKeystrokes(f.session.id, { keys: ['Left'] });
     const result = await f.submit('the next message');
     expect(result.recordedUserInput?.text).toBe('the next message');
-    expect(f.tmux.sentKeys).toEqual([['Escape'], ...(navigate ? [['Left']] : []), ['C-c'], ['Enter']]);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c'], ...(navigate ? [['Left']] : []), ['Enter']]);
     expect(f.tmux.sent).toEqual(['stranded by Stop', 'the next message']);
   });
 
-  it('does not clear stranded text after the human edits it', async () => {
+  it('preserves a new native draft entered after Stop', async () => {
     const f = await fixture();
     let stop: Promise<unknown> | undefined;
     f.tmux.onText = async () => { f.tmux.onText = undefined; stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
@@ -611,7 +789,7 @@ describe('durable human input queue', () => {
     f.tmux.paneText = ready('stranded by Stop, edited by hand');
     expect((await f.submit('the next message')).queuedInput?.state).toBe('queued');
     await new Promise(resolve => setTimeout(resolve, 1100));
-    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c']]);
     expect(f.tmux.paneText).toContain('edited by hand');
   });
 
@@ -621,7 +799,7 @@ describe('durable human input queue', () => {
     f.tmux.onText = async () => { stop = f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] }); };
     await f.submit('stop before Enter');
     await stop;
-    expect(f.tmux.sentKeys).toEqual([['Escape']]);
+    expect(f.tmux.sentKeys).toEqual([['Escape'], ['C-c']]);
     expect(f.db.boundSessions.getById(f.session.id)?.queuedInputs).toBeUndefined();
   });
 

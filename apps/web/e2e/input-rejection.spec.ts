@@ -94,6 +94,7 @@ for (const provider of ['claude', 'codex'] as const) {
         const body = route.request().postDataJSON() as SessionKeystrokeRequest;
         if (!body.keys?.includes('Enter')) return route.fallback();
         pending.push(body);
+        if (pending.length > 1) return route.fallback();
         await blocked;
         await route.fulfill({ status: 409, json: { error: 'This send was cancelled by a later Stop.' } });
       });
@@ -110,13 +111,25 @@ for (const provider of ['claude', 'codex'] as const) {
         await expect(stop).toBeEnabled();
         await stop.click();
         await expect.poll(() => calls.inputCalls).toEqual([{ sessionId: 'original-session', body: { keys: ['Escape'] } }]);
+        await expect(textbox).toBeEditable();
+        await expect(textbox).toHaveValue(draft);
+        if (mobile) await page.getByRole('button', { name: 'Send message' }).click();
+        else await textbox.press('Enter');
+        await expect.poll(() => pending.length).toBe(2);
+        expect(pending[1].submissionId).not.toBe(pending[0].submissionId);
+        if (mobile) {
+          await expect(textbox).not.toBeVisible();
+          await page.getByRole('button', { name: 'Reply', exact: true }).click();
+        }
+        await expect(textbox).toBeEditable();
+        await expect(textbox).toHaveValue('');
         expect(calls.bindCalls).toEqual([]);
         expect(calls.releaseCalls).toEqual([]);
         await page.screenshot({ path: testInfo.outputPath('interrupt-pending-send.png') });
       } finally { release(); }
-      await expect(textbox).toHaveValue(draft);
+      await expect(textbox).toHaveValue('');
       await expect(textbox).toBeEditable();
-      expect(pending).toHaveLength(1);
+      expect(pending).toHaveLength(2);
     });
   }
 

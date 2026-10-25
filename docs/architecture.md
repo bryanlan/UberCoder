@@ -347,10 +347,22 @@ Restart may resume observation of typed text, but an interrupted or uncertain En
 the conversation and never causes automatic replay. Queue state is projected on
 the bound session and is excluded from transcript/search content until submission.
 Pending human messages defer automatic peer input and automatic session sleep.
-Stop and Escape send only the interrupt key, without synchronizing a local draft
-or flushing buffered Text Bypass input. They remain available during a pending send.
-The browser cancels unsent commands from before the interrupt; the server also
-cancels human sends still waiting to enter the session command queue. After Enter,
+Stop and Escape interrupt without synchronizing a local draft or flushing buffered
+Text Bypass input. Escape also works when focus is outside the editor. The editor
+becomes editable immediately, retaining the interrupted draft while the old request
+is still pending. The browser gives the next send a fresh identity and ignores old
+responses, so they cannot overwrite the new draft or unlock a newer submission.
+The server cancels human sends still waiting to enter the session command queue.
+Queued chat submissions retain the input revision from before asynchronous image and native checks,
+including the pending first-message restart path. Stop invalidates that revision.
+After Escape, a bounded wait for readiness repaint and a fresh ownership and
+unchanged-composer check clear a remaining draft
+with one native clear-input key. That explicit human cancellation can clear a draft
+whose prefix differs from the queued message. It preserves the known text in debug
+history. Repeated Escape on an empty composer never sends the clear-input key.
+Cancelled submission identities remain cancelled, including uncertain submissions
+and late paste-timeout or transport results;
+they never replay or block a new explicit message. After Enter,
 the human-message journal confirms an empty native composer before recording
 delivery. If Enter leaves text in the composer, delivery requires review and is
 never retried automatically.

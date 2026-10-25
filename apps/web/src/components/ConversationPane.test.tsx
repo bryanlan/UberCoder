@@ -544,8 +544,9 @@ describe('ConversationPane live input bridge', () => {
 
   it.each(['Esc', 'keyboard', 'Interrupt session'])('%s remains available during a pending send', async control => {
     const pending = deferred<SessionInputResponse>();
+    const next = deferred<SessionInputResponse>();
     const send = vi.fn().mockImplementation((_session, request) => request.keys?.includes('Escape')
-      ? Promise.resolve({ session: boundSession() }) : pending.promise);
+      ? Promise.resolve({ session: boundSession() }) : request.submittedText === 'The next message' ? next.promise : pending.promise);
     renderPane({ onSendKeystrokes: send });
     const textbox = screen.getByRole('textbox');
     fireEvent.change(textbox, { target: { value: 'A pending message' } });
@@ -559,10 +560,27 @@ describe('ConversationPane live input bridge', () => {
     }
     await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
     expect(send).toHaveBeenLastCalledWith('session-1', { keys: ['Escape'] });
-    pending.resolve({ session: boundSession() });
     await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
     expect(textbox).toHaveValue('A pending message');
+    fireEvent.change(textbox, { target: { value: 'The next message' } });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(3));
+    expect(textbox).toHaveAttribute('readonly');
+    pending.resolve({ session: boundSession() });
+    await act(async () => { await pending.promise; });
+    expect(textbox).toHaveAttribute('readonly');
+    expect(textbox).not.toHaveValue('A pending message');
+    next.resolve({ session: boundSession() });
+    await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+    expect(textbox).toHaveValue('');
     fireEvent.change(textbox, { target: { value: '' } });
+  });
+
+  it('handles Escape when focus is outside the message editor', async () => {
+    const send = vi.fn().mockResolvedValue({ session: boundSession() });
+    renderPane({ onSendKeystrokes: send });
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    await waitFor(() => expect(send).toHaveBeenCalledExactlyOnceWith('session-1', { keys: ['Escape'] }));
   });
 
   it('interrupts Text Bypass without flushing buffered text or a queued Enter', async () => {

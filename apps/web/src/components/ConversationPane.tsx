@@ -255,6 +255,7 @@ function LiveSessionInputBridge({
   visibleModel,
   modelProfileRequest,
   hasQueuedInput,
+  queuedDraftText,
   nativeSelectionActive,
 }: {
   csrfToken?: string;
@@ -282,6 +283,7 @@ function LiveSessionInputBridge({
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
   hasQueuedInput: boolean;
+  queuedDraftText?: string;
   nativeSelectionActive: boolean;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
@@ -298,6 +300,7 @@ function LiveSessionInputBridge({
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
   const inputGenerationRef = useRef(0);
+  const submissionDraftRef = useRef<string | undefined>(undefined);
   const pendingTextRef = useRef('');
   const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
   const bypassPreviewTextRef = useRef<string | undefined>(undefined);
@@ -345,6 +348,17 @@ function LiveSessionInputBridge({
   useEffect(() => {
     setProfileError(undefined);
   }, [sessionId]);
+
+  useEffect(() => {
+    const stop = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat || event.defaultPrevented
+        || (event.target instanceof Element && event.target.closest('[role="dialog"]'))) return;
+      event.preventDefault();
+      void handleSpecialKey('Escape');
+    };
+    window.addEventListener('keydown', stop);
+    return () => window.removeEventListener('keydown', stop);
+  });
 
   useEffect(() => {
     const onProfileShortcut = (event: KeyboardEvent) => {
@@ -520,17 +534,22 @@ function LiveSessionInputBridge({
       return undefined;
     }
 
+    const generation = inputGenerationRef.current;
     bridgeBusyRef.current = true;
     setBridgeBusy(true);
     try {
       return await action();
     } finally {
-      bridgeBusyRef.current = false;
-      setBridgeBusy(false);
+      if (generation === inputGenerationRef.current) {
+        submissionDraftRef.current = undefined;
+        bridgeBusyRef.current = false;
+        setBridgeBusy(false);
+      }
     }
   }
 
   async function flushBufferedText(): Promise<boolean> {
+    const generation = inputGenerationRef.current;
     if (textFlushInFlightRef.current) {
       return await textFlushInFlightRef.current;
     }
@@ -543,7 +562,7 @@ function LiveSessionInputBridge({
     }
     const task = (async (): Promise<boolean> => {
       let ok = true;
-      while (pendingTextRef.current) {
+      while (pendingTextRef.current && generation === inputGenerationRef.current) {
         const text = pendingTextRef.current;
         pendingTextRef.current = '';
         ok = await queueKeystrokes({ text, deferScreenUpdate: true });
@@ -560,7 +579,7 @@ function LiveSessionInputBridge({
       if (textFlushInFlightRef.current === task) {
         textFlushInFlightRef.current = undefined;
       }
-      if (pendingTextRef.current) {
+      if (generation === inputGenerationRef.current && pendingTextRef.current) {
         scheduleBufferedTextFlush();
       }
     }
@@ -643,6 +662,7 @@ function LiveSessionInputBridge({
       return;
     }
     const targetSessionId = sessionId;
+    const generation = inputGenerationRef.current;
     const input = event.currentTarget;
     const start = input.selectionStart;
     const end = input.selectionEnd;
@@ -650,7 +670,7 @@ function LiveSessionInputBridge({
     void runBridgeAction(async () => {
       try {
         const resolved = await api.agentReference(reference);
-        if (activeSessionIdRef.current !== targetSessionId || captureRef.current !== input) return;
+        if (generation !== inputGenerationRef.current || activeSessionIdRef.current !== targetSessionId || captureRef.current !== input) return;
         const text = formatAgentReference(resolved);
         if (textBypassEnabled) {
           appendLiteralText(`${bypassPreviewTextRef.current ? '\n' : ''}${text}\n`);
@@ -670,11 +690,13 @@ function LiveSessionInputBridge({
   }
 
   async function syncDraftToRemote(extraKeys: SessionKeyToken[] = [], options: { clearAfterSend?: boolean } = {}): Promise<boolean> {
+    const generation = inputGenerationRef.current;
     const baseText = committedInputRef.current;
     const nextText = draftText;
     const submittedText = extraKeys.includes('Enter') ? nextText.trim() : '';
     const clearImmediately = options.clearAfterSend === true;
     if (clearImmediately) {
+      submissionDraftRef.current = nextText;
       clearDraftSubmitPreview();
     }
     let prefixLength = 0;
@@ -686,6 +708,7 @@ function LiveSessionInputBridge({
 
     if (backspaces > 0) {
       const ok = await queueKeystrokes({ keys: Array.from({ length: backspaces }, () => 'BSpace' as const) });
+      if (generation !== inputGenerationRef.current) return false;
       if (!ok) {
         if (clearImmediately) {
           restoreDraftSubmitPreview(nextText);
@@ -700,6 +723,7 @@ function LiveSessionInputBridge({
         ...(extraKeys.length > 0 ? { keys: extraKeys } : {}),
         ...(submittedText ? { submittedText } : {}),
       }, !hasNumericMenuDraft);
+      if (generation !== inputGenerationRef.current) return false;
       if (!ok) {
         if (clearImmediately) {
           restoreDraftSubmitPreview(nextText);
@@ -800,11 +824,11 @@ function LiveSessionInputBridge({
       const submittedText = (bypassPreviewTextRef.current ?? '').trim();
       keepBypassSelectionPinnedRef.current = true;
       const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
+      submissionDraftRef.current = previewBeforeSubmit;
       const optimisticMessage = !nativeSelectionActive && submittedText && !submittedText.startsWith('/')
         ? onLocalSubmittedText(sessionId, submittedText) : undefined;
       const restore = () => {
-        if (generation !== inputGenerationRef.current) restoreDraftSubmitPreview(previewBeforeSubmit);
-        else restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
+        if (generation === inputGenerationRef.current) restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
         if (optimisticMessage) {
           onDiscardLocalSubmittedText(optimisticMessage.id);
         }
@@ -833,7 +857,17 @@ function LiveSessionInputBridge({
       // Stop must reach the server even while a previous send is pending.
       // Never paste a held draft or flush buffered typing before interruption.
       inputGenerationRef.current += 1;
+      const heldDraft = submissionDraftRef.current ?? (textBypassEnabled ? bypassPreviewTextRef.current : draftText) ?? queuedDraftText ?? '';
       if (textBypassEnabled) stopTextBypassForQueue();
+      if (flushTimerRef.current !== undefined) window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = undefined;
+      pendingTextRef.current = '';
+      textFlushInFlightRef.current = undefined;
+      committedInputRef.current = '';
+      submissionDraftRef.current = undefined;
+      restoreDraftSubmitPreview(heldDraft || queuedDraftText || '');
+      bridgeBusyRef.current = false;
+      setBridgeBusy(false);
       const stop = onSendKeystrokes(sessionId, { keys: ['Escape'] });
       keyQueueRef.current = stop.then(() => undefined, () => undefined);
       await stop;
@@ -2015,6 +2049,7 @@ export function ConversationPane({
           key={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           sessionId={boundSession.id}
           hasQueuedInput={Boolean(boundSession.queuedInputs?.length)}
+          queuedDraftText={boundSession.queuedInputs?.at(-1)?.text}
           projectSlug={timeline.conversation.projectSlug}
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           conversationRef={timeline.conversation.ref}

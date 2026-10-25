@@ -115,6 +115,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
   const pendingSubmissionIds = useRef(new Map<string, string>());
+  const inputGenerations = useRef(new Map<string, number>());
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
   const [renamingProjectKey, setRenamingProjectKey] = useState<string>();
   const [rebindingConversationKey, setRebindingConversationKey] = useState<string>();
@@ -706,6 +707,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   }
 
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<SessionInputResponse | undefined> {
+    if (body.keys?.some(key => key === 'Escape' || key === 'C-c')) {
+      inputGenerations.current.set(sessionId, (inputGenerations.current.get(sessionId) ?? 0) + 1);
+      for (const key of pendingSubmissionIds.current.keys()) {
+        if (key.startsWith(`${sessionId}:`)) pendingSubmissionIds.current.delete(key);
+      }
+    }
+    const generation = inputGenerations.current.get(sessionId) ?? 0;
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
     const optimisticSubmittedText = optimisticSubmittedTextForKeystrokes(body);
@@ -739,7 +747,11 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       if (submissionId) pendingSubmissionIds.current.set(submissionKey, submissionId);
       const response = await api.sendKeystrokes(sessionId, completeChatSubmit
         ? { ...body, submissionId } : body, authQuery.data?.csrfToken);
-      pendingSubmissionIds.current.delete(submissionKey);
+      if (generation !== (inputGenerations.current.get(sessionId) ?? 0)) {
+        discardOptimisticMessage();
+        return undefined;
+      }
+      if (pendingSubmissionIds.current.get(submissionKey) === submissionId) pendingSubmissionIds.current.delete(submissionKey);
       const updatedSession = response.session;
       applyUpdatedSessionToSelection(sessionId, updatedSession);
       if (response.queuedInput) discardOptimisticMessage();
@@ -756,6 +768,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       return response;
     } catch (error) {
       discardOptimisticMessage();
+      if (generation !== (inputGenerations.current.get(sessionId) ?? 0)) return undefined;
       setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
       return undefined;
     }

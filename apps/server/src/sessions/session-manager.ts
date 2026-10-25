@@ -2202,16 +2202,25 @@ export class SessionManager {
     return updated;
   }
 
-  async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
-    if (!payload.submissionId && (payload.text || payload.keys?.length)) this.inputQueue.invalidateNativeInput(sessionId);
-    if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId,
-      payload.keys?.includes('Escape') ? 'human_stop' : 'human_keys',
-      payload.keys?.includes('Escape') ? 'A human requested Stop.' : 'A human requested native input.');
-    if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
-    if (payload.keys?.some(key => key === 'Escape' || key === 'C-c')) this.cancelQueuedInputs(sessionId);
-    if (!payload.submissionId && payload.keys?.length) this.inputQueue.stage(sessionId, undefined);
+  async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload,
+    revision = this.inputQueue.revision(sessionId)): Promise<SessionCommandResult> {
+    const interrupt = payload.keys?.some(key => key === 'Escape' || key === 'C-c');
+    const cancelledBeforeAdmission = revision !== this.inputQueue.revision(sessionId) && !interrupt;
+    if (cancelledBeforeAdmission && !payload.submissionId) {
+      throw new SessionInputRejectedError('This input was cancelled by a later Stop or native input.');
+    }
+    // Native choices can lose their submission ID during route preflight. They
+    // still belong to the captured revision; stale input must not pause new work.
+    if (!cancelledBeforeAdmission) {
+      if (!payload.submissionId && (payload.text || payload.keys?.length)) this.inputQueue.invalidateNativeInput(sessionId);
+      if (payload.text || payload.keys?.length) this.pauseAutomaticInput(sessionId,
+        payload.keys?.includes('Escape') ? 'human_stop' : 'human_keys',
+        payload.keys?.includes('Escape') ? 'A human requested Stop.' : 'A human requested native input.');
+      if (payload.text || payload.keys?.length) this.runRecovery.cancel(sessionId);
+      if (interrupt) this.cancelQueuedInputs(sessionId, true);
+      if (!payload.submissionId && payload.keys?.length && !payload.keys.includes('Escape')) this.inputQueue.stage(sessionId, undefined);
+    }
     if (payload.submissionId) {
-      const revision = this.inputQueue.revision(sessionId);
       const run = this.runtimes.run(sessionId, 'queueInput', () => this.queueInputInternal(sessionId, payload, revision));
       this.activeInputCommands.add(run);
       try { return await run; } finally { this.activeInputCommands.delete(run); }
@@ -2230,7 +2239,7 @@ export class SessionManager {
     this.publishInputQueue(sessionId);
   }
 
-  private cancelQueuedInputs(sessionId: string): void {
+  private cancelQueuedInputs(sessionId: string, cancelUncertain = false): void {
     if (!this.db.isOpen()) return;
     const panePid = this.db.boundSessions.getById(sessionId)?.pid;
     for (const record of this.inputQueue.list(sessionId)) {
@@ -2238,9 +2247,10 @@ export class SessionManager {
       // before the next queued message instead of racing a repeated Escape.
       const remnant = this.inputQueue.cancelledRemnant(sessionId, record, panePid);
       if (remnant) this.inputQueue.setRemnant(sessionId, { ...remnant, nativeRevision: this.inputQueue.revision(sessionId) });
-      this.inputQueue.put(sessionId, record.state === 'submitting'
+      this.inputQueue.put(sessionId, record.state === 'submitting' && !cancelUncertain
         ? { ...record, state: 'failed', reason: 'Stopped during submission. Check the conversation before sending again.' }
-        : { ...record, state: 'cancelled' });
+        : { ...record, state: 'cancelled', reason: record.state === 'submitting'
+          ? 'Stopped during submission. It may already have arrived and will not be retried.' : record.reason });
     }
     if (this.db.boundSessions.getById(sessionId)) this.publishInputQueue(sessionId);
   }
@@ -2550,7 +2560,7 @@ export class SessionManager {
       this.saveQueuedInput(sessionId, { ...record, state: 'submitted', initialText: undefined, baselineInput: undefined, recordedUserInput });
       await this.emitScreenUpdate(this.mustGetSession(sessionId));
     } catch {
-      if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitted') {
+      if (this.inputQueue.get(sessionId, record.requestId)?.state === 'submitting') {
         this.saveQueuedInput(sessionId, { ...record, state: 'failed', reason: 'Submission could not be confirmed. Check the conversation before sending again.' });
       }
     }
@@ -2747,6 +2757,11 @@ export class SessionManager {
       );
     }
 
+    if (!payload.text && payload.keys?.length === 1 && payload.keys[0] === 'Escape') {
+      await this.clearStoppedNativeDraft(liveSession);
+      this.inputQueue.stage(sessionId, undefined);
+    }
+
     const activityAt = nowIso();
     const updated = this.updateBoundSessionFields(liveSession.id, {
       updatedAt: activityAt,
@@ -2791,14 +2806,57 @@ export class SessionManager {
     return sessionCommandResult(updated, recordedUserInput);
   }
 
+  /** A human Stop abandons the native draft as well as pending Console sends. */
+  private async clearStoppedNativeDraft(session: BoundSession): Promise<void> {
+    const revision = this.inputQueue.revision(session.id);
+    const initial = await this.captureSessionScreen(session, false);
+    const before = screenLooksReadyForLiteralPrompt(initial) ? initial
+      : await this.waitForScreenMatch(session, hashScreen(initial), combinedTextKeySettleWaitMs(initial.inputText),
+        candidate => screenLooksReadyForLiteralPrompt(candidate) || this.inputQueue.revision(session.id) !== revision);
+    if (!before || !screenLooksReadyForLiteralPrompt(before) || !before.inputText.trim()
+      || before.inputText !== initial.inputText || this.inputQueue.revision(session.id) !== revision) return;
+    const owner = await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id');
+    const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName);
+    const screen = await this.captureSessionScreen(session, false);
+    const current = this.mustGetSession(session.id);
+    if (owner !== session.id || pid !== session.pid || current.pid !== session.pid
+      || this.getCurrentRestorableSession(current)?.id !== session.id
+      || this.inputQueue.revision(session.id) !== revision
+      || !screenLooksReadyForLiteralPrompt(screen) || screen.inputText !== before.inputText) return;
+    this.appendDebugTrace(session, { action: 'stop-native-draft-intent', keys: ['C-c'],
+      text: this.inputQueue.staged(session.id)?.text ?? screen.inputText, before: screen, after: screen });
+    // Only clear a freshly observed nonempty composer. Repeated Stop on an
+    // empty composer must never arm the provider's Ctrl-C exit shortcut.
+    this.inputQueue.stage(session.id, undefined);
+    this.inputQueue.setRemnant(session.id, undefined);
+    await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']));
+    const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(screen.inputText),
+      candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
+    if (!cleared || cleared.inputText.trim()) {
+      throw new SessionInputRejectedError('Stop was sent, but the terminal draft could not be confirmed cleared. Your local draft is kept; Escape can be used again.');
+    }
+  }
+
   async restartPendingSessionWithInitialPrompt(input: {
     sessionId: string;
     project: ActiveProject;
     provider: ProviderAdapter;
     providerSettings: MergedProviderSettings;
     initialPrompt: string;
+    inputRevision?: number;
+    submissionId?: string;
   }): Promise<SessionCommandResult> {
-    return await this.runtimes.run(input.sessionId, 'restartPendingSessionWithInitialPrompt', () => this.restartPendingSessionWithInitialPromptInternal(input));
+    return await this.runtimes.run(input.sessionId, 'restartPendingSessionWithInitialPrompt', () => {
+      const revision = input.inputRevision ?? this.inputQueue.revision(input.sessionId);
+      if (revision !== this.inputQueue.revision(input.sessionId)
+        || (input.submissionId && this.inputQueue.get(input.sessionId, input.submissionId)?.state === 'cancelled')) {
+        if (input.submissionId) return this.queueInputInternal(input.sessionId, {
+          text: input.initialPrompt, submittedText: input.initialPrompt, keys: ['Enter'], submissionId: input.submissionId,
+        }, revision);
+        throw new SessionInputRejectedError('This send was cancelled by a later Stop or native input. The draft was not submitted.');
+      }
+      return this.restartPendingSessionWithInitialPromptInternal(input);
+    });
   }
 
   private async restartPendingSessionWithInitialPromptInternal(input: {
