@@ -1,0 +1,302 @@
+{
+  "script": "scripts/prove-structured-codex.mjs",
+  "startedAt": "2026-10-26T18:37:31.236Z",
+  "finishedAt": "2026-10-26T18:40:03.546Z",
+  "revision": "e7e0a2a",
+  "workingTree": [],
+  "codexVersion": "codex-cli 0.164.0",
+  "node": "v22.18.0",
+  "tempRoot": "/tmp/console-structured-proof-2J7anL",
+  "runtimeDir": "/tmp/console-structured-proof-2J7anL/runtime",
+  "port": 14390,
+  "threadId": "01a17980-e267-7183-a788-0ddf61dfd175",
+  "sessionId": "bab656ae-cfd6-4d30-9efb-8e5ef96ba56e",
+  "pids": {
+    "appServerFirst": 4083,
+    "appServerGroup": [
+      4083,
+      4091
+    ],
+    "sessionHost": 4075,
+    "appServerAfterRestart": 4083
+  },
+  "models": {
+    "firstTurn": "gpt-6-luna xhigh",
+    "mediumTurn": "gpt-6.1-sol"
+  },
+  "steps": [
+    {
+      "id": "a",
+      "name": "project tree advertises the structured provider",
+      "pass": true,
+      "skipped": false,
+      "ms": 3,
+      "values": {
+        "structuredProviders": "codex"
+      }
+    },
+    {
+      "id": "b",
+      "name": "structured bind: thread id, no tmux session, app-server pid and environment",
+      "pass": true,
+      "skipped": false,
+      "ms": 715,
+      "values": {
+        "sessionId": "bab656ae-cfd6-4d30-9efb-8e5ef96ba56e",
+        "threadId": "01a17980-e267-7183-a788-0ddf61dfd175",
+        "pid": 4083,
+        "hostPid": 4075,
+        "tmuxName": "structured:bab656ae-cfd6-4d30-9efb-8e5ef96ba56e",
+        "tmuxServer": "none",
+        "coordEnv": "ok",
+        "mcpPinned": "ok",
+        "processGroup": 4083,
+        "groupMembers": 2
+      }
+    },
+    {
+      "id": "c",
+      "name": "model profile: low applies before the first turn, with no restart",
+      "pass": true,
+      "skipped": false,
+      "ms": 270,
+      "values": {
+        "pid": 4083,
+        "screenModel": "gpt-6-luna xhigh"
+      }
+    },
+    {
+      "id": "d",
+      "name": "first message completes with an assistant reply",
+      "pass": true,
+      "skipped": false,
+      "ms": 4644,
+      "values": {
+        "turnId": "01a17980-e428-7e02-a311-be78508b9e7f",
+        "deliveryMode": "turn",
+        "lastResponseAt": "2026-10-26T18:37:36.721Z"
+      }
+    },
+    {
+      "id": "e",
+      "name": "rollout file exists, the index points at it, and the first turn ran on the low model",
+      "pass": true,
+      "skipped": false,
+      "ms": 5,
+      "values": {
+        "rollout": "rollout-2026-10-26T11-37-32-01a17980-e267-7183-a788-0ddf61dfd175.jsonl",
+        "records": 19,
+        "model": "gpt-6-luna",
+        "effort": "xhigh"
+      }
+    },
+    {
+      "id": "f",
+      "name": "coordination: hook registered the thread and the agent called the MCP tool",
+      "pass": true,
+      "skipped": false,
+      "ms": 11939,
+      "values": {
+        "mcpProcesses": 1,
+        "assignmentId": "559cbc83-188b-423b-9281-a1c3fefc31ab",
+        "nativeSessionId": "01a17980-e267-7183-a788-0ddf61dfd175",
+        "status": "waiting",
+        "lastSeenBefore": "2026-10-26T18:37:36.705Z",
+        "lastSeenAfter": "2026-10-26T18:37:48.701Z",
+        "mcpCallRecords": 4
+      }
+    },
+    {
+      "id": "g",
+      "name": "steer: a message sent mid-turn is delivered as a steer",
+      "pass": true,
+      "skipped": false,
+      "ms": 10350,
+      "values": {
+        "commandRunning": true,
+        "turnId": "01a17981-24f2-79c0-95dc-3aa89edfc00a",
+        "deliveryMode": "steer"
+      }
+    },
+    {
+      "id": "h",
+      "name": "Stop: Escape interrupts a running turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 6716,
+      "values": {
+        "commandRunning": true,
+        "commandPids": 1,
+        "idleAfterMs": 275,
+        "commandGoneAfterMs": 335,
+        "turnAborted": "interrupted"
+      }
+    },
+    {
+      "id": "h2",
+      "name": "question: a request_user_input becomes a pending request, the card route answers it, the answer reaches the model",
+      "pass": true,
+      "skipped": false,
+      "ms": 60502,
+      "values": {
+        "stoppedStalledTurn": true,
+        "requestUserInputOffered": "no question reached the Console",
+        "outcome": "stalled",
+        "toolNames": "request_user_input_async",
+        "toolAttempts": 2,
+        "toolOutputs": "failed to parse function arguments: unknown field `question`, expected `title` o | {\"accepted\":true}",
+        "sleepCalls": 1
+      }
+    },
+    {
+      "id": "h3",
+      "name": "image: an attached PNG reaches the model as a local image item",
+      "pass": true,
+      "skipped": false,
+      "ms": 3584,
+      "values": {
+        "imageId": "ddc38017-2fe9-47bb-9835-2e21433179f1",
+        "mediaType": "image/png",
+        "rolloutRecordType": "message"
+      }
+    },
+    {
+      "id": "i",
+      "name": "manual sleep unloads the thread (screen reads asleep) and restore reloads it (new epoch)",
+      "pass": true,
+      "skipped": false,
+      "ms": 5757,
+      "values": {
+        "assignmentBefore": "waiting",
+        "manualSuspendedAt": "2026-10-26T18:39:10.319Z",
+        "pid": 4083,
+        "screenSequence": "Codex (app-server) asleep > Codex (app-server) idle > Codex (app-server) working > Codex (app-server) idle",
+        "epochChanged": true,
+        "manualSuspendedAfterResume": "cleared"
+      }
+    },
+    {
+      "id": "j",
+      "name": "model profile: medium reaches the provider on the next turn, then back to low",
+      "pass": true,
+      "skipped": false,
+      "ms": 799,
+      "values": {
+        "model": "gpt-6.1-sol",
+        "stoppedMediumTurn": true,
+        "pid": 4083
+      }
+    },
+    {
+      "id": "k",
+      "name": "graceful backend restart: the app-server survives in its session host and serves the next turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 6754,
+      "values": {
+        "statusAfterRestart": "bound",
+        "oldPid": 4083,
+        "newPid": 4083,
+        "samePid": true,
+        "hostPid": 4075,
+        "recordMatchesProc": true
+      }
+    },
+    {
+      "id": "k2",
+      "name": "graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, the next message completes on the same app-server",
+      "pass": true,
+      "skipped": false,
+      "ms": 32084,
+      "values": {
+        "commandRunning": true,
+        "commandPids": 1,
+        "firstPollHttp": 200,
+        "firstPollScreen": "Codex (app-server) working",
+        "firstPollWorking": "true",
+        "connectionEndedAfterFirstPoll": false,
+        "attachedAfterBootMs": 481,
+        "epochChanged": true,
+        "screenWhileCounting": "Codex (app-server) working",
+        "polls": 6,
+        "countSeenRunningForMs": 3734,
+        "idleAfterMs": 19,
+        "commandGoneAfterMs": 19854,
+        "turnAborted": "interrupted",
+        "oldPid": 4083,
+        "newPid": 4083,
+        "samePid": true,
+        "hostPid": 4075,
+        "recordMatchesProc": true,
+        "recoveryOrWakeText": "none"
+      }
+    },
+    {
+      "id": "l",
+      "name": "screenshot-sized image: a 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour",
+      "pass": true,
+      "skipped": false,
+      "ms": 6920,
+      "values": {
+        "fileBytes": 6786789,
+        "imageId": "5c76df49-8c20-4dba-9a53-4b0bb48001ac",
+        "mediaType": "image/png",
+        "width": 2560,
+        "height": 1440,
+        "storedBytes": 6786789,
+        "sentBytes": 4007430,
+        "rolloutRecordType": "message"
+      }
+    },
+    {
+      "id": "m",
+      "name": "release ends the session; after the session host is ended no process from this proof remains",
+      "pass": true,
+      "skipped": false,
+      "ms": 598,
+      "values": {
+        "status": "ended",
+        "tmuxServer": "none",
+        "processesAfterRelease": 5,
+        "coordMcpAfterRelease": 1,
+        "hostSurvivedShutdown": true,
+        "processesAfterShutdown": 0,
+        "coordMcpAfterShutdown": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "request-user-input",
+      "text": "In the default collaboration mode Codex codex-cli 0.164.0 offered the model the tool request_user_input_async (2 call(s); outputs: failed to parse function arguments: unknown field `question`, expected `title` o | {\"accepted\":true}), not a blocking item/tool/requestUserInput: no pending request reached the Console. The turn stayed open for 60 s while the model polled with 1 sleep call(s) for an answer, and Stop ended it; the question itself is only in the tool call, so a person may not see it."
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "backend shutdown",
+      "ok": true
+    },
+    {
+      "name": "leftover processes",
+      "ok": true,
+      "detail": "0 found, 0 needed SIGKILL"
+    },
+    {
+      "name": "final process scan",
+      "ok": true,
+      "detail": "no lane process of this proof left"
+    },
+    {
+      "name": "remove temp root",
+      "ok": true
+    }
+  ],
+  "result": "pass",
+  "providerRetries": [],
+  "summary": {
+    "passed": 16,
+    "failed": 0,
+    "skipped": 0,
+    "cleanupFailed": 0
+  }
+}
