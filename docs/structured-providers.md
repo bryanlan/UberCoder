@@ -570,14 +570,12 @@ earlier runs reported the same values for steps that did not change, with other 
 `codex app-server` process was left. This host's Codex is the npm launcher: the recorded pid led a process group
 of two (launcher and native server).
 
-Automated suites on the round-2 working tree (`env -u NODE_ENV`, targeted files only, `--testTimeout 10000
---maxWorkers=2`; the full suite was not rerun for round 2): the 12 structured files (`structured-*.test.ts` and
-`tmux-client-structured-guard`) 259 passed, 2 skipped (the opt-in real-Codex handshake tests); the tmux suites
-`session-lifecycle`, `run-recovery`, `peer-message-wake`, `coordination` and `agent-session-launches` 322 passed.
-`npm run typecheck` and `npm run build` clean. The last full-suite run was on `ca41634` (`env -u NODE_ENV`): server
-`vitest run` 1931 passed, 2 skipped, 3 failed; the three failures are the same timing-sensitive Claude tmux tests
-that fail on untouched `main` on this host (`claude-ready-lifecycle` twice, `claude-run-state` once). Web
-`vitest run` 198 passed.
+Automated suites on the final commit `73521dd` (`env -u NODE_ENV`): server `vitest run` 1958 passed, 2 skipped
+(the opt-in real-Codex handshake tests), 3 failed; the three failures are the same timing-sensitive Claude
+tmux tests that fail on untouched `main` on this host (`claude-ready-lifecycle` twice, `claude-run-state`
+once). Web `vitest run` 198 passed. `npm run typecheck` and `npm run build` clean. The same three failures
+and no others appeared in the full runs on `be43958` and `ca41634`. The round-2 proof run
+(`proof-run-2026-10-26T08-56-32Z.json`) passed 12 of 12 on the final code.
 
 | Step | Result and key values |
 |---|---|
