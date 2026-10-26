@@ -438,15 +438,28 @@ the fake plugin). `bound_sessions.tmux_session_name` becomes nullable in a later
 - Real proofs. Each is opt-in (`--run`, after `npm run build`), runs one isolated backend (temp database and runtime,
   scratch git project, private tmux socket, free port) that never touches the live Console, uses the host's Claude and Codex
   logins with short fixed prompts, and ends with no `claude`, `codex app-server`, session host or `agent-coord.mjs mcp` of its
-  own left running and its temp root removed. They share `scripts/structured-proof-kit.mjs`; the Codex proof keeps its own copy of
-  the helpers.
-  - `scripts/prove-structured-claude.mjs` (12 steps): bind, first reply with transcript and human turn origin, coordination
+  own left running and its temp root removed. Every proof ends with a scan for those four kinds of process that name its temp
+  root; anything the scan has to end is recorded under `cleanup` and fails the run, and a failure during setup or before the
+  proof's own cleanup still removes the temp root. They share `scripts/structured-proof-kit.mjs`; the Codex proof keeps its
+  own harness and imports only the PNG builders, the event-log reader, the control-text list and the process scan from it.
+  - `scripts/prove-structured-claude.mjs` (14 steps): bind, first reply with transcript and human turn origin, coordination
     hook and MCP call, steer, Stop, an `AskUserQuestion` answered through the card route, an image turn, a live model and
-    effort switch, manual sleep and restore, a graceful backend restart with the process alive, release.
-  - `scripts/prove-structured-migration.mjs` (8 steps): one real tmux Codex chat and one real tmux Claude chat are moved by
+    effort switch, manual sleep and restore, k1, k2, l and release (m).
+    - k1: graceful backend restart while idle; the first reconcile pass adopts the process and the same pid answers.
+    - k2: graceful backend restart during a running 25 s count; no "connection ended" line, re-adopted before any message,
+      `isWorking` stays true, Stop interrupts it, the next message completes on the same pid with no recovery or wake text.
+    - l: a 2560x1440 PNG above 5 MB completes without an image error and the reply names its dominant colour (step h keeps
+      the 64x64 case).
+  - `scripts/prove-structured-migration.mjs` (9 steps): one real tmux Codex chat and one real tmux Claude chat are moved by
     the reconcile pass after `defaultTransport` flips to `structured`, then answer on the structured path in the same native
-    conversation.
-  - `scripts/prove-structured-codex.mjs` (14 steps): the earlier 12 steps plus a question step and an image step.
+    conversation. The tmux Claude runs without `--strict-mcp-config`, as in production.
+    - b2: records which coordination MCP server the tmux Claude started and asserts only the SessionStart registration in the
+      proof's own runtime.
+  - `scripts/prove-structured-codex.mjs` (16 steps): the earlier 12 steps (release is now m) plus a question step (h2), an
+    image step (h3), k2 and l.
+    - k2: the restart during a running count as for Claude; the row reads working on the same app-server, Stop interrupts it,
+      the next message completes on the same app-server pid, no "connection ended" line and no recovery or wake text.
+    - l: the same large PNG; the turn completes and the reply names the colour.
 - Full suites and typecheck; the three known timing failures on this host stay the baseline.
 
 Decision log. The plan said the migration proof would run on a copy of the live database. It runs on fresh chats created in the
@@ -454,7 +467,10 @@ isolated backend instead. A copy of the live database names the live tmux sessio
 conversations, so a mistake would kill or write to real work; fresh chats exercise the same code (`classify`, kill, confirm,
 `setTransport`, resume) with nothing to lose. The cost is that a real-world row shape the proof does not create (a history-bound
 Claude row without a profile, a working row, a row whose tmux session already died) is covered only by the unit tests and the
-dry-run route.
+dry-run route. The tmux Claude command of that proof first carried `--strict-mcp-config`, to keep the user-scope MCP entry (which
+names the live runtime) out of the proof. Production never passes it, so the proof now runs the installed command and records which
+coordination MCP server the CLI started; the cost is that the proof starts the user-scope MCP servers of `~/.claude.json` as a real
+tmux chat does, and calls none of their tools.
 
 ## Verification evidence
 

@@ -3,7 +3,9 @@
 //
 // Starts an isolated Console backend with the installed tmux provider commands (as `prove-granted-launches.mjs` builds them),
 // both structured lanes enabled and `defaultTransport: 'tmux'`, and creates one real tmux Codex chat and one real tmux Claude
-// chat through the normal bind routes. Each answers "TMUX". The config is then rewritten to `defaultTransport: 'structured'`
+// chat through the normal bind routes. The Claude command is the product's (no `--strict-mcp-config`; the per-session
+// `--mcp-config` the tmux path injects shares its name with the user-scope entry in `~/.claude.json`, so which one the CLI
+// started is observed and recorded, and the proof relies only on the hook registration in its own runtime). Each answers "TMUX". The config is then rewritten to `defaultTransport: 'structured'`
 // (the flip procedure's config edit), the backend is closed and rebuilt, and the proof watches `reconcileSessions` (first pass 5 s
 // after start) move both rows: transport structured, asleep, the tmux sessions gone, no provider process of the tmux phase left.
 // Each conversation then answers "MIGRATED" on the structured path, in the same native conversation. Real turns run with the host's
@@ -33,7 +35,7 @@ const TURN_TIMEOUT_MS = Number(process.env.PROOF_TURN_TIMEOUT_MS) || 240_000;
 const version = (command) => { try { return execFileSync(command, ['--version'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } };
 const kit = await createProofKit({
   script: 'scripts/prove-structured-migration.mjs', rootPrefix: 'console-structured-migration-proof', evidenceSubdir: 'structured-migration-proof',
-  expectedSteps: 8, extraEvidence: { codexVersion: version('codex'), claudeVersion: version('claude'), rows: {} },
+  expectedSteps: 9, extraEvidence: { codexVersion: version('codex'), claudeVersion: version('claude'), rows: {} },
 });
 const { evidence, say, finding, call, api, wait, alive, step } = kit;
 say(`${evidence.codexVersion}; ${evidence.claudeVersion}`);
@@ -50,11 +52,11 @@ const writeConfig = defaultTransport => kit.writeConfig(config => {
     };
   }
   for (const key of ['newCommand', 'resumeCommand', 'continueCommand']) {
-    // The global ~/.codex MCP entry and the user-scope Claude MCP entry name the live runtime: pin this proof's processes to its own.
+    // The global ~/.codex MCP entry names the live runtime: pin this proof's Codex processes to its own. This is the one command
+    // difference from production's tmux path (recorded in the evidence). The Claude command is left as the installed config has it.
     config.providers.codex.commands[key].push('--dangerously-bypass-hook-trust', '-c',
       `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(kit.runtimeDir)}`, '-c',
       `mcp_servers.agent_console_coordination.args=${JSON.stringify([helper, 'mcp'])}`);
-    config.providers.claude.commands[key].push('--strict-mcp-config');
   }
   config.structuredSessions = {
     defaultTransport,
@@ -77,6 +79,33 @@ const countAssistant = async (chat, marker) => {
 };
 const sessionState = async chat => (await call('GET', `/api/sessions/${chat.sessionId}/screen`)).body;
 const nativeChats = () => PROVIDERS.map(provider => chats[provider]);
+const assignment = chat => kit.db.prepare('select id, status from coordination_assignments where provider = ? and native_session_id = ?').get(chat.provider, chat.nativeId);
+/**
+ * The tmux Claude runs as production does. The CLI's coordination MCP server comes either from the per-session `--mcp-config` the
+ * tmux path injects (this proof's runtime) or from the user-scope entry in `~/.claude.json` (the live runtime): both have the same
+ * name. The proof makes no MCP call, so neither is used; what it asserts is the hook path, the SessionStart registration in its own
+ * runtime (step b2, kept apart from step b so that an unexpected hook result does not end the proof).
+ */
+const observeClaudeCoordination = async (chat, values) => {
+  const servers = await wait('the coordination MCP server of the Claude pane to start', () => {
+    const found = kit.descendantsOf(chat.panePid).filter(pid => kit.cmdlineOf(pid).some(arg => arg.endsWith('agent-coord.mjs')) && kit.cmdlineOf(pid).includes('mcp'));
+    return found.length ? found : undefined;
+  }, 15_000, 500).catch(() => []);
+  const runtimes = servers.map(pid => kit.envValue(pid, 'AGENT_COORD_RUNTIME'));
+  const isolated = servers.length > 0 && runtimes.every(runtime => runtime === kit.runtimeDir);
+  values.claudeMcpServers = servers.length;
+  values.claudeMcpRuntime = !servers.length ? 'none seen' : isolated ? 'isolated (the per-session --mcp-config won)' : 'live (the user-scope entry won)';
+  evidence.rows.claude.mcpRuntime = values.claudeMcpRuntime;
+  if (servers.length) {
+    finding('migration-mcp-precedence', isolated
+      ? `Without --strict-mcp-config the tmux Claude started ${servers.length} coordination MCP server(s), all with the isolated runtime: the per-session --mcp-config won over the user-scope entry of ~/.claude.json.`
+      : `Without --strict-mcp-config the tmux Claude started a coordination MCP server with runtime ${runtimes.map(runtime => String(runtime).replace(os.homedir(), '~')).join(', ')}, not the isolated one: the user-scope entry of ~/.claude.json won over the per-session --mcp-config. The proof calls no MCP tool, so nothing reached that runtime through it.`);
+  }
+  // The hook path: the SessionStart hook registered the conversation in this proof's runtime (the env of the process redirects the live checkout's helper).
+  const registered = await wait('the SessionStart hook to register the Claude conversation in the isolated runtime', () => assignment(chat), 30_000, 500);
+  values.claudeRegisteredInIsolatedRuntime = true;
+  values.claudeAssignmentStatus = registered.status;
+};
 /** Codex asks to trust a new folder before it shows a prompt; the tmux phase answers it the way a person would. */
 const answerTrustPrompts = () => {
   const names = kit.tmux('list-sessions', '-F', '#{session_name}').stdout.split('\n').filter(Boolean);
@@ -100,7 +129,10 @@ try {
       assert.equal(bound.session.transport, 'tmux');
       assert.ok(!chat.tmuxName.startsWith('structured:'));
       assert.equal(kit.tmux('has-session', '-t', chat.tmuxName).status, 0, `${chat.provider}: the tmux session must exist on the private socket.`);
-      evidence.rows[chat.provider] = { sessionId: chat.sessionId, tmuxName: chat.tmuxName };
+      evidence.rows[chat.provider] = {
+        sessionId: chat.sessionId, tmuxName: chat.tmuxName,
+        tmuxCommandAdditions: chat.provider === 'codex' ? '--dangerously-bypass-hook-trust and the coordination -c overrides (pin the MCP server to this runtime)' : 'none (the installed command)',
+      };
       values[`${chat.provider}Session`] = chat.sessionId;
       values[`${chat.provider}Tmux`] = chat.tmuxName;
     }
@@ -164,6 +196,10 @@ try {
       values[`${chat.provider}Processes`] = chat.tmuxPids.length;
     }
   }, { fatal: true });
+
+  await step('b2', 'tmux phase: the Claude conversation registered in the proof\'s own runtime (SessionStart hook); which coordination MCP server the CLI started', async values => {
+    await observeClaudeCoordination(chats.claude, values);
+  });
 
   let before;
   await step('c', 'flip: config edited to defaultTransport structured, backend restarted; the dry run lists both rows as idle', async values => {

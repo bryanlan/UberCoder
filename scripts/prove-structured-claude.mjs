@@ -6,9 +6,10 @@
 // (the proof names `transport: 'structured'` on the bind), then drives ONE structured Claude conversation through the HTTP
 // API the web client uses: bind, send, transcript and index, coordination hook and MCP, steer, Stop, an AskUserQuestion
 // answered through the card route, an image turn, a live model/effort switch, manual sleep and restore, a graceful backend
-// restart (the `claude` process, held by its session host, survives it and answers the next turn) and release. Real Claude
-// turns run with the host's subscription login and the hooks already installed in Bryan's `~/.claude/settings.json`
-// (their helper path is the live checkout's `agent-coord.mjs`; the per-process `AGENT_COORD_RUNTIME` and
+// restart while idle (k1) and during a running turn (k2: the `claude` process, held by its session host, survives it; the
+// turn is re-adopted, Stop interrupts it and the next message completes on the same process), a screenshot-sized image over
+// 5 MB (l) and release (m). Real Claude turns run with the host's subscription login and the hooks already installed in Bryan's
+// `~/.claude/settings.json` (their helper path is the live checkout's `agent-coord.mjs`; the per-process `AGENT_COORD_RUNTIME` and
 // `AGENT_CONSOLE_CONFIG` the plugin sets redirect it to this proof's runtime, which step b and d check). Every prompt is one
 // short fixed sentence; message bodies are never printed or recorded.
 //
@@ -25,24 +26,25 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 if (!process.argv.includes('--run')) {
-  process.stderr.write('Use --run to opt into a real Claude proof (about fifteen short turns on the host login). Run `npm run build` first.\n');
+  process.stderr.write('Use --run to opt into a real Claude proof (about twenty short turns on the host login). Run `npm run build` first.\n');
   process.exit(2);
 }
 
-const { createProofKit, sleep, solidPng } = await import('./structured-proof-kit.mjs');
+const { createProofKit, sleep, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText } = await import('./structured-proof-kit.mjs');
 const { CLAUDE_COST_PROFILES } = await import('@agent-console/shared');
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
 const RUN_TAG = randomBytes(4).toString('hex');
 /** A counting command that carries a unique marker, so its process can be found (and shown gone) on the host. */
 const countMarker = tag => `proof-${tag}-${RUN_TAG}`;
-const countPrompt = tag => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 30); do echo $i; sleep 1; done`;
+const countPrompt = (tag, to = 30) => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
 const PROMPTS = {
   first: 'Reply with exactly the single word PONG.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
   steer: 'Stop counting now and reply with the single word STEERED.',
   question: 'Use the AskUserQuestion tool to ask me which color I prefer, with options red and blue. After I answer, reply with exactly the single word of the color I chose.',
   image: 'What color is the attached image? Reply with one word.',
+  bigImage: 'What is the dominant color of the attached image? Reply with one word.',
   medium: 'Reply with the single word MODEL.',
   low: 'Reply with the single word LOWER.',
   settle: 'Reply with the single word SETTLED.',
@@ -54,7 +56,7 @@ const TURN_TIMEOUT_MS = 240_000;
 const claudeVersion = (() => { try { return execFileSync('claude', ['--version'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })();
 const kit = await createProofKit({
   script: 'scripts/prove-structured-claude.mjs', rootPrefix: 'console-structured-claude-proof', evidenceSubdir: 'structured-claude-proof',
-  expectedSteps: 12, extraEvidence: { claudeVersion, sessionId: null, nativeSessionId: null, models: {} },
+  expectedSteps: 14, extraEvidence: { claudeVersion, sessionId: null, nativeSessionId: null, models: {} },
 });
 const { evidence, say, finding, call, api, wait, alive, pgrep, step } = kit;
 say(claudeVersion);
@@ -166,6 +168,21 @@ const switchProfile = async profile => {
   assert.equal(row().claude_profile, profile);
 };
 const claudePid = () => row()?.pid;
+const eventLogPath = () => row()?.event_log_path;
+/** After a restart: the same process under the same host, one provider process under the host, and exactly one live holder of the session. */
+const assertSameProcess = (oldPid, before) => {
+  const after = kit.hostRecord(hostId());
+  assert.equal(after.host.pid, before.host.pid, 'The same session host must still hold it.');
+  assert.equal(after.child.pid, oldPid);
+  assert.equal(after.child.startTicks, kit.startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
+  assert.equal(after.child.startTicks, before.child.startTicks);
+  assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === after.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
+  const holders = fs.readdirSync(path.join(claudeConfigDir, 'sessions')).filter(name => name.endsWith('.json')).flatMap(name => {
+    try { const entry = JSON.parse(fs.readFileSync(path.join(claudeConfigDir, 'sessions', name), 'utf8')); return entry.sessionId === nativeId && alive(entry.pid) ? [entry.pid] : []; } catch { return []; }
+  });
+  assert.deepEqual(holders, [oldPid], 'Exactly one live process may hold the session.');
+  return { after, holders };
+};
 
 
 /** A failed step can leave a turn running or a question open; settle both so the next step is judged on its own. */
@@ -499,7 +516,7 @@ try {
     Object.assign(values, { pidBefore, pidAfter, processEnded: true, resumedSameSession: true, epochChanged: true });
   });
 
-  await step('k', 'graceful backend restart: the process survives in its session host and answers the next turn', async values => {
+  await step('k1', 'graceful backend restart while idle: the process survives in its session host and answers the next turn', async values => {
     const oldPid = claudePid();
     const before = kit.hostRecord(hostId());
     assert.equal(before.child.pid, oldPid);
@@ -514,40 +531,136 @@ try {
     const stored = row();
     assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
     assert.equal(stored.conversation_ref, nativeId);
-    // Lane C5's first reconcile pass (5 s after start) adopts a surviving per-session process without starting anything; a build
-    // without it leaves the process unowned until the next message reattaches it. Either way no second process may start.
-    const reattachBuilt = fs.readFileSync(new URL('../apps/server/dist/sessions/structured/structured-session-service.js', import.meta.url), 'utf8').includes('reattachSurvivors');
+    // The first reconcile pass (5 s after start) adopts a surviving per-session process without starting anything, before any message.
     await sleep(8000);
     values.reattachedAtBoot = epoch() !== epochBefore;
-    values.reattachBuilt = reattachBuilt;
-    if (reattachBuilt) {
-      assert.ok(values.reattachedAtBoot, 'The first reconcile pass must adopt the surviving process (a new epoch) before any message.');
-      assert.equal(claudePid(), oldPid, 'The adopted process is the one that survived.');
-      const screen = await api('GET', `/api/sessions/${sessionId}/screen`);
-      assert.match(screen.screen.status, /idle$/, 'The adopted row reads as loaded and idle before the message.');
-      values.screenBeforeMessage = screen.screen.status;
-      assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === before.host.pid), [oldPid], 'Adoption must not start a second process.');
-    } else if (!values.reattachedAtBoot) {
-      finding('reattach-at-boot', 'After a backend restart the surviving claude process stayed unowned until the next message (no boot-time reattach in this build).');
-    }
-    const base = await countAssistant('RESUMED');
-    await send(PROMPTS.resumed);
-    await waitForReply('RESUMED', base);
+    assert.ok(values.reattachedAtBoot, 'The first reconcile pass must adopt the surviving process (a new epoch) before any message.');
+    assert.equal(claudePid(), oldPid, 'The adopted process is the one that survived.');
+    const screen = await api('GET', `/api/sessions/${sessionId}/screen`);
+    assert.match(screen.screen.status, /idle$/, 'The adopted row reads as loaded and idle before the message.');
+    values.screenBeforeMessage = screen.screen.status;
+    assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === before.host.pid), [oldPid], 'Adoption must not start a second process.');
+    await converse(PROMPTS.resumed, 'RESUMED');
     assert.equal(claudePid(), oldPid, 'The same claude process must answer after the restart.');
-    const after = kit.hostRecord(hostId());
-    assert.equal(after.host.pid, before.host.pid, 'The same session host must still hold it.');
-    assert.equal(after.child.pid, oldPid);
-    assert.equal(after.child.startTicks, kit.startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
-    assert.equal(after.child.startTicks, before.child.startTicks);
-    assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === after.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
-    const holders = fs.readdirSync(path.join(claudeConfigDir, 'sessions')).filter(name => name.endsWith('.json')).flatMap(name => {
-      try { const entry = JSON.parse(fs.readFileSync(path.join(claudeConfigDir, 'sessions', name), 'utf8')); return entry.sessionId === nativeId && alive(entry.pid) ? [entry.pid] : []; } catch { return []; }
-    });
-    assert.deepEqual(holders, [oldPid], 'Exactly one live process may hold the session.');
+    const { after, holders } = assertSameProcess(oldPid, before);
     Object.assign(values, { oldPid, newPid: claudePid(), samePid: true, hostPid: after.host.pid, recordMatchesProc: true, liveHolders: holders.length });
   });
 
-  await step('l', 'release ends the session and the process; no process of this proof remains', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, the next message completes on the same process', async values => {
+    const control = await consoleControlTexts();
+    const skip = records().length;
+    const oldPid = claudePid();
+    const before = kit.hostRecord(hostId());
+    assert.equal(before.child.pid, oldPid);
+    const counting = await send(countPrompt('k2', 25));
+    assert.equal(counting.record.deliveryMode, 'turn');
+    const commandPids = await countingStarted('k2', values);
+    const countSeenAt = Date.now();
+    const epochBefore = epoch();
+    const eventLog = eventLogPath();
+    const eventsBeforeShutdown = readEventLog(eventLog).size;
+    await kit.shutdown();
+    await sleep(1000);
+    assert.ok(alive(oldPid), 'The claude process must survive the backend.');
+    assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
+    assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
+    // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
+    const eventsFrom = readEventLog(eventLog).size;
+    await kit.boot();
+    const bootedAt = Date.now();
+    // Before any message and before the first reconcile pass (5 s after start): the row the database holds, then the first screen
+    // poll that an open web page makes. That poll must not write the loss line a turn that ended with its connection would get.
+    const stored = row();
+    assert.equal(stored.status, 'bound');
+    assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
+    assert.equal(stored.conversation_ref, nativeId);
+    const samples = [];
+    const httpStatuses = new Set();
+    const poll = async () => {
+      const response = await call('GET', `/api/sessions/${sessionId}/screen`);
+      samples.push(response.body?.session?.isWorking === true);
+      httpStatuses.add(response.status);
+      return response;
+    };
+    const firstPoll = await poll();
+    const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
+    Object.assign(values, { firstPollHttp: firstPoll.status, firstPollScreen: firstPoll.body?.screen?.status ?? 'none', firstPollWorking: String(samples[0]), connectionEndedAfterFirstPoll: lostAfterFirstPoll.length > 0 });
+    assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
+    // Loaded (adopted) within the first reconcile pass, with no message sent.
+    await wait('the surviving process to be adopted by the first reconcile pass', async () => { await poll(); return epoch() !== epochBefore; }, 12_000, 500);
+    values.adoptedAfterBootMs = Date.now() - bootedAt;
+    assert.equal(claudePid(), oldPid, 'The adopted process is the one that survived.');
+    assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === before.host.pid), [oldPid], 'Adoption must not start a second process.');
+    // The turn is still running, so the row must read as working for as long as the count runs.
+    let lastPoll;
+    for (let index = 0; index < 4; index += 1) { await sleep(500); lastPoll = await poll(); }
+    values.screenWhileCounting = lastPoll.body?.screen?.status ?? 'none';
+    values.polls = samples.length;
+    const notWorking = samples.filter(working => !working).length;
+    assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join("/")}) while the count was still running.`);
+    const stillCounting = pgrep(countMarker('k2'));
+    values.countSeenRunningForMs = Date.now() - countSeenAt;
+    assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${values.countSeenRunningForMs} ms after it was seen running, so Stop could not be tested; rerun.`);
+    // Stop reaches the re-adopted turn: idle within 15 s, same process, the command ends, the transcript records the interruption.
+    const stopped = Date.now();
+    await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
+    await wait('the session to become idle after Stop', idle, 15_000, 250);
+    values.idleAfterMs = Date.now() - stopped;
+    assert.equal(claudePid(), oldPid, 'The row pid must not change for an interrupt.');
+    assert.ok(alive(oldPid), 'The claude process must survive an interrupt.');
+    await wait('the counting command to end after Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 20_000, 250);
+    values.commandGoneAfterMs = Date.now() - stopped;
+    const marker = await wait('the transcript to record the interruption', () =>
+      records().slice(skip).find(entry => entry.type === 'user' && /Request interrupted by user/i.test(textOf(entry) + blocksOf(entry).map(resultText).join('\n'))), 15_000, 500);
+    values.interruptionMarker = textOf(marker).slice(0, 60) || 'in a tool_result';
+    assert.equal((await sessionState()).isWorking, false);
+    // The next message gets its own reply from the same process.
+    await converse(PROMPTS.resumed, 'RESUMED');
+    assert.equal(claudePid(), oldPid, 'The same claude process must answer after the restart.');
+    const { after, holders } = assertSameProcess(oldPid, before);
+    // Nothing the Console sends on its own (recovery, wake) reached the conversation, and no loss line was written at any point.
+    const events = readEventLog(eventLog, eventsBeforeShutdown).entries;
+    assert.deepEqual(lostTurnStatusLines(events), [], 'No lost-turn status line may be written for a turn that survived the restart.');
+    const injected = findControlText(events, control) ?? findControlText(records().slice(skip).filter(entry => entry.type === 'user'), control);
+    assert.equal(injected, undefined, `The Console sent control text into the conversation: ${injected}`);
+    Object.assign(values, { oldPid, newPid: claudePid(), samePid: true, hostPid: after.host.pid, liveHolders: holders.length, recoveryOrWakeText: 'none' });
+  });
+
+  await step('l', 'screenshot-sized image: a 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour', async values => {
+    const skip = records().length;
+    const eventsFrom = readEventLog(eventLogPath()).size;
+    const failureBefore = row().run_failure_json;
+    const before = await countAssistant('red');
+    const png = noisyPng(2560, 1440, [225, 25, 25]);
+    values.fileBytes = png.length;
+    const upload = await kit.app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/images`, payload: png, headers: { ...kit.headers, 'content-type': 'image/png' } });
+    assert.equal(upload.statusCode, 201, `image upload: HTTP ${upload.statusCode}`);
+    const image = upload.json().image;
+    const sent = await send(PROMPTS.bigImage, { imageIds: [image.id] });
+    assert.equal(sent.record.state, 'submitted');
+    // A turn that ends in an image error leaves a run failure on the row, an API error record in the transcript, or a status line.
+    const failure = () => {
+      const stored = row().run_failure_json;
+      const apiErrors = records().slice(skip).filter(entry => entry.type === 'assistant' && (entry.isApiErrorMessage || entry.error)).map(entry => textOf(entry).slice(0, 160));
+      const lines = readEventLog(eventLogPath(), eventsFrom).entries.filter(entry => entry.type === 'status' && /image/i.test(String(entry.text ?? ''))).map(entry => String(entry.text).slice(0, 160));
+      return [stored && stored !== failureBefore ? stored.slice(0, 200) : undefined, ...apiErrors, ...lines].filter(Boolean);
+    };
+    await wait('a completed turn whose reply names the colour', async () => {
+      const failed = failure();
+      if (failed.length) throw new Error(`The image turn failed (image_error?): ${failed.join(' | ')}`);
+      return (await idle()) && (await countAssistant('red')) > before;
+    }, TURN_TIMEOUT_MS, 500);
+    const prompt = records().slice(skip).find(entry => entry.type === 'user' && textOf(entry).includes('dominant color of the attached image'));
+    assert.ok(prompt, 'The transcript has no user row for the image prompt.');
+    const imageBlocks = blocksOf(prompt).filter(block => block.type === 'image');
+    assert.equal(imageBlocks.length, 1, 'The user row must carry the image as a content block.');
+    Object.assign(values, {
+      imageId: image.id, mediaType: image.mediaType, width: image.width, height: image.height, storedBytes: image.sizeBytes,
+      blockBytes: imageBlocks[0].source?.data ? Math.floor(imageBlocks[0].source.data.length * 3 / 4) : 'unknown', sourceType: imageBlocks[0].source?.type ?? 'unknown', readToolCalls: toolUsesSince(skip, 'Read').length,
+    });
+  });
+
+  await step('m', 'release ends the session and the process; no process of this proof remains', async values => {
     const pid = claudePid();
     const record = kit.hostRecord(hostId());
     await api('POST', `/api/sessions/${sessionId}/release`);

@@ -4,10 +4,12 @@
 // Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux
 // socket) with `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
 // API the web client uses: bind, send, coordination hook and MCP, steer, Stop, a question answered through the card
-// route (h2), an image turn (h3), model profile, manual sleep and restore, a graceful backend restart (the app-server,
-// held by its session host, survives it and serves the next turn) and release. The coordination MCP server is pinned to the proof's runtime by the product itself (the
-// app-server argv), not by this script; a backend crash is not exercised here. Real Codex
-// turns run with the host's ChatGPT login; every prompt is one short fixed sentence.
+// route (h2), an image turn (h3), model profile, manual sleep and restore, a graceful backend restart while idle (k: the
+// app-server, held by its session host, survives it and serves the next turn) and during a running turn (k2: the turn is
+// re-adopted, Stop interrupts it and the next message completes on the same app-server), a screenshot-sized image over 5 MB (l)
+// and release (m). The coordination MCP server is pinned to the proof's runtime by the product itself (the app-server argv), not
+// by this script; a backend crash is not exercised here. Real Codex turns run with the host's ChatGPT login; every prompt is one
+// short fixed sentence.
 //
 // Usage (build first):  env -u NODE_ENV npm run build
 //                       env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log
@@ -23,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, scryptSync } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { solidPng } from './structured-proof-kit.mjs';
+import { solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, installExitBackstop, endProofProcesses, scanProofProcesses, summarizeProcesses } from './structured-proof-kit.mjs';
 
 if (!process.argv.includes('--run')) {
   process.stderr.write('Use --run to opt into a real Codex app-server proof (several short turns on the host login). Run `npm run build` first.\n');
@@ -33,18 +35,20 @@ if (!process.argv.includes('--run')) {
 const repoRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const { buildApp } = await import(new URL('../apps/server/dist/app.js', import.meta.url));
 const { CODEX_COST_PROFILES } = await import('@agent-console/shared');
+const { terminateHost } = await import(new URL('../apps/server/dist/providers/transport/line-transport.js', import.meta.url));
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
 const RUN_TAG = randomBytes(4).toString('hex');
 /** A counting command that carries a unique marker, so its process can be found (and shown gone) on the host. */
 const countMarker = tag => `proof-${tag}-${RUN_TAG}`;
-const countPrompt = tag => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 30); do echo $i; sleep 1; done`;
+const countPrompt = (tag, to = 30) => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
 const PROMPTS = {
   first: 'Reply with exactly the single word PONG and nothing else.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
   steer: 'Stop counting now and reply with the single word STEERED.',
   question: 'Use the request_user_input tool to ask me which color I prefer, with options red and blue. After I answer, reply with exactly the single word of the color I chose.',
   image: 'What color is the attached image? Reply with one word.',
+  bigImage: 'What is the dominant color of the attached image? Reply with one word.',
   model: 'Reply with the single word MODEL.',
   settle: 'Reply with the single word SETTLED.',
   restored: 'Reply with the single word RESTORED.',
@@ -54,7 +58,10 @@ const TURN_TIMEOUT_MS = 180_000;
 
 // ---- isolated environment ----------------------------------------------------------------------------------
 const startedAt = new Date();
+const tmuxSocket = `console-structured-proof-${randomUUID().slice(0, 8)}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-structured-proof-'));
+// Covers a failure before the `try` below (and an uncaught one): the temp root is removed and anything started is ended.
+installExitBackstop(root, () => tmuxSocket);
 const project = path.join(root, 'projects', 'demo');
 fs.mkdirSync(project, { recursive: true });
 execFileSync('git', ['init', '-q', project]);
@@ -62,7 +69,6 @@ fs.writeFileSync(path.join(project, 'AGENTS.md'), 'This is a disposable Console 
 const configPath = path.join(root, 'config.json');
 const runtimeDir = path.join(root, 'runtime');
 const databasePath = path.join(root, 'fixture.sqlite');
-const tmuxSocket = `console-structured-proof-${randomUUID().slice(0, 8)}`;
 
 const freePort = async () => {
   for (let port = 14390; port <= 14399; port += 1) {
@@ -154,9 +160,17 @@ const api = async (method, url, payload) => {
   return body;
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// The first signal stops the proof at its next poll so the cleanup below runs; a second one leaves at once (the `exit` backstop still cleans up).
+let interrupted = false;
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+  if (interrupted) { say(`${signal} again: leaving now`); process.exit(130); }
+  interrupted = true;
+  say(`${signal}: stopping at the next poll; cleanup will run`);
+});
 const wait = async (label, predicate, timeout = TURN_TIMEOUT_MS, interval = 500) => {
   const deadline = Date.now() + timeout;
   for (;;) {
+    if (interrupted) throw new Error('Interrupted by a signal.');
     const result = await predicate();
     if (result) return result;
     if (Date.now() >= deadline) throw new Error(`Timed out after ${Math.round(timeout / 1000)} s: ${label}`);
@@ -200,8 +214,8 @@ const parentOf = pid => {
 /** The record the session host holding the app-server wrote: pids, start times and boot of the host and of the app-server. */
 const hostRecordPath = path.join(runtimeDir, 'structured', 'hosts', 'codex.json');
 const hostRecord = () => JSON.parse(fs.readFileSync(hostRecordPath, 'utf8'));
-/** Processes of this proof: anything whose command line holds the temp root, plus anything started with this runtime. */
-const listProcesses = () => [...new Set([...pgrep(root), ...processesWithRuntime()])];
+/** Processes of this proof: anything whose command line holds the temp root, anything started with this runtime, and every lane process that names the temp root. */
+const listProcesses = () => [...new Set([...pgrep(root), ...processesWithRuntime(), ...scanProofProcesses(root).map(entry => entry.pid)])];
 
 // ---- session accessors -------------------------------------------------------------------------------------
 let sessionId;
@@ -228,6 +242,7 @@ const queueRecord = requestId => {
   return found ? JSON.parse(found.value) : undefined;
 };
 const idle = async () => (await sessionState()).isWorking !== true;
+const eventLogPath = () => row()?.event_log_path;
 const epoch = () => db.prepare('select value from meta where key = ?').get(`structured-epoch:${sessionId}`)?.value;
 /** Collects the `session.screen-updated` events of the session from the event stream the web client listens to. */
 const watchScreens = async () => {
@@ -306,9 +321,10 @@ const ensureIdle = async entry => {
 };
 const step = async (id, name, fn, { fatal = false } = {}) => {
   const entry = { id, name, pass: false, skipped: false, ms: 0, values: {} };
+  if (interrupted) aborted = true;
   if (aborted) {
     entry.skipped = true;
-    entry.error = 'Skipped: an earlier fatal step failed.';
+    entry.error = 'Skipped: an earlier fatal step failed or the proof was interrupted.';
   } else {
     const t0 = Date.now();
     try {
@@ -662,7 +678,133 @@ try {
     Object.assign(values, { oldPid, newPid, samePid: newPid === oldPid, hostPid: after.host.pid, recordMatchesProc: true });
   });
 
-  await step('l', 'release ends the session; after the session host is ended no process from this proof remains', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, the next message completes on the same app-server', async values => {
+    const control = await consoleControlTexts();
+    const skip = rolloutRecords().length;
+    const oldPid = row().pid;
+    const before = hostRecord();
+    assert.equal(before.child.pid, oldPid);
+    const oldGroup = groupMembers(oldPid);
+    const counting = await send(countPrompt('k2', 25));
+    assert.equal(counting.record.deliveryMode, 'turn');
+    await countingStarted(skip, values);
+    const commandPids = await wait('the counting command to be running', () => { const found = pgrep(countMarker('k2')); return found.length ? found : undefined; }, 30_000, 250);
+    values.commandPids = commandPids.length;
+    const countSeenAt = Date.now();
+    const epochBefore = epoch();
+    const eventLog = eventLogPath();
+    const eventsBeforeShutdown = readEventLog(eventLog).size;
+    await shutdown();
+    await sleep(1000);
+    assert.ok(alive(oldPid), 'The app-server must survive the backend.');
+    assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
+    assert.ok(oldGroup.every(pid => alive(pid)), 'Every process of the app-server group must survive the backend.');
+    assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
+    // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
+    const eventsFrom = readEventLog(eventLog).size;
+    await boot();
+    const bootedAt = Date.now();
+    // Before any message: the row the database holds, then the first screen poll that an open web page makes. That poll must not
+    // write the loss line a turn that ended with its connection would get, and must not send recovery into the running turn.
+    const stored = row();
+    assert.equal(stored.status, 'bound');
+    assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
+    assert.equal(stored.conversation_ref, threadId);
+    const samples = [];
+    const httpStatuses = new Set();
+    let screenStatus;
+    const poll = async () => {
+      const response = await call('GET', `/api/sessions/${sessionId}/screen`);
+      samples.push(response.body?.session?.isWorking === true);
+      httpStatuses.add(response.status);
+      screenStatus = response.body?.screen?.status ?? 'none';
+      return response;
+    };
+    const firstPoll = await poll();
+    const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
+    Object.assign(values, { firstPollHttp: firstPoll.status, firstPollScreen: screenStatus, firstPollWorking: String(samples[0]), connectionEndedAfterFirstPoll: lostAfterFirstPoll.length > 0 });
+    assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
+    // Attached again (loaded, not asleep) within the first reconcile pass, to the app-server that survived.
+    await wait('the thread to be attached again', async () => { const response = await poll(); return response.status === 200 && !/asleep$/.test(screenStatus); }, 12_000, 500);
+    values.attachedAfterBootMs = Date.now() - bootedAt;
+    values.epochChanged = epoch() !== epochBefore;
+    assert.equal(row().pid, oldPid, 'The thread is served by the app-server that survived.');
+    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === before.host.pid), [oldPid], 'Attaching must not start a second app-server.');
+    // The turn is still running, so the row must read as working for as long as the count runs.
+    for (let index = 0; index < 4; index += 1) { await sleep(500); await poll(); }
+    values.screenWhileCounting = screenStatus;
+    values.polls = samples.length;
+    const notWorking = samples.filter(working => !working).length;
+    assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join("/")}) while the count was still running.`);
+    const stillCounting = pgrep(countMarker('k2'));
+    values.countSeenRunningForMs = Date.now() - countSeenAt;
+    assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${values.countSeenRunningForMs} ms after it was seen running, so Stop could not be tested; rerun.`);
+    // Stop reaches the re-adopted turn: idle within 15 s, same app-server, the command ends, the rollout records the interruption.
+    const stopped = Date.now();
+    await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
+    await wait('the session to become idle after Stop', idle, 15_000, 250);
+    values.idleAfterMs = Date.now() - stopped;
+    assert.equal(row().pid, oldPid, 'The row pid must not change for an interrupt.');
+    await wait('the counting command to end after Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 20_000, 250);
+    values.commandGoneAfterMs = Date.now() - stopped;
+    const abortRecord = await wait('the rollout to record the interrupted turn', () =>
+      rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);
+    assert.equal(abortRecord.payload.reason, 'interrupted');
+    values.turnAborted = abortRecord.payload.reason;
+    assert.equal((await sessionState()).isWorking, false);
+    // The next message gets its own reply from the same app-server.
+    const resumedBefore = await countAssistant('RESUMED');
+    await send(PROMPTS.resumed);
+    await wait('assistant reply containing RESUMED', async () => (await idle()) && (await countAssistant('RESUMED')) > resumedBefore);
+    assert.equal(row().pid, oldPid, 'The same app-server must serve the resumed thread.');
+    const after = hostRecord();
+    assert.equal(after.host.pid, before.host.pid, 'The same session host must still hold it.');
+    assert.equal(after.child.pid, oldPid);
+    assert.equal(after.child.startTicks, startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
+    assert.equal(after.child.startTicks, before.child.startTicks);
+    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === after.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
+    // Nothing the Console sends on its own (recovery, wake) reached the conversation, and no loss line was written at any point.
+    const events = readEventLog(eventLog, eventsBeforeShutdown).entries;
+    assert.deepEqual(lostTurnStatusLines(events), [], 'No lost-turn status line may be written for a turn that survived the restart.');
+    const injected = findControlText(events, control) ?? rolloutRecords().slice(skip).map(record => findControlText(record, control)).find(Boolean);
+    assert.equal(injected, undefined, `The Console sent control text into the conversation: ${injected}`);
+    Object.assign(values, { oldPid, newPid: row().pid, samePid: true, hostPid: after.host.pid, recordMatchesProc: true, recoveryOrWakeText: 'none' });
+  });
+
+  await step('l', 'screenshot-sized image: a 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour', async values => {
+    const skip = rolloutRecords().length;
+    const eventsFrom = readEventLog(eventLogPath()).size;
+    const failureBefore = row().run_failure_json;
+    const before = await countAssistant('red');
+    const png = noisyPng(2560, 1440, [225, 25, 25]);
+    values.fileBytes = png.length;
+    const upload = await app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/images`, payload: png, headers: { ...headers, 'content-type': 'image/png' } });
+    assert.equal(upload.statusCode, 201, `image upload: HTTP ${upload.statusCode}`);
+    const image = upload.json().image;
+    const sent = await send(PROMPTS.bigImage, { imageIds: [image.id] });
+    assert.equal(sent.record.state, 'submitted');
+    // A turn that ends in an image error leaves a run failure on the row, an error record in the rollout, or a status line.
+    const failure = () => {
+      const stored = row().run_failure_json;
+      const errors = rolloutRecords().slice(skip).filter(record => record.type === 'event_msg' && record.payload?.type === 'error').map(record => String(record.payload.message ?? '').slice(0, 160));
+      const lines = readEventLog(eventLogPath(), eventsFrom).entries.filter(entry => entry.type === 'status' && /image/i.test(String(entry.text ?? ''))).map(entry => String(entry.text).slice(0, 160));
+      return [stored && stored !== failureBefore ? stored.slice(0, 200) : undefined, ...errors, ...lines].filter(Boolean);
+    };
+    await wait('a completed turn whose reply names the colour', async () => {
+      const failed = failure();
+      if (failed.length) throw new Error(`The image turn failed (image_error?): ${failed.join(' | ')}`);
+      return (await idle()) && (await countAssistant('red')) > before;
+    });
+    const imageRecord = rolloutRecords().slice(skip).find(record => JSON.stringify(record).includes('input_image') || JSON.stringify(record).includes('localImage') || JSON.stringify(record).includes('local_image'));
+    assert.ok(imageRecord, 'The rollout shows no image content for the turn.');
+    const dataUrl = JSON.stringify(imageRecord).match(/data:image\/[a-z]+;base64,([A-Za-z0-9+/=]+)/);
+    Object.assign(values, {
+      imageId: image.id, mediaType: image.mediaType, width: image.width, height: image.height, storedBytes: image.sizeBytes,
+      sentBytes: dataUrl ? Math.floor(dataUrl[1].length * 3 / 4) : 'unknown', rolloutRecordType: imageRecord.payload?.type ?? imageRecord.type,
+    });
+  });
+
+  await step('m', 'release ends the session; after the session host is ended no process from this proof remains', async values => {
     await api('POST', `/api/sessions/${sessionId}/release`);
     const stored = row();
     assert.equal(stored.status, 'ended');
@@ -678,7 +820,6 @@ try {
     const host = hostRecord();
     assert.ok(alive(host.host.pid) && alive(host.child.pid), 'The host and the app-server must still be running after backend shutdown.');
     values.hostSurvivedShutdown = true;
-    const { terminateHost } = await import(new URL('../apps/server/dist/providers/transport/line-transport.js', import.meta.url));
     await terminateHost(runtimeDir, 'codex', { info: () => undefined, warn: () => undefined });
     await wait('every process of this proof to exit after the session host is ended', () => listProcesses().length === 0, 20_000, 250);
     assert.ok(!fs.existsSync(hostRecordPath), 'The host record must be removed with the host.');
@@ -686,7 +827,8 @@ try {
     values.coordMcpAfterShutdown = coordMcpProcesses().length;
   });
 } finally {
-  // Cleanup runs on every path: release the session, stop the backend, kill any child, remove the temp root.
+  // Cleanup runs on every path: release the session, stop the backend, end the session host, kill any child, scan once more for
+  // lane processes of this proof, remove the temp root.
   const note = (name, ok, detail) => { evidence.cleanup.push({ name, ok, ...(detail ? { detail } : {}) }); };
   try {
     if (app && sessionId && db && row()?.should_restore) {
@@ -696,23 +838,38 @@ try {
   } catch (error) { note('release session', false, String(error.message)); }
   try { await shutdown(); note('backend shutdown', true); } catch (error) { note('backend shutdown', false, String(error.message)); }
   try {
+    if (fs.existsSync(hostRecordPath)) {
+      await terminateHost(runtimeDir, 'codex', { info: () => undefined, warn: () => undefined });
+      note('terminate host codex', !fs.existsSync(hostRecordPath));
+    }
+  } catch (error) { note('terminate host codex', false, String(error.message)); }
+  try {
     const leftover = listProcesses();
     for (const pid of leftover) { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
     if (leftover.length) await sleep(2000);
-    for (const pid of listProcesses()) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
-    note('leftover processes', true, `${leftover.length} found`);
+    const stubborn = listProcesses();
+    for (const pid of stubborn) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+    if (stubborn.length) await sleep(500);
+    // After a run whose steps all passed, release had already ended everything: a process found here is a defect, not tidying up after a failure.
+    note('leftover processes', listProcesses().length === 0 && (leftover.length === 0 || evidence.steps.some(entry => !entry.pass)), `${leftover.length} found, ${stubborn.length} needed SIGKILL`);
   } catch (error) { note('leftover processes', false, String(error.message)); }
   try { spawnSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server */ }
+  try {
+    const { found, remaining } = await endProofProcesses(root);
+    note('final process scan', found.length === 0 && remaining.length === 0, found.length ? `had to end ${found.length} lane process(es) still running: ${summarizeProcesses(found)}${remaining.length ? `; ${remaining.length} survived SIGKILL` : ''}` : 'no lane process of this proof left');
+    if (found.length) say(`FINAL SCAN found and ended ${found.length} lane process(es): ${summarizeProcesses(found)}`);
+  } catch (error) { note('final process scan', false, String(error.message)); }
   try { fs.rmSync(root, { recursive: true, force: true }); note('remove temp root', !fs.existsSync(root)); } catch (error) { note('remove temp root', false, String(error.message)); }
   const failed = evidence.steps.filter(entry => !entry.pass && !entry.skipped).length;
   const skipped = evidence.steps.filter(entry => entry.skipped).length;
+  const cleanupFailed = evidence.cleanup.filter(entry => !entry.ok).length;
   evidence.providerRetries = providerRetries();
   if (evidence.providerRetries?.length) say(`NOTE Codex retried a model request ${evidence.providerRetries.length} time(s) on this thread (${[...new Set(evidence.providerRetries.map(entry => entry.cause))].join('; ')}); turns that waited out a backoff look hung.`);
   evidence.finishedAt = new Date().toISOString();
-  evidence.result = failed === 0 && skipped === 0 && evidence.steps.length === 14 ? 'pass' : 'fail';
-  evidence.summary = { passed: evidence.steps.filter(entry => entry.pass).length, failed, skipped };
+  evidence.result = failed === 0 && skipped === 0 && cleanupFailed === 0 && evidence.steps.length === 16 ? 'pass' : 'fail';
+  evidence.summary = { passed: evidence.steps.filter(entry => entry.pass).length, failed, skipped, cleanupFailed };
   flush();
-  say(`${evidence.result.toUpperCase()}: ${evidence.summary.passed} passed, ${failed} failed, ${skipped} skipped. Evidence ${evidencePath}`);
+  say(`${evidence.result.toUpperCase()}: ${evidence.summary.passed} passed, ${failed} failed, ${skipped} skipped, ${cleanupFailed} cleanup problems. Evidence ${evidencePath}`);
   process.exitCode = evidence.result === 'pass' ? 0 : 1;
 }
 // The backend is closed; end the process even if a library timer is still pending.
