@@ -2746,6 +2746,7 @@ export class SessionManager {
         }
       }
     }
+    const keyRevision = this.inputQueue.revision(sessionId);
     if (plan.hasSpecialKeys) {
       if (payload.keys?.includes('Enter') && !submittedDeferredSelection
         && submittedTextShouldCreateUserTurn(latestObservedScreen, submittedText ?? (shouldRecordTextAsUserInput ? payload.text : undefined))) {
@@ -2758,7 +2759,7 @@ export class SessionManager {
     }
 
     if (!payload.text && payload.keys?.length === 1 && payload.keys[0] === 'Escape') {
-      await this.clearStoppedNativeDraft(liveSession);
+      await this.clearStoppedNativeDraft(liveSession, beforeScreen, keyRevision);
       this.inputQueue.stage(sessionId, undefined);
     }
 
@@ -2807,14 +2808,26 @@ export class SessionManager {
   }
 
   /** A human Stop abandons the native draft as well as pending Console sends. */
-  private async clearStoppedNativeDraft(session: BoundSession): Promise<void> {
-    const revision = this.inputQueue.revision(session.id);
+  private async clearStoppedNativeDraft(session: BoundSession, beforeStop: SessionScreen, revision: number): Promise<void> {
+    if (this.inputQueue.revision(session.id) !== revision) return;
+    // Claude can restore the interrupted prompt only after Escape's first
+    // empty-composer repaint. Recognize that exact accepted human input;
+    // unrelated text appearing during the wait still belongs to the user.
+    const lastInput = this.db.meta.get(`human-input:${session.id}`);
+    const restoredPrompt = session.provider === 'claude' && beforeStop.inputActive && !beforeStop.inputText.trim()
+      && /esc to interrupt/i.test(beforeStop.status) && lastInput
+      ? (JSON.parse(lastInput) as RecordedUserInput).text : undefined;
+    const ready = (screen: SessionScreen) => screenLooksReadyForLiteralPrompt(screen)
+      && !/esc to interrupt/i.test(screen.status);
     const initial = await this.captureSessionScreen(session, false);
-    const before = screenLooksReadyForLiteralPrompt(initial) ? initial
-      : await this.waitForScreenMatch(session, hashScreen(initial), combinedTextKeySettleWaitMs(initial.inputText),
-        candidate => screenLooksReadyForLiteralPrompt(candidate) || this.inputQueue.revision(session.id) !== revision);
-    if (!before || !screenLooksReadyForLiteralPrompt(before) || !before.inputText.trim()
-      || before.inputText !== initial.inputText || this.inputQueue.revision(session.id) !== revision) return;
+    const before = ready(initial) && (initial.inputText.trim() || !restoredPrompt) ? initial
+      : await this.waitForScreenMatch(session, hashScreen(initial), combinedTextKeySettleWaitMs(restoredPrompt ?? initial.inputText),
+        candidate => (ready(candidate) && Boolean(candidate.inputText.trim() || !restoredPrompt))
+          || this.inputQueue.revision(session.id) !== revision);
+    if (!before || !ready(before) || !before.inputText.trim()
+      || (before.inputText !== initial.inputText
+        && !(!initial.inputText.trim() && screenInputMatchesText(before, restoredPrompt)))
+      || this.inputQueue.revision(session.id) !== revision) return;
     const owner = await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id');
     const pid = await this.tmuxClient.getPanePid(session.tmuxSessionName);
     const screen = await this.captureSessionScreen(session, false);
@@ -2822,7 +2835,7 @@ export class SessionManager {
     if (owner !== session.id || pid !== session.pid || current.pid !== session.pid
       || this.getCurrentRestorableSession(current)?.id !== session.id
       || this.inputQueue.revision(session.id) !== revision
-      || !screenLooksReadyForLiteralPrompt(screen) || screen.inputText !== before.inputText) return;
+      || !ready(screen) || screen.inputText !== before.inputText) return;
     this.appendDebugTrace(session, { action: 'stop-native-draft-intent', keys: ['C-c'],
       text: this.inputQueue.staged(session.id)?.text ?? screen.inputText, before: screen, after: screen });
     // Only clear a freshly observed nonempty composer. Repeated Stop on an
@@ -2831,7 +2844,7 @@ export class SessionManager {
     this.inputQueue.setRemnant(session.id, undefined);
     await this.runInputTmuxAction(session, () => this.tmuxClient.sendKeys(session.tmuxSessionName, ['C-c']));
     const cleared = await this.waitForScreenMatch(session, hashScreen(screen), combinedTextKeySettleWaitMs(screen.inputText),
-      candidate => screenLooksReadyForLiteralPrompt(candidate) && !candidate.inputText.trim());
+      candidate => ready(candidate) && !candidate.inputText.trim());
     if (!cleared || cleared.inputText.trim()) {
       throw new SessionInputRejectedError('Stop was sent, but the terminal draft could not be confirmed cleared. Your local draft is kept; Escape can be used again.');
     }

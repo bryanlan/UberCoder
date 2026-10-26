@@ -137,6 +137,56 @@ describe('durable human input queue', () => {
     expect(f.tmux.paneText).toContain('new human draft');
   });
 
+  it.each(['working', 'ready'] as const)('clears Claude\'s interrupted prompt restored after an initially %s empty composer', async repaint => {
+    const f = await fixture('claude');
+    const original = 'how is progress I just woke up';
+    await f.submit(original);
+    f.tmux.paneText = '✢ Thinking…\n────────────────\n❯ \n────────────────\n  ⏵⏵ bypass permissions on · esc to interrupt';
+    const sendKeys = f.tmux.sendKeys.bind(f.tmux);
+    vi.spyOn(f.tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+      await sendKeys(name, keys);
+      if (keys.includes('Escape')) f.tmux.captureSequence = [repaint === 'working' ? busy : ready(), ready(original)];
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Enter'], ['Escape'], ['C-c']]);
+    expect((await f.submit('the next question')).recordedUserInput?.text).toBe('the next question');
+    expect(f.tmux.sent).toEqual([original, 'the next question']);
+    expect(f.db.boundSessions.getById(f.session.id)?.pid).toBe(f.session.pid);
+  });
+
+  it.each(['different draft', 'edited original'] as const)('preserves a %s appearing after Claude Stop', async change => {
+    const f = await fixture('claude');
+    const original = 'already submitted';
+    await f.submit(original);
+    f.tmux.paneText = '✢ Thinking…\n────────────────\n❯ \n────────────────\n  ⏵⏵ bypass permissions on · esc to interrupt';
+    const changed = change === 'edited original' ? original + ', with new edits' : 'a new human draft';
+    const sendKeys = f.tmux.sendKeys.bind(f.tmux);
+    vi.spyOn(f.tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+      await sendKeys(name, keys);
+      if (keys.includes('Escape')) f.tmux.captureSequence = [busy, ready(changed)];
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Enter'], ['Escape']]);
+    expect(f.tmux.paneText).toContain(changed);
+  });
+
+  it.each(['new native input', 'still working', 'empty composer'] as const)('does not clear Claude\'s restored prompt across %s', async guard => {
+    const f = await fixture('claude');
+    const original = 'already submitted';
+    await f.submit(original);
+    f.tmux.paneText = '✢ Thinking…\n────────────────\n❯ \n────────────────\n  ⏵⏵ bypass permissions on · esc to interrupt';
+    const sendKeys = f.tmux.sendKeys.bind(f.tmux);
+    vi.spyOn(f.tmux, 'sendKeys').mockImplementation(async (name, keys) => {
+      await sendKeys(name, keys);
+      if (!keys.includes('Escape')) return;
+      f.tmux.paneText = guard === 'empty composer' ? ready()
+        : guard === 'still working' ? `✢ Thinking…\n────────────────\n❯ ${original}\n────────────────\n  ⏵⏵ bypass permissions on · esc to interrupt` : ready(original);
+      if (guard === 'new native input') new InputQueue(f.db.sqlite).invalidateNativeInput(f.session.id);
+    });
+    await f.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(f.tmux.sentKeys).toEqual([['Enter'], ['Escape']]);
+  });
+
   it.each(['native-selection', 'images', 'pending-project'] as const)('cancels an HTTP send held in %s preflight before Stop', async phase => {
     const f = await fixture();
     if (phase === 'pending-project') {

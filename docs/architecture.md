@@ -362,6 +362,11 @@ unchanged-composer check clear a remaining draft
 with one native clear-input key. That explicit human cancellation can clear a draft
 whose prefix differs from the queued message. It preserves the known text in debug
 history. Repeated Escape on an empty composer never sends the clear-input key.
+Claude can restore an interrupted prompt after first repainting an empty composer.
+When Stop interrupts its working turn with an empty input box, cleanup waits for
+that repaint and can clear the exact last accepted human prompt. It preserves
+different or edited text, waits for the native interrupt indicator to disappear,
+and checks the input revision captured before Escape plus current ownership.
 Cancelled submission identities remain cancelled, including uncertain submissions
 and late paste-timeout or transport results;
 they never replay or block a new explicit message. After Enter,
