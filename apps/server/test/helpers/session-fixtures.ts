@@ -1,6 +1,6 @@
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { SessionManager } from '../../src/sessions/session-manager.js';
-import type { TmuxClient } from '../../src/sessions/tmux-client.js';
+import { assertTmuxSessionName, type TmuxClient } from '../../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../../src/providers/types.js';
 import type { ActiveProject } from '../../src/projects/project-service.js';
 import type { MergedProviderSettings } from '../../src/config/service.js';
@@ -29,30 +29,41 @@ export class FakeTmux implements TmuxClient {
   sessionCreatedAt = '1970-01-01T00:00:01.000Z';
 
   async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (this.created.length) this.sessionCreatedAt = new Date().toISOString();
     this.created.push(sessionName);
     this.createdCommands.push(shellCommand);
     this.alive.add(sessionName);
   }
   async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (this.failPipePane) {
       throw new Error('pipe-pane failed');
     }
     this.pipedToFiles.push({ sessionName, filePath });
   }
   async closePanePipe(sessionName: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (this.failClosePipe) {
       throw new Error('close pipe failed');
     }
     this.closedPipes.push(sessionName);
   }
-  async sendLiteralText(_sessionName: string, text: string): Promise<void> { this.sent.push(text); }
-  async pasteText(_sessionName: string, text: string): Promise<void> {
+  async sendLiteralText(sessionName: string, text: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
+    this.sent.push(text);
+  }
+  async pasteText(sessionName: string, text: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     this.pasted.push(text);
     this.sent.push(text);
   }
-  async sendKeys(_sessionName: string, keys: string[]): Promise<void> { this.sentKeys.push(keys); }
-  async capturePane(_sessionName?: string, startLine?: number): Promise<string> {
+  async sendKeys(sessionName: string, keys: string[]): Promise<void> {
+    assertTmuxSessionName(sessionName);
+    this.sentKeys.push(keys);
+  }
+  async capturePane(sessionName?: string, startLine?: number): Promise<string> {
+    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
     this.captureStartLines.push(startLine);
     if (this.captureSequence.length > 0) {
       const next = this.captureSequence.shift();
@@ -62,14 +73,18 @@ export class FakeTmux implements TmuxClient {
     }
     return this.paneText;
   }
-  async interrupt(): Promise<void> {}
+  async interrupt(sessionName?: string): Promise<void> {
+    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
+  }
   async killSession(sessionName: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (this.failKill) {
       throw new Error('kill failed');
     }
     this.alive.delete(sessionName);
   }
   async hasSession(sessionName: string): Promise<boolean> {
+    assertTmuxSessionName(sessionName);
     const next = this.hasSessionResults.shift();
     if (next instanceof Error) {
       throw next;
@@ -79,13 +94,21 @@ export class FakeTmux implements TmuxClient {
     }
     return this.alive.has(sessionName);
   }
-  async getPanePid(): Promise<number | undefined> { return 4242; }
-  async getSessionCreatedAt(): Promise<string> { return this.sessionCreatedAt; }
+  async getPanePid(sessionName?: string): Promise<number | undefined> {
+    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
+    return 4242;
+  }
+  async getSessionCreatedAt(sessionName?: string): Promise<string> {
+    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
+    return this.sessionCreatedAt;
+  }
   async ensureMinimumWindowSize(sessionName: string, _columns: number, _rows: number): Promise<boolean> {
+    assertTmuxSessionName(sessionName);
     this.windowSizeChecks.push(sessionName);
     return false;
   }
   async getOption(sessionName: string, name: string): Promise<string | undefined> {
+    assertTmuxSessionName(sessionName);
     for (let index = this.options.length - 1; index >= 0; index -= 1) {
       const option = this.options[index];
       if (option?.sessionName === sessionName && option.name === name) {
@@ -95,6 +118,7 @@ export class FakeTmux implements TmuxClient {
     return undefined;
   }
   async setOption(sessionName: string, name: string, value: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     this.options.push({ sessionName, name, value });
   }
 }

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BoundSession, ConversationSummary, SessionEvent } from '@agent-console/shared';
+import type { ProviderAdapter } from '../../src/providers/types.js';
 import { AppDatabase } from '../../src/db/database.js';
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { TransportPluginRegistry } from '../../src/providers/transport/registry.js';
@@ -10,7 +11,7 @@ import { FakeTmux, createRecoveryManager, project, provider, providerSettings } 
 import { FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
 
 export const structuredSessionsConfig = {
-  codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60 },
+  codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
 };
 
 export interface StructuredSessionFixtureOptions {
@@ -18,6 +19,8 @@ export interface StructuredSessionFixtureOptions {
   manager?: Parameters<typeof createRecoveryManager>[6];
   /** Leave the structured lane off to prove binds are refused. */
   disabled?: boolean;
+  /** The provider adapter the manager sees (for example one with a run monitor over a rollout file). */
+  provider?: ProviderAdapter;
 }
 
 /** Everything a structured-session test needs: a database, a FakeTmux that must stay untouched, and a fake plugin. */
@@ -31,7 +34,7 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   const bus = new RealtimeEventBus();
   const events: SessionEvent[] = [];
   bus.subscribe((event) => { events.push(event); });
-  const manager = createRecoveryManager(db, tmux, root, bus, provider, providerSettings, {
+  const manager = createRecoveryManager(db, tmux, root, bus, options.provider ?? provider, providerSettings, {
     transportPlugins: registry,
     structuredSessions: options.disabled ? undefined : structuredSessionsConfig,
     ...options.manager,
@@ -76,7 +79,7 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);
     const nextTmux = new FakeTmux();
-    const nextManager = createRecoveryManager(db, nextTmux, root, bus, provider, providerSettings, {
+    const nextManager = createRecoveryManager(db, nextTmux, root, bus, options.provider ?? provider, providerSettings, {
       transportPlugins: nextRegistry, structuredSessions: structuredSessionsConfig, ...options.manager,
     });
     const next = { manager: nextManager, plugin: nextPlugin, tmux: nextTmux };

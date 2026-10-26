@@ -14,8 +14,10 @@
 
 import { randomUUID } from 'node:crypto';
 import {
+  NotSentError,
   PreviousTurnActiveError,
   TransportUnavailableError,
+  TurnNotActiveError,
   type OpenOptions,
   type ProviderFailure,
   type TransportCapabilities,
@@ -23,7 +25,7 @@ import {
   type TransportSession,
   type TurnInput,
 } from '../types.js';
-import { classifyCodexFailure, mergeTurnErrors, parseCodexRetryProgress, steerLostRace, TurnAlreadyCompletedError } from './errors.js';
+import { classifyCodexFailure, mergeTurnErrors, parseCodexRetryProgress, steerLostRace } from './errors.js';
 import { JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, type JsonRpcClient } from './jsonrpc.js';
 import {
   callCodex,
@@ -74,6 +76,8 @@ export interface CodexTimings {
   queuedStartWaitMs: number;
   closeGraceMs: number;
   termGraceMs: number;
+  /** Before the first spawn, a process left by a crashed backend gets SIGTERM and this long to end before SIGKILL. */
+  staleTermGraceMs: number;
 }
 
 export const DEFAULT_TIMINGS: CodexTimings = {
@@ -84,6 +88,7 @@ export const DEFAULT_TIMINGS: CodexTimings = {
   queuedStartWaitMs: 10_000,
   closeGraceMs: 5_000,
   termGraceMs: 5_000,
+  staleTermGraceMs: 5_000,
 };
 
 export interface CodexLogger {
@@ -205,7 +210,7 @@ export function itemTitle(item: CodexThreadItem): string | undefined {
     case 'fileChange':
       return Array.isArray(item.changes) ? shorten(item.changes.map((change) => change.path).join(', ')) : undefined;
     default:
-      // userMessage (including a steer), plan, contextCompaction, subagent and review items.
+      // plan, contextCompaction, subagent and review items.
       return item.type;
   }
 }
@@ -391,14 +396,21 @@ export class CodexAppServerSession implements TransportSession {
   // TransportSession
 
   async sendTurn(input: TurnInput): Promise<{ turnId: string }> {
-    if (this.ended) throw new TransportUnavailableError('The Codex session has ended.');
+    if (this.ended) throw new NotSentError('The Codex session has ended.');
     if (this.activeTurnId !== null || this.pendingStart !== null) throw new PreviousTurnActiveError();
     const clientMessageId = input.clientMessageId ?? randomUUID();
     const params = buildTurnStartParams(this.nativeSessionId, input, this.policy, this.cwd, clientMessageId);
+    let client: JsonRpcClient;
+    try {
+      client = this.host.client();
+    } catch (error) {
+      // The connection is gone before anything was written: the caller may queue the turn and try again.
+      throw new NotSentError(error instanceof Error ? error.message : 'The Codex app-server is not running.');
+    }
     this.pendingStart = { adoptedTurnId: null };
     try {
       // The response is applied synchronously, before the notifications queued right behind it.
-      const response = await callCodex(this.host.client(), 'turn/start', params, {
+      const response = await callCodex(client, 'turn/start', params, {
         timeoutMs: this.host.timings.requestTimeoutMs,
         onResult: (result) => this.onTurnStartResponse(result.turn),
       });
@@ -406,13 +418,15 @@ export class CodexAppServerSession implements TransportSession {
     } catch (error) {
       this.pendingStart = null;
       this.early.clear();
+      // A refusal before the frame was written is certain; anything after the write is uncertain.
+      if (error instanceof JsonRpcExitError && !error.sent) throw new NotSentError(error.message);
       throw toTransportError(error);
     }
   }
 
   async steer(turnId: string, input: TurnInput): Promise<void> {
     const record = this.turns.get(turnId);
-    if (!record || record.terminal) throw new TurnAlreadyCompletedError(turnId);
+    if (!record || record.terminal) throw new TurnNotActiveError(turnId);
     const params = {
       threadId: this.nativeSessionId,
       input: textInput(input),
@@ -420,12 +434,12 @@ export class CodexAppServerSession implements TransportSession {
       ...(input.clientMessageId ? { clientUserMessageId: input.clientMessageId } : {}),
     };
     await this.awaitStarted(record, this.host.timings.queuedStartWaitMs);
-    if (record.terminal) throw new TurnAlreadyCompletedError(turnId);
+    if (record.terminal) throw new TurnNotActiveError(turnId);
     try {
       await callCodex(this.host.client(), 'turn/steer', params, { timeoutMs: this.host.timings.requestTimeoutMs });
     } catch (error) {
       if (error instanceof JsonRpcRequestError && (record.terminal || steerLostRace(error))) {
-        throw new TurnAlreadyCompletedError(turnId);
+        throw new TurnNotActiveError(turnId);
       }
       throw toTransportError(error);
     }
@@ -442,13 +456,19 @@ export class CodexAppServerSession implements TransportSession {
     try {
       await callCodex(this.host.client(), 'turn/interrupt', { threadId: this.nativeSessionId, turnId }, { timeoutMs: this.host.timings.requestTimeoutMs });
     } catch (error) {
-      if (record.terminal) return;
+      if (record.terminal) {
+        // The turn ended while the request was in flight, but commands it started can still be running.
+        this.terminateBackgroundCommands(record);
+        return;
+      }
       record.interrupt = null;
       throw toTransportError(error);
     }
+    // Whether `turn/completed` or this response arrived first, the user asked to stop: a command the turn
+    // started never ends on its own (fixture `turn_interrupt_mid_tool`), so end the tracked ones either way.
+    this.terminateBackgroundCommands(record);
     if (record.terminal || !record.interrupt) return;
     record.interrupt.timer = setTimeout(() => this.interruptTimedOut(record), this.host.timings.interruptGraceMs);
-    this.terminateBackgroundCommands(record);
   }
 
   /** Every server request is answered the moment it arrives (slice 1 has no approval UI), so nothing stays open. */
@@ -685,7 +705,16 @@ export class CodexAppServerSession implements TransportSession {
       // A `turn/started` was adopted for this request, but the server answered with another turn.
       this.host.log.warn({ threadId: this.nativeSessionId, adopted: pending.adoptedTurnId, responded: turn.id }, 'codex turn/start answered with a different turn than the one adopted');
     }
-    if (this.finishedTurnIds.has(turn.id)) return;
+    if (this.finishedTurnIds.has(turn.id)) {
+      // A turn this request adopted can end before its response is read, and a response that reports an ended
+      // turn needs no tracking either.
+      if (pending?.adoptedTurnId === turn.id || turn.status !== 'inProgress') return;
+      // Otherwise this session closed the turn earlier (a local interrupt finalize) yet the server answers
+      // `turn/start` with it as running: Codex still considers it active. Track it again, or the turn would run
+      // unobserved and its real `turn/completed` would be dropped as a finished turn.
+      this.host.log.warn({ threadId: this.nativeSessionId, turnId: turn.id }, 'codex turn/start answered with a turn this session already finished; tracking it as active again');
+      this.finishedTurnIds.delete(turn.id);
+    }
     let record = this.turns.get(turn.id);
     if (!record) {
       record = this.newTurn(turn.id, 'user');
@@ -881,6 +910,8 @@ export class CodexAppServerSession implements TransportSession {
     if (!record) return;
     this.ensureStarted(record);
     record.commands.delete(item.id);
+    // The user's own message (and an injected hook prompt) is echoed back as an item; it is not agent output.
+    if (item.type === 'userMessage' || item.type === 'hookPrompt') return;
     const title = itemTitle(item as CodexThreadItem);
     this.channel.push({
       type: 'item.completed',

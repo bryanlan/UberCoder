@@ -13,7 +13,7 @@ async function pluginConfig(manager: NonNullable<Parameters<typeof structuredSes
   return f.plugin.instance!.config as { enabled: boolean; command: string[]; env?: Record<string, string> };
 }
 
-const codex = (env?: Record<string, string>) => ({ codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, ...(env ? { env } : {}) } });
+const codex = (env?: Record<string, string>) => ({ codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, env: env ?? {} } });
 
 describe('Structured provider process environment', () => {
   it('gives the plugin the Console coordination variables when coordination is on', async () => {

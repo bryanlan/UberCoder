@@ -99,10 +99,13 @@ export class JsonRpcRequestError extends Error {
 /** The process ended (or its stdin was closed) while a request was pending or being sent. */
 export class JsonRpcExitError extends Error {
   readonly exit: JsonRpcExit;
-  constructor(exit: JsonRpcExit, message?: string) {
+  /** False when the request was refused before any byte was written, so it certainly did not reach the process. */
+  readonly sent: boolean;
+  constructor(exit: JsonRpcExit, message?: string, sent = true) {
     super(message ?? describeExit(exit));
     this.name = 'JsonRpcExitError';
     this.exit = exit;
+    this.sent = sent;
   }
 }
 
@@ -144,7 +147,13 @@ export class JsonRpcReplyError extends Error {
   }
 }
 
-/** One-line description of how the process ended, with the last stderr lines (redacted) when there are any. */
+/** How the process ended, in one short phrase and without any process output: "exit code 1", "signal SIGKILL". */
+export function exitReason(exit: JsonRpcExit): string {
+  if (exit.error) return exit.error.message;
+  return exit.signal ? `signal ${exit.signal}` : `exit code ${exit.code ?? 'unknown'}`;
+}
+
+/** One-line description of how the process ended, with the last stderr lines (redacted) when there are any. For logs and errors, not for conversation lines. */
 export function describeExit(exit: JsonRpcExit): string {
   const how = exit.signal ? `signal ${exit.signal}` : `code ${exit.code ?? 'unknown'}`;
   const tail = exit.stderrTail.replace(ANSI_PATTERN, '').trim().split('\n').slice(-3).join(' | ');
@@ -333,7 +342,7 @@ export class JsonRpcClient {
   request<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.finished) {
-        reject(this.exitError());
+        reject(this.exitError(false));
         return;
       }
       const id = this.nextId;
@@ -443,7 +452,7 @@ export class JsonRpcClient {
   }
 
   private writeFrame(frame: Record<string, unknown>): void {
-    if (this.finished || this.child.stdin.destroyed || !this.child.stdin.writable) throw this.exitError();
+    if (this.finished || this.child.stdin.destroyed || !this.child.stdin.writable) throw this.exitError(false);
     const line = `${JSON.stringify(frame)}\n`;
     this.log.debug?.(this.describeFrame('out', frame, line.length), 'codex protocol');
     this.child.stdin.write(line, (error) => {
@@ -451,9 +460,9 @@ export class JsonRpcClient {
     });
   }
 
-  private exitError(): JsonRpcExitError {
+  private exitError(sent = true): JsonRpcExitError {
     const exit = this.finished ?? { code: null, signal: null, expected: this.closing, stderrTail: this.stderrTail() };
-    return new JsonRpcExitError(exit, exit.error ? exit.error.message : undefined);
+    return new JsonRpcExitError(exit, exit.error ? exit.error.message : undefined, sent);
   }
 
   private failFatal(error: Error): void {

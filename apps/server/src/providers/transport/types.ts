@@ -47,8 +47,8 @@ export interface TransportSession {
   readonly capabilities: TransportCapabilities;
   readonly events: AsyncIterable<TransportEvent>; // single consumer; ends after session.state 'stopped'
   readonly transcriptPath?: string; // when the provider reports it
-  sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs
-  steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'
+  sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
+  steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
   interrupt(turnId: string): Promise<void>; // resolves when the request is accepted; terminal follows as an event
   respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void>;
   unload(): Promise<void>; // shared process: drop the thread from memory; per-session: no-op
@@ -82,7 +82,6 @@ export interface TransportPlugin<Config = unknown> {
 export interface PluginContext {
   runtimeDir: string; // <runtimeDir>/structured/<plugin>/
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
-  spawnScoped(argv: string[], options: { cwd: string; env: Record<string, string>; unit: string }): Promise<{ pid: number }>;
   meta: { get(key: string): string | undefined; set(key: string, value: string): void; delete(key: string): void };
 }
 
@@ -92,6 +91,30 @@ export class PreviousTurnActiveError extends Error {
   constructor(message = 'A turn is already running on this session.') {
     super(message);
     this.name = 'PreviousTurnActiveError';
+  }
+}
+
+/**
+ * The request certainly never reached the provider (the session had ended or the connection was gone before
+ * anything was written), so the caller can queue it and try again. A failure after the write is not this
+ * error: its outcome is uncertain and must not be replayed.
+ */
+export class NotSentError extends Error {
+  readonly code = 'not_sent';
+  constructor(message = 'The request was not sent.') {
+    super(message);
+    this.name = 'NotSentError';
+  }
+}
+
+/** `steer` named a turn that is not the active one any more (it ended first). The caller may send the text as a new turn. */
+export class TurnNotActiveError extends Error {
+  readonly code = 'turn_not_active';
+  readonly turnId?: string;
+  constructor(turnId?: string, message = 'The turn finished before the steer reached it.') {
+    super(message);
+    this.name = 'TurnNotActiveError';
+    this.turnId = turnId;
   }
 }
 

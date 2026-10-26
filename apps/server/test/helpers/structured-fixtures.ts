@@ -2,6 +2,7 @@ import {
   PreviousTurnActiveError,
   ResumeFailedError,
   TransportUnavailableError,
+  TurnNotActiveError,
   type OpenOptions,
   type PluginContext,
   type TransportCapabilities,
@@ -84,6 +85,8 @@ export class FakeTransportSession implements TransportSession {
   transcriptPath: string | undefined;
   activeTurnId: string | undefined;
   closed = false;
+  /** The next `sendTurn` rejects with this error (once), after being recorded as a call. */
+  failNextSend: Error | undefined;
   private turnCounter = 0;
   private readonly channel = new EventChannel();
 
@@ -115,6 +118,11 @@ export class FakeTransportSession implements TransportSession {
     this.calls.push({ method: 'sendTurn', args: [input] });
     this.assertOpen();
     if (this.activeTurnId) throw new PreviousTurnActiveError();
+    if (this.failNextSend) {
+      const error = this.failNextSend;
+      this.failNextSend = undefined;
+      throw error;
+    }
     const turnId = `turn-${++this.turnCounter}`;
     this.activeTurnId = turnId;
     if (!this.instance.manualTurns) this.push({ type: 'turn.started', turnId, origin: 'user', replay: false });
@@ -125,7 +133,7 @@ export class FakeTransportSession implements TransportSession {
     this.calls.push({ method: 'steer', args: [turnId, input] });
     this.assertOpen();
     if (this.capabilities.steer === 'none') throw new Error('This fake session does not support steer.');
-    if (turnId !== this.activeTurnId) throw new Error(`Cannot steer turn ${turnId}: it is not the active turn.`);
+    if (turnId !== this.activeTurnId) throw new TurnNotActiveError(turnId, `Cannot steer turn ${turnId}: it is not the active turn.`);
   }
 
   async interrupt(turnId: string): Promise<void> {
@@ -247,13 +255,12 @@ export class FakeTransportPlugin implements TransportPlugin {
   }
 }
 
-/** A PluginContext whose logging is silent, spawning is refused and meta is an in-memory map. */
+/** A PluginContext whose logging is silent and whose meta is an in-memory map. */
 export function fakePluginContext(runtimeDir = '/tmp/agent-console-fake-runtime'): PluginContext & { metaValues: Map<string, string> } {
   const metaValues = new Map<string, string>();
   return {
     runtimeDir,
     log: { info() {}, warn() {} },
-    async spawnScoped() { throw new Error('The fake plugin context does not spawn processes.'); },
     meta: {
       get: (key) => metaValues.get(key),
       set: (key, value) => { metaValues.set(key, value); },

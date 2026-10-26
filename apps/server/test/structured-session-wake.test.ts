@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CoordinationService } from '../src/coordination/service.js';
 import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, peerWakeAttemptKey, type PeerWakeAttempt } from '../src/coordination/wake.js';
 import { continuationControl, saveContinuation, signalContinuation } from '../src/coordination/continuation.js';
-import { PreviousTurnActiveError } from '../src/providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError } from '../src/providers/transport/types.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 const open: StructuredSessionFixture[] = [];
@@ -77,6 +77,21 @@ describe('Structured peer wake delivery', () => {
     expect(w.attempt(message.id)).toMatchObject({ status: 'deferred' });
     expect(w.attempt(message.id)?.nextAttemptAt).toBeTruthy();
     expect(w.f.row(w.session.id).isWorking).toBe(false);
+  });
+
+  it('defers when the transport reports nothing was sent, and delivers on the next attempt', async () => {
+    const w = await wakeFixture();
+    w.f.thread(w.native).failNextSend = new NotSentError('The Codex session has ended.');
+    const message = w.send();
+    await w.f.manager.wakePendingAssignments();
+    // Certainly not delivered: no "delivery is uncertain" block, only a later attempt.
+    expect(w.attempt(message.id)).toMatchObject({ status: 'deferred' });
+    expect(w.attempt(message.id)?.nextAttemptAt).toBeTruthy();
+
+    w.f.db.meta.set(peerWakeAttemptKey(message.id), JSON.stringify({ ...w.attempt(message.id), nextAttemptAt: new Date(Date.now() - 1).toISOString() }));
+    await w.f.manager.wakePendingAssignments();
+    expect(w.attempt(message.id)).toMatchObject({ status: 'submitted' });
+    expect(w.turnTexts()).toEqual([PEER_WAKE_PROMPT, PEER_WAKE_PROMPT]);
   });
 
   it('records an uncertain transport failure and never replays it', async () => {

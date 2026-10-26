@@ -24,8 +24,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 //
-// Modifications: removed the Effect and T3 contract types; `classifyCodexFailure` and
-// `TurnAlreadyCompletedError` are new.
+// Modifications: removed the Effect and T3 contract types; `classifyCodexFailure` is new.
 
 import type { ProviderFailure } from '../types.js';
 import type { CodexErrorInfo, CodexTurnError } from './protocol.js';
@@ -68,17 +67,6 @@ export function codexExhaustionHttpStatus(errorInfo: CodexErrorInfo | null | und
 
 export function codexUsageLimitError(code: string | null, errorInfo: CodexErrorInfo | null | undefined): boolean {
   return code === 'usageLimitExceeded' || code === 'rateLimitExceeded' || codexExhaustionHttpStatus(errorInfo) === 429;
-}
-
-/** `turn/steer` found no matching active turn: the turn finished before the steer arrived. */
-export class TurnAlreadyCompletedError extends Error {
-  readonly code = 'turn_already_completed';
-  readonly turnId: string;
-  constructor(turnId: string, message = 'The turn finished before the steer reached it.') {
-    super(message);
-    this.name = 'TurnAlreadyCompletedError';
-    this.turnId = turnId;
-  }
 }
 
 const PERMISSION_CODES = new Set(['unauthorized', 'cyberPolicy', 'misalignmentPolicyViolation', 'tooManyDenials']);

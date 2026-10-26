@@ -72,11 +72,14 @@ const structuredProviderSchema = z.object({
   env: z.record(z.string(), z.string()).default({}),
 });
 
+/** One provider's structured-session settings. The host service and the provider's transport plugin both take this shape. */
+export type StructuredProviderConfig = z.output<typeof structuredProviderSchema>;
+/** What a provider without a `structuredSessions` entry gets: the lane is off. */
+export const DEFAULT_STRUCTURED_PROVIDER_CONFIG: StructuredProviderConfig = structuredProviderSchema.parse({});
+
 const structuredSessionsConfigSchema = z.object({
-  codex: structuredProviderSchema.default({ enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} }),
-}).default({
-  codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
-});
+  codex: structuredProviderSchema.default(DEFAULT_STRUCTURED_PROVIDER_CONFIG),
+}).default({ codex: DEFAULT_STRUCTURED_PROVIDER_CONFIG });
 
 export const appConfigSchema = z.object({
   server: serverConfigSchema,

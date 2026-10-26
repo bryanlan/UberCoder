@@ -24,7 +24,6 @@ import {
   codexUsageLimitError,
   mergeTurnErrors,
   parseCodexRetryProgress,
-  TurnAlreadyCompletedError,
 } from '../src/providers/transport/codex/errors.js';
 import {
   JsonRpcClient,
@@ -47,7 +46,7 @@ import {
   rateLimitsToWindows,
   usageLimitResetAt,
 } from '../src/providers/transport/codex/usage.js';
-import { PreviousTurnActiveError, ResumeFailedError, TransportUnavailableError, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError, ResumeFailedError, TransportUnavailableError, TurnNotActiveError, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
 import {
   agentMessageItem,
   baseHandlers,
@@ -369,6 +368,14 @@ describe('codex JSON-RPC client over a fake app-server', () => {
     expect(receivedFrames(logFile).filter((frame) => frame.id !== undefined).map((frame) => frame.id)).toEqual([1, 2, 3, 4]);
   });
 
+  it('marks a request refused after the process ended as not sent, and one cut off mid-flight as sent', async () => {
+    const { client } = await spawnClient({ handlers: { slow: { noResponse: true, emitAfter: [{ delayMs: 60, exit: { code: 2 } }] } } });
+    await handshake(client);
+    const inFlight = client.request('slow', {});
+    await expect(inFlight).rejects.toMatchObject({ name: 'JsonRpcExitError', sent: true });
+    await expect(client.request('after-exit', {})).rejects.toMatchObject({ name: 'JsonRpcExitError', sent: false });
+  });
+
   it('routes notifications, server requests and responses by shape, in order', async () => {
     const { client, logFile } = await spawnClient({
       afterInitialize: [notification('first', { n: 1 }), serverRequest('known/request', { q: 1 }), notification('second', { n: 2 })],
@@ -606,9 +613,10 @@ describe('codex instance and session against a scripted app-server', () => {
       approvalsReviewer: 'user',
       sandboxPolicy: { type: 'dangerFullAccess' },
     });
-    expect(log.types()).toEqual(['session.native', 'session.state', 'turn.started', 'item.completed', 'item.completed', 'item.completed', 'usage.updated', 'turn.terminal']);
+    // The echo of the user's own message is not agent output, so it produces no item.completed event.
+    expect(log.types()).toEqual(['session.native', 'session.state', 'turn.started', 'item.completed', 'item.completed', 'usage.updated', 'turn.terminal']);
     expect(log.of('turn.started')).toEqual([{ type: 'turn.started', turnId: TURN, origin: 'user', replay: false }]);
-    expect(log.of('item.completed').map((event) => [event.kind, event.title])).toEqual([['other', 'userMessage'], ['reasoning', undefined], ['assistant', undefined]]);
+    expect(log.of('item.completed').map((event) => [event.kind, event.title])).toEqual([['reasoning', undefined], ['assistant', undefined]]);
     expect(log.of('usage.updated').find((event) => event.contextUsedTokens !== undefined)).toEqual({ type: 'usage.updated', contextUsedTokens: 129_200, contextMaxTokens: 258_400 });
     expect(terminal).toEqual({ type: 'turn.terminal', turnId: TURN, status: 'completed', sessionUsable: true, replay: false });
   });
@@ -655,7 +663,7 @@ describe('codex instance and session against a scripted app-server', () => {
   it('reports the server package version as the client version by default', async () => {
     const dir = makeTempDir();
     const { scenarioPath, logFile } = writeScenario(dir, { handlers: baseHandlers(THREAD) });
-    const instance = createCodexAppServerPlugin({ timings: FAST_TIMINGS }).create({ enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60 }, makeContext(path.join(dir, 'runtime')));
+    const instance = createCodexAppServerPlugin({ timings: FAST_TIMINGS }).create({ enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60, env: {} }, makeContext(path.join(dir, 'runtime')));
     cleanups.push(async () => {
       await instance.dispose('shutdown');
       fs.rmSync(dir, { recursive: true, force: true });
@@ -736,7 +744,7 @@ describe('codex instance and session against a scripted app-server', () => {
     await consumer;
   });
 
-  it('delivers a steer as a second user item in the same turn', async () => {
+  it('delivers a steer into the same turn and does not report its echo as output', async () => {
     const fake = track(
       setupFake(
         turnScenario(
@@ -767,13 +775,13 @@ describe('codex instance and session against a scripted app-server', () => {
       expectedTurnId: TURN,
       clientUserMessageId: 'steer-1',
     });
-    const userItems = log.of('item.completed').filter((event) => event.title === 'userMessage');
-    expect(userItems).toEqual([expect.objectContaining({ turnId: TURN, itemId: 'item-u2', kind: 'other' })]);
+    // The steer's echo is a user item, not agent output: only the assistant message is reported.
+    expect(log.of('item.completed').map((event) => [event.itemId, event.kind])).toEqual([['item-a', 'assistant']]);
     expect(log.of('turn.started')).toHaveLength(1);
     expect(turnTerminals(log)).toHaveLength(1);
   });
 
-  it('throws TurnAlreadyCompletedError when a steer loses the race to the turn finishing', async () => {
+  it('throws TurnNotActiveError when a steer loses the race to the turn finishing', async () => {
     const fake = track(
       setupFake(
         turnScenario([turnStarted(THREAD, TURN)], {
@@ -786,10 +794,10 @@ describe('codex instance and session against a scripted app-server', () => {
     const { turnId } = await session.sendTurn({ text: 'first' });
     await log.waitForType('turn.started');
     // The server says there is no active turn, although the completion has not reached us yet.
-    await expect(session.steer!(turnId, { text: 'late' })).rejects.toMatchObject({ name: 'TurnAlreadyCompletedError', code: 'turn_already_completed', turnId });
+    await expect(session.steer!(turnId, { text: 'late' })).rejects.toMatchObject({ name: 'TurnNotActiveError', code: 'turn_not_active', turnId });
   });
 
-  it('throws TurnAlreadyCompletedError for a finished turn, and rethrows other steer failures', async () => {
+  it('throws TurnNotActiveError for a finished turn, and rethrows other steer failures', async () => {
     const fake = track(
       setupFake(
         turnScenario([turnStarted(THREAD, TURN)], {
@@ -802,7 +810,72 @@ describe('codex instance and session against a scripted app-server', () => {
     const { turnId } = await session.sendTurn({ text: 'first' });
     await log.waitForType('turn.started');
     await expect(session.steer!(turnId, { text: 'x' })).rejects.toBeInstanceOf(JsonRpcRequestError);
-    await expect(session.steer!('unknown-turn', { text: 'x' })).rejects.toBeInstanceOf(TurnAlreadyCompletedError);
+    await expect(session.steer!('unknown-turn', { text: 'x' })).rejects.toBeInstanceOf(TurnNotActiveError);
+  });
+
+  it('tracks a turn again when turn/start answers with an id this session already closed, and warns', async () => {
+    const fake = track(
+      setupFake({
+        handlers: {
+          ...baseHandlers(THREAD),
+          'turn/start': [
+            { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), turnCompleted(THREAD, TURN, 'interrupted', null, 20)] },
+            // Codex still runs that turn (the host closed it locally) and the new request joined it.
+            { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [itemCompleted(THREAD, TURN, agentMessageItem('late-a', 'still going'), 30), turnCompleted(THREAD, TURN, 'completed', null, 60)] },
+          ],
+        },
+      }),
+    );
+    const session = await fake.instance.start(OPEN_OPTIONS);
+    const log = new EventLog(session);
+    await session.sendTurn({ text: 'first' });
+    await waitUntil(() => turnTerminals(log).length === 1, 5000, 'the first terminal');
+    await expect(session.sendTurn({ text: 'second' })).resolves.toEqual({ turnId: TURN });
+    await waitUntil(() => turnTerminals(log).length === 2, 5000, 'the second terminal');
+    expect(log.of('turn.started').map((event) => event.turnId)).toEqual([TURN, TURN]);
+    expect(turnTerminals(log).map((event) => event.status)).toEqual(['interrupted', 'completed']);
+    expect(log.of('item.completed').map((event) => event.itemId)).toEqual(['late-a']);
+    expect(fake.context.logs.warn.some(([fields, message]) => /already finished/.test(message) && (fields as { turnId?: string }).turnId === TURN)).toBe(true);
+    expect((session as unknown as { activeTurn: string | null }).activeTurn).toBeNull();
+  });
+
+  it('does not track a finished turn again when its own response arrives after the turn ended', async () => {
+    const fake = track(
+      setupFake({
+        handlers: {
+          ...baseHandlers(THREAD),
+          // The turn starts and completes before the response is written: the response must not revive it.
+          'turn/start': { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitBefore: [turnStarted(THREAD, TURN), turnCompleted(THREAD, TURN)], delayMs: 60 },
+        },
+      }),
+    );
+    const session = await fake.instance.start(OPEN_OPTIONS);
+    const log = new EventLog(session);
+    await expect(session.sendTurn({ text: 'fast' })).resolves.toEqual({ turnId: TURN });
+    await sleep(50);
+    expect(log.of('turn.started')).toHaveLength(1);
+    expect(turnTerminals(log)).toHaveLength(1);
+    expect((session as unknown as { activeTurn: string | null }).activeTurn).toBeNull();
+    expect(fake.context.logs.warn.some(([, message]) => /already finished/.test(message))).toBe(false);
+  });
+
+  it('reports neither the user message echo nor a hook prompt as agent output', async () => {
+    const fake = track(
+      setupFake(
+        turnScenario([
+          turnStarted(THREAD, TURN),
+          itemCompleted(THREAD, TURN, userMessageItem('item-u', 'do it')),
+          itemCompleted(THREAD, TURN, { type: 'hookPrompt', id: 'item-h', fragments: [] }),
+          itemCompleted(THREAD, TURN, agentMessageItem('item-a', 'done')),
+          turnCompleted(THREAD, TURN),
+        ]),
+      ),
+    );
+    const session = await fake.instance.start(OPEN_OPTIONS);
+    const log = new EventLog(session);
+    await session.sendTurn({ text: 'do it' });
+    await log.waitForType('turn.terminal');
+    expect(log.of('item.completed').map((event) => [event.itemId, event.kind])).toEqual([['item-a', 'assistant']]);
   });
 
   describe('interrupt', () => {
@@ -882,6 +955,50 @@ describe('codex instance and session against a scripted app-server', () => {
       await waitUntil(() => receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').length >= 1, 5000, 'terminate');
       await log.waitForType('turn.terminal');
       // proc-2 is not in the live list and proc-3 already completed: only proc-1 is terminated.
+      expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').map((frame) => frame.params)).toEqual([{ threadId: THREAD, processId: 'proc-1' }]);
+    });
+
+    it('terminates tracked background commands even when turn/completed arrives before the interrupt response', async () => {
+      const fake = track(
+        setupFake(
+          turnScenario([turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))], {
+            // The completion frame is written, and processed, before the response to the interrupt.
+            'turn/interrupt': { result: {}, delayMs: 120, emitBefore: [turnCompleted(THREAD, TURN, 'interrupted')] },
+            'thread/backgroundTerminals/list': { result: { data: [{ itemId: 'cmd-1', processId: 'proc-1', command: 'sleep 30', cwd: '/work/project', osPid: 1, cpuPercent: null, rssKb: null }], nextCursor: null } },
+            'thread/backgroundTerminals/terminate': { result: { terminated: true } },
+          }),
+        ),
+      );
+      const session = await fake.instance.start(OPEN_OPTIONS);
+      const log = new EventLog(session);
+      const { turnId } = await session.sendTurn({ text: 'run a command' });
+      await log.waitForType('turn.started');
+      await sleep(60); // let the item/started frame land
+      await session.interrupt(turnId);
+      expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+      await waitUntil(() => receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').length >= 1, 5000, 'terminate');
+      expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').map((frame) => frame.params)).toEqual([{ threadId: THREAD, processId: 'proc-1' }]);
+      expect(turnTerminals(log)).toHaveLength(1);
+    });
+
+    it('terminates tracked background commands when the interrupt is refused after the turn already ended', async () => {
+      const fake = track(
+        setupFake(
+          turnScenario([turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))], {
+            'turn/interrupt': { error: { code: -32600, message: 'no active turn to interrupt' }, delayMs: 120, emitBefore: [turnCompleted(THREAD, TURN, 'interrupted')] },
+            'thread/backgroundTerminals/list': { result: { data: [{ itemId: 'cmd-1', processId: 'proc-1', command: 'sleep 30', cwd: '/work/project', osPid: 1, cpuPercent: null, rssKb: null }], nextCursor: null } },
+            'thread/backgroundTerminals/terminate': { result: { terminated: true } },
+          }),
+        ),
+      );
+      const session = await fake.instance.start(OPEN_OPTIONS);
+      const log = new EventLog(session);
+      const { turnId } = await session.sendTurn({ text: 'run a command' });
+      await log.waitForType('turn.started');
+      await sleep(60);
+      await session.interrupt(turnId); // the turn ended on its own meanwhile, so the refusal is not an error
+      expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+      await waitUntil(() => receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').length >= 1, 5000, 'terminate');
       expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').map((frame) => frame.params)).toEqual([{ threadId: THREAD, processId: 'proc-1' }]);
     });
 
@@ -1122,7 +1239,7 @@ describe('codex instance and session against a scripted app-server', () => {
       setupFake({
         handlers: {
           ...baseHandlers(THREAD),
-          'turn/start': { noResponse: true, emitAfter: [{ delayMs: 80, exit: { code: 3 } }] },
+          'turn/start': { noResponse: true, emitAfter: [{ delayMs: 80, stderr: 'FATAL: panicked at /home/someone/secret-path/main.rs\n' }, { delayMs: 10, exit: { code: 3 } }] },
         },
       }),
     );
@@ -1137,8 +1254,12 @@ describe('codex instance and session against a scripted app-server', () => {
     await secondLog.done;
     expect(secondLog.types()).toEqual(['session.native', 'session.state', 'session.state', 'session.state']);
     const error = secondLog.events.find((event) => event.type === 'session.state' && event.state === 'error');
-    expect(error).toMatchObject({ failure: { class: 'transport_error', code: 'process_exited', retryable: true } });
+    // The message becomes a conversation status line: how the process ended, never its stderr. The tail goes to the log.
+    expect(error).toMatchObject({ failure: { class: 'transport_error', code: 'process_exited', retryable: true, message: 'exit code 3' } });
+    expect(fake.context.logs.warn.some(([fields]) => /panicked at/.test(String((fields as { detail?: string }).detail)))).toBe(true);
     expect(secondLog.events.at(-1)).toEqual({ type: 'session.state', state: 'stopped' });
+    // The request above died after it was written, so its outcome is unknown. Once the session has ended nothing is written at all.
+    await expect(second.sendTurn({ text: 'after the process died' })).rejects.toBeInstanceOf(NotSentError);
     // The replaced first session was ended locally when the second took over its thread id.
     await firstLog.done;
     expect(firstLog.events.at(-1)).toEqual({ type: 'session.state', state: 'stopped' });
@@ -1182,7 +1303,7 @@ describe('codex instance and session against a scripted app-server', () => {
     expect(receivedRequests(fake.logFile, 'thread/unsubscribe')[0]?.params).toEqual({ threadId: THREAD });
     expect(log.events.at(-1)).toEqual({ type: 'session.state', state: 'stopped' });
     expect(fake.instance.openThreadIds).toEqual([]);
-    await expect(session.sendTurn({ text: 'after unload' })).rejects.toBeInstanceOf(TransportUnavailableError);
+    await expect(session.sendTurn({ text: 'after unload' })).rejects.toMatchObject({ name: 'NotSentError', code: 'not_sent' });
   });
 
   it('ends the session when the server closes the thread, failing a turn that was still running', async () => {
@@ -1303,7 +1424,7 @@ describe('codex instance and session against a scripted app-server', () => {
 
       const dir = makeTempDir();
       cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
-      const missing = createCodexAppServerPlugin().create({ enabled: true, command: ['/nonexistent/codex-binary', 'app-server'], idleUnloadMinutes: 60 }, makeContext(path.join(dir, 'runtime')));
+      const missing = createCodexAppServerPlugin().create({ enabled: true, command: ['/nonexistent/codex-binary', 'app-server'], idleUnloadMinutes: 60, env: {} }, makeContext(path.join(dir, 'runtime')));
       expect(await missing.probe()).toEqual({ installed: false, auth: 'unknown', models: [] });
       await expect(missing.start(OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
     });
@@ -1353,8 +1474,9 @@ describe('codex plugin against recorded app-server traffic', () => {
     expect(turnId).toBe('01a0d5eb-f176-71d0-8e1c-a459700443de');
     const terminal = await log.waitForType('turn.terminal');
     expect(terminal).toMatchObject({ status: 'completed', replay: false, sessionUsable: true });
-    expect(untilTerminal(log)).toEqual(['session.native', 'session.state', 'turn.started', 'item.completed', 'item.completed', 'usage.updated', 'turn.terminal']);
-    expect(log.of('item.completed').map((event) => event.kind)).toEqual(['other', 'assistant']);
+    // The recorded user-message echo is not reported; only the assistant message is.
+    expect(untilTerminal(log)).toEqual(['session.native', 'session.state', 'turn.started', 'item.completed', 'usage.updated', 'turn.terminal']);
+    expect(log.of('item.completed').map((event) => event.kind)).toEqual(['assistant']);
     expect(log.of('usage.updated').find((event) => event.contextUsedTokens !== undefined)?.contextMaxTokens).toBeGreaterThan(0);
     // The plugin's own turn/start parameters (the transcript's were T3 Code's).
     expect(replayFrames(replay.replayLog, 'turn/start')[0]?.params).toEqual({
@@ -1390,15 +1512,14 @@ describe('codex plugin against recorded app-server traffic', () => {
     expect(turnTerminals(log).map((event) => event.status)).toEqual(['completed', 'completed']);
   });
 
-  it('message_steering: the steer appears as a second user message inside the same turn', async () => {
+  it('message_steering: the steer is delivered inside the same turn and its echo is not agent output', async () => {
     const { replay, session, log } = await open('message_steering');
     const { turnId } = await session.sendTurn({ text: 'Respond with exactly: steering fixture initial response' });
     await log.waitForType('turn.started');
     await session.steer!(turnId, { text: 'Actually, respond with exactly: steering fixture observed' });
     await log.waitForType('turn.terminal');
-    const userItems = log.of('item.completed').filter((event) => event.title === 'userMessage');
-    expect(userItems).toHaveLength(2);
-    expect(new Set(userItems.map((event) => event.turnId))).toEqual(new Set([turnId]));
+    // Both user messages (the original and the steer) are echoed as items; neither counts as agent output.
+    expect(log.of('item.completed').filter((event) => event.title === 'userMessage')).toHaveLength(0);
     expect(turnTerminals(log)).toHaveLength(1);
     expect(replayFrames(replay.replayLog, 'turn/steer')[0]?.params).toMatchObject({ expectedTurnId: turnId, input: [{ type: 'text', text: 'Actually, respond with exactly: steering fixture observed' }] });
   });
@@ -1496,7 +1617,7 @@ describe.skipIf(process.env.AGENT_CONSOLE_REAL_CODEX !== '1')('real codex app-se
     const dir = makeTempDir('codex-real-');
     cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
     const context = makeContext(path.join(dir, 'structured', 'codex'));
-    const instance = createCodexAppServerPlugin().create({ enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60 }, context) as CodexAppServerInstance;
+    const instance = createCodexAppServerPlugin().create({ enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
     cleanups.push(() => instance.dispose('shutdown'));
 
     const probe = await instance.probe();

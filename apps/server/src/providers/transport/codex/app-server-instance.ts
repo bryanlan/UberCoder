@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { StructuredProviderConfig } from '../../../config/schema.js';
 import {
   ResumeFailedError,
   TransportUnavailableError,
@@ -17,7 +18,7 @@ import {
   type TransportInstance,
 } from '../types.js';
 import { isArchivedThreadError } from './errors.js';
-import { describeExit, JsonRpcClient, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
+import { describeExit, exitReason, JsonRpcClient, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
 import {
   callCodex,
   INITIALIZED_NOTIFICATION,
@@ -41,14 +42,22 @@ import {
   type CodexSessionHost,
   type CodexTimings,
 } from './app-server-session.js';
+import {
+  currentBootId,
+  isRecordedProcessRunning,
+  parseRecordedProcess,
+  processStartTicks,
+  resolveExecutable,
+  terminateRecordedProcess,
+  withParentDeathSignal,
+} from './process-lifetime.js';
 import { mergeRateLimits, type CodexRateLimitSnapshot } from './usage.js';
 
-/** `structuredSessions.codex` in the Console config. */
-export interface CodexStructuredConfig {
-  enabled: boolean;
-  command: string[];
-  idleUnloadMinutes: number;
-}
+/**
+ * `structuredSessions.codex` in the Console config. The plugin uses `command` and `env` (the host merges the
+ * Console's coordination variables into `env` first); `enabled` and `idleUnloadMinutes` are the host's.
+ */
+export type CodexStructuredConfig = StructuredProviderConfig;
 
 /** Test and embedding hooks. Production code passes none of them. */
 export interface CodexPluginOptions {
@@ -92,11 +101,16 @@ export function expandHome(value: string, home: string = os.homedir()): string {
 
 /**
  * The shared process serves every thread, so it must not carry the identity of one session: a stale
- * `AGENT_CONSOLE_SESSION_ID` or `CODEX_THREAD_ID` in the Console's own environment would be inherited by every
- * hook process. `CODEX_HOME` is expanded because spawn does not expand `~` and Codex would reject it.
+ * `AGENT_CONSOLE_SESSION_ID` or `CODEX_THREAD_ID` in the Console's own environment (or the configured `env`)
+ * would be inherited by every hook process. Configured values win over the inherited environment, and `~`
+ * in them is expanded, as for the tmux provider commands; `CODEX_HOME` is always expanded because spawn does
+ * not expand `~` and Codex would reject it.
  */
-export function buildAppServerEnv(base: NodeJS.ProcessEnv, home: string = os.homedir()): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base };
+export function buildAppServerEnv(base: NodeJS.ProcessEnv, home: string = os.homedir(), extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...base,
+    ...Object.fromEntries(Object.entries(extra).map(([key, value]) => [key, expandHome(value, home)])),
+  };
   delete env.AGENT_CONSOLE_SESSION_ID;
   delete env.CODEX_THREAD_ID;
   if (env.CODEX_HOME) env.CODEX_HOME = expandHome(env.CODEX_HOME, home);
@@ -177,6 +191,10 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private disposed = false;
   private respawnNeeded = false;
   private warnedSessionEnv = false;
+  /** The earlier backend's process is ended before the first spawn only; a later respawn follows our own exit. */
+  private staleReaped = false;
+  /** `setpriv`, looked up on first spawn. `null` when it is not installed. */
+  private setpriv: string | null | undefined;
 
   constructor(config: CodexStructuredConfig, context: PluginContext, options: CodexPluginOptions = {}) {
     this.config = config;
@@ -356,12 +374,14 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private async startClient(): Promise<JsonRpcClient> {
     const cwd = this.context.runtimeDir;
     fs.mkdirSync(cwd, { recursive: true });
+    await this.reapStaleProcess();
+    const env = buildAppServerEnv(this.baseEnv, os.homedir(), this.config.env);
     let client: JsonRpcClient;
     try {
       client = await JsonRpcClient.spawn({
-        command: buildAppServerCommand(this.config.command),
+        command: this.spawnCommand(env, cwd),
         cwd,
-        env: buildAppServerEnv(this.baseEnv),
+        env,
         log: this.log,
         defaultRequestTimeoutMs: this.timings.requestTimeoutMs,
         closeGraceMs: this.timings.closeGraceMs,
@@ -393,13 +413,56 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     if (client.exited) throw new TransportUnavailableError(describeExit(client.exitInfo!));
     this.clientRef = client;
     this.respawnNeeded = false;
+    const startTicks = client.pid !== undefined ? processStartTicks(client.pid) : undefined;
+    const bootId = currentBootId();
     this.context.meta.set(
       INSTANCE_META_KEY,
-      JSON.stringify({ pid: client.pid, startedAt: new Date().toISOString(), ...(this.cliVersion ? { version: this.cliVersion } : {}) }),
+      JSON.stringify({
+        pid: client.pid,
+        ...(startTicks ? { startTicks } : {}),
+        ...(bootId ? { bootId } : {}),
+        startedAt: new Date().toISOString(),
+        ...(this.cliVersion ? { version: this.cliVersion } : {}),
+      }),
     );
     this.log.info({ pid: client.pid, version: this.cliVersion }, 'codex app-server started');
     this.seedRateLimits(client);
     return client;
+  }
+
+  /**
+   * The app-server command, run under `setpriv --pdeathsig TERM` so the kernel ends it if the backend dies
+   * (a crash leaves it running otherwise: the service keeps `KillMode=process`). Without `setpriv`, or when the
+   * configured binary cannot be found (so a missing `codex` still fails the plain way), it starts as it is.
+   */
+  private spawnCommand(env: NodeJS.ProcessEnv, cwd: string): string[] {
+    const command = buildAppServerCommand(this.config.command);
+    if (this.setpriv === undefined) {
+      this.setpriv = resolveExecutable('setpriv', env.PATH, cwd) ?? null;
+      if (this.setpriv === null) {
+        this.log.warn({}, 'setpriv is not installed; a codex app-server left behind by a crashed backend is ended by the next backend start instead');
+      }
+    }
+    if (this.setpriv === null || resolveExecutable(command[0] ?? '', env.PATH, cwd) === undefined) return command;
+    return withParentDeathSignal(this.setpriv, command);
+  }
+
+  /**
+   * An app-server recorded by an earlier backend that is still running (the backend crashed; the child
+   * outlived it) would keep executing its turn on the same rollout this backend is about to resume. End it
+   * first, but only when the recorded pid still has the recorded start time.
+   */
+  private async reapStaleProcess(): Promise<void> {
+    if (this.staleReaped) return;
+    this.staleReaped = true;
+    const stored = this.context.meta.get(INSTANCE_META_KEY);
+    if (!stored) return;
+    this.context.meta.delete(INSTANCE_META_KEY);
+    const record = parseRecordedProcess(stored);
+    if (!record || record.pid === process.pid || !isRecordedProcessRunning(record)) return;
+    this.log.warn({ pid: record.pid }, 'codex app-server left running by an earlier backend; ending it before starting a new one');
+    const gone = await terminateRecordedProcess(record, this.timings.staleTermGraceMs);
+    if (!gone) this.log.warn({ pid: record.pid }, 'the stale codex app-server did not end; starting a new one anyway');
   }
 
   private async initialize(client: JsonRpcClient): Promise<void> {
@@ -435,8 +498,10 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.respawnNeeded = true;
-    const failure: ProviderFailure = { class: 'transport_error', code: 'process_exited', message: describeExit(exit), retryable: true };
-    this.log.warn({ code: exit.code, signal: exit.signal, sessions: sessions.length }, 'codex app-server exited unexpectedly');
+    // The failure message reaches the conversation as a status line, so it names only how the process ended; the
+    // stderr tail (redacted) goes to the server log.
+    const failure: ProviderFailure = { class: 'transport_error', code: 'process_exited', message: exitReason(exit), retryable: true };
+    this.log.warn({ code: exit.code, signal: exit.signal, sessions: sessions.length, detail: describeExit(exit) }, 'codex app-server exited unexpectedly');
     for (const session of sessions) session.handleProcessExit(failure);
   }
 

@@ -86,6 +86,8 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
     structuredSessions: config.structuredSessions,
+    // Hooks and the coordination MCP inside a structured thread find this Console the way tmux sessions do.
+    structuredEnv: config.coordination.enabled ? { AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_CONFIG: configService.getConfigPath() } : undefined,
     hasActiveLaunchAuthority: session => {
       const assignment = db.sqlite.prepare('select id from coordination_assignments where provider=? and native_session_id=?')
         .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string } | undefined;

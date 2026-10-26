@@ -10,7 +10,7 @@ import { createCodexAppServerPlugin } from '../src/providers/transport/codex/ind
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import {
   FAKE_APP_SERVER, FAST_TIMINGS, agentMessageItem, baseHandlers, itemCompleted, receivedRequests, turnCompleted, turnObject,
-  turnStarted, waitUntil, writeScenario,
+  turnStarted, userMessageItem, waitUntil, writeScenario,
 } from './helpers/codex-harness.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
@@ -37,7 +37,7 @@ async function codexFixture(turns: unknown[]) {
   registry.register(createCodexAppServerPlugin({ timings: FAST_TIMINGS, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' }));
   const manager = createRecoveryManager(db, tmux, root, new RealtimeEventBus(), provider, providerSettings, {
     transportPlugins: registry,
-    structuredSessions: { codex: { enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60 } },
+    structuredSessions: { codex: { enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60, env: {} } },
   });
   cleanups.push(async () => { await manager.stop(); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const pendingRef = `pending:${randomUUID()}`;
@@ -102,8 +102,11 @@ describe('Structured sessions on the Codex plugin', () => {
     expect(f.db.boundSessions.getById(f.session.id)?.idleSuspendedAt).toBeUndefined();
   });
 
-  it('notices the app-server exiting under a running turn', async () => {
-    const dies = { result: { turn: turnObject('turn-1', 'inProgress', null) }, emitAfter: [turnStarted(THREAD, 'turn-1'), { delayMs: 50, exit: { code: 1 } }] };
+  it('notices the app-server exiting under a running turn, with a one-line reason and none of its stderr', async () => {
+    const dies = {
+      result: { turn: turnObject('turn-1', 'inProgress', null) },
+      emitAfter: [turnStarted(THREAD, 'turn-1'), { delayMs: 50, stderr: 'FATAL: panicked at /home/someone/private/path/main.rs:12\n' }, { delayMs: 10, exit: { code: 1 } }],
+    };
     const f = await codexFixture([dies]);
     await f.manager.sendInput(f.session.id, 'work');
     await waitUntil(() => {
@@ -111,5 +114,24 @@ describe('Structured sessions on the Codex plugin', () => {
       return row && !row.isWorking && fs.readFileSync(row.eventLogPath!, 'utf8').includes('connection ended');
     }, 5_000, 'the connection loss to be recorded');
     expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    const log = fs.readFileSync(f.db.boundSessions.getById(f.session.id)!.eventLogPath!, 'utf8');
+    expect(log).toContain('The provider connection ended (exit code 1). The session reconnects on next use.');
+    expect(log).not.toMatch(/panicked|private\/path/);
+  });
+
+  it('does not count the echo of the user\'s own message as agent output', async () => {
+    const failsAfterEcho = {
+      result: { turn: turnObject('turn-1', 'inProgress', null) },
+      emitAfter: [
+        turnStarted(THREAD, 'turn-1'),
+        itemCompleted(THREAD, 'turn-1', userMessageItem('item-u', 'work')),
+        turnCompleted(THREAD, 'turn-1', 'failed', { message: 'Selected model is at capacity.', codexErrorInfo: 'serverOverloaded', additionalDetails: null }),
+      ],
+    };
+    const f = await codexFixture([failsAfterEcho]);
+    await f.manager.sendInput(f.session.id, 'work');
+    await waitUntil(() => f.db.boundSessions.getById(f.session.id)?.runFailure, 5_000, 'the run failure');
+    // The turn echoed the user's message and then failed: the provider produced nothing.
+    expect(f.db.boundSessions.getById(f.session.id)?.lastOutputAt).toBeUndefined();
   });
 });

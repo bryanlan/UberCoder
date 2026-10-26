@@ -4,7 +4,7 @@ import { CodexAppServerInstance, type CodexPluginOptions, type CodexStructuredCo
 export type { CodexPluginOptions, CodexStructuredConfig } from './app-server-instance.js';
 export { CodexAppServerInstance, INSTANCE_META_KEY } from './app-server-instance.js';
 export { CodexAppServerSession, CODEX_CAPABILITIES, type CodexTimings } from './app-server-session.js';
-export { TurnAlreadyCompletedError, classifyCodexFailure } from './errors.js';
+export { classifyCodexFailure } from './errors.js';
 
 /** `options` exists for tests (shorter timeouts, a fake `codex`); the host passes none. */
 export function createCodexAppServerPlugin(options: CodexPluginOptions = {}): TransportPlugin<CodexStructuredConfig> {

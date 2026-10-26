@@ -6,10 +6,13 @@ import {
   type ProviderId,
   type SessionScreen,
 } from '@agent-console/shared';
+import { DEFAULT_STRUCTURED_PROVIDER_CONFIG, type StructuredProviderConfig } from '../../config/schema.js';
 import { nowIso } from '../../lib/time.js';
 import type { TransportPluginRegistry } from '../../providers/transport/registry.js';
 import {
+  NotSentError,
   PreviousTurnActiveError,
+  TurnNotActiveError,
   type OpenOptions,
   type PluginContext,
   type ProviderFailure,
@@ -20,11 +23,6 @@ import {
 } from '../../providers/transport/types.js';
 import type { QueuedInputRecord } from '../input-queue.js';
 
-export interface StructuredProviderConfig {
-  enabled: boolean;
-  command: string[];
-  idleUnloadMinutes: number;
-}
 export type StructuredSessionsConfig = Partial<Record<string, StructuredProviderConfig>>;
 
 export type StructuredTerminalStatus = 'completed' | 'interrupted' | 'failed';
@@ -47,6 +45,11 @@ export interface StructuredSessionServiceOptions {
   createContext: (pluginId: string) => PluginContext;
   meta: PluginContext['meta'];
   callbacks: StructuredCallbacks;
+  /**
+   * Console-owned environment for every provider process (the coordination runtime and config path, so hooks and
+   * MCP servers inside a thread reach this Console). The provider's configured `env` overrides it.
+   */
+  hostEnv?: Record<string, string>;
   logger?: { warn(bindings: object, message: string): void };
 }
 
@@ -72,9 +75,7 @@ export interface AutomaticDelivery {
   turnId?: string;
 }
 
-const DEFAULT_PROVIDER_CONFIG: StructuredProviderConfig = { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 };
 const TERMINAL_MEMORY = 64;
-const TURN_GONE_PATTERN = /(?:not|no longer) (?:the )?active|no active turn|already (?:completed|finished|ended)|turn (?:has )?(?:completed|finished|ended)|expected turn/i;
 
 interface LoadedSession {
   readonly sessionId: string;
@@ -124,6 +125,7 @@ export class StructuredSessionService {
   private readonly createContext: (pluginId: string) => PluginContext;
   private readonly meta: PluginContext['meta'];
   private readonly callbacks: StructuredCallbacks;
+  private readonly hostEnv: Record<string, string>;
   private readonly logger?: { warn(bindings: object, message: string): void };
   private readonly instances = new Map<string, TransportInstance>();
   private readonly sessions = new Map<string, LoadedSession>();
@@ -136,6 +138,7 @@ export class StructuredSessionService {
     this.createContext = options.createContext;
     this.meta = options.meta;
     this.callbacks = options.callbacks;
+    this.hostEnv = options.hostEnv ?? {};
     this.logger = options.logger;
   }
 
@@ -145,7 +148,7 @@ export class StructuredSessionService {
   }
 
   configFor(provider: ProviderId): StructuredProviderConfig {
-    return this.config[provider] ?? DEFAULT_PROVIDER_CONFIG;
+    return this.config[provider] ?? DEFAULT_STRUCTURED_PROVIDER_CONFIG;
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------------
@@ -289,7 +292,9 @@ export class StructuredSessionService {
         await steer(activeTurnId, input);
         return { turnId: activeTurnId, mode: 'steer' };
       } catch (error) {
-        if (!this.turnIsGone(state, activeTurnId, error)) throw error;
+        // Only the transport's own "that turn already ended" answer may become a new turn; any other failure
+        // (a refusal, a timeout) leaves it unknown whether the text arrived, so it is never sent twice.
+        if (!(error instanceof TurnNotActiveError)) throw error;
       }
     }
     return { turnId: await this.startTurn(state, input), mode: 'turn' };
@@ -309,16 +314,6 @@ export class StructuredSessionService {
     return 'interrupted';
   }
 
-  /** Wait for the active turn to end after an interrupt; resolves false on timeout. */
-  async waitForIdle(session: Pick<BoundSession, 'id'>, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (this.turnActive(session)) {
-      if (Date.now() >= deadline) return false;
-      await new Promise<void>(resolve => setTimeout(resolve, 25));
-    }
-    return true;
-  }
-
   /** Coordination wake, recovery and restart prompts. Never steers a running turn; never replays. */
   async deliverAutomatic(session: BoundSession, prompt: string): Promise<AutomaticDelivery> {
     const state = this.sessions.get(session.id);
@@ -328,7 +323,8 @@ export class StructuredSessionService {
     try {
       return { status: 'submitted', turnId: await this.startTurn(state, { text: prompt, ...this.modelFor(state) }) };
     } catch (error) {
-      if (error instanceof PreviousTurnActiveError) return { status: 'deferred', reason: error.message };
+      // Both refusals happened before anything was written, so the caller may try again later.
+      if (error instanceof PreviousTurnActiveError || error instanceof NotSentError) return { status: 'deferred', reason: error.message };
       return { status: 'failed', reason: errorMessage(error) };
     }
   }
@@ -381,14 +377,6 @@ export class StructuredSessionService {
     return { ...(fallback?.model ? { model: fallback.model } : {}), ...(fallback?.effort ? { effort: fallback.effort } : {}) };
   }
 
-  private turnIsGone(state: LoadedSession, expectedTurnId: string, error: unknown): boolean {
-    if (state.activeTurnId !== expectedTurnId) return true;
-    // Plugins mark a steer that lost the race with the turn's end with one of these codes.
-    const code = (error as { code?: unknown } | undefined)?.code;
-    if (code === 'turn_not_active' || code === 'turn_already_completed') return true;
-    return TURN_GONE_PATTERN.test(errorMessage(error));
-  }
-
   private async startTurn(state: LoadedSession, input: TurnInput): Promise<string> {
     const { turnId } = await state.transport.sendTurn(input);
     // Events for the turn can be handled before sendTurn resolves; never resurrect a finished turn.
@@ -401,7 +389,8 @@ export class StructuredSessionService {
     if (cached) return cached;
     const plugin = this.registry.get(provider);
     if (!plugin) throw new StructuredUnavailableError(`No structured transport plugin is registered for ${provider}.`);
-    const instance = plugin.create(this.configFor(provider), this.createContext(plugin.id));
+    const config = this.configFor(provider);
+    const instance = plugin.create({ ...config, env: { ...this.hostEnv, ...config.env } }, this.createContext(plugin.id));
     this.instances.set(provider, instance);
     return instance;
   }
@@ -490,7 +479,7 @@ export class StructuredSessionService {
       this.logger?.warn({ err: error, sessionId: state.sessionId }, 'Structured event stream failed.');
     }
     // The stream ending without the host closing the session is an unexpected exit.
-    await this.lose(state, { class: 'transport_error', code: 'process_exited', message: 'The provider connection ended unexpectedly.' });
+    await this.lose(state, { class: 'transport_error', code: 'process_exited', message: 'the event stream ended unexpectedly' });
   }
 
   private safely(action: () => void, state: LoadedSession): void {
@@ -503,7 +492,7 @@ export class StructuredSessionService {
       case 'session.state':
         if (event.state === 'error' || event.state === 'stopped') {
           if (!state.closing) {
-            void this.lose(state, event.failure ?? { class: 'transport_error', code: 'process_exited', message: 'The provider connection ended unexpectedly.' });
+            void this.lose(state, event.failure ?? { class: 'transport_error', code: 'process_exited', message: 'the event stream ended unexpectedly' });
           }
           return;
         }
@@ -514,7 +503,13 @@ export class StructuredSessionService {
         return;
       case 'turn.started':
         // Resume backfill describes history; it never owns the active turn.
-        if (!event.replay) state.activeTurnId = event.turnId;
+        if (!event.replay) {
+          state.activeTurnId = event.turnId;
+          // A turn the transport reports as running again (it answered a new request with an id already closed
+          // locally) must get its own terminal, so it leaves the exactly-once memory.
+          const seen = state.terminalSeen.indexOf(event.turnId);
+          if (seen >= 0) state.terminalSeen.splice(seen, 1);
+        }
         this.safely(() => this.callbacks.onTurnStarted(id, event.turnId, event.origin, event.replay), state);
         return;
       case 'item.completed':
@@ -562,7 +557,7 @@ export class StructuredSessionService {
     this.safely(() => this.callbacks.onTurnTerminal(id, event.turnId, status, event.failure, false), state);
     if (!event.sessionUsable) {
       void state.transport.close('error').catch(() => undefined);
-      void this.lose(state, event.failure ?? { class: 'transport_error', message: 'The provider session can no longer take turns.' });
+      void this.lose(state, event.failure ?? { class: 'transport_error', message: 'the session can no longer take turns' });
     }
   }
 }

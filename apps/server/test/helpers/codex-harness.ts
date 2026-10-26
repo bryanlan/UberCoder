@@ -52,9 +52,6 @@ export function makeContext(runtimeDir: string): TestContext {
       warn: (fields: object, message: string) => void logs.warn.push([fields, message]),
       debug: (fields: object, message: string) => void logs.debug.push([fields, message]),
     } as PluginContext['log'],
-    spawnScoped: async () => {
-      throw new Error('spawnScoped is not used by the stdio plugin.');
-    },
     meta: {
       get: (key) => metaStore.get(key),
       set: (key, value) => void metaStore.set(key, value),
@@ -94,7 +91,7 @@ export function setupFake(scenario: Scenario, timings: Partial<CodexTimings> = F
   const command = [process.execPath, FAKE_APP_SERVER, scenarioPath];
   const context = makeContext(path.join(dir, 'runtime', 'structured', 'codex'));
   const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH, ...baseEnv }, clientVersion: '9.9.9' });
-  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60 }, context) as CodexAppServerInstance;
+  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
   return { dir, scenarioPath, logFile, context, instance, command };
 }
 
@@ -110,7 +107,7 @@ export function setupReplay(fixture: string, extraEnv: NodeJS.ProcessEnv = {}): 
     baseEnv: { PATH: process.env.PATH, REPLAY_LOG: replayLog, REPLAY_OPTIONAL_METHODS: 'account/rateLimits/read,thread/backgroundTerminals/list', ...extraEnv },
     clientVersion: '9.9.9',
   });
-  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60 }, context) as CodexAppServerInstance;
+  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
   return { dir, scenarioPath: transcript, logFile: replayLog, replayLog, context, instance, command };
 }
 

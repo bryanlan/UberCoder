@@ -124,19 +124,13 @@ export class CoordinationService {
     return rows.length === 1 ? rows[0] : undefined;
   }
 
-  /** The shared structured process for a provider is running (its pid is recorded by the transport plugin). */
-  private structuredInstanceAlive(provider: string): boolean {
-    const stored = this.db.meta.get(`structured-instance:${provider}`);
-    if (!stored) return false;
-    try {
-      const pid = (JSON.parse(stored) as { pid?: unknown }).pid;
-      return typeof pid === 'number' && processStart(pid) !== '';
-    } catch { return false; }
-  }
-
-  /** Liveness of a structured assignment is its binding and the shared process, not the pid of whichever hook last ran. */
+  /**
+   * A structured assignment is alive while Console holds a restorable bound row for its thread. The thread loads on
+   * demand (wake, recovery, selection), so a stopped or restarted provider process does not end the assignment, and
+   * the pid of whichever hook last ran says nothing about it. Undefined when no such row exists (use the pid).
+   */
   private structuredAssignmentAlive(provider: string, nativeSessionId: string): boolean | undefined {
-    return this.structuredBinding(provider, nativeSessionId) ? this.structuredInstanceAlive(provider) : undefined;
+    return this.structuredBinding(provider, nativeSessionId) ? true : undefined;
   }
 
   register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string; acceptsMessages?: boolean }): { enabled: boolean; assignmentId?: string } {

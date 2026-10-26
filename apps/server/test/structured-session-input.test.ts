@@ -5,6 +5,7 @@ import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
 import type { QueuedInputRecord } from '../src/sessions/input-queue.js';
 import { imagePromptSuffix } from '../src/images/prompt.js';
 import { peerWakePaused } from '../src/coordination/wake.js';
+import { NotSentError, TurnNotActiveError } from '../src/providers/transport/types.js';
 import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
@@ -75,7 +76,7 @@ describe('Structured human input', () => {
     expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-2', deliveryMode: 'turn' });
   });
 
-  it('falls back on a plugin-coded lost steer race too', async () => {
+  it('falls back on a lost steer race the plugin reports as TurnNotActiveError', async () => {
     const f = fixture();
     const { session } = await f.bindNew();
     await send(f, session.id, 'first');
@@ -84,9 +85,56 @@ describe('Structured human input', () => {
     thread.steer = async (turnId, input) => {
       thread.calls.push({ method: 'steer', args: [turnId, input] });
       thread.activeTurnId = undefined;
-      throw Object.assign(new Error('The turn ended first.'), { code: 'turn_already_completed' });
+      throw new TurnNotActiveError(turnId);
     };
     await send(f, session.id, 'racing message');
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
+  });
+
+  it('never sends a refused steer again as a new turn, whatever its message says', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'first');
+    await settle();
+    const thread = f.thread(session.conversationRef);
+    thread.steer = async (turnId, input) => {
+      thread.calls.push({ method: 'steer', args: [turnId, input] });
+      // Wording the old matcher took for "the turn is gone": only the typed error may mean that now.
+      throw new Error('The turn has already completed according to this refusal.');
+    };
+    const requestId = randomUUID();
+    await send(f, session.id, 'refused message', requestId);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    expect(record(f, session.id, requestId)).toMatchObject({ state: 'failed', reason: expect.stringMatching(/could not be confirmed/i) });
+  });
+
+  it('does not resend a steer of unknown outcome when the turn ended while it was in flight', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'first');
+    await settle();
+    const thread = f.thread(session.conversationRef);
+    thread.steer = async (turnId, input) => {
+      thread.calls.push({ method: 'steer', args: [turnId, input] });
+      thread.completeTurn('completed'); // the terminal reaches the host while the steer is pending
+      await settle();
+      throw new Error('turn/steer did not answer within 60000 ms.');
+    };
+    const requestId = randomUUID();
+    await send(f, session.id, 'maybe delivered', requestId);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    expect(record(f, session.id, requestId).state).toBe('failed');
+  });
+
+  it('queues a message the transport reports as never sent, then delivers it, instead of marking it unconfirmed', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    f.thread(session.conversationRef).failNextSend = new NotSentError('The Codex session has ended.');
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'try again please', requestId);
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'queued' });
+    expect(record(f, session.id, requestId)).toMatchObject({ state: 'queued', reason: 'Waiting for the session to accept the message.' });
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('submitted');
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
   });
 
@@ -223,17 +271,26 @@ describe('Structured input that has no meaning without a terminal', () => {
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
   });
 
-  it('rejects slash commands on every submit path', async () => {
+  it('rejects a message that is only a slash command, on every submit path', async () => {
     const f = fixture();
     const { session } = await f.bindNew();
     await rejected(send(f, session.id, '/compact'));
-    await rejected(send(f, session.id, '/model gpt-6'));
+    await rejected(send(f, session.id, '  /model  '));
     await rejected(f.manager.sendInput(session.id, '/status'));
     await rejected(f.manager.sendKeystrokes(session.id, { text: '/review', keys: ['Enter'] }));
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
-    // A file path is a normal message.
-    await send(f, session.id, '/home/bryan/code/app/main.ts needs a look');
+  });
+
+  it('accepts ordinary messages that merely start with a slash', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, '/tmp is full');
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    f.thread(session.conversationRef).completeTurn();
+    await settle();
+    await send(f, session.id, '/home/bryan/code/app/main.ts needs a look');
+    expect(f.calls(session.conversationRef, 'sendTurn').map(call => (call.args[0] as { text: string }).text))
+      .toEqual(['/tmp is full', '/home/bryan/code/app/main.ts needs a look']);
   });
 
   it('rejects image attachments with a clear message', async () => {

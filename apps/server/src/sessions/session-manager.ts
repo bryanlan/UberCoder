@@ -1,6 +1,5 @@
 import { assignmentTask, dispatchEligible } from '../coordination/tasks.js';
 import fs from 'node:fs';
-import { spawn } from 'node:child_process';
 import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,14 +13,14 @@ import type { ActiveProject } from '../projects/project-service.js';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderAdapter } from '../providers/types.js';
 import type { ProviderRunState } from '../providers/types.js';
-import { CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS, isTmuxSessionMissingError, type TmuxClient } from './tmux-client.js';
+import { CONSOLE_PANE_COLUMNS, CONSOLE_PANE_ROWS, isTmuxSessionMissingError, STRUCTURED_SESSION_NAME_PREFIX, type TmuxClient } from './tmux-client.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { normalizeRawOutputLines } from './live-output/filters.js';
 import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import { TransportPluginRegistry } from '../providers/transport/registry.js';
-import { PreviousTurnActiveError, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
 import {
   StructuredBusyError,
   StructuredSessionService,
@@ -118,8 +117,8 @@ const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 60 * 60 * 1000;
 const WORK_SESSION_RELEASE_MS = (48 + 7 * 24) * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
-const STRUCTURED_INTERRUPT_WAIT_MS = 10_000;
-const STRUCTURED_SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(?:\s|$)/;
+// A message that is only a command word ("/model", "/compact"). A sentence that starts with a path ("/tmp is full") is ordinary text.
+const STRUCTURED_SLASH_COMMAND = /^\/[A-Za-z][\w:-]*$/;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -140,6 +139,8 @@ interface SessionManagerOptions {
   transportPlugins?: TransportPluginRegistry;
   /** Per-provider structured-session settings. A provider without an enabled entry cannot bind new structured sessions. */
   structuredSessions?: StructuredSessionsConfig;
+  /** Environment every structured provider process gets (coordination runtime and config path); the provider's own `env` wins. */
+  structuredEnv?: Record<string, string>;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -176,23 +177,6 @@ export class StructuredSessionDisabledError extends Error {
     super(`Structured sessions are not enabled for ${provider}.`);
     this.name = 'StructuredSessionDisabledError';
   }
-}
-
-function spawnDetached(argv: string[], options: { cwd: string; env: Record<string, string>; unit: string }): Promise<{ pid: number }> {
-  return new Promise((resolve, reject) => {
-    const [command, ...args] = argv;
-    if (!command) {
-      reject(new Error('Cannot spawn an empty command.'));
-      return;
-    }
-    const child = spawn(command, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, detached: true, stdio: 'ignore' });
-    child.once('error', reject);
-    child.once('spawn', () => {
-      child.unref();
-      if (child.pid === undefined) reject(new Error(`Failed to start ${command}.`));
-      else resolve({ pid: child.pid });
-    });
-  });
 }
 
 function readTextTailSync(filePath: string | undefined, maxBytes: number): string {
@@ -380,6 +364,7 @@ export class SessionManager {
     this.structured = new StructuredSessionService({
       registry: options.transportPlugins ?? new TransportPluginRegistry(),
       config: options.structuredSessions ?? {},
+      hostEnv: options.structuredEnv,
       meta: structuredMeta,
       logger: this.logger ? { warn: (bindings, message) => this.logger?.warn(bindings, message) } : undefined,
       createContext: (pluginId) => {
@@ -391,7 +376,6 @@ export class SessionManager {
             info: (bindings, message) => this.logger?.info?.(bindings, message),
             warn: (bindings, message) => this.logger?.warn(bindings, message),
           },
-          spawnScoped: spawnDetached,
           meta: structuredMeta,
         };
       },
@@ -1106,13 +1090,16 @@ export class SessionManager {
 
   private providerTurnIsWorking(sessionId: string): boolean | undefined {
     // A structured turn can only run while its thread is loaded, so the transport's own state is authoritative.
+    // A thread that is not loaded runs nothing, whatever its rollout last said: an unfinished rollout after a
+    // restart must not read as working (it would block wakes and show a busy row that nothing is driving).
     if (this.structured.alive({ id: sessionId })) return this.structured.turnActive({ id: sessionId });
+    const session = this.db.boundSessions.getById(sessionId);
+    if (session?.transport === 'structured') return false;
     const run = this.runRecovery.getRunState(sessionId);
     const state = this.runtimeState(sessionId);
     if (!run) return undefined;
     // A previous completion cannot acknowledge a newly submitted turn.
     if (state.submittedTurnAt && run.timestamp < state.submittedTurnAt) return true;
-    const session = this.db.boundSessions.getById(sessionId);
     // Resuming history does not resume its unfinished native request. This also
     // applies to ordinary restores and survives a backend-only restart because
     // the epoch comes from the existing tmux writer, not backend attachment time.
@@ -1332,10 +1319,10 @@ export class SessionManager {
         && !this.hasActiveCoordinationAssignment(session)
         && this.providerTurnIsWorking(session.id) !== true
         && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') continue;
-      // A structured thread loads on first use, not at boot: only its lost-turn bookkeeping runs here.
-      // A failed restore is retried, as it is for tmux.
+      // A structured thread loads on first use, not at boot: only its lost-turn bookkeeping runs here. A failed
+      // restore is retried, as it is for tmux, and so is one a crash cut off half way (the row stays `starting`).
       await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session,
-        { restoreMissing: session.transport !== 'structured' || session.status === 'error', resumeIdle: true }));
+        { restoreMissing: session.transport !== 'structured' || session.status === 'error' || session.status === 'starting', resumeIdle: true }));
     }
   }
 
@@ -1984,16 +1971,11 @@ export class SessionManager {
       };
       requireRestartAuthority();
       if (session.transport === 'structured') {
-        // Stop any running turn, then drop the thread so the reload below starts a fresh epoch.
-        if (this.structured.turnActive(session)) {
-          await this.structured.interrupt(session);
-          if (!await this.structured.waitForIdle(session, STRUCTURED_INTERRUPT_WAIT_MS)) {
-            throw new SessionInputRejectedError('Restart is waiting for the running turn to stop.');
-          }
-        }
-        requireRestartAuthority();
+        // As on tmux, a grant never stops work in progress: a human's running turn must finish first.
+        if (this.structured.turnActive(session)) throw new SessionInputRejectedError('Restart is waiting for the current work to finish.');
+        // Drop the thread so the reload below starts a fresh epoch, and forget the old turns' run state.
         await this.structured.unload(session);
-        this.structuredMonitors.delete(session.id);
+        this.structuredMonitors.get(session.id)?.reset();
       } else {
       const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
       if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
@@ -3947,7 +3929,7 @@ export class SessionManager {
   }
 
   private structuredInputError(error: unknown): unknown {
-    if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError
+    if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof NotSentError
       || error instanceof StructuredUnavailableError || error instanceof StructuredUnsupportedError) {
       return new SessionInputRejectedError(`${error.message} Nothing was sent.`);
     }
@@ -4018,7 +4000,8 @@ export class SessionManager {
       this.saveQueuedInput(sessionId, { ...sending, state: 'submitted', turnId: sent.turnId, deliveryMode: sent.mode, recordedUserInput });
     } catch (error) {
       if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
-      if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof StructuredUnavailableError) {
+      if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof NotSentError
+        || error instanceof StructuredUnavailableError) {
         // The transport refused before sending anything, so the message can wait for the next attempt.
         this.saveQueuedInput(sessionId, { ...record, reason: error instanceof StructuredBusyError
           ? 'Waiting for the running turn to finish.' : 'Waiting for the session to accept the message.' });
@@ -4099,6 +4082,10 @@ export class SessionManager {
         this.retainFinishedInbox(current);
         return this.db.boundSessions.getById(current.id);
       }
+      // A thread that is not loaded can still owe a scheduled recovery or unfinished unattended work. Watch the
+      // row so RunRecovery re-arms from the persisted budget and the rollout, as it does for a tmux row at boot;
+      // without a watcher nothing would ever wake the retry until a human opened the conversation.
+      if (current.runFailure || this.hasUnattendedWork(current)) this.watchSessionOutput(current);
       if (!(options.restoreMissing ?? true) && !options.resumeSuspension) return undefined;
       return await this.restoreSession(current, options.resumeSuspension === true);
     }
@@ -4165,7 +4152,6 @@ export class SessionManager {
     }
     this.stopWatching(latest.id);
     this.runtimes.clearEphemeral(latest.id);
-    this.structuredMonitors.delete(latest.id);
     this.runRecovery.cancel(latest.id);
     this.db.meta.set(peerWakeComposerKey(latest.id), '');
     const suspended = this.db.boundSessions.setIdleSuspendedAt(latest.id, nowIso());
@@ -4355,8 +4341,9 @@ export class SessionManager {
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,
       resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
-      // tmux rejects names containing a colon, so a stray tmux call on this row fails instead of touching a session.
-      tmuxSessionName: `structured:${sessionId}`,
+      // tmux itself accepts this name (it would create `structured_<id>`), so the tmux client refuses the prefix: a
+      // stray tmux call on this row throws instead of launching a second provider process on the thread.
+      tmuxSessionName: `${STRUCTURED_SESSION_NAME_PREFIX}${sessionId}`,
       transport: 'structured',
       status: 'starting',
       shouldRestore: true,

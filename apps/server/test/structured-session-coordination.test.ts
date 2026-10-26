@@ -19,17 +19,13 @@ function fixture(options: Parameters<typeof structuredSessionFixture>[0] = {}) {
   const grants = new GrantService(f.db, f.bus, undefined, undefined, undefined,
     cwd => cwd.startsWith(project.path) ? project.slug : undefined);
   const coordination = new CoordinationService(f.db, { enabled: true, pilotPaths: [] }, undefined, grants);
-  const instanceMeta = (pid: number | undefined) => {
-    if (pid === undefined) f.db.sqlite.prepare("delete from meta where key='structured-instance:codex'").run();
-    else f.db.meta.set('structured-instance:codex', JSON.stringify({ pid, startedAt: new Date().toISOString(), version: 'fake' }));
-  };
   const register = (nativeSessionId: string, extra: { consoleSessionId?: string } = {}) =>
     coordination.register({ provider: 'codex', nativeSessionId, token: randomUUID(), pid: process.pid, cwd: `${project.path}/work`, ...extra }).assignmentId!;
   const deadPid = 2147483647;
   const stale = (assignmentId: string) =>
     f.db.sqlite.prepare("update coordination_assignments set pid=?, process_start='gone' where id=?").run(deadPid, assignmentId);
   const sender = () => coordination.register({ provider: 'claude', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
-  return { f, grants, coordination, instanceMeta, register, stale, sender, deadPid };
+  return { f, grants, coordination, register, stale, sender, deadPid };
 }
 
 describe('Coordination registration for structured threads', () => {
@@ -71,62 +67,60 @@ describe('Coordination liveness for structured threads', () => {
   const receipt = (c: ReturnType<typeof fixture>, recipient: string) => c.coordination.send(c.sender(), {
     id: randomUUID(), recipientId: recipient, text: 'Hello', priority: 'P2',
   });
+  const status = (c: ReturnType<typeof fixture>, id: string) =>
+    (c.f.db.sqlite.prepare('select status from coordination_assignments where id=?').get(id) as { status: string }).status;
+  const instanceMeta = (c: ReturnType<typeof fixture>) => c.f.db.meta.get('structured-instance:codex');
 
-  it('reports a bound thread as alive while the shared process runs, whatever pid the assignment recorded', async () => {
+  it('reports a bound thread as alive whatever pid the assignment recorded and whether or not a provider process runs', async () => {
     const c = fixture();
     const { session } = await c.f.bindNew();
     const recipient = c.register(session.conversationRef);
     c.stale(recipient);
-    c.instanceMeta(process.pid);
+    // The shared process is not recorded (a restarted backend, or an app-server that unloaded): the thread still loads on demand.
+    expect(instanceMeta(c)).toBeUndefined();
     expect(receipt(c, recipient).recipient).toMatchObject({ status: 'idle', resumableInConsole: true });
     c.f.db.boundSessions.upsert({ ...c.f.row(session.id), isWorking: true });
     expect(receipt(c, recipient).recipient.status).toBe('working');
   });
 
-  it('reports stopped when the shared process is gone or was never recorded', async () => {
+  it('reports stopped for a suspended row and for a released row', async () => {
     const c = fixture();
     const { session } = await c.f.bindNew();
     const recipient = c.register(session.conversationRef);
-    c.stale(recipient);
-    c.instanceMeta(c.deadPid);
-    expect(receipt(c, recipient).recipient.status).toBe('stopped');
-    c.instanceMeta(undefined);
-    expect(receipt(c, recipient).recipient.status).toBe('stopped');
-  });
-
-  it('reports stopped for a released structured row even while the shared process runs', async () => {
-    const c = fixture();
-    const { session } = await c.f.bindNew();
-    const recipient = c.register(session.conversationRef);
-    c.instanceMeta(process.pid);
     expect(receipt(c, recipient).recipient.status).not.toBe('stopped');
+    c.f.db.boundSessions.setManualSuspendedAt(session.id, new Date().toISOString());
+    expect(receipt(c, recipient).recipient.status).toBe('stopped');
+    c.f.db.boundSessions.setManualSuspendedAt(session.id, undefined);
     await c.f.manager.releaseSession(session.id);
     expect(receipt(c, recipient).recipient).toMatchObject({ status: 'stopped', resumableInConsole: false });
   });
 
-  it('keeps a structured assignment connected while its row is bound and the shared process lives', async () => {
+  it('keeps a structured assignment connected after a backend restart and does not page its supervisor', async () => {
     const c = fixture();
     const { session } = await c.f.bindNew();
+    const supervisor = c.sender();
     const recipient = c.register(session.conversationRef);
+    c.coordination.update(recipient, { continuation: 'unattended', supervisorId: supervisor });
     const other = c.register(randomUUID());
     c.stale(recipient);
     c.stale(other);
-    c.instanceMeta(process.pid);
+    const messagesBefore = (c.f.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=?').get(supervisor) as { n: number }).n;
     c.coordination.reconcileProcesses();
-    const status = (id: string) => (c.f.db.sqlite.prepare('select status from coordination_assignments where id=?').get(id) as { status: string }).status;
-    expect(status(recipient)).toBe('active');
+    expect(status(c, recipient)).toBe('active');
+    expect(c.f.db.sqlite.prepare("select 1 from coordination_events where assignment_id=? and kind='disconnected'").get(recipient)).toBeUndefined();
+    expect((c.f.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=?').get(supervisor) as { n: number }).n).toBe(messagesBefore);
     // An assignment with no structured binding still follows its own process.
-    expect(status(other)).toBe('disconnected');
+    expect(status(c, other)).toBe('disconnected');
   });
 
-  it('disconnects a structured assignment when the shared process is gone or its row was released', async () => {
+  it('disconnects a structured assignment once its row was released', async () => {
     const c = fixture();
     const { session } = await c.f.bindNew();
     const recipient = c.register(session.conversationRef);
     c.stale(recipient);
-    c.instanceMeta(c.deadPid);
+    await c.f.manager.releaseSession(session.id);
     c.coordination.reconcileProcesses();
-    expect((c.f.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient) as { status: string }).status).toBe('disconnected');
+    expect(status(c, recipient)).toBe('disconnected');
   });
 });
 

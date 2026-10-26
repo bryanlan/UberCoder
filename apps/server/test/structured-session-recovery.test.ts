@@ -169,25 +169,54 @@ describe('Structured granted restart and close', () => {
     launchedBy: 'launcher-assignment', launcherName: 'Launcher', grantIds: [], requestId: 'request-1', flags: [], supervisorId: 'launcher-assignment',
   };
 
-  it('stops a running turn, reloads the thread for a fresh epoch and starts the restart turn', async () => {
+  it('refuses to restart while a turn is running, as on tmux, and leaves the turn alone', async () => {
     const f = structuredSessionFixture();
     open.push(f);
     const { session } = await f.bindNew({ launchContext });
     const native = session.conversationRef;
-    await f.manager.sendInput(session.id, 'stuck work');
+    await f.manager.sendInput(session.id, 'a human is waiting on this');
     await settle();
     const thread = f.thread(native);
-    thread.interrupt = async (turnId: string) => {
-      thread.calls.push({ method: 'interrupt', args: [turnId] });
-      thread.completeTurn('interrupted');
-    };
+    const epochBefore = f.db.meta.get(`structured-epoch:${session.id}`);
+
+    await expect(f.manager.restartGrantedSession(session.id, undefined, () => true))
+      .rejects.toMatchObject({ name: 'SessionInputRejectedError', message: 'Restart is waiting for the current work to finish.' });
+
+    // Nothing was stopped, unloaded or restarted: the grant never ends a human's running turn.
+    expect(thread.calls.map(call => call.method)).not.toEqual(expect.arrayContaining(['interrupt']));
+    expect(thread.calls.map(call => call.method)).not.toEqual(expect.arrayContaining(['unload']));
+    expect(thread.activeTurnId).toBe('turn-1');
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(f.db.meta.get(`structured-epoch:${session.id}`)).toBe(epochBefore);
+    expect(f.plugin.instance!.sessions.filter(candidate => candidate.nativeSessionId === native)).toHaveLength(1);
+
+    // Once the turn has finished the same request goes through.
+    thread.completeTurn();
+    await settle();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const restarted = await f.manager.restartGrantedSession(session.id, undefined, () => true);
+    expect(restarted).toMatchObject({ status: 'bound', transport: 'structured' });
+    expect(f.db.meta.get(`structured-epoch:${session.id}`)).not.toBe(epochBefore);
+  });
+
+  it('reloads an idle thread for a fresh epoch and starts the restart turn', async () => {
+    const f = structuredSessionFixture();
+    open.push(f);
+    const { session } = await f.bindNew({ launchContext });
+    const native = session.conversationRef;
+    await f.manager.sendInput(session.id, 'earlier work');
+    await settle();
+    const thread = f.thread(native);
+    thread.completeTurn();
+    await settle();
     const epochBefore = f.db.meta.get(`structured-epoch:${session.id}`);
     await new Promise(resolve => setTimeout(resolve, 5));
 
     const restarted = await f.manager.restartGrantedSession(session.id, undefined, () => true);
 
     expect(restarted).toMatchObject({ status: 'bound', transport: 'structured', pid: process.pid });
-    expect(thread.calls.map(call => call.method)).toEqual(expect.arrayContaining(['interrupt', 'unload']));
+    expect(thread.calls.map(call => call.method)).toEqual(expect.arrayContaining(['unload']));
+    expect(thread.calls.map(call => call.method)).not.toContain('interrupt');
     const reloaded = f.plugin.instance!.sessions.filter(candidate => candidate.nativeSessionId === native);
     expect(reloaded).toHaveLength(2);
     expect(reloaded[1]!.resumed).toBe(true);

@@ -29,6 +29,25 @@ export class TmuxError extends Error {
   }
 }
 
+/**
+ * A structured row has no tmux session; its `tmuxSessionName` is this prefix plus the row id. tmux does not
+ * reject such a name (`new-session -s structured:abc` succeeds and creates `structured_abc`, while
+ * `has-session -t structured:abc` reports "can't find window"), so the client refuses it instead. A stray tmux
+ * call on a structured row then fails loudly rather than launching a second provider process on its thread.
+ */
+export const STRUCTURED_SESSION_NAME_PREFIX = 'structured:';
+
+export function assertTmuxSessionName(sessionName: string): void {
+  if (sessionName.startsWith(STRUCTURED_SESSION_NAME_PREFIX)) {
+    throw new TmuxError(
+      `"${sessionName}" names a structured session, which has no tmux session.`,
+      [sessionName],
+      undefined,
+      '',
+    );
+  }
+}
+
 export function isTmuxSessionMissingError(error: unknown): boolean {
   if (!(error instanceof TmuxError) || error.exitCode !== 1) {
     return false;
@@ -134,6 +153,7 @@ export interface TmuxClient {
 
 export class ShellTmuxClient implements TmuxClient {
   async newDetachedSession(sessionName: string, cwd: string, shellCommand: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     const args = ['new-session', '-d', '-x', String(CONSOLE_PANE_COLUMNS), '-y', String(CONSOLE_PANE_ROWS),
       '-s', sessionName, '-c', cwd, shellCommand];
     try {
@@ -144,6 +164,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // Evaluate and attach in tmux's command queue without replacing a live pipe.
     const attachCommand = ['pipe-pane', '-t', sessionName, `cat >> ${shellEscape(filePath)}`]
@@ -152,10 +173,12 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async closePanePipe(sessionName: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     await runTmux(['pipe-pane', '-t', sessionName]);
   }
 
   async sendLiteralText(sessionName: string, text: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (!text.length) {
       return;
     }
@@ -163,6 +186,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async pasteText(sessionName: string, text: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (!text.length) {
       return;
     }
@@ -187,6 +211,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async sendKeys(sessionName: string, keys: string[]): Promise<void> {
+    assertTmuxSessionName(sessionName);
     if (!keys.length) {
       return;
     }
@@ -194,6 +219,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async capturePane(sessionName: string, startLine = -240): Promise<string> {
+    assertTmuxSessionName(sessionName);
     const args = ['capture-pane', '-e', '-p', '-J', '-t', sessionName];
     if (Number.isFinite(startLine)) {
       args.push('-S', String(startLine));
@@ -202,14 +228,17 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async interrupt(sessionName: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     await runTmux(['send-keys', '-t', sessionName, 'C-c']);
   }
 
   async killSession(sessionName: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     await runTmux(['kill-session', '-t', sessionName]);
   }
 
   async hasSession(sessionName: string): Promise<boolean> {
+    assertTmuxSessionName(sessionName);
     try {
       await runTmux(['has-session', '-t', sessionName]);
       return true;
@@ -222,6 +251,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async getPanePid(sessionName: string): Promise<number | undefined> {
+    assertTmuxSessionName(sessionName);
     try {
       const output = await runTmux(['list-panes', '-t', sessionName, '-F', '#{pane_pid}']);
       const pid = Number(output.split(/\s+/)[0]);
@@ -232,6 +262,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async ensureMinimumWindowSize(sessionName: string, columns: number, rows: number): Promise<boolean> {
+    assertTmuxSessionName(sessionName);
     const output = await runTmux(['display-message', '-p', '-t', sessionName, '#{window_width} #{window_height}']);
     const [width, height] = output.trim().split(/\s+/).map(Number);
     if (!Number.isFinite(width) || !Number.isFinite(height) || (width! >= columns && height! >= rows)) return false;
@@ -241,6 +272,7 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async getSessionCreatedAt(sessionName: string): Promise<string> {
+    assertTmuxSessionName(sessionName);
     const output = await runTmux(['display-message', '-p', '-t', sessionName, '#{session_created}']);
     const seconds = Number(output);
     if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('Could not verify tmux session creation time.');
@@ -248,11 +280,13 @@ export class ShellTmuxClient implements TmuxClient {
   }
 
   async getOption(sessionName: string, name: string): Promise<string | undefined> {
+    assertTmuxSessionName(sessionName);
     const output = await runTmux(['show-options', '-qv', '-t', sessionName, name]);
     return output || undefined;
   }
 
   async setOption(sessionName: string, name: string, value: string): Promise<void> {
+    assertTmuxSessionName(sessionName);
     await runTmux(['set-option', '-t', sessionName, '-q', name, value]);
   }
 }
