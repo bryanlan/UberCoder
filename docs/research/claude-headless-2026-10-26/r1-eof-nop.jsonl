@@ -1,0 +1,5 @@
+{"t":12,"kind":"spawn","data":{"pid":3591094,"args":["--output-format","stream-json","--verbose","--input-format","stream-json"]}}
+{"t":3013,"kind":"stdin-end","data":null}
+{"t":3157,"kind":"exit","data":{"code":0,"signal":null}}
+{"t":3157,"kind":"stderr","data":""}
+{"t":3157,"kind":"maxRssKb","data":176532}

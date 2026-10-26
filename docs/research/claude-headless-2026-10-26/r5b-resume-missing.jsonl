@@ -1,0 +1,7 @@
+{"t":3,"kind":"spawn","data":{"pid":3606878,"args":["--output-format","stream-json","--verbose","--input-format","stream-json","--resume","99999999-2222-4333-8444-555555555555","--permission-mode","bypassPermissions","--allow-dangerously-skip-permissions"]}}
+{"t":3,"kind":"in","data":{"type":"control_request","request_id":"r1","request":{"subtype":"initialize","hooks":{}}}}
+{"t":329,"kind":"out","data":{"type":"result","subtype":"error_during_execution","duration_ms":0,"duration_api_ms":0,"is_error":true,"num_turns":0,"stop_reason":null,"session_id":"99999999-2222-4333-8444-555555555555","total_cost_usd":0,"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":"standard","cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],"speed":"standard","fallback_credit":null},"modelUsage":{},"permission_denials":[],"uuid":"0f8c0aaf-7b77-442e-befe-a4cbbb49e371","errors":["No conversation found with session ID: 99999999-2222-4333-8444-555555555555"],"result_index":0}}
+{"t":507,"kind":"exit","data":{"code":1,"signal":null}}
+{"t":1007,"kind":"stdin-end","data":null}
+{"t":1007,"kind":"stderr","data":"No conversation found with session ID: 99999999-2222-4333-8444-555555555555\n"}
+{"t":1007,"kind":"maxRssKb","data":179924}

@@ -1,0 +1,6 @@
+{"t":3,"kind":"spawn","data":{"pid":3608862,"args":["--output-format","stream-json","--verbose","--input-format","stream-json","--resume","22222222-2222-4333-8444-555555555555","--session-id","88888888-2222-4333-8444-555555555555"]}}
+{"t":4,"kind":"in","data":{"type":"control_request","request_id":"r1","request":{"subtype":"initialize","hooks":{}}}}
+{"t":206,"kind":"exit","data":{"code":1,"signal":null}}
+{"t":706,"kind":"stdin-end","data":null}
+{"t":706,"kind":"stderr","data":"\u001b[0m\u001b[31m\u001b[31mError: --session-id can only be used with --continue or --resume if --fork-session is also specified.\u001b[39m\u001b[0m\n"}
+{"t":706,"kind":"maxRssKb","data":83048}

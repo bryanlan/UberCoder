@@ -1,0 +1,6 @@
+{"t":3,"kind":"spawn","data":{"pid":3633814,"args":["--output-format","stream-json","--input-format","stream-json"]}}
+{"t":3,"kind":"in","data":{"type":"control_request","request_id":"r1","request":{"subtype":"initialize","hooks":{}}}}
+{"t":516,"kind":"exit","data":{"code":1,"signal":null}}
+{"t":816,"kind":"stdin-end","data":null}
+{"t":816,"kind":"stderr","data":"Error: When using --print, --output-format=stream-json requires --verbose\n"}
+{"t":816,"kind":"maxRssKb","data":200740}
