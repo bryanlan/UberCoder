@@ -260,6 +260,8 @@ export interface BoundSession {
   idleSuspendedAt?: string;
   isWorking?: boolean;
   queuedInputs?: SessionQueuedInput[];
+  /** Structured sessions: requests the provider is waiting on (a question for the person). Projected from backend state. */
+  pendingRequests?: PendingRequestSummary[];
   pid?: number | null;
   rawLogPath?: string;
   eventLogPath?: string;
@@ -305,6 +307,31 @@ export interface SessionQueuedInput {
   state: 'queued' | 'waiting_for_input' | 'submitting' | 'needs_review';
   reason: string;
 }
+
+/** One question the agent asks the person. `allowCustom` means a typed answer is accepted next to the options. */
+export interface PendingRequestQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+  allowCustom?: boolean;
+}
+
+/** A request a structured provider has raised and is still waiting on. Only questions stay open; approvals are declined. */
+export interface PendingRequestSummary {
+  requestId: string;
+  kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question';
+  summary: string;
+  questions: PendingRequestQuestion[];
+  turnId?: string;
+  openedAt: string;
+}
+
+/** Body of `POST /api/sessions/:id/requests/:requestId`. `answers` maps a question id to the chosen or typed answers. */
+export type SessionRequestResponse =
+  | { decision: 'answer'; answers: Record<string, string[]>; text?: string }
+  | { decision: 'decline' };
 
 export interface SessionKeystrokeRequest {
   /** Idempotent, server-owned delivery of a complete chat draft. */

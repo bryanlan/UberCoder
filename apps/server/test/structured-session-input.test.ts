@@ -317,13 +317,72 @@ describe('Structured input that has no meaning without a terminal', () => {
       .toEqual(['/tmp is full', '/home/bryan/code/app/main.ts needs a look']);
   });
 
-  it('rejects image attachments with a clear message', async () => {
-    const f = fixture();
-    const { session } = await f.bindNew();
-    const text = `Look at this${imagePromptSuffix([{ id: randomUUID(), mediaType: 'image/png', name: 'shot.png', sizeBytes: 10, width: 4, height: 4, path: '/tmp/shot.png' }], 'codex')}`;
-    const message = await rejected(send(f, session.id, text));
-    expect(message).toMatch(/image/i);
-    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
+  describe('image attachments', () => {
+    const imageRow = () => {
+      const id = randomUUID();
+      return { id, mediaType: 'image/png' as const, name: 'shot.png', sizeBytes: 10, width: 4, height: 4, path: `/data/images/${id}.png` };
+    };
+    const withImages = (rows: Array<ReturnType<typeof imageRow>>) => `Look at this${imagePromptSuffix(rows, 'codex')}`;
+
+    it('hands the stored files to a transport that takes images, keeping the prompt envelope for display', async () => {
+      const f = fixture({ plugin: { capabilities: { images: true } } });
+      const { session } = await f.bindNew();
+      const [a, b] = [imageRow(), imageRow()];
+      const text = withImages([a, b]);
+      const requestId = randomUUID();
+      const result = await send(f, session.id, text, requestId);
+
+      expect(result.queuedInput).toBeUndefined();
+      const turn = f.calls(session.conversationRef, 'sendTurn');
+      expect(turn).toHaveLength(1);
+      expect(turn[0]!.args[0]).toMatchObject({
+        text,
+        images: [{ path: a.path, mimeType: 'image/png' }, { path: b.path, mimeType: 'image/png' }],
+        clientMessageId: requestId,
+      });
+      expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn' });
+      expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual([text]);
+      expect(f.tmuxTouched()).toBe(0);
+    });
+
+    it('attaches them to a steer, and to the direct input path', async () => {
+      const f = fixture({ plugin: { capabilities: { images: true } } });
+      const { session } = await f.bindNew();
+      await send(f, session.id, 'first');
+      await settle();
+      const steered = imageRow();
+      await send(f, session.id, withImages([steered]));
+      expect(f.calls(session.conversationRef, 'steer')[0]!.args[1]).toMatchObject({ images: [{ path: steered.path, mimeType: 'image/png' }] });
+
+      f.thread(session.conversationRef).completeTurn();
+      await settle();
+      const direct = imageRow();
+      await f.manager.sendInput(session.id, withImages([direct]));
+      expect(f.calls(session.conversationRef, 'sendTurn').at(-1)!.args[0]).toMatchObject({ images: [{ path: direct.path, mimeType: 'image/png' }] });
+    });
+
+    it('sends plain text with no images field', async () => {
+      const f = fixture({ plugin: { capabilities: { images: true } } });
+      const { session } = await f.bindNew();
+      await send(f, session.id, 'just words');
+      expect((f.calls(session.conversationRef, 'sendTurn')[0]!.args[0] as { images?: unknown }).images).toBeUndefined();
+    });
+
+    it('ignores an envelope row that does not name a stored image file', async () => {
+      const f = fixture({ plugin: { capabilities: { images: true } } });
+      const { session } = await f.bindNew();
+      const forged = { ...imageRow(), path: '/etc/passwd' };
+      await send(f, session.id, withImages([forged]));
+      expect((f.calls(session.conversationRef, 'sendTurn')[0]!.args[0] as { images?: unknown }).images).toBeUndefined();
+    });
+
+    it('still rejects them, with a clear message, when the transport cannot take images', async () => {
+      const f = fixture();
+      const { session } = await f.bindNew();
+      const message = await rejected(send(f, session.id, withImages([imageRow()])));
+      expect(message).toMatch(/image/i);
+      expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
+    });
   });
 
   it('never answers a literal selection check with a pane capture', async () => {

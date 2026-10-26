@@ -1,10 +1,10 @@
 import { assignmentTask, dispatchEligible } from '../coordination/tasks.js';
 import fs from 'node:fs';
-import { imagePromptDisplay } from '../images/prompt.js';
+import { imagePromptDisplay, imagePromptFiles } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -20,9 +20,10 @@ import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import { TransportPluginRegistry } from '../providers/transport/registry.js';
-import { NotSentError, PreviousTurnActiveError, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError, type LineTransportFactory, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
 import {
   StructuredBusyError,
+  StructuredRequestNotPendingError,
   StructuredSessionService,
   StructuredUnavailableError,
   StructuredUnsupportedError,
@@ -32,6 +33,7 @@ import {
   type StructuredTerminalStatus,
 } from './structured/structured-session-service.js';
 import { StructuredRunMonitor } from './structured/structured-run-monitor.js';
+import { STRUCTURED_REQUESTS_KEY_PREFIX, type StructuredQuestionNotice } from './structured/pending-requests.js';
 import {
   adoptPendingConversation,
   clearPendingRestoreBinding as clearPendingConversationRestoreBinding,
@@ -142,6 +144,10 @@ interface SessionManagerOptions {
   structuredSessions?: StructuredSessionsConfig;
   /** Environment every structured provider process gets (coordination runtime and config path); the provider's own `env` wins. */
   structuredEnv?: Record<string, string>;
+  /** Opens line channels to structured provider processes (session hosts that outlive the backend). Without it a plugin runs its child directly over stdio. */
+  lineTransport?: LineTransportFactory;
+  /** Called when a structured agent asks a question, so the person can be told even with the browser closed. */
+  notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -168,6 +174,22 @@ export class SessionKeystrokeRejectedError extends SessionInputRejectedError {
     super(message);
     this.name = 'SessionKeystrokeRejectedError';
   }
+}
+
+/** The request id is not waiting for an answer on this session (answered, withdrawn or unknown). Routes answer 404. */
+export class StructuredRequestNotFoundError extends Error {
+  readonly statusCode = 404;
+
+  constructor(message = 'That request is no longer waiting for an answer.') {
+    super(message);
+    this.name = 'StructuredRequestNotFoundError';
+  }
+}
+
+/** The stored image files a prompt names, as a structured transport takes them; none when the prompt has no images. */
+function structuredImages(text: string): Array<{ path: string; mimeType: string }> | undefined {
+  const files = imagePromptFiles(text);
+  return files.length ? files : undefined;
 }
 
 /** A structured bind was requested for a provider whose structured lane is off. Routes answer 400. */
@@ -325,6 +347,7 @@ export class SessionManager {
   private readonly coordinationEnabled: boolean;
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private readonly launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
+  private readonly notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
   private stopped = false;
 
   constructor(
@@ -340,6 +363,7 @@ export class SessionManager {
     if (this.coordinationEnabled) migrateMessagePolicies(db);
     this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
     this.launchAuthorityContext = options.launchAuthorityContext;
+    this.notifyStructuredQuestion = options.notifyStructuredQuestion;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -357,6 +381,8 @@ export class SessionManager {
         );
       },
     });
+    // A question waits on a provider connection, and every connection of an earlier backend process is gone.
+    db.sqlite.prepare('delete from meta where key like ?').run(`${STRUCTURED_REQUESTS_KEY_PREFIX}%`);
     const structuredMeta: PluginContext['meta'] = {
       get: (key) => this.db.meta.get(key) || undefined,
       set: (key, value) => this.db.meta.set(key, value),
@@ -380,6 +406,7 @@ export class SessionManager {
             warn: (bindings, message) => this.logger?.warn(bindings, message),
           },
           meta: structuredMeta,
+          ...(options.lineTransport ? { lineTransport: options.lineTransport } : {}),
         };
       },
       callbacks: {
@@ -387,6 +414,8 @@ export class SessionManager {
         onItemCompleted: (sessionId, at, replay) => this.handleStructuredItemCompleted(sessionId, at, replay),
         onTurnTerminal: (sessionId, turnId, status, failure, replay) => this.handleStructuredTurnTerminal(sessionId, turnId, status, failure, replay),
         onRequest: (sessionId, summary) => this.appendStructuredStatus(sessionId, `Declined a provider request: ${summary}`),
+        onQuestion: (sessionId, request) => this.handleStructuredQuestion(sessionId, request),
+        onRequestsChanged: (sessionId) => this.publishStructuredRequests(sessionId),
         onSessionState: (sessionId, state, failure) => this.handleStructuredSessionState(sessionId, state, failure),
         appendStatus: (sessionId, text) => this.appendStructuredStatus(sessionId, text),
       },
@@ -2477,7 +2506,7 @@ export class SessionManager {
       throw new SessionInputRejectedError('Queued submission requires a complete message and a single Enter.');
     }
     if (session.transport === 'structured') {
-      const rejection = this.structuredTextRejection(text);
+      const rejection = this.structuredTextRejection(text, session.provider);
       if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     }
     let record = this.inputQueue.get(sessionId, payload.submissionId!);
@@ -3918,9 +3947,53 @@ export class SessionManager {
     if (session) this.appendEvent(session, { type: 'status', text, timestamp: nowIso() });
   }
 
-  private structuredTextRejection(text: string): string | undefined {
-    if (imagePromptDisplay(text).images?.length) {
-      return 'Image attachments are not available on structured sessions yet. Nothing was sent.';
+  /** A question is waiting: show it on the row, note it in the log (without its text) and push it to the browser. */
+  private handleStructuredQuestion(sessionId: string, request: PendingRequestSummary): void {
+    const session = this.structuredRow(sessionId);
+    if (!session) return;
+    this.appendStructuredStatus(sessionId, 'The agent asked a question');
+    this.publishStructuredRequests(sessionId);
+    const notify = this.notifyStructuredQuestion;
+    if (!notify) return;
+    const notice: StructuredQuestionNotice = {
+      sessionId, projectSlug: session.projectSlug, provider: session.provider, conversationRef: session.conversationRef,
+      requestId: request.requestId, summary: request.summary,
+    };
+    void Promise.resolve().then(() => notify(notice)).catch((error: unknown) => {
+      if (this.structuredEventsLive()) this.logger?.warn({ err: error, sessionId }, 'Notifying about a structured question failed.');
+    });
+  }
+
+  /** The row's open questions changed. Moving the row version makes a poll that raced this event adopt the new list. */
+  private publishStructuredRequests(sessionId: string): void {
+    if (!this.structuredRow(sessionId)) return;
+    this.eventBus.emit({ type: 'session.updated', session: this.updateBoundSessionFields(sessionId, { updatedAt: nowIso() }) });
+  }
+
+  /**
+   * The person's answer to a question a structured session is holding open. Runs under the session's command
+   * lock; the service lets exactly one answer through, and an answer for a withdrawn or unknown request is a 404.
+   */
+  async answerStructuredRequest(sessionId: string, requestId: string, response: SessionRequestResponse): Promise<BoundSession> {
+    return await this.runtimes.run(sessionId, 'answerStructuredRequest', async () => {
+      const session = this.mustGetSession(sessionId);
+      if (session.transport !== 'structured') throw new SessionInputRejectedError('Only app-server sessions have questions to answer.');
+      try {
+        await this.structured.respond(session, requestId, response.decision === 'answer'
+          ? { decision: 'answer', answers: response.answers, ...(response.text ? { text: response.text } : {}) }
+          : { decision: 'decline' });
+      } catch (error) {
+        if (error instanceof StructuredRequestNotPendingError) throw new StructuredRequestNotFoundError(error.message);
+        throw error;
+      }
+      return this.mustGetSession(sessionId);
+    });
+  }
+
+  private structuredTextRejection(text: string, provider: ProviderId): string | undefined {
+    // Refuse at admission, before the message is queued, rather than leave it failed in the journal.
+    if (structuredImages(text) && !this.structured.supportsImages(provider)) {
+      return 'Image attachments are not available for this provider in app-server sessions. Nothing was sent.';
     }
     if (STRUCTURED_SLASH_COMMAND.test(text.trim())) {
       return 'Slash commands are terminal controls and are not available on structured sessions. Send the request as a normal message. Nothing was sent.';
@@ -3946,10 +4019,10 @@ export class SessionManager {
   }
 
   private async submitStructuredText(session: BoundSession, text: string): Promise<SessionCommandResult> {
-    const rejection = this.structuredTextRejection(text);
+    const rejection = this.structuredTextRejection(text, session.provider);
     if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     try {
-      await this.structured.submitHuman(session, { requestId: randomUUID(), text });
+      await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text));
     } catch (error) {
       throw this.structuredInputError(error);
     }
@@ -4001,7 +4074,7 @@ export class SessionManager {
     const sending: QueuedInputRecord = { ...record, state: 'submitting', nativeRevision: attemptRevision, reason: 'Sending the message.' };
     this.saveQueuedInput(sessionId, sending);
     try {
-      const sent = await this.structured.submitHuman(session, record);
+      const sent = await this.structured.submitHuman(session, record, structuredImages(record.text));
       const inputAt = nowIso();
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
       const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));

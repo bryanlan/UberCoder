@@ -2,6 +2,7 @@ import webpush, { type PushSubscription } from 'web-push';
 import type { AgentGrant } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import type { WakeWarning } from '../coordination/audit.js';
+import type { StructuredQuestionNotice } from '../sessions/structured/pending-requests.js';
 
 export interface PushDelivery { subscriptions: number; accepted: number; failed: number; acceptedEndpoints: string[] }
 
@@ -24,6 +25,12 @@ export class GrantPushService {
     const payload = JSON.stringify({ title: 'Agent permission request', body: grant.scope.slice(0, 1200),
       grantId: grant.id, url: `/grants?request=${encodeURIComponent(grant.id)}` });
     await this.deliver(payload, `grant-push-delivery:${grant.id}`, `grant-push-error:${grant.id}`);
+  }
+  /** A structured agent is waiting on an answer; the notification opens its conversation. One delivery record per session. */
+  async question(notice: StructuredQuestionNotice): Promise<PushDelivery> {
+    const url = `/projects/${encodeURIComponent(notice.projectSlug)}/${notice.provider}/${encodeURIComponent(notice.conversationRef)}`;
+    const payload = JSON.stringify({ title: 'Agent question', body: notice.summary.slice(0, 1200), questionId: `${notice.sessionId}:${notice.requestId}`, url });
+    return this.deliver(payload, `question-push-delivery:${notice.sessionId}`, `question-push-error:${notice.sessionId}`);
   }
   async wakeWarning(warning: WakeWarning, deliveredEndpoints: readonly string[]): Promise<PushDelivery> {
     const session = warning.key.startsWith('supervisor-results:')

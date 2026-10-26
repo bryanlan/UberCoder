@@ -41,6 +41,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('Answering an app-server question', () => {
+  it('posts the answer to the request route with the CSRF token and encodes the ids', async () => {
+    const fetchMock = installSuccessfulFetch();
+    const body = { decision: 'answer' as const, answers: { schema: ['Strict'] }, text: 'and fast' };
+    const result = await api.answerSessionRequest('session/1', 'request 7', body, 'token-1');
+
+    expect(result).toEqual({ session: { id: 'session-1' } });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%2F1/requests/request%207');
+    expect(requestInit(fetchMock, 0).method).toBe('POST');
+    expect(new Headers(requestInit(fetchMock, 0).headers).get('x-csrf-token')).toBe('token-1');
+    expect(requestBody(fetchMock)).toEqual(body);
+  });
+
+  it('posts a decline', async () => {
+    const fetchMock = installSuccessfulFetch();
+    await api.answerSessionRequest('session-1', 'q1', { decision: 'decline' }, 'token-1');
+    expect(requestBody(fetchMock)).toEqual({ decision: 'decline' });
+  });
+
+  it('reports a request that is no longer waiting as a 404 error, without replaying it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(404, { error: 'That request is no longer waiting for an answer.' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(api.answerSessionRequest('session-1', 'q1', { decision: 'decline' }, 'token-1'))
+      .rejects.toMatchObject({ status: 404, message: 'That request is no longer waiting for an answer.' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('CSRF recovery', () => {
   it('refreshes auth, retries the same chat once and uses the recovered token for later actions', async () => {
     queryClient.setQueryData(['auth'], authenticated('old-token'));

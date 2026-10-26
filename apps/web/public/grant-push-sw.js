@@ -8,6 +8,13 @@ self.addEventListener('push', event => {
     }));
     return;
   }
+  if (message?.questionId) {
+    event.waitUntil(self.registration.showNotification(message.title, {
+      body: message.body, tag: `agent-question-${message.questionId}`, requireInteraction: true,
+      data: { url: message.url },
+    }));
+    return;
+  }
   if (!message?.grantId) return;
   event.waitUntil(self.registration.showNotification(message.title, {
     body: message.body, tag: `agent-grant-${message.grantId}`, requireInteraction: true,

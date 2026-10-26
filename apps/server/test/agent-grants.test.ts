@@ -124,4 +124,20 @@ describe('Bryan standing grants', () => {
     send.mockRejectedValueOnce({ statusCode: 410 }); await push.request(pending);
     expect(f.db.sqlite.prepare('select count(*) as n from agent_push_subscriptions').get()).toEqual({ n: 0 });
   });
+
+  it('pushes a structured agent question on the same channel, opening its conversation', async () => {
+    const f = fixture(), send = vi.fn(async (_subscription: unknown, _payload?: string | Buffer | null, _options?: unknown) => ({ statusCode: 201, body: '', headers: {} }));
+    const push = new GrantPushService(f.db, 'https://console.example.test', send);
+    push.subscribe({ endpoint: 'https://push.example.test/fixture', keys: { auth: 'auth', p256dh: 'key' } });
+    const notice = { sessionId: 'session-1', projectSlug: 'demo', provider: 'codex' as const, conversationRef: 'pending:abc', requestId: '7', summary: 'Fixture: Strict schemas or UI flexibility?' };
+    const delivery = await push.question(notice);
+    expect(delivery).toMatchObject({ subscriptions: 1, accepted: 1, failed: 0 });
+    expect(JSON.parse(String(send.mock.calls[0]![1]))).toEqual({
+      title: 'Agent question', body: notice.summary, questionId: 'session-1:7', url: '/projects/demo/codex/pending%3Aabc',
+    });
+    expect(JSON.parse(f.db.meta.get('question-push-delivery:session-1')!)).toMatchObject({ subscriptions: 1, accepted: 1, failed: 0 });
+    // One delivery record per session, so a long conversation does not grow the table.
+    await push.question({ ...notice, requestId: '8' });
+    expect(f.db.sqlite.prepare("select count(*) as n from meta where key like 'question-push-delivery:%'").get()).toEqual({ n: 1 });
+  });
 });

@@ -1,16 +1,14 @@
-// Keeps the shared `codex app-server` from outliving the backend that owns it.
+// Process identity and gated termination for the session host's record file (`../session-host.ts`).
 //
-// The backend runs with `KillMode=process` (tmux must survive restarts), so a crashed backend leaves its
-// app-server running, possibly in the middle of a turn. Two layers deal with that:
-//   - the child is started through `setpriv --pdeathsig TERM`, so the kernel ends it when the backend dies;
-//   - the instance records the child's pid and start time, and the next backend ends a recorded process that
-//     is still running before it spawns a new one, so two writers never share a thread.
-// The recorded pid is the process `setpriv` execs into. With an npm install that is the `codex` Node launcher, and
-// the native app-server is its child. The child therefore starts as the leader of its own process group, and the
-// stale reap signals that group (identity checks still gate it), so the native child is ended with its launcher.
+// The backend runs with `KillMode=process` (tmux must survive restarts), so provider processes survive it too,
+// and that is intended: each runs behind a session host that a restarted backend reconnects to. What this file
+// does is identify a recorded process safely before anything is signalled. A pid is trusted only together with
+// its start time (field 22 of `/proc/<pid>/stat`) and the kernel boot id, so a reused pid or a record from before
+// a reboot is never taken for the process it once named. The host record names the host, the provider child and the
+// child's process group; `terminateRecordedProcess` ends a recorded process (and, for a child that leads its own
+// group, the group: the npm `codex` is a Node launcher whose native server shares it) after those checks.
 
 import fs from 'node:fs';
-import path from 'node:path';
 
 const POLL_MS = 50;
 const KILL_WAIT_MS = 2_000;
@@ -55,30 +53,13 @@ export function currentBootId(procRoot = '/proc'): string | undefined {
   }
 }
 
-/** What the instance records about the child it started. */
+/** The identity a record names for a process (the session host, or its provider child). */
 export interface RecordedProcess {
   pid: number;
   startTicks?: string;
   bootId?: string;
   /** The process group the process leads (equal to `pid`). Absent for a record of a process that did not start its own group. */
   processGroup?: number;
-}
-
-/** Reads the stored instance record. Anything unusable gives undefined. */
-export function parseRecordedProcess(stored: string): RecordedProcess | undefined {
-  try {
-    const value = JSON.parse(stored) as { pid?: unknown; startTicks?: unknown; bootId?: unknown; processGroup?: unknown };
-    if (typeof value.pid !== 'number' || !Number.isInteger(value.pid) || value.pid <= 1) return undefined;
-    return {
-      pid: value.pid,
-      ...(typeof value.startTicks === 'string' ? { startTicks: value.startTicks } : {}),
-      ...(typeof value.bootId === 'string' ? { bootId: value.bootId } : {}),
-      // Only the group the process itself leads is ever signalled; any other value is dropped.
-      ...(value.processGroup === value.pid ? { processGroup: value.pid } : {}),
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 /** True when the recorded process is still running: same pid, same start time, same boot. */
@@ -132,27 +113,4 @@ export async function terminateRecordedProcess(record: RecordedProcess, termGrac
   if (!isRecordedProcessRunning(record)) return true;
   signalRecordedProcess(record, 'SIGKILL'); // a failure means it is already gone or not ours; the wait below reports which
   return await waitUntilGone(record, KILL_WAIT_MS);
-}
-
-/** The file of `name` on `pathEnv` (or `name` itself when it contains a slash) that can be executed. */
-export function resolveExecutable(name: string, pathEnv: string | undefined, cwd: string): string | undefined {
-  const candidates = name.includes('/')
-    ? [path.resolve(cwd, name)]
-    : (pathEnv ?? '').split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, name));
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isFile()) {
-        fs.accessSync(candidate, fs.constants.X_OK);
-        return candidate;
-      }
-    } catch {
-      // Not here.
-    }
-  }
-  return undefined;
-}
-
-/** `argv` run under `setpriv`, which asks the kernel to send SIGTERM when this process dies, then execs `argv`. */
-export function withParentDeathSignal(setpriv: string, argv: string[]): string[] {
-  return [setpriv, '--pdeathsig', 'TERM', '--', ...argv];
 }

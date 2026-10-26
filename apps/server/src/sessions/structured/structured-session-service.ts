@@ -3,6 +3,7 @@ import {
   CODEX_COST_PROFILES,
   type BoundSession,
   type ModelProfileKey,
+  type PendingRequestSummary,
   type ProviderId,
   type SessionScreen,
 } from '@agent-console/shared';
@@ -16,12 +17,14 @@ import {
   type OpenOptions,
   type PluginContext,
   type ProviderFailure,
+  type RequestResponse,
   type TransportEvent,
   type TransportInstance,
   type TransportSession,
   type TurnInput,
 } from '../../providers/transport/types.js';
 import type { QueuedInputRecord } from '../input-queue.js';
+import { structuredRequestsKey } from './pending-requests.js';
 
 export type StructuredSessionsConfig = Partial<Record<string, StructuredProviderConfig>>;
 
@@ -34,7 +37,12 @@ export interface StructuredCallbacks {
   /** `replay` events come from resume backfill; the owner must not let them move recency. */
   onItemCompleted(sessionId: string, at: string, replay?: boolean): void;
   onTurnTerminal(sessionId: string, turnId: string, status: StructuredTerminalStatus, failure?: ProviderFailure, replay?: boolean): void;
+  /** A request the service declined at once (an approval or an elicitation). */
   onRequest(sessionId: string, summary: string): void;
+  /** A question is waiting for the person. It is already stored, so the session row projects it. */
+  onQuestion(sessionId: string, request: PendingRequestSummary): void;
+  /** The open questions changed: one was answered or withdrawn, or the session ended. The row projects the new list. */
+  onRequestsChanged(sessionId: string): void;
   onSessionState(sessionId: string, state: StructuredSessionState, failure?: ProviderFailure): void;
   appendStatus(sessionId: string, text: string): void;
 }
@@ -68,6 +76,11 @@ export class StructuredUnsupportedError extends Error {
   readonly code = 'structured_unsupported';
   constructor(message: string) { super(message); this.name = 'StructuredUnsupportedError'; }
 }
+/** The request is not waiting for an answer: it was answered, withdrawn, or its turn ended. */
+export class StructuredRequestNotPendingError extends Error {
+  readonly code = 'structured_request_not_pending';
+  constructor(message = 'That request is no longer waiting for an answer.') { super(message); this.name = 'StructuredRequestNotPendingError'; }
+}
 
 export interface AutomaticDelivery {
   status: 'submitted' | 'deferred' | 'failed';
@@ -92,7 +105,12 @@ interface LoadedSession {
   pendingInterrupt?: { turnId: string; at: string };
   profile?: ModelProfileKey;
   fallbackModel?: { model?: string; effort?: string };
+  /** Every request the transport has opened and not closed, answered at once or not. */
   pendingRequests: Set<string>;
+  /** The questions held open for the person, stored under `structuredRequestsKey`. */
+  questions: Map<string, PendingRequestSummary>;
+  /** Questions whose answer is on its way to the transport, so a second answer cannot follow it. */
+  answering: Set<string>;
   terminalSeen: string[];
   transcriptPath?: string;
   usage?: { used?: number; max?: number };
@@ -157,6 +175,15 @@ export class StructuredSessionService {
   /** Whether new structured sessions may be bound for this provider. Existing rows do not depend on it. */
   isEnabled(provider: ProviderId): boolean {
     return this.config[provider]?.enabled === true && this.registry.get(provider) !== undefined;
+  }
+
+  /** Whether sessions of this provider take image attachments. False when no transport plugin serves the provider. */
+  supportsImages(provider: ProviderId): boolean {
+    try {
+      return this.instanceFor(provider).capabilities.images;
+    } catch {
+      return false;
+    }
   }
 
   configFor(provider: ProviderId): StructuredProviderConfig {
@@ -341,6 +368,23 @@ export class StructuredSessionService {
     }
   }
 
+  /**
+   * Forwards the person's answer to a question held open, once. The question leaves the list as soon as the
+   * transport has taken the answer, so a second attempt (a double click, another browser) finds nothing.
+   */
+  async respond(session: Pick<BoundSession, 'id'>, requestId: string, response: RequestResponse): Promise<void> {
+    const state = this.sessions.get(session.id);
+    if (!state?.loaded || !state.questions.has(requestId) || state.answering.has(requestId)) throw new StructuredRequestNotPendingError();
+    state.answering.add(requestId);
+    try {
+      await state.transport.respond(requestId, response);
+    } catch (error) {
+      state.answering.delete(requestId);
+      throw error;
+    }
+    this.closeRequest(state, requestId);
+  }
+
   /** Switch the profile used by the next turn. A running turn keeps its model, so the switch is deferred. */
   async setProfile(session: BoundSession, profile: ModelProfileKey): Promise<'applied' | 'deferred'> {
     const state = this.sessions.get(session.id);
@@ -447,6 +491,8 @@ export class StructuredSessionService {
       profile,
       fallbackModel,
       pendingRequests: new Set(),
+      questions: new Map(),
+      answering: new Set(),
       terminalSeen: [],
       transcriptPath: transport.transcriptPath,
     };
@@ -454,6 +500,8 @@ export class StructuredSessionService {
     if (previous) { previous.closing = true; previous.loaded = false; }
     this.sessions.set(sessionId, state);
     this.meta.set(`structured-epoch:${sessionId}`, epoch);
+    // Questions of an earlier connection died with it.
+    if (this.meta.get(structuredRequestsKey(sessionId))) this.publishRequests(state);
     void this.consume(state);
     return state;
   }
@@ -463,7 +511,55 @@ export class StructuredSessionService {
     state.activeTurnId = undefined;
     state.pendingInterrupt = undefined;
     state.pendingRequests.clear();
-    if (this.sessions.get(state.sessionId) === state) this.sessions.delete(state.sessionId);
+    state.answering.clear();
+    // The questions died with the connection: drop them from the row before the state leaves the table.
+    const hadQuestions = state.questions.size > 0;
+    state.questions.clear();
+    if (this.sessions.get(state.sessionId) === state) {
+      if (hadQuestions) this.publishRequests(state);
+      this.sessions.delete(state.sessionId);
+    }
+  }
+
+  /** Writes the open questions to the meta table (where the row projects them from) and tells the owner. */
+  private publishRequests(state: LoadedSession): void {
+    this.storeRequests(state);
+    this.safely(() => this.callbacks.onRequestsChanged(state.sessionId), state);
+  }
+
+  private storeRequests(state: LoadedSession): void {
+    const key = structuredRequestsKey(state.sessionId);
+    if (state.questions.size > 0) this.meta.set(key, JSON.stringify([...state.questions.values()]));
+    else this.meta.delete(key);
+  }
+
+  /** The transport closed the request, or the person's answer reached it. Idempotent. */
+  private closeRequest(state: LoadedSession, requestId: string): void {
+    state.pendingRequests.delete(requestId);
+    state.answering.delete(requestId);
+    if (state.questions.delete(requestId)) this.publishRequests(state);
+  }
+
+  /** Closes the questions `belongs` selects: ones a new turn or the end of their own turn made stale. */
+  private dropRequests(state: LoadedSession, belongs: (question: PendingRequestSummary) => boolean): void {
+    for (const question of [...state.questions.values()]) {
+      if (belongs(question)) this.closeRequest(state, question.requestId);
+    }
+  }
+
+  private openQuestion(state: LoadedSession, event: Extract<TransportEvent, { type: 'request.opened' }>): void {
+    if (state.questions.has(event.requestId)) return; // the same request announced again
+    const request: PendingRequestSummary = {
+      requestId: event.requestId,
+      kind: 'question',
+      summary: event.summary,
+      questions: event.questions ?? [],
+      ...(event.turnId ? { turnId: event.turnId } : {}),
+      openedAt: nowIso(),
+    };
+    state.questions.set(request.requestId, request);
+    this.storeRequests(state);
+    this.safely(() => this.callbacks.onQuestion(state.sessionId, request), state);
   }
 
   private async dropInstanceIfDisconnected(provider: ProviderId, instance: TransportInstance): Promise<void> {
@@ -522,6 +618,8 @@ export class StructuredSessionService {
           // locally) must get its own terminal, so it leaves the exactly-once memory.
           const seen = state.terminalSeen.indexOf(event.turnId);
           if (seen >= 0) state.terminalSeen.splice(seen, 1);
+          // A question belongs to the turn that raised it; one left over from an earlier turn is stale.
+          this.dropRequests(state, question => question.turnId !== event.turnId);
         }
         this.safely(() => this.callbacks.onTurnStarted(id, event.turnId, event.origin, event.replay), state);
         return;
@@ -530,7 +628,12 @@ export class StructuredSessionService {
         return;
       case 'request.opened': {
         state.pendingRequests.add(event.requestId);
-        // Slice 1 has no approval or question UI: decline, then record it.
+        // A question the person can answer stays open until `respond()` or the transport closes it.
+        if (event.kind === 'question' && event.questions?.length) {
+          this.openQuestion(state, event);
+          return;
+        }
+        // There is no approval UI: decline anything else, then record it.
         void state.transport.respond(event.requestId, { decision: 'decline' }).catch((error: unknown) => {
           this.logger?.warn({ err: error, sessionId: id, requestId: event.requestId }, 'Declining a provider request failed.');
         });
@@ -538,7 +641,7 @@ export class StructuredSessionService {
         return;
       }
       case 'request.closed':
-        state.pendingRequests.delete(event.requestId);
+        this.closeRequest(state, event.requestId);
         return;
       case 'usage.updated':
         state.usage = { used: event.contextUsedTokens ?? state.usage?.used, max: event.contextMaxTokens ?? state.usage?.max };
@@ -567,6 +670,7 @@ export class StructuredSessionService {
     const status: StructuredTerminalStatus = interrupted && event.status === 'completed' ? 'interrupted' : event.status;
     if (state.activeTurnId === event.turnId) state.activeTurnId = undefined;
     if (interrupted) state.pendingInterrupt = undefined;
+    this.dropRequests(state, question => question.turnId === undefined || question.turnId === event.turnId);
     this.safely(() => this.callbacks.onTurnTerminal(id, event.turnId, status, event.failure, false), state);
     if (!event.sessionUsable) {
       void state.transport.close('error').catch(() => undefined);

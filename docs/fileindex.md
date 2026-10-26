@@ -323,11 +323,16 @@ Run recovery ownership (requires explicit unattended permission):
   `docs/research/codex-app-server-2026-10-26/` holds the protocol brief and seam maps it was built from.
 - `apps/server/src/providers/transport/{types,registry}.ts` — transport plugin contract (capabilities,
   events, instance, session) and the plugin registry.
-- `apps/server/src/providers/transport/codex/` — the `codex app-server` plugin: `jsonrpc.ts` (stdio
-  JSON-RPC client), `protocol.ts` (wire shapes), `app-server-instance.ts` (shared child process, thread
-  routing, environment, launch and stale-process reaping), `app-server-session.ts` (thread and turn
-  lifecycle, event mapping, steer and interrupt), `process-lifetime.ts` (process start-ticks identity, the
-  `setpriv --pdeathsig TERM` command wrapper and ending a recorded stale process), `errors.ts`, `usage.ts`
+- `apps/server/src/providers/transport/line-transport.ts` — line channels to provider processes:
+  `StdioLineTransport` (a directly run child), `HostLineTransport` (a session host over a Unix socket) and
+  `createLineTransportFactory` (reconnect to the recorded host or start one; ends a changed or orphaned one);
+  `session-host.ts` — the standalone host program and the protocol pieces it shares (record, replay buffer,
+  line splitter). Both are documented in `docs/structured-cutover.md`, "Session host relay".
+- `apps/server/src/providers/transport/codex/` — the `codex app-server` plugin: `jsonrpc.ts` (JSON-RPC client
+  over a `LineTransport`), `protocol.ts` (wire shapes), `app-server-instance.ts` (shared child process behind a
+  session host, thread routing, environment, reconnect), `app-server-session.ts` (thread and turn
+  lifecycle, event mapping, steer and interrupt), `process-lifetime.ts` (process start-ticks identity and
+  gated termination of a recorded process or group), `errors.ts`, `usage.ts`
   and `redact.ts` (ported from T3 Code; see `THIRD_PARTY_NOTICES.md`).
 - `apps/server/src/sessions/tmux-client.ts`: also holds `assertTmuxSessionName`, which makes every
   `ShellTmuxClient` method refuse a `structured:` session name.
@@ -341,9 +346,12 @@ Run recovery ownership (requires explicit unattended permission):
   Codex end to end against a fake app-server, process environment). Helpers: `test/helpers/structured-fixtures.ts`,
   `structured-session-fixture.ts`, `codex-harness.ts`, `fake-app-server.mjs`, `replay-app-server.mjs`
   and `codex-fixtures/`.
-- `apps/server/test/structured-codex-process-lifetime.test.ts`: the `setpriv` launch (a fake `setpriv` script),
-  `/proc` start-ticks identity, ending a stale app-server (small node processes stand in for it), and the
-  process-group signals for a launcher with a native child (`test/helpers/fake-launcher.mjs`).
+- `apps/server/test/structured-session-host.test.ts`: the real host program against a scripted child
+  (`test/helpers/fake-host-child.mjs`): record and socket, protocol, replay and gap, terminate order, detached
+  survival, parent death, and the factory's reconnect, replacement and reaping.
+- `apps/server/test/structured-codex-process-lifetime.test.ts`: `/proc` start-ticks identity, the host launch,
+  ending an app-server a host crash left behind (small node processes stand in for it), and the process-group
+  signals for a launcher with a native child (`test/helpers/fake-launcher.mjs`).
 - `apps/server/test/structured-session-restart.test.ts`: a turn cut by a backend restart, scheduled recovery
   and half-restored rows re-armed at boot, not-sent delivery, a turn id that runs again.
 - `apps/server/test/structured-session-env.test.ts`: the provider process environment (coordination

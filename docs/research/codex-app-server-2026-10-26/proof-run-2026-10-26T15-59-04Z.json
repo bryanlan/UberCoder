@@ -1,0 +1,216 @@
+{
+  "script": "scripts/prove-structured-codex.mjs",
+  "startedAt": "2026-10-26T15:59:04.296Z",
+  "finishedAt": "2026-10-26T15:59:57.020Z",
+  "revision": "8fb1510",
+  "codexVersion": "codex-cli 0.164.0",
+  "node": "v22.18.0",
+  "tempRoot": "/tmp/console-structured-proof-kLpY1t",
+  "runtimeDir": "/tmp/console-structured-proof-kLpY1t/runtime",
+  "port": 14390,
+  "threadId": "01a178ef-d1b9-7352-98b6-40c609c26e01",
+  "sessionId": "a5e3903c-9a94-490f-a91a-25c87241b2ca",
+  "pids": {
+    "appServerFirst": 3777226,
+    "appServerGroup": [
+      3777226,
+      3777233
+    ],
+    "sessionHost": 3777219,
+    "appServerAfterRestart": 3777226
+  },
+  "models": {
+    "firstTurn": "gpt-6-luna xhigh",
+    "mediumTurn": "gpt-6.1-sol"
+  },
+  "steps": [
+    {
+      "id": "a",
+      "name": "project tree advertises the structured provider",
+      "pass": true,
+      "skipped": false,
+      "ms": 2,
+      "values": {
+        "structuredProviders": "codex"
+      }
+    },
+    {
+      "id": "b",
+      "name": "structured bind: thread id, no tmux session, app-server pid and environment",
+      "pass": true,
+      "skipped": false,
+      "ms": 687,
+      "values": {
+        "sessionId": "a5e3903c-9a94-490f-a91a-25c87241b2ca",
+        "threadId": "01a178ef-d1b9-7352-98b6-40c609c26e01",
+        "pid": 3777226,
+        "hostPid": 3777219,
+        "tmuxName": "structured:a5e3903c-9a94-490f-a91a-25c87241b2ca",
+        "tmuxServer": "none",
+        "coordEnv": "ok",
+        "mcpPinned": "ok",
+        "processGroup": 3777226,
+        "groupMembers": 2
+      }
+    },
+    {
+      "id": "c",
+      "name": "model profile: low applies before the first turn, with no restart",
+      "pass": true,
+      "skipped": false,
+      "ms": 265,
+      "values": {
+        "pid": 3777226,
+        "screenModel": "gpt-6-luna xhigh"
+      }
+    },
+    {
+      "id": "d",
+      "name": "first message completes with an assistant reply",
+      "pass": true,
+      "skipped": false,
+      "ms": 5726,
+      "values": {
+        "turnId": "01a178ef-d355-7c43-b3c0-c23c651fcdea",
+        "deliveryMode": "turn",
+        "lastResponseAt": "2026-10-26T15:59:11.217Z"
+      }
+    },
+    {
+      "id": "e",
+      "name": "rollout file exists, the index points at it, and the first turn ran on the low model",
+      "pass": true,
+      "skipped": false,
+      "ms": 5,
+      "values": {
+        "rollout": "rollout-2026-10-26T08-59-05-01a178ef-d1b9-7352-98b6-40c609c26e01.jsonl",
+        "records": 21,
+        "model": "gpt-6-luna",
+        "effort": "xhigh"
+      }
+    },
+    {
+      "id": "f",
+      "name": "coordination: hook registered the thread and the agent called the MCP tool",
+      "pass": true,
+      "skipped": false,
+      "ms": 9010,
+      "values": {
+        "mcpProcesses": 1,
+        "assignmentId": "1d642b59-53ad-4177-b7ba-e2fda43be765",
+        "nativeSessionId": "01a178ef-d1b9-7352-98b6-40c609c26e01",
+        "status": "waiting",
+        "lastSeenBefore": "2026-10-26T15:59:11.200Z",
+        "lastSeenAfter": "2026-10-26T15:59:19.903Z",
+        "mcpCallRecords": 3
+      }
+    },
+    {
+      "id": "g",
+      "name": "steer: a message sent mid-turn is delivered as a steer",
+      "pass": true,
+      "skipped": false,
+      "ms": 12864,
+      "values": {
+        "commandRunning": true,
+        "turnId": "01a178f0-0cea-79e2-bae6-55182b15907c",
+        "deliveryMode": "steer"
+      }
+    },
+    {
+      "id": "h",
+      "name": "Stop: Escape interrupts a running turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 5687,
+      "values": {
+        "commandRunning": true,
+        "commandPids": 1,
+        "idleAfterMs": 270,
+        "commandGoneAfterMs": 325,
+        "turnAborted": "interrupted"
+      }
+    },
+    {
+      "id": "i",
+      "name": "manual sleep unloads the thread (screen reads asleep) and restore reloads it (new epoch)",
+      "pass": true,
+      "skipped": false,
+      "ms": 9811,
+      "values": {
+        "assignmentBefore": "active",
+        "refusedWhileActive": true,
+        "manualSuspendedAt": "2026-10-26T15:59:41.895Z",
+        "pid": 3777226,
+        "screenSequence": "Codex (app-server) working > Codex (app-server) idle > Codex (app-server) asleep > Codex (app-server) idle > Codex (app-server) working > Codex (app-server) idle",
+        "epochChanged": true,
+        "manualSuspendedAfterResume": "cleared"
+      }
+    },
+    {
+      "id": "j",
+      "name": "model profile: medium reaches the provider on the next turn, then back to low",
+      "pass": true,
+      "skipped": false,
+      "ms": 1047,
+      "values": {
+        "model": "gpt-6.1-sol",
+        "stoppedMediumTurn": true,
+        "pid": 3777226
+      }
+    },
+    {
+      "id": "k",
+      "name": "graceful backend restart: the app-server survives in its session host and serves the next turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 6730,
+      "values": {
+        "statusAfterRestart": "bound",
+        "oldPid": 3777226,
+        "newPid": 3777226,
+        "samePid": true,
+        "hostPid": 3777219,
+        "recordMatchesProc": true
+      }
+    },
+    {
+      "id": "l",
+      "name": "release ends the session; after the session host is ended no process from this proof remains",
+      "pass": true,
+      "skipped": false,
+      "ms": 443,
+      "values": {
+        "status": "ended",
+        "tmuxServer": "none",
+        "processesAfterRelease": 5,
+        "coordMcpAfterRelease": 1,
+        "hostSurvivedShutdown": true,
+        "processesAfterShutdown": 0,
+        "coordMcpAfterShutdown": 0
+      }
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "backend shutdown",
+      "ok": true
+    },
+    {
+      "name": "leftover processes",
+      "ok": true,
+      "detail": "0 found"
+    },
+    {
+      "name": "remove temp root",
+      "ok": true
+    }
+  ],
+  "result": "pass",
+  "providerRetries": [],
+  "summary": {
+    "passed": 12,
+    "failed": 0,
+    "skipped": 0
+  }
+}

@@ -34,7 +34,6 @@ import {
   JsonRpcReplyError,
   JsonRpcRequestError,
   JsonRpcTimeoutError,
-  LineSplitter,
   type JsonRpcExit,
   type JsonRpcNotification,
 } from '../src/providers/transport/codex/jsonrpc.js';
@@ -57,6 +56,7 @@ import {
   EventLog,
   FAKE_APP_SERVER,
   FAST_TIMINGS,
+  hostTransportFactory,
   itemCompleted,
   itemStarted,
   makeContext,
@@ -68,6 +68,7 @@ import {
   readLog,
   receivedFrames,
   receivedRequests,
+  restartBackend,
   serverRequest,
   setupFake,
   setupReplay,
@@ -83,6 +84,9 @@ import {
   type FakeSetup,
 } from './helpers/codex-harness.js';
 import { createCodexAppServerPlugin } from '../src/providers/transport/codex/index.js';
+import { processStartTicks } from '../src/providers/transport/codex/process-lifetime.js';
+import { HostLineTransport, hostPaths, LineTransportSpawnError, StdioLineTransport } from '../src/providers/transport/line-transport.js';
+import { LineSplitter } from '../src/providers/transport/session-host.js';
 
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -92,6 +96,7 @@ const cleanups: Array<() => Promise<void>> = [];
 function track<T extends FakeSetup>(setup: T): T {
   cleanups.push(async () => {
     await setup.instance.dispose('shutdown');
+    await setup.stopHost(); // a session host outlives its instance; the test ends it
     fs.rmSync(setup.dir, { recursive: true, force: true });
   });
   return setup;
@@ -304,7 +309,9 @@ describe('codex request building', () => {
     const bare = buildTurnStartParams('t1', { text: 'hello' }, policy, '/work', 'msg-2');
     expect(bare).not.toHaveProperty('model');
     expect(bare).not.toHaveProperty('effort');
-    expect(() => buildTurnStartParams('t1', { text: 'x', images: [{ path: '/a.png', mimeType: 'image/png' }] }, policy, '/work', 'm')).toThrow(/image/);
+    // Attached images go first, one localImage item per file, then the text.
+    expect(buildTurnStartParams('t1', { text: 'x', images: [{ path: '/a.png', mimeType: 'image/png' }, { path: '/b.jpg', mimeType: 'image/jpeg' }] }, policy, '/work', 'm').input)
+      .toEqual([{ type: 'localImage', path: '/a.png' }, { type: 'localImage', path: '/b.jpg' }, { type: 'text', text: 'x' }]);
   });
 
   it('always asks Codex to wait for optional MCP servers, and adds the effort override only when given', () => {
@@ -359,10 +366,14 @@ describe('codex request building', () => {
 
 // ---------------------------------------------------------------------------------------------------------
 describe('codex JSON-RPC client over a fake app-server', () => {
-  async function spawnClient(scenario: Record<string, unknown>, options: Partial<Parameters<typeof JsonRpcClient.spawn>[0]> = {}) {
+  async function spawnClient(scenario: Record<string, unknown>, options: { maxLineBytes?: number } = {}) {
     const dir = makeTempDir('codex-rpc-');
     const { scenarioPath, logFile } = writeScenario(dir, scenario);
-    const client = await JsonRpcClient.spawn({ command: [process.execPath, FAKE_APP_SERVER, scenarioPath], cwd: dir, env: { PATH: process.env.PATH }, closeGraceMs: 300, termGraceMs: 300, ...options });
+    const transport = await StdioLineTransport.spawn(
+      { argv: [process.execPath, FAKE_APP_SERVER, scenarioPath], cwd: dir, env: { PATH: process.env.PATH ?? '' }, closeGraceMs: 300, termGraceMs: 300 },
+      { maxLineBytes: options.maxLineBytes },
+    );
+    const client = new JsonRpcClient(transport);
     cleanups.push(async () => {
       await client.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -372,7 +383,7 @@ describe('codex JSON-RPC client over a fake app-server', () => {
 
   async function handshake(client: JsonRpcClient) {
     await client.request('initialize', { clientInfo: { name: 't', title: null, version: '1' }, capabilities: null });
-    client.notify('initialized');
+    await client.notify('initialized');
   }
 
   it('numbers requests from 1, routes responses by id and errors by shape', async () => {
@@ -514,7 +525,19 @@ describe('codex JSON-RPC client over a fake app-server', () => {
   });
 
   it('fails to start a missing binary with a spawn error', async () => {
-    await expect(JsonRpcClient.spawn({ command: ['/nonexistent/codex-binary'], cwd: os.tmpdir(), env: {} })).rejects.toMatchObject({ name: 'JsonRpcSpawnError' });
+    await expect(StdioLineTransport.spawn({ argv: ['/nonexistent/codex-binary'], cwd: os.tmpdir(), env: {} })).rejects.toBeInstanceOf(LineTransportSpawnError);
+  });
+
+  it('holds lines that arrive before anyone listens and delivers them in order, and tells a late exit listener at once', async () => {
+    const transport = await StdioLineTransport.spawn({ argv: [process.execPath, '-e', "console.log('first'); console.log('second'); process.exit(4)"], cwd: os.tmpdir(), env: { PATH: process.env.PATH ?? '' } });
+    await sleep(500); // everything has been written and the process is gone
+    const lines: string[] = [];
+    transport.onLine((line) => lines.push(line));
+    const exits: Array<{ code: number | null; reason: string }> = [];
+    transport.onExit((info) => exits.push(info));
+    expect(lines).toEqual(['first', 'second']);
+    expect(exits).toEqual([{ code: 4, signal: null, reason: 'exited' }]);
+    await expect(transport.write('{}')).rejects.toBeInstanceOf(NotSentError);
   });
 });
 
@@ -600,7 +623,7 @@ describe('codex instance and session against a scripted app-server', () => {
     const session = await fake.instance.start({ ...OPEN_OPTIONS, model: 'gpt-x', effort: 'high' });
     expect(session.nativeSessionId).toBe(THREAD);
     expect(session.transcriptPath).toBe('/rollout/thread-1.jsonl');
-    expect(session.capabilities).toMatchObject({ processModel: 'shared', nativeIds: 'server-allocated', resume: 'reattach', steer: 'native', interrupt: 'terminal-follows', images: false, modelSwitch: 'next-turn' });
+    expect(session.capabilities).toMatchObject({ processModel: 'shared', nativeIds: 'server-allocated', resume: 'reattach', steer: 'native', interrupt: 'terminal-follows', images: true, modelSwitch: 'next-turn' });
     expect(receivedRequests(fake.logFile, 'thread/start')[0]?.params).toEqual({
       cwd: '/work/project',
       model: 'gpt-x',
@@ -866,7 +889,7 @@ describe('codex instance and session against a scripted app-server', () => {
       session.handleNotification('turn/started', { threadId: THREAD, turn: turnObject(TURN, 'inProgress', 1) });
       return session;
     }
-    const exit = { code: 1, signal: null, expected: false, stderrTail: '' };
+    const exit = { code: 1, signal: null, reason: 'exited' as const, expected: false, stderrTail: '' };
 
     it('throws NotSentError when the session has ended', async () => {
       const fake = track(setupFake(turnScenario([turnStarted(THREAD, TURN)])));
@@ -1279,7 +1302,7 @@ describe('codex instance and session against a scripted app-server', () => {
       setupFake(
         turnScenario([
           turnStarted(THREAD, TURN),
-          serverRequest('item/tool/requestUserInput', { threadId: THREAD, turnId: TURN, itemId: 'i1', questions: [{ id: 'q', header: 'Pick one', question: 'Strict or flexible?', isOther: false, isSecret: false, options: null }], isBlocking: true, autoResolutionMs: null }),
+          serverRequest('item/tool/requestUserInput', { threadId: THREAD, turnId: TURN, itemId: 'i1', questions: [{ id: 'q', header: 'Pick one', question: 'Strict or flexible?', isOther: false, isSecret: true, options: null }], isBlocking: true, autoResolutionMs: null }),
           serverRequest('mcpServer/elicitation/request', { threadId: THREAD, turnId: TURN, serverName: 'gmail', mode: 'form', message: 'Allow sending?', requestedSchema: {}, _meta: null }),
           serverRequest('item/commandExecution/requestApproval', { threadId: THREAD, turnId: TURN, itemId: 'i2', startedAtMs: 1, environmentId: null, command: 'rm -rf /tmp/x' }),
           serverRequest('item/fileChange/requestApproval', { threadId: THREAD, turnId: TURN, itemId: 'i3', startedAtMs: 1, reason: 'write outside the workspace' }),
@@ -1693,9 +1716,12 @@ describe('codex plugin against recorded app-server traffic', () => {
     expect(log.events.some((event) => /stream line \d/.test(JSON.stringify(event)))).toBe(false); // the streamed output is not in events
   });
 
-  it('plan_questions: a user-input request is answered with empty answers and recorded', async () => {
+  it('plan_questions: a user-input request stays open until the host answers it (here: declines), and is recorded', async () => {
     const { replay, session, log } = await open('plan_questions');
     await session.sendTurn({ text: 'Use request_user_input to ask one multiple-choice clarifying question.' });
+    await log.waitForType('request.opened');
+    expect(replayAnswers(replay.replayLog)).toEqual([]); // nothing answered by itself
+    await session.respond('0', { decision: 'decline' });
     const terminal = await log.waitForType('turn.terminal');
     expect(terminal.status).toBe('completed');
     const opened = log.of('request.opened');
@@ -1727,6 +1753,120 @@ function replayAnswers(file: string): Array<Record<string, any>> {
 // ---------------------------------------------------------------------------------------------------------
 // Opt-in: the installed codex binary. Starts the real app-server, reads models and the account, never opens
 // a thread or a turn, so it spends no quota.
+// ---------------------------------------------------------------------------------------------------------
+describe('codex instance behind a session host', () => {
+  const hostScenario = (turns: unknown[]) => ({ handlers: { ...baseHandlers(THREAD), 'turn/start': turns } });
+  const completedTurn = (turnId: string) => ({
+    result: { turn: turnObject(turnId, 'inProgress', null) },
+    emitAfter: [turnStarted(THREAD, turnId), itemCompleted(THREAD, turnId, agentMessageItem(`item-${turnId}`, `answer ${turnId}`)), turnCompleted(THREAD, turnId)],
+  });
+  const startEvents = (file: string) => readLog(file).filter((entry) => entry.event === 'start');
+
+  it('keeps the app-server and its thread state across a backend restart: the new backend reconnects, resumes and runs a turn on the same process', async () => {
+    const fake = track(setupFake(hostScenario([completedTurn('turn-1'), completedTurn('turn-2')]), FAST_TIMINGS, {}, { host: true }));
+    const first = await fake.instance.start(OPEN_OPTIONS);
+    const firstLog = new EventLog(first);
+    const firstPid = (await fake.instance.alive()).pid!;
+    await first.sendTurn({ text: 'before the restart' });
+    expect((await firstLog.waitForType('turn.terminal')).status).toBe('completed');
+    expect(JSON.parse(fake.context.metaStore.get('structured-instance:codex')!)).toMatchObject({ pid: firstPid, version: '0.164.0' });
+
+    // The backend shuts down. Its sessions end, but the app-server does not: it was not asked to close.
+    await fake.instance.dispose('shutdown');
+    await firstLog.done;
+    expect(processStartTicks(firstPid)).toBeDefined();
+    expect(readLog(fake.logFile).some((entry) => entry.event === 'stdin-eof')).toBe(false);
+    expect(fake.context.metaStore.has('structured-instance:codex')).toBe(true);
+
+    // A new backend: new plugin instance, new transport factory, nothing remembered but the database.
+    const next = restartBackend(fake);
+    cleanups.push(() => next.instance.dispose('shutdown'));
+    const resumed = await next.instance.resume(THREAD, OPEN_OPTIONS);
+    expect((await next.instance.alive())).toEqual({ pid: firstPid, connected: true });
+    expect(startEvents(fake.logFile)).toHaveLength(1); // no second app-server
+    expect(receivedRequests(fake.logFile, 'initialize')).toHaveLength(1); // and no second handshake: it is already initialized
+    expect(receivedRequests(fake.logFile, 'thread/start')).toHaveLength(1); // the first backend's; the new one resumed instead
+    expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(1);
+    expect(next.context.logs.info.some(([, message]) => /reconnected to a running codex app-server/.test(message))).toBe(true);
+    await expect(next.instance.probe()).resolves.toMatchObject({ installed: true, version: '0.164.0' }); // the version came from the record, not a handshake
+
+    const secondLog = new EventLog(resumed);
+    expect(await resumed.sendTurn({ text: 'after the restart' })).toEqual({ turnId: 'turn-2' });
+    expect((await secondLog.waitForType('turn.terminal')).status).toBe('completed');
+    expect(secondLog.of('item.completed').some((event) => event.kind === 'assistant')).toBe(true);
+    expect(startEvents(fake.logFile)).toHaveLength(1);
+  });
+
+  it('finishes the handshake when an earlier backend died halfway through it', async () => {
+    const fake = track(setupFake(hostScenario([completedTurn('turn-1')]), FAST_TIMINGS, {}, { host: true }));
+    // A host whose app-server has received a line but never initialized: what a backend killed mid-handshake leaves.
+    fs.mkdirSync(fake.context.runtimeDir, { recursive: true });
+    const argv = [...fake.command, '-c', 'check_for_update_on_startup=false'];
+    const earlier = await hostTransportFactory(fake.hostRuntimeDir, fake.context)({ argv, cwd: fake.context.runtimeDir, env: { PATH: process.env.PATH ?? '' }, hostId: 'codex' });
+    await earlier.write(JSON.stringify({ id: 1, method: 'thread/list', params: {} }));
+    await earlier.close();
+
+    const session = await fake.instance.start(OPEN_OPTIONS);
+    expect(session.nativeSessionId).toBe(THREAD);
+    expect(startEvents(fake.logFile)).toHaveLength(1);
+    expect(receivedRequests(fake.logFile, 'initialize')).toHaveLength(1); // sent by this backend, because the server asked for it
+    expect(receivedFrames(fake.logFile).filter((frame) => frame.method === 'initialized')).toHaveLength(1);
+  });
+
+  it('starts one app-server for the first backend and a new one only when the old one is gone', async () => {
+    const fake = track(setupFake(hostScenario([completedTurn('turn-1')]), FAST_TIMINGS, {}, { host: true }));
+    await fake.instance.start(OPEN_OPTIONS);
+    const firstPid = (await fake.instance.alive()).pid!;
+    await fake.instance.dispose('shutdown');
+    await fake.stopHost(); // an operator ended it, or it crashed while nobody was connected
+    expect(await waitUntil(() => processStartTicks(firstPid) === undefined, 5_000, 'the app-server to end')).toBe(true);
+
+    const next = restartBackend(fake);
+    cleanups.push(() => next.instance.dispose('shutdown'));
+    await next.instance.start(OPEN_OPTIONS);
+    const secondPid = (await next.instance.alive()).pid!;
+    expect(secondPid).not.toBe(firstPid);
+    expect(startEvents(fake.logFile)).toHaveLength(2);
+    expect(receivedRequests(fake.logFile, 'initialize')).toHaveLength(2); // a new process is handshaken
+  });
+
+  it('fails a request that was in flight when the connection dropped as uncertain, ends the sessions, and reconnects to the same process on the next use', async () => {
+    const fake = track(setupFake({ handlers: { ...baseHandlers(THREAD), 'turn/start': { noResponse: true } } }, FAST_TIMINGS, {}, { host: true }));
+    const session = await fake.instance.start(OPEN_OPTIONS);
+    const log = new EventLog(session);
+    const pid = (await fake.instance.alive()).pid!;
+    const settled = session.sendTurn({ text: 'never answered' }).catch((failure: unknown) => failure);
+    await waitUntil(() => receivedRequests(fake.logFile, 'turn/start').length === 1, 5_000, 'turn/start to reach the app-server');
+
+    // Another Console client takes over the host: our connection drops while the app-server keeps running.
+    const intruder = await HostLineTransport.connect({ socketPath: hostPaths(fake.hostRuntimeDir, 'codex').socket });
+    cleanups.push(() => intruder.close());
+    const failure = await settled;
+
+    // The frame was written, so the app-server may have started the turn: not NotSentError, and never replayed.
+    expect(failure).toBeInstanceOf(TransportUnavailableError);
+    expect(failure).not.toBeInstanceOf(NotSentError);
+    expect((failure as Error).cause).toMatchObject({ name: 'JsonRpcExitError', sent: true, exit: { reason: 'disconnected' } });
+    await log.done;
+    expect(log.of('session.state').map((event) => event.state)).toEqual(['ready', 'error', 'stopped']);
+    expect(log.of('session.state').find((event) => event.state === 'error')?.failure).toMatchObject({ class: 'transport_error', code: 'process_exited', retryable: true, message: 'Another client took over this session host.' });
+    expect(processStartTicks(pid)).toBeDefined(); // the process is fine
+    expect(fake.instance.needsRespawn).toBe(true);
+    expect(await fake.instance.alive()).toEqual({ connected: false });
+    expect(fake.context.metaStore.has('structured-instance:codex')).toBe(true); // a lost connection is not the end of the process
+    // Nothing is written once the session has ended: that one is certainly not sent.
+    await expect(session.sendTurn({ text: 'too late' })).rejects.toBeInstanceOf(NotSentError);
+
+    // The next use connects again, to the same process, without a handshake.
+    const again = await fake.instance.resume(THREAD, OPEN_OPTIONS);
+    expect(again.nativeSessionId).toBe(THREAD);
+    expect(await fake.instance.alive()).toEqual({ pid, connected: true });
+    expect(fake.instance.needsRespawn).toBe(false);
+    expect(startEvents(fake.logFile)).toHaveLength(1);
+    expect(receivedRequests(fake.logFile, 'initialize')).toHaveLength(1);
+  });
+});
+
 describe.skipIf(process.env.AGENT_CONSOLE_REAL_CODEX !== '1')('real codex app-server handshake', () => {
   it('initializes, lists models and reads the account through the plugin', async () => {
     const dir = makeTempDir('codex-real-');
@@ -1757,13 +1897,13 @@ describe.skipIf(process.env.AGENT_CONSOLE_REAL_CODEX !== '1')('real codex app-se
   it('accepts the exact request shapes the plugin sends (checked against a thread that does not exist)', async () => {
     const dir = makeTempDir('codex-real-');
     cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
-    const client = await JsonRpcClient.spawn({ command: ['codex', 'app-server', '-c', 'check_for_update_on_startup=false'], cwd: dir, env: process.env });
+    const client = new JsonRpcClient(await StdioLineTransport.spawn({ argv: ['codex', 'app-server', '-c', 'check_for_update_on_startup=false'], cwd: dir, env: process.env as Record<string, string> }));
     cleanups.push(() => client.close());
     await client.request('initialize', {
       clientInfo: { name: 'agent_console', title: 'Agent Console', version: '0.0.0-test' },
       capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods: ['turn/diff/updated'] },
     });
-    client.notify('initialized');
+    await client.notify('initialized');
     const bogus = '00000000-0000-7000-8000-000000000000';
     const policy = { approvals: 'never', sandbox: 'full-access' } as const;
     const shapes: Array<[string, unknown]> = [

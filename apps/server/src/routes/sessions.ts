@@ -6,7 +6,7 @@ import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
-import { SessionInputRejectedError, SessionManager, type SessionCommandResult } from '../sessions/session-manager.js';
+import { SessionInputRejectedError, SessionManager, StructuredRequestNotFoundError, type SessionCommandResult } from '../sessions/session-manager.js';
 import { MAX_PROMPT_IMAGES, type BoundSession, type SessionInputResponse } from '@agent-console/shared';
 import { ImageStore, ImageUploadError } from '../images/store.js';
 import { imagePromptSuffix } from '../images/prompt.js';
@@ -25,6 +25,18 @@ const sessionParamsSchema = z.object({
 const modelProfileRequestParamsSchema = sessionParamsSchema.extend({
   requestId: z.string().uuid(),
 });
+const sessionRequestParamsSchema = sessionParamsSchema.extend({
+  requestId: z.string().min(1).max(256),
+});
+// Bounds keep a hostile or buggy client from sending an unbounded blob to the provider.
+const sessionRequestBodySchema = z.discriminatedUnion('decision', [
+  z.object({
+    decision: z.literal('answer'),
+    answers: z.record(z.string().min(1).max(256), z.array(z.string().max(8_000)).max(32)).refine((answers) => Object.keys(answers).length <= 32, { message: 'Too many answered questions.' }),
+    text: z.string().max(16_000).optional(),
+  }),
+  z.object({ decision: z.literal('decline') }),
+]);
 const screenQuerySchema = z.object({
   lines: z.coerce.number().int().min(50).max(20000).optional(),
 });
@@ -399,10 +411,6 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
-    if (parsed.data.imageIds && session.transport === 'structured') {
-      reply.code(400).send({ error: 'Images cannot be attached to app-server sessions.' });
-      return;
-    }
     // Capture before image/native preflight, which can finish after a later Stop.
     const inputRevision = new InputQueue(db.sqlite).revision(sessionId);
     if (parsed.data.imageIds) {
@@ -453,6 +461,28 @@ export async function registerSessionRoutes(
       if (error instanceof SessionInputRejectedError) {
         reply.code(error.statusCode).send({ error: error.message });
         return;
+      }
+      throw error;
+    }
+  });
+
+  // The person's answer to a question a structured session is holding open.
+  app.post('/api/sessions/:sessionId/requests/:requestId', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply);
+    } catch { return; }
+    const params = sessionRequestParamsSchema.safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'Invalid request route.', details: params.error.flatten() });
+    const body = sessionRequestBodySchema.safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'Invalid request answer.', details: body.error.flatten() });
+    const session = sessions.getSessionById(params.data.sessionId);
+    if (!session) return reply.code(404).send({ error: 'Session not found.' });
+    if (session.transport !== 'structured') return reply.code(409).send({ error: 'Only app-server sessions have questions to answer.' });
+    try {
+      return { session: await sessions.answerStructuredRequest(params.data.sessionId, params.data.requestId, body.data) };
+    } catch (error) {
+      if (error instanceof StructuredRequestNotFoundError || error instanceof SessionInputRejectedError) {
+        return reply.code(error.statusCode).send({ error: error.message });
       }
       throw error;
     }

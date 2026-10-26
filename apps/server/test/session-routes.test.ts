@@ -6,7 +6,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { BoundSession, ConversationSummary } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import { registerSessionRoutes } from '../src/routes/sessions.js';
-import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
+import { imagePromptFiles, imagePromptSuffix } from '../src/images/prompt.js';
+import { SessionInputRejectedError, StructuredRequestNotFoundError } from '../src/sessions/session-manager.js';
 
 function commandResult(session: BoundSession, recordedUserInput?: { id: string; text: string; timestamp: string }) {
   return { ...session, session, recordedUserInput };
@@ -766,11 +767,13 @@ describe('session routes', () => {
       }
     });
 
-    it('refuses image attachments on a structured session before touching the image store', async () => {
+    it('attaches stored images to a structured session message, as it does for a terminal session', async () => {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
       const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-      const resolve = vi.fn();
-      const sendKeystrokes = vi.fn();
+      const imageId = 'd5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5';
+      const image = { id: imageId, mediaType: 'image/png' as const, name: 'Pasted image.png', sizeBytes: 10, width: 4, height: 4, path: `/data/images/${imageId}.png` };
+      const resolve = vi.fn(async () => [image]);
+      const sendKeystrokes = vi.fn(async () => commandResult(structuredSession));
       const app = fastify();
       await registerSessionRoutes(
         app,
@@ -778,7 +781,7 @@ describe('session routes', () => {
         db,
         {} as never,
         {} as never,
-        { getSessionById: vi.fn(() => structuredSession), sendKeystrokes } as never,
+        { getSessionById: vi.fn(() => structuredSession), allowsLiteralSelectionKeystroke: vi.fn(async () => false), sendKeystrokes } as never,
         { resolve } as never,
       );
       await app.ready();
@@ -786,16 +789,118 @@ describe('session routes', () => {
         const response = await app.inject({
           method: 'POST',
           url: '/api/sessions/session-structured/keys',
-          payload: { text: 'look at this', keys: ['Enter'], imageIds: ['d5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5'] },
+          payload: { text: 'look at this', keys: ['Enter'], imageIds: [imageId] },
         });
-        expect(response.statusCode).toBe(400);
-        expect(response.json()).toEqual({ error: 'Images cannot be attached to app-server sessions.' });
-        expect(resolve).not.toHaveBeenCalled();
-        expect(sendKeystrokes).not.toHaveBeenCalled();
+        expect(response.statusCode).toBe(200);
+        expect(resolve).toHaveBeenCalledWith([imageId], structuredSession);
+        expect(sendKeystrokes).toHaveBeenCalledOnce();
+        const [, payload] = sendKeystrokes.mock.calls[0] as unknown as [string, { text: string; submittedText: string; imageIds?: string[] }];
+        // The envelope names the stored file; SessionManager turns it into a native attachment.
+        expect(imagePromptFiles(payload.text)).toEqual([{ path: image.path, mimeType: 'image/png' }]);
+        expect(payload.submittedText).toBe(`look at this${imagePromptSuffix([image], 'codex')}`);
+        expect(payload.imageIds).toBeUndefined();
       } finally {
         await app.close();
         db.close();
       }
+    });
+
+    describe('answering a question the agent asked', () => {
+      const requestUrl = '/api/sessions/session-structured/requests/q%201';
+      async function routes(manager: Record<string, unknown>, session: BoundSession | undefined = structuredSession) {
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+        const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+        const ensureAuthenticated = vi.fn(async () => undefined);
+        const app = fastify();
+        await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never, {} as never,
+          { getSessionById: vi.fn((id: string) => (id === structuredSession.id ? session : undefined)), ...manager } as never);
+        await app.ready();
+        return { app, ensureAuthenticated, close: async () => { await app.close(); db.close(); } };
+      }
+
+      it('forwards an answer to the session and returns the updated row', async () => {
+        const answered = { ...structuredSession, updatedAt: '2026-10-26T11:00:00.000Z' };
+        const answerStructuredRequest = vi.fn(async () => answered);
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const body = { decision: 'answer', answers: { schema: ['Strict'] }, text: 'and fast' };
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: body });
+          expect(response.statusCode).toBe(200);
+          expect(response.json()).toEqual({ session: answered });
+          expect(answerStructuredRequest).toHaveBeenCalledWith('session-structured', 'q 1', body);
+          expect(r.ensureAuthenticated).toHaveBeenCalledOnce();
+        } finally { await r.close(); }
+      });
+
+      it('forwards a decline', async () => {
+        const answerStructuredRequest = vi.fn(async () => structuredSession);
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: { decision: 'decline' } });
+          expect(response.statusCode).toBe(200);
+          expect(answerStructuredRequest).toHaveBeenCalledWith('session-structured', 'q 1', { decision: 'decline' });
+        } finally { await r.close(); }
+      });
+
+      it('answers 404 when the request is not waiting for an answer', async () => {
+        const answerStructuredRequest = vi.fn(async () => { throw new StructuredRequestNotFoundError(); });
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: { decision: 'decline' } });
+          expect(response.statusCode).toBe(404);
+          expect(response.json()).toEqual({ error: 'That request is no longer waiting for an answer.' });
+        } finally { await r.close(); }
+      });
+
+      it('answers 404 for an unknown session without asking the manager', async () => {
+        const answerStructuredRequest = vi.fn();
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: '/api/sessions/unknown/requests/q1', payload: { decision: 'decline' } });
+          expect(response.statusCode).toBe(404);
+          expect(response.json()).toEqual({ error: 'Session not found.' });
+          expect(answerStructuredRequest).not.toHaveBeenCalled();
+        } finally { await r.close(); }
+      });
+
+      it('answers 409 for a terminal session', async () => {
+        const answerStructuredRequest = vi.fn();
+        const r = await routes({ answerStructuredRequest }, { ...structuredSession, transport: 'tmux' });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: { decision: 'decline' } });
+          expect(response.statusCode).toBe(409);
+          expect(answerStructuredRequest).not.toHaveBeenCalled();
+        } finally { await r.close(); }
+      });
+
+      it('passes a refusal from the session on with its status', async () => {
+        const answerStructuredRequest = vi.fn(async () => { throw new SessionInputRejectedError('Not now.'); });
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: { decision: 'decline' } });
+          expect(response.statusCode).toBe(409);
+          expect(response.json()).toEqual({ error: 'Not now.' });
+        } finally { await r.close(); }
+      });
+
+      it.each([
+        ['no body', undefined],
+        ['an unknown decision', { decision: 'approve' }],
+        ['an answer without answers', { decision: 'answer' }],
+        ['answers that are not lists', { decision: 'answer', answers: { schema: 'Strict' } }],
+        ['a non-string answer', { decision: 'answer', answers: { schema: [1] } }],
+        ['an oversized answer', { decision: 'answer', answers: { schema: ['x'.repeat(8_001)] } }],
+        ['too many answers for one question', { decision: 'answer', answers: { schema: Array.from({ length: 33 }, () => 'a') } }],
+        ['text that is not a string', { decision: 'answer', answers: {}, text: 3 }],
+      ])('answers 400 for %s', async (_label, payload) => {
+        const answerStructuredRequest = vi.fn();
+        const r = await routes({ answerStructuredRequest });
+        try {
+          const response = await r.app.inject({ method: 'POST', url: requestUrl, ...(payload === undefined ? {} : { payload }) });
+          expect(response.statusCode).toBe(400);
+          expect(answerStructuredRequest).not.toHaveBeenCalled();
+        } finally { await r.close(); }
+      });
     });
 
     it('never relaunches a structured session as a first-turn pending terminal chat', async () => {

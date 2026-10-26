@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
@@ -12,6 +13,7 @@ import { IndexingService } from './indexing/indexing-service.js';
 import { ProjectService } from './projects/project-service.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
+import { createLineTransportFactory } from './providers/transport/line-transport.js';
 import { TransportPluginRegistry } from './providers/transport/registry.js';
 import { LocalhostProxyService } from './proxy/localhost-proxy.js';
 import { RealtimeEventBus } from './realtime/event-bus.js';
@@ -75,6 +77,12 @@ export async function buildApp(options: AppOptions = {}) {
   let grants: GrantService;
   const transportPlugins = options.transportPlugins ?? new TransportPluginRegistry();
   if (!options.transportPlugins) transportPlugins.register(createCodexAppServerPlugin());
+  // Provider processes run behind session hosts that outlive this process, so a restart reconnects to them. Injected (test) plugins bring their own transport.
+  const lineTransport = options.transportPlugins ? undefined : createLineTransportFactory({
+    runtimeDir: config.runtimeDir,
+    log: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
+    hostProgramPath: fileURLToPath(new URL('./providers/transport/session-host.js', import.meta.url)),
+  });
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -86,6 +94,7 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
     structuredSessions: config.structuredSessions,
+    lineTransport,
     // Hooks and the coordination MCP inside a structured thread find this Console the way tmux sessions do.
     structuredEnv: config.coordination.enabled ? { AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_CONFIG: configService.getConfigPath() } : undefined,
     hasActiveLaunchAuthority: session => {
@@ -94,6 +103,8 @@ export async function buildApp(options: AppOptions = {}) {
       return !!assignment && grants.grantsFor(assignment.id).length > 0;
     },
     launchAuthorityContext: context => grants.authorityContext(context),
+    // The same browser push channel as grant decisions; `grantPush` exists by the time any structured agent can ask.
+    notifyStructuredQuestion: notice => grantPush.question(notice),
   });
   const authService = new AuthService(config, db);
   const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));

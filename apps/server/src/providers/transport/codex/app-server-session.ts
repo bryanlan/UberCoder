@@ -19,6 +19,7 @@ import {
   TransportUnavailableError,
   TurnNotActiveError,
   type OpenOptions,
+  type PendingQuestion,
   type ProviderFailure,
   type TransportCapabilities,
   type TransportEvent,
@@ -60,7 +61,7 @@ export const CODEX_CAPABILITIES: TransportCapabilities = {
   resume: 'reattach',
   steer: 'native',
   interrupt: 'terminal-follows',
-  images: false,
+  images: true,
   enforcement: 'native',
   modelSwitch: 'next-turn',
 };
@@ -160,11 +161,15 @@ export function buildTurnStartParams(threadId: string, input: TurnInput, policy:
   };
 }
 
+/**
+ * One `localImage` item per attached file (Codex reads the file; its type comes from the bytes), then the text.
+ * Images come first so the prompt's trailing image envelope stays the end of the text a transcript shows.
+ */
 function textInput(input: TurnInput): CodexUserInput[] {
-  if (input.images && input.images.length > 0) {
-    throw new Error('Codex app-server sessions do not accept image input yet.');
-  }
-  return [{ type: 'text', text: input.text }];
+  return [
+    ...(input.images ?? []).map((image): CodexUserInput => ({ type: 'localImage', path: image.path })),
+    { type: 'text', text: input.text },
+  ];
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -222,8 +227,10 @@ export function itemTitle(item: CodexThreadItem): string | undefined {
 type RequestKind = Extract<TransportEvent, { type: 'request.opened' }>['kind'];
 
 /**
- * Slice 1 has no approval UI: every server request that still arrives under the `never` policy is declined.
- * Each method has its own answer shape (the permissions request has no `decision`).
+ * Approvals and elicitations have no UI: every such server request that still arrives under the `never` policy
+ * is declined at once. A `requestUserInput` question is declined here only when it cannot be shown (see
+ * `pendingQuestions`); otherwise the session holds it open until `respond()`. Each method has its own answer
+ * shape (the permissions request has no `decision`).
  */
 export function declinedServerRequest(method: string, params: unknown): { kind: RequestKind; summary: string; result: unknown } {
   const request = (isRecord(params) ? params : {}) as Record<string, unknown>;
@@ -249,6 +256,53 @@ export function declinedServerRequest(method: string, params: unknown): { kind: 
     default:
       throw new Error(`No answer is defined for server request ${method}`);
   }
+}
+
+/**
+ * The questions of an `item/tool/requestUserInput` request as the host shows them. Undefined when the request
+ * cannot be shown and must be declined: no questions, a malformed question, or a secret one (a password typed
+ * into the browser would travel and be stored as plain text).
+ */
+export function pendingQuestions(params: unknown): PendingQuestion[] | undefined {
+  const request = (isRecord(params) ? params : {}) as Record<string, unknown>;
+  if (!Array.isArray(request.questions) || request.questions.length === 0) return undefined;
+  const questions: PendingQuestion[] = [];
+  for (const raw of request.questions) {
+    if (!isRecord(raw)) return undefined;
+    const { id, header, question, isOther, isSecret, options } = raw as Record<string, unknown>;
+    if (typeof id !== 'string' || !id || typeof question !== 'string' || isSecret === true) return undefined;
+    const choices = Array.isArray(options)
+      ? options.flatMap((option): Array<{ label: string; description?: string }> => {
+          if (!isRecord(option) || typeof option.label !== 'string' || !option.label) return [];
+          const description = asString(option.description);
+          return [{ label: option.label, ...(description ? { description } : {}) }];
+        })
+      : [];
+    const title = asString(header);
+    // A question with no options can only be answered in words.
+    questions.push({ id, ...(title ? { header: title } : {}), question, options: choices, allowCustom: isOther === true || choices.length === 0 });
+  }
+  return questions;
+}
+
+/** A question held open for the person: the id list shapes the answer, `settle` sends the JSON-RPC reply. */
+interface OpenQuestion {
+  turnId: string | undefined;
+  questionIds: string[];
+  settle: (result: unknown) => void;
+}
+
+/** What Codex gets for a question nobody answered: no answers. */
+const NO_ANSWERS = { answers: {} };
+
+/** `{answers: {[questionId]: {answers: string[]}}}`; typed text joins the first question's answers. */
+function questionAnswerResult(questionIds: string[], response: RequestResponse): unknown {
+  if (response.decision !== 'answer') return NO_ANSWERS;
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const id of questionIds) answers[id] = { answers: (response.answers[id] ?? []).filter((answer) => typeof answer === 'string') };
+  const text = response.text?.trim();
+  if (text && questionIds[0] !== undefined) answers[questionIds[0]]!.answers.push(text);
+  return { answers };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -365,6 +419,8 @@ export class CodexAppServerSession implements TransportSession {
   private readonly early = new Map<string, Array<{ method: string; params: unknown }>>();
   private readonly tokenUsage = makeTurnTokenUsageState();
   private readonly cleanupJobs = new Set<Promise<void>>();
+  /** `requestUserInput` questions held open for the person, by JSON-RPC id. */
+  private readonly openQuestions = new Map<string, OpenQuestion>();
   private threadStatus: string = 'idle';
   private firstTerminalSeen = false;
   private pathRefresh: Promise<string | undefined> | undefined;
@@ -492,9 +548,19 @@ export class CodexAppServerSession implements TransportSession {
     record.interrupt.timer = setTimeout(() => this.interruptTimedOut(record), this.host.timings.interruptGraceMs);
   }
 
-  /** Every server request is answered the moment it arrives (slice 1 has no approval UI), so nothing stays open. */
+  /**
+   * Answers a question held open for the person. The first answer settles it and removes it, so a second
+   * `respond` (or one that loses to a withdrawal or the end of the turn) finds nothing and has no effect.
+   * Every other server request was answered when it arrived.
+   */
   async respond(requestId: string, response: RequestResponse): Promise<void> {
-    this.host.log.debug?.({ requestId, decision: response.decision, threadId: this.nativeSessionId }, 'codex request already answered');
+    const open = this.openQuestions.get(requestId);
+    if (!open) {
+      this.host.log.debug?.({ requestId, decision: response.decision, threadId: this.nativeSessionId }, 'codex request is not open');
+      return;
+    }
+    this.closeQuestion(requestId, open, questionAnswerResult(open.questionIds, response),
+      response.decision === 'answer' ? 'resolved' : response.decision === 'decline' ? 'declined' : 'cancelled');
   }
 
   async unload(): Promise<void> {
@@ -585,8 +651,10 @@ export class CodexAppServerSession implements TransportSession {
       case 'mcpServer/startupStatus/updated':
         this.onMcpStatus(params as CodexNotificationMap['mcpServer/startupStatus/updated']);
         return;
+      case 'serverRequest/resolved':
+        this.onServerRequestResolved(params as CodexNotificationMap['serverRequest/resolved']);
+        return;
       case 'item/agentMessage/delta': // assistant text arrives through the rollout transcript
-      case 'serverRequest/resolved': // every request was answered when it arrived
       case 'hook/started':
       case 'hook/completed':
         return;
@@ -598,13 +666,52 @@ export class CodexAppServerSession implements TransportSession {
     }
   }
 
-  /** Answers a server request for this thread. Everything is declined; no approval UI exists in slice 1. */
+  /**
+   * Answers a server request for this thread. A question the person can see is held open (the reply is a promise
+   * that `respond()` settles); everything else is declined at once, because there is no approval UI.
+   */
   handleServerRequest(method: string, params: unknown, rpcId: string | number): unknown {
     const requestId = String(rpcId);
+    if (method === 'item/tool/requestUserInput' && !this.ended) {
+      const questions = pendingQuestions(params);
+      if (questions) return this.openQuestion(requestId, params, questions);
+    }
     const answer = declinedServerRequest(method, params);
     this.channel.push({ type: 'request.opened', requestId, kind: answer.kind, summary: answer.summary });
     this.channel.push({ type: 'request.closed', requestId, outcome: 'declined' });
     return answer.result;
+  }
+
+  private openQuestion(requestId: string, params: unknown, questions: PendingQuestion[]): Promise<unknown> {
+    const turnId = asString((params as { turnId?: unknown }).turnId);
+    const summary = declinedServerRequest('item/tool/requestUserInput', params).summary;
+    const reply = new Promise<unknown>((settle) => {
+      this.openQuestions.set(requestId, { turnId, questionIds: questions.map((question) => question.id), settle });
+    });
+    this.channel.push({ type: 'request.opened', requestId, kind: 'question', summary, ...(turnId ? { turnId } : {}), questions });
+    return reply;
+  }
+
+  /** Removes the question, sends its reply and tells the consumer. The only way a held question ends. */
+  private closeQuestion(requestId: string, open: OpenQuestion, result: unknown, outcome: 'resolved' | 'declined' | 'cancelled'): void {
+    this.openQuestions.delete(requestId);
+    open.settle(result);
+    this.channel.push({ type: 'request.closed', requestId, outcome });
+  }
+
+  /** The turn ended, the thread closed or the process went away: no answer can matter any more. */
+  private cancelQuestions(turnId?: string): void {
+    for (const [requestId, open] of [...this.openQuestions]) {
+      if (turnId === undefined || open.turnId === undefined || open.turnId === turnId) this.closeQuestion(requestId, open, NO_ANSWERS, 'cancelled');
+    }
+  }
+
+  /** The server withdrew a request (a timeout, or another client answered it): it must not keep waiting here. */
+  private onServerRequestResolved(params: CodexNotificationMap['serverRequest/resolved']): void {
+    if (params?.requestId === undefined || params.requestId === null) return;
+    const requestId = String(params.requestId);
+    const open = this.openQuestions.get(requestId);
+    if (open) this.closeQuestion(requestId, open, NO_ANSWERS, 'cancelled');
   }
 
   /** Account-level limits changed: tell this session's consumer. */
@@ -618,6 +725,7 @@ export class CodexAppServerSession implements TransportSession {
   handleProcessExit(failure: ProviderFailure): void {
     if (this.ended) return;
     this.ended = true;
+    this.cancelQuestions();
     this.clearTimers();
     this.channel.push({ type: 'session.state', state: 'error', failure });
     this.channel.push({ type: 'session.state', state: 'stopped' });
@@ -628,6 +736,7 @@ export class CodexAppServerSession implements TransportSession {
   endLocal(): void {
     if (this.ended) return;
     this.ended = true;
+    this.cancelQuestions();
     this.clearTimers();
     this.channel.push({ type: 'session.state', state: 'stopped' });
     this.host.release(this);
@@ -790,6 +899,8 @@ export class CodexAppServerSession implements TransportSession {
       const oldest = this.finishedTurnIds.values().next().value;
       if (oldest !== undefined) this.finishedTurnIds.delete(oldest);
     }
+    // A question of this turn can no longer be answered; release it before the terminal is announced.
+    this.cancelQuestions(record.id);
     const usage = completeTurnTokenUsage(this.tokenUsage, record.id, status === 'completed');
     this.host.log.debug?.({ threadId: this.nativeSessionId, turnId: record.id, status, usage }, 'codex turn finished');
     this.channel.push({

@@ -1,5 +1,6 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
+import { PendingQuestionCard } from './PendingQuestionCard';
 import { Bug, Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
 import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
@@ -289,7 +290,7 @@ function LiveSessionInputBridge({
   hasQueuedInput: boolean;
   queuedDraftText?: string;
   nativeSelectionActive: boolean;
-  /** App-server session: no terminal, so no Text Bypass, navigation keys or image attachments. */
+  /** App-server session: no terminal, so no Text Bypass or navigation keys. */
   structured: boolean;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
@@ -1234,7 +1235,7 @@ function LiveSessionInputBridge({
                 event.preventDefault();
                 return;
               }
-              const files = !structured && event.clipboardData.files
+              const files = event.clipboardData.files
                 ? Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'))
                 : [];
               if (files.length) {
@@ -2056,6 +2057,7 @@ export function ConversationPane({
       {isMobile && terminalScreen?.inputActive === false && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`) && mobileInputPanel !== 'controls' && (
         <button type="button" onClick={onOpenMobileControls} className="shrink-0 border-t border-amber-400/20 bg-amber-500/10 px-3 py-2 text-left text-sm text-amber-200">Needs your input · Open controls</button>
       )}
+      {structuredSession && boundSession?.pendingRequests?.length ? <PendingQuestionCard sessionId={boundSession.id} requests={boundSession.pendingRequests} csrfToken={csrfToken} /> : null}
       {sessionSuspended ? (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
           Resume this session to use the live input bridge.

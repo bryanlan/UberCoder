@@ -126,6 +126,11 @@ export interface PluginContext {
   coordination?: { runtimeDir: string; helperPath: string };
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
   meta: { get(key: string): string | undefined; set(key: string, value: string): void; delete(key: string): void };
+  /**
+   * Opens line channels to provider processes. Present when the host runs provider processes behind session hosts that
+   * outlive the backend; a plugin that finds none runs its child directly over stdio (tests and embedding).
+   */
+  lineTransport?: LineTransportFactory;
 }
 
 /** `sendTurn` was called while the previous turn on the same session is still running. */

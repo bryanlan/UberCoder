@@ -53,10 +53,11 @@ implementation starts, and the full suite plus the Codex proof rerun on the reba
    headless docs say `--bare` (no hooks, no subscription login) "will become the default for `-p` in a future
    release"; the plugin launches without `-p` and fails fast if a launch comes up without hooks or on an API
    key, so a CLI update cannot silently change the lane's behavior.
-2. **Session host relay so provider processes survive backend deploys (recommended).** A small Node
-   process per structured provider instance, started under `systemd-run --user --scope`, owns the provider
+2. **Session host relay so provider processes survive backend deploys (recommended; built in C0, see "Session
+   host relay": started detached, without `systemd-run`).** A small Node
+   process per structured provider instance owns the provider
    child and its stdio and serves a Unix socket speaking the same newline JSON. Console connects, and on a
-   backend restart reconnects and replays the bounded output it missed. One mechanism for both providers
+   backend restart reconnects, and a client that keeps a cursor replays the bounded output it missed. One mechanism for both providers
    (Codex could also use its own `--listen unix://`, which is WebSocket and would need a `ws` dependency;
    the relay keeps one code path). Without the relay, every deploy ends every running turn, which the tmux
    path never did. Alternative: accept interrupted turns on deploys and add a "wait for idle" deploy guard.
@@ -192,19 +193,75 @@ the child pid as the tmux path does today; granted launches pass `transport`.
 
 ## Session host relay
 
-`apps/server/src/providers/transport/session-host.ts` (compiled, run with `node`), one per provider
-instance for Codex and one per conversation for Claude:
+Built in lane C0: `apps/server/src/providers/transport/session-host.ts` (the host program),
+`line-transport.ts` (the channels and the factory) and the Codex plugin on top of them. One host holds one
+provider child: a single host (`hostId: 'codex'`) for the shared Codex app-server; the Claude plugin will use
+one host per conversation.
 
-- Started by the plugin under `systemd-run --user --scope --unit agent-console-structured-<id>`, with the
-  provider argv, cwd and env; it spawns the child in its own process group with `setpriv --pdeathsig`
-  relative to the host, not the backend.
-- Serves `<runtimeDir>/structured/<id>.sock`. Protocol: the client sends `{"type":"hello","sinceSeq":N}`
-  and then raw provider lines; the host forwards stdin lines to the child and streams child stdout lines
-  as `{"seq":N,"line":...}` with a bounded replay buffer (last 4 MiB or 10 minutes) so a reconnecting backend
-  sees what it missed; `{"type":"exit",...}` when the child ends; `{"type":"status"}` for pid and liveness;
-  `{"type":"terminate"}` for owned close.
-- Console records the host pid, socket path and start ticks in meta; on boot it reconnects to every
-  recorded host before considering a session lost; a host whose child has exited is reaped.
+Changed from the first plan: the host is started detached (`detached: true`, so its own session and process
+group, `stdio` to `<runtimeDir>/structured/hosts/<hostId>.log`), not under `systemd-run --user --scope`. The
+service runs with `KillMode=process`, so a detached child of the backend survives a restart without a scope,
+and a scope would add a systemd dependency to every test and proof run. The host is plain Node that imports only
+`node:` modules, so it runs alone from `dist/providers/transport/session-host.js` (and from the `.ts` file under
+Node 22.18 or later, which the tests and `tsx` development use).
+
+- **Start.** `node session-host.js --socket <path> --record <path> --cwd <dir> --env-file <path> -- <argv...>`.
+  The factory writes the child's exact environment to the env file (mode 0600); the host reads it once and
+  deletes it. The host's own environment is a short allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LANGUAGE`, `LC_*`, `TZ`, `TMPDIR`), so `AGENT_CONSOLE_SESSION_ID`, `CODEX_THREAD_ID`, `CLAUDECODE`,
+  `CLAUDE_CODE_*` and `TMUX` never reach it. The child gets the env file and nothing else.
+- **Child.** Started in its own process group through `setpriv --pdeathsig TERM --`, relative to the host: if the
+  host dies, the kernel ends the child. Without `setpriv` the host logs a warning and starts the child plainly
+  (the record then says `parentDeathSignal: false`); a binary it cannot find is also started plainly so the
+  failure is the usual `ENOENT`, which the client receives in the welcome message.
+- **Files** in `<runtimeDir>/structured/hosts/` (directory 0700): `<hostId>.sock` (0600; a path above 100 bytes is
+  replaced by a hash of the id), `<hostId>.json` (0600, written once the socket listens and the child runs),
+  `<hostId>.log`. The record:
+  `{ version: 1, host: { pid, startTicks, bootId }, child: { pid, startTicks, bootId, processGroup }, socketPath,
+  argvHash, startedAt, parentDeathSignal }`. `startTicks` is field 22 of `/proc/<pid>/stat`; `processGroup`
+  equals the child's pid (a record that says otherwise is not read). Nothing is ever signalled unless pid, start
+  ticks and boot id all match.
+- **Protocol** (newline JSON, a connection is identified by its first message). Client to host:
+  `{"type":"hello","sinceSeq":N}` (become the client; `sinceSeq` optional), `{"type":"write","line":"..."}` (one
+  line for the child's stdin), `{"type":"status"}`, `{"type":"terminate"}`. Host to client:
+  `{"type":"welcome",hostPid,childPid,alive,seq,firstSeq,everWrote,startedAt[,spawnError]}`,
+  `{"seq":N,"line":"..."}` for each stdout line of the child, `{"type":"gap","firstSeq":M}`,
+  `{"type":"exit","code":..,"signal":..,"stderrTail":"..."[,"error":{...}]}`, `{"type":"replaced"}`,
+  `{"type":"status",pid,hostPid,alive,seq,firstSeq,everWrote,clients,startedAt}`. Writes are explicit messages
+  (not raw lines) because a provider line can itself be an object with a `type` field.
+- **One client at a time.** A `hello` makes that connection the client and replaces the previous one, which
+  receives `replaced` and is closed (it does not reconnect by itself, so two backends cannot take turns forever).
+  `status` and `terminate` work from any connection, including one that never says hello; a connection that
+  starts with them never becomes the client, and only the client can write.
+- **Replay.** The host keeps the child's stdout lines in a bounded buffer: at most 4 MiB and nothing older than 10
+  minutes (a single line larger than the buffer empties it, so a replay never skips a line without saying so).
+  `hello` without `sinceSeq` delivers live output only. With `sinceSeq: N` the host first sends `welcome`, then
+  `{"type":"gap","firstSeq":M}` when lines after N are no longer held (or N is newer than anything the host has
+  seen), then every buffered line after N, then live output. `everWrote` in the welcome and in `status` says
+  whether any client line has ever reached the child's stdin; a fresh child needs its handshake, a used one does not.
+- **Ending.** `terminate` (and SIGTERM to the host): stdin EOF, 5 s, SIGTERM to the child's group, 5 s, SIGKILL to
+  the group, then a final group SIGKILL for leftovers of a launcher; the sender receives `exit`, then the host
+  removes its record and socket and exits. When the child ends on its own, the host sends `exit`, keeps answering
+  for 60 s (a reconnecting backend learns the outcome), removes its record and exits. A child line above 128 MiB
+  ends the child and is reported in `exit.error`.
+- **Backend side** (`createLineTransportFactory({ runtimeDir, log, hostProgramPath })`, handed to plugins as
+  `PluginContext.lineTransport`; `app.ts` creates it, tests that inject their own plugins get none). With a
+  `hostId`: read the record; if the recorded host is alive and its `argvHash` matches, connect (a reconnect: the
+  child keeps running and the next client takes over); a changed command, an unanswering host or a host whose
+  child had ended is ended first (over the socket, else by gated signals), a child left running without its host
+  is ended through its recorded group, and a new host is started. Without a `hostId` the child is run directly over
+  stdio (`StdioLineTransport`: newline framing with the 128 MiB cap, `\r` stripped, 64 KiB stderr tail, close = stdin
+  EOF, 5 s, group SIGTERM, 5 s, group SIGKILL). A plugin that finds no factory uses stdio too.
+- **What survives.** The provider process, its loaded threads and its connection state. What does not: anything
+  that was only in the backend. A backend that connects after a restart asks for live output only and re-resumes
+  its threads through the provider (`thread/resume` for Codex), so output produced while no backend was connected
+  is read from the provider's own record (the rollout), not from the relay. Replay is for a client that keeps a
+  cursor (`HostLineTransport.lastSeq`, passed back as `sinceSeq`) and wants the lines it missed; the Claude plugin
+  is the intended user.
+- **Limits.** One backend per runtime directory. The command line is compared (`argvHash`), the environment is
+  not: a changed `env` setting applies when the host next starts. A launcher that is already dead while its
+  native child lives on cannot be found again from the record (the group leader is gone); the parent death signal
+  prevents that case unless the child ignores SIGTERM.
 - Idle: a Claude host exits when its child exits; a Codex host lives as long as the app-server.
 
 ## Parity features

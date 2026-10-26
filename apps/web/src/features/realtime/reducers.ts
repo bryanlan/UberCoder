@@ -174,6 +174,8 @@ export function applySessionUpdateToTimeline(
           ...(current.boundSession ?? session),
           ...session,
           queuedInputs: session.queuedInputs,
+          // Absent means none are open: the spread above would otherwise keep a question that was answered.
+          pendingRequests: session.pendingRequests,
         }
       : undefined,
   };

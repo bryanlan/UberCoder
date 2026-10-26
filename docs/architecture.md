@@ -588,13 +588,14 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   `providers/transport/codex/` implements it with one shared `codex app-server` child per Console (stdio
   JSON-RPC) and one thread per conversation, routed by thread id. Plugin events carry no message bodies:
   durable history is still the Codex rollout, so transcript parsing, search and live-output
-  normalization are unchanged, and replayed events never move recency. The plugin starts the child through
-  `setpriv --pdeathsig TERM --`, so a crashed backend does not leave an app-server running a turn (the
-  service keeps `KillMode=process`). The child leads its own process group, because the npm `codex` is a Node
-  launcher whose child is the native server: the plugin's SIGTERM and SIGKILL escalation and the stale reap
-  signal the group, so the native server dies with its launcher. The instance meta records the child's pid,
-  start ticks, boot id and process group, and the next backend ends a matching stale process (and its group)
-  before its first spawn. Without `setpriv` it spawns the command directly.
+  normalization are unchanged, and replayed events never move recency. The child runs behind a session host (`providers/transport/session-host.ts`, started detached by
+  `providers/transport/line-transport.ts`) that owns its stdio and a Unix socket, so a backend restart or crash does
+  not end an app-server mid-turn (the service keeps `KillMode=process`): the next backend reads the host's record
+  file, reconnects when the recorded host and command still match, and re-resumes its threads on the same
+  process. The host starts the child in its own process group through `setpriv --pdeathsig TERM --` relative to the
+  host, and group signals reach the native server behind the npm `codex` launcher. A recorded child left without
+  its host is ended through its recorded group before a new host starts; every signal is gated on pid, start ticks
+  and boot id. See `docs/structured-cutover.md`, "Session host relay".
 - Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
   A server request that still arrives (approval, elicitation, user-input question) is declined and
   recorded as a status event. There is no approval UI.

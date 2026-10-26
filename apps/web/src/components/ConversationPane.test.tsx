@@ -2,9 +2,9 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import type { BoundSession, ConversationTimeline, NormalizedMessage, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
+import type { BoundSession, ConversationTimeline, NormalizedMessage, PendingRequestSummary, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane, type MobileInputPanel } from './ConversationPane';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { CONVERSATION_DRAG_TYPE } from '../features/conversation/agent-reference';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
@@ -1253,14 +1253,19 @@ describe('ConversationPane app-server (structured) sessions', () => {
     fireEvent.change(textbox, { target: { value: '' } });
   });
 
-  it('ignores pasted images because the server refuses them on app-server sessions', () => {
+  it('uploads pasted images and sends them with the message, as on a terminal chat', async () => {
     const upload = vi.spyOn(api, 'uploadImage').mockResolvedValue(pastedImage);
+    const send = vi.fn().mockResolvedValue({ session: boundSession(structured) });
     try {
-      renderPane({ sessionOverrides: structured });
-      pasteImage(screen.getByRole('textbox', { name: 'Message' }));
+      renderPane({ onSendKeystrokes: send, sessionOverrides: structured });
+      const textbox = screen.getByRole('textbox', { name: 'Message' });
+      const file = pasteImage(textbox);
 
-      expect(upload).not.toHaveBeenCalled();
-      expect(screen.queryByText('Uploading image…')).not.toBeInTheDocument();
+      await waitFor(() => expect(screen.getByAltText('Pasted image.png')).toBeVisible());
+      expect(upload).toHaveBeenCalledWith('session-1', file, undefined);
+      fireEvent.keyDown(textbox, { key: 'Enter' });
+      await waitFor(() => expect(send).toHaveBeenCalledWith('session-1', { keys: ['Enter'], imageIds: [pastedImage.id] }));
+      await waitFor(() => expect(screen.queryByAltText('Pasted image.png')).not.toBeInTheDocument());
     } finally {
       upload.mockRestore();
     }
@@ -1313,5 +1318,156 @@ describe('ConversationPane app-server (structured) sessions', () => {
       expect(screen.getByRole('button', { name })).toBeVisible();
     }
     expect(screen.queryByText('app-server')).not.toBeInTheDocument();
+  });
+});
+
+
+describe('ConversationPane agent question card', () => {
+  const structured = { transport: 'structured' as const, tmuxSessionName: 'acs-session-1' };
+  const ask = (overrides: Partial<PendingRequestSummary> = {}): PendingRequestSummary => ({
+    requestId: 'q1',
+    kind: 'question',
+    summary: 'Fixture: Strict schemas or UI flexibility?',
+    openedAt: baseTime,
+    questions: [{
+      id: 'schema',
+      header: 'Fixture',
+      question: 'Strict schemas or UI flexibility?',
+      options: [{ label: 'Strict', description: 'Validate tightly' }, { label: 'Flexible' }],
+      allowCustom: true,
+    }],
+    ...overrides,
+  });
+  const answered = () => vi.spyOn(api, 'answerSessionRequest').mockResolvedValue({ session: boundSession(structured) });
+
+  it('shows the header, question, options, a typed-answer field, Submit and Decline, and leaves the composer usable', () => {
+    renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+
+    const card = screen.getByRole('region', { name: 'Agent question' });
+    expect(card).toHaveTextContent('Fixture');
+    expect(card).toHaveTextContent('Strict schemas or UI flexibility?');
+    expect(screen.getByRole('radio', { name: /Strict/ })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByRole('radio', { name: /Flexible/ })).toBeVisible();
+    expect(screen.getByLabelText('Your answer: Fixture')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Decline' })).toBeEnabled();
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    expect(composer).toBeEnabled();
+    expect(composer).not.toHaveAttribute('readonly');
+  });
+
+  it('submits the chosen option once and only then', async () => {
+    const answer = answered();
+    try {
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+      fireEvent.click(screen.getByRole('radio', { name: /Strict/ }));
+      expect(screen.getByRole('radio', { name: /Strict/ })).toHaveAttribute('aria-checked', 'true');
+      fireEvent.click(screen.getByRole('radio', { name: /Flexible/ }));
+      expect(screen.getByRole('radio', { name: /Strict/ })).toHaveAttribute('aria-checked', 'false');
+      fireEvent.click(screen.getByRole('radio', { name: /Strict/ }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+      expect(answer).toHaveBeenCalledWith('session-1', 'q1', { decision: 'answer', answers: { schema: ['Strict'] } }, undefined);
+    } finally { answer.mockRestore(); }
+  });
+
+  it('disables the card while the answer is on its way, so it cannot be sent twice', async () => {
+    const pending = deferred<{ session: BoundSession }>();
+    const answer = vi.spyOn(api, 'answerSessionRequest').mockImplementation(() => pending.promise);
+    try {
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+      fireEvent.click(screen.getByRole('radio', { name: /Strict/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled());
+      expect(screen.getByRole('button', { name: 'Decline' })).toBeDisabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      expect(answer).toHaveBeenCalledTimes(1);
+      pending.resolve({ session: boundSession(structured) });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Decline' })).toBeEnabled());
+    } finally { answer.mockRestore(); }
+  });
+
+  it('sends a typed answer instead of an option', async () => {
+    const answer = answered();
+    try {
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+      fireEvent.click(screen.getByRole('radio', { name: /Strict/ }));
+      fireEvent.change(screen.getByLabelText('Your answer: Fixture'), { target: { value: '  something else  ' } });
+      expect(screen.getByRole('radio', { name: /Strict/ })).toHaveAttribute('aria-checked', 'false');
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await waitFor(() => expect(answer).toHaveBeenCalledWith('session-1', 'q1', { decision: 'answer', answers: { schema: ['something else'] } }, undefined));
+    } finally { answer.mockRestore(); }
+  });
+
+  it('lets a multi-select question take several options and a typed one', async () => {
+    const answer = answered();
+    try {
+      const request = ask({ questions: [{
+        id: 'tags', question: 'Which areas?', options: [{ label: 'Server' }, { label: 'Web' }, { label: 'Docs' }], multiSelect: true, allowCustom: true,
+      }] });
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [request] } });
+      fireEvent.click(screen.getByRole('checkbox', { name: /Server/ }));
+      fireEvent.click(screen.getByRole('checkbox', { name: /Web/ }));
+      fireEvent.click(screen.getByRole('checkbox', { name: /Docs/ }));
+      fireEvent.click(screen.getByRole('checkbox', { name: /Docs/ }));
+      fireEvent.change(screen.getByLabelText('Your answer: Which areas?'), { target: { value: 'tests' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await waitFor(() => expect(answer).toHaveBeenCalledWith('session-1', 'q1', { decision: 'answer', answers: { tags: ['Server', 'Web', 'tests'] } }, undefined));
+    } finally { answer.mockRestore(); }
+  });
+
+  it('needs an answer to every question before Submit, and offers only a text field when there are no options', async () => {
+    const answer = answered();
+    try {
+      const request = ask({ questions: [
+        { id: 'a', question: 'First?', options: [{ label: 'Yes' }, { label: 'No' }] },
+        { id: 'b', question: 'Name it', options: [] },
+      ] });
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [request] } });
+      expect(screen.queryByLabelText('Your answer: First?')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('radio', { name: 'Yes' }));
+      expect(screen.getByRole('button', { name: 'Submit' })).toBeDisabled();
+      fireEvent.change(screen.getByLabelText('Your answer: Name it'), { target: { value: 'Orion' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await waitFor(() => expect(answer).toHaveBeenCalledWith('session-1', 'q1', { decision: 'answer', answers: { a: ['Yes'], b: ['Orion'] } }, undefined));
+    } finally { answer.mockRestore(); }
+  });
+
+  it('declines without needing an answer', async () => {
+    const answer = answered();
+    try {
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+      fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+      await waitFor(() => expect(answer).toHaveBeenCalledWith('session-1', 'q1', { decision: 'decline' }, undefined));
+    } finally { answer.mockRestore(); }
+  });
+
+  it('says so when the question is no longer waiting, and allows trying again for other failures', async () => {
+    const answer = vi.spyOn(api, 'answerSessionRequest')
+      .mockRejectedValueOnce(new ApiError('That request is no longer waiting for an answer.', { status: 404 }))
+      .mockRejectedValueOnce(new ApiError('Boom', { status: 500 }));
+    try {
+      renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask()] } });
+      fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no longer waiting for an answer'));
+      fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Boom'));
+      expect(screen.getByRole('button', { name: 'Decline' })).toBeEnabled();
+    } finally { answer.mockRestore(); }
+  });
+
+  it('shows one card per open question', () => {
+    renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask(), ask({ requestId: 'q2', questions: [{ id: 'x', question: 'Another?', options: [] }] })] } });
+    expect(screen.getAllByRole('region', { name: 'Agent question' })).toHaveLength(2);
+  });
+
+  it('shows nothing for a session without questions, a terminal session, or a request that is not a question', () => {
+    renderPane({ sessionOverrides: structured });
+    expect(screen.queryByRole('region', { name: 'Agent question' })).not.toBeInTheDocument();
+    renderPane({ sessionOverrides: { pendingRequests: [ask()] } });
+    expect(screen.queryByRole('region', { name: 'Agent question' })).not.toBeInTheDocument();
+    renderPane({ sessionOverrides: { ...structured, pendingRequests: [ask({ kind: 'permission', questions: [] })] } });
+    expect(screen.queryByRole('region', { name: 'Agent question' })).not.toBeInTheDocument();
   });
 });

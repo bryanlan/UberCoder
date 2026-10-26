@@ -4,8 +4,9 @@
 // Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux
 // socket) with `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
 // API the web client uses: bind, send, coordination hook and MCP, steer, Stop, model profile, manual sleep and
-// restore, a graceful backend restart and release. The coordination MCP server is pinned to the proof's runtime by
-// the product itself (the app-server argv), not by this script; a backend crash is not exercised here. Real Codex
+// restore, a graceful backend restart (the app-server, held by its session host, survives it and serves the next
+// turn) and release. The coordination MCP server is pinned to the proof's runtime by the product itself (the
+// app-server argv), not by this script; a backend crash is not exercised here. Real Codex
 // turns run with the host's ChatGPT login; every prompt is one short fixed sentence.
 //
 // Usage (build first):  env -u NODE_ENV npm run build
@@ -174,6 +175,22 @@ const groupMembers = pgid => procEntries().filter(pid => {
     return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]) === pgid;
   } catch { return false; }
 });
+/** The start time of a live process in clock ticks (field 22 of /proc/<pid>/stat), as the session host records it. */
+const startTicksOf = pid => {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+  } catch { return undefined; }
+};
+const parentOf = pid => {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+  } catch { return undefined; }
+};
+/** The record the session host holding the app-server wrote: pids, start times and boot of the host and of the app-server. */
+const hostRecordPath = path.join(runtimeDir, 'structured', 'hosts', 'codex.json');
+const hostRecord = () => JSON.parse(fs.readFileSync(hostRecordPath, 'utf8'));
 /** Processes of this proof: anything whose command line holds the temp root, plus anything started with this runtime. */
 const listProcesses = () => [...new Set([...pgrep(root), ...processesWithRuntime()])];
 
@@ -339,13 +356,21 @@ try {
     assert.ok(override('command="node"'), 'The app-server argv must pin the MCP command.');
     assert.ok(argv.indexOf('check_for_update_on_startup=false') < argv.findIndex(arg => arg.startsWith('mcp_servers.agent_console_coordination.')), 'The overrides follow the update check override.');
     assert.ok(!argv.some(arg => arg.includes('AGENT_CONSOLE_SESSION_ID')), 'No session id may be pinned into the shared process.');
-    // The recorded pid leads its own process group (the npm launcher and its native child share it), and the instance says so.
-    const recorded = JSON.parse(db.prepare('select value from meta where key = ?').get('structured-instance:codex').value);
-    assert.equal(recorded.processGroup, stored.pid, 'The instance record must name the process group the pid leads.');
+    // The app-server runs behind a session host that outlives the backend. Its record names both processes by pid and
+    // start time, and the app-server (the npm launcher with its native child) leads its own process group.
+    const record = hostRecord();
+    assert.equal(record.child.pid, stored.pid, 'The host record must name the app-server pid that the row holds.');
+    assert.equal(record.child.processGroup, stored.pid, 'The host record must name the process group the app-server leads.');
+    assert.equal(record.child.startTicks, startTicksOf(stored.pid), 'The recorded app-server start time must match /proc.');
+    assert.equal(record.host.startTicks, startTicksOf(record.host.pid), 'The recorded host start time must match /proc.');
+    assert.equal(parentOf(stored.pid), record.host.pid, 'The app-server must be a child of its session host.');
+    assert.notEqual(parentOf(record.host.pid), stored.pid);
+    assert.ok(record.parentDeathSignal, 'The app-server must be started with a parent death signal relative to the host.');
     const members = groupMembers(stored.pid);
     assert.ok(members.includes(stored.pid), 'The app-server must lead its process group.');
     evidence.pids.appServerGroup = members;
-    Object.assign(values, { sessionId, threadId, pid: stored.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok', mcpPinned: 'ok', processGroup: recorded.processGroup, groupMembers: members.length });
+    evidence.pids.sessionHost = record.host.pid;
+    Object.assign(values, { sessionId, threadId, pid: stored.pid, hostPid: record.host.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok', mcpPinned: 'ok', processGroup: record.child.processGroup, groupMembers: members.length });
   }, { fatal: true });
 
   // The default (medium) profile's model is rate limited on this host at times: Codex then waits out a long 429
@@ -514,14 +539,18 @@ try {
     values.pid = pidBefore;
   });
 
-  await step('k', 'graceful backend restart: the conversation resumes on a new app-server', async values => {
+  await step('k', 'graceful backend restart: the app-server survives in its session host and serves the next turn', async values => {
     const oldPid = row().pid;
+    const before = hostRecord();
+    assert.equal(before.child.pid, oldPid);
+    assert.equal(before.child.startTicks, startTicksOf(oldPid));
     const oldGroup = groupMembers(oldPid);
     assert.ok(oldGroup.includes(oldPid));
     await shutdown();
-    await wait('the old app-server to exit with the old backend', () => !alive(oldPid), 20_000, 250);
-    await wait('every process of the old app-server group to exit', () => oldGroup.every(pid => !alive(pid)), 20_000, 250);
-    values.oldGroupGone = oldGroup.length;
+    await sleep(2000); // long enough for a host that died with the backend to take the app-server down with it
+    assert.ok(alive(oldPid), 'The app-server must survive the backend.');
+    assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
+    assert.ok(oldGroup.every(pid => alive(pid)), 'Every process of the app-server group must survive the backend.');
     await boot();
     const stored = row();
     assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
@@ -529,13 +558,21 @@ try {
     values.statusAfterRestart = stored.status;
     await send(PROMPTS.resumed);
     await waitForReply('RESUMED');
+    // The same process: the new backend reconnected to the host instead of starting a second app-server.
     const newPid = row().pid;
-    assert.ok(newPid > 0 && newPid !== oldPid, 'A new app-server process must serve the resumed thread.');
+    assert.equal(newPid, oldPid, 'The same app-server must serve the resumed thread.');
+    const after = hostRecord();
+    assert.equal(after.host.pid, before.host.pid, 'The same session host must still hold it.');
+    assert.equal(after.child.pid, oldPid);
+    assert.equal(after.child.startTicks, startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
+    assert.equal(after.child.startTicks, before.child.startTicks);
+    assert.equal(after.host.startTicks, startTicksOf(after.host.pid));
+    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === after.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
     evidence.pids.appServerAfterRestart = newPid;
-    Object.assign(values, { oldPid, newPid, oldPidGone: !alive(oldPid) });
+    Object.assign(values, { oldPid, newPid, samePid: newPid === oldPid, hostPid: after.host.pid, recordMatchesProc: true });
   });
 
-  await step('l', 'release ends the session and no app-server from this proof remains', async values => {
+  await step('l', 'release ends the session; after the session host is ended no process from this proof remains', async values => {
     await api('POST', `/api/sessions/${sessionId}/release`);
     const stored = row();
     assert.equal(stored.status, 'ended');
@@ -547,7 +584,14 @@ try {
     values.processesAfterRelease = listProcesses().length;
     values.coordMcpAfterRelease = coordMcpProcesses().length;
     await shutdown();
-    await wait('every process of this proof to exit after backend shutdown', () => listProcesses().length === 0, 20_000, 250);
+    // The session host and the app-server it holds outlive the backend by design; ending them is a separate, explicit act.
+    const host = hostRecord();
+    assert.ok(alive(host.host.pid) && alive(host.child.pid), 'The host and the app-server must still be running after backend shutdown.');
+    values.hostSurvivedShutdown = true;
+    const { terminateHost } = await import(new URL('../apps/server/dist/providers/transport/line-transport.js', import.meta.url));
+    await terminateHost(runtimeDir, 'codex', { info: () => undefined, warn: () => undefined });
+    await wait('every process of this proof to exit after the session host is ended', () => listProcesses().length === 0, 20_000, 250);
+    assert.ok(!fs.existsSync(hostRecordPath), 'The host record must be removed with the host.');
     values.processesAfterShutdown = 0;
     values.coordMcpAfterShutdown = coordMcpProcesses().length;
   });

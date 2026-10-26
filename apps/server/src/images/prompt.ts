@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { MAX_PROMPT_IMAGES, type ImageAttachment, type NormalizedMessage, type ProviderId } from '@agent-console/shared';
 import { z } from 'zod';
 
@@ -32,6 +33,34 @@ export function imagePromptDisplay(text: string): { text: string; images?: Image
     return { text: text.slice(0, start).trimEnd(), images };
   } catch {
     return { text };
+  }
+}
+
+const IMAGE_EXTENSIONS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' } as const;
+const imageRowSchema = imageAttachmentSchema.extend({ path: z.string().min(1) });
+
+/**
+ * The stored image files named by the prompt envelope, for a transport that attaches images natively. The rows
+ * are the ones the `/keys` route wrote from the image store (`<id>.<ext>` files), so a row whose path is not an
+ * absolute store-style file name is ignored rather than read.
+ */
+export function imagePromptFiles(text: string): Array<{ path: string; mimeType: ImageAttachment['mediaType'] }> {
+  const start = text.lastIndexOf(OPEN);
+  if (start < 0 || !text.trimEnd().endsWith(CLOSE)) return [];
+  const lines = text.slice(start + OPEN.length, text.lastIndexOf(CLOSE)).trim().split('\n');
+  if (!lines[0]?.startsWith('Inspect the attached local image files with ')) return [];
+  const rows = lines.slice(1);
+  if (!rows.length || rows.length > MAX_PROMPT_IMAGES) return [];
+  try {
+    return rows.map((row) => {
+      const image = imageRowSchema.parse(JSON.parse(row));
+      if (!path.isAbsolute(image.path) || path.basename(image.path) !== `${image.id}.${IMAGE_EXTENSIONS[image.mediaType]}`) {
+        throw new Error('Not an image store file.');
+      }
+      return { path: image.path, mimeType: image.mediaType };
+    });
+  } catch {
+    return [];
   }
 }
 

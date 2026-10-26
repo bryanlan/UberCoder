@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import type { BoundSession, ModelProfileKey, ModelProfileRequest, SessionTransport } from '@agent-console/shared';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 import { InputQueue } from '../../sessions/input-queue.js';
+import { parsePendingRequests, structuredRequestsKey } from '../../sessions/structured/pending-requests.js';
 
 const treeVisibleBoundSessionSql = (alias: string) => `${alias}.should_restore = 1 and ${alias}.status in ('starting', 'bound', 'releasing')`;
 
@@ -23,7 +24,13 @@ export class BoundSessionsRepo {
   private mapRow(row: SqliteRow): BoundSession {
     const session = mapBoundSessionRow(row);
     const queuedInputs = new InputQueue(this.sqlite).summaries(session.id);
-    return queuedInputs.length ? { ...session, queuedInputs } : session;
+    // Only a structured session has a provider connection that can be waiting on the person.
+    const pendingRequests = session.transport === 'structured'
+      ? parsePendingRequests((this.sqlite.prepare('select value from meta where key = ?').get(structuredRequestsKey(session.id)) as { value: string } | undefined)?.value)
+      : [];
+    return queuedInputs.length || pendingRequests.length
+      ? { ...session, ...(queuedInputs.length ? { queuedInputs } : {}), ...(pendingRequests.length ? { pendingRequests } : {}) }
+      : session;
   }
 
   upsert(session: BoundSessionInput): void {

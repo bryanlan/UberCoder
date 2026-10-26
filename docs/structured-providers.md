@@ -53,8 +53,8 @@ used here as reference and, where marked, as copied code with its license notice
                                              v  TransportPlugin contract (providers/transport/types.ts)
                                 +---------------------------+
                                 | CodexAppServerPlugin      |  providers/transport/codex/
-                                | one app-server child on   |  JSON-RPC over the child's stdio,
-                                | stdio, N threads          |  spawned by the plugin
+                                | one app-server child on   |  JSON-RPC over a LineTransport:
+                                | stdio, N threads          |  a session host holds the child
                                 +---------------------------+
 ```
 
@@ -97,13 +97,14 @@ Rules:
   helper exists" keep working: worker roster, grant concurrency).
 - `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 19 in the same change.
 - Meta keys owned by the structured lane: `structured-instance:<provider>` =
-  `{ pid, startTicks, bootId, processGroup, startedAt, version }` for the shared process. `pid` is the process
-  `setpriv` execs into, which on an npm install is the `codex` Node launcher; the native app-server is its child.
-  `startTicks` is the process start time (field 22 of `/proc/<pid>/stat`) and `bootId` is the kernel boot id; both
-  are left out when `/proc` cannot be read. `processGroup` equals `pid` (the process leads its own process group,
-  which holds the native child) and is left out in records written before the group start. `version` is left out
-  when Codex reported none. The plugin deletes the key when the
-  instance closes or the process exits. `structured-epoch:<sessionId>` = ISO time the thread was last loaded
+  `{ pid, startTicks, bootId, startedAt, version }`, the backend's note of the provider process it is connected
+  to. `pid` is the process the session host started, which on an npm install is the `codex` Node launcher; the
+  native app-server is its child. `startTicks` is the process start time (field 22 of `/proc/<pid>/stat`) and
+  `bootId` is the kernel boot id; both are left out when `/proc` cannot be read. `version` is left out when
+  Codex reported none; a backend that reconnects to a running app-server reads it from here, because it does not
+  handshake again. The key is deleted when the process exits (or, for a process run directly over stdio, when the
+  instance closes) and kept when only the connection ends. Which process is adopted or ended is decided by the
+  session host's record file (`docs/structured-cutover.md`, "Session host relay"), not by this key. `structured-epoch:<sessionId>` = ISO time the thread was last loaded
   on the current connection (recency and run-epoch guard).
 
 ### Shared contracts (`packages/shared/src/index.ts`)
@@ -226,8 +227,10 @@ export interface PluginContext {
 }
 ```
 
-The context has no spawn helper. A plugin starts its own provider process (the Codex plugin does, see
-below), and the host does not start or scope it.
+The context carries no spawn helper. A plugin opens its provider process through `context.lineTransport`, a
+`LineTransportFactory` (`providers/transport/line-transport.ts`) that returns a `LineTransport`: a line channel to
+a provider process held by a session host that outlives the backend, or to a child run directly over stdio. The
+host (`app.ts`) provides the factory; a plugin that finds none runs its child over stdio (tests, embedding).
 
 Contract errors (`types.ts`):
 
@@ -271,40 +274,43 @@ the source of truth for field names):
   'Agent Console', version }, capabilities: { experimentalApi: true, optOutNotificationMethods:
   ['turn/diff/updated'] } }`, then the `initialized` notification. Notifications can arrive between the
   `initialize` response and `initialized`. "Already initialized" counts as success.
-- `--listen unix://PATH` exists (WebSocket over a Unix socket) and would let the process outlive a
-  Console backend restart. Slice 1 uses stdio, which is the documented and T3-proven path; a backend
-  restart therefore ends running structured turns, which RunRecovery reports as `process_exited`. The
-  socket mode is a follow-up and the plugin's connection layer is written so it can be added without
-  touching the protocol code. Console never uses the per-user daemon (`codex app-server daemon`).
-- Process lifetime: the service runs with `KillMode=process` (tmux must survive a restart), so a crashed
-  backend would leave its app-server running, possibly in the middle of a turn. The restarted backend would
-  then start a second writer on the same thread. Three things prevent this. First, the plugin starts the child
-  through `setpriv --pdeathsig TERM --` (`transport/codex/process-lifetime.ts`, `withParentDeathSignal`), so
-  the kernel sends SIGTERM to the app-server when the backend dies. `setpriv` execs the command, so the
-  recorded pid is the process `setpriv` became. On an npm install of Codex that is the `codex` Node launcher,
-  not the native app-server: the launcher runs the native binary as its child and only forwards SIGINT, SIGTERM
-  and SIGHUP to it. The pdeathsig therefore reaches the native server only through that forwarding. The plugin
-  looks for `setpriv` on `PATH` at its first spawn. If it is missing, the plugin logs one warning and spawns the
-  command directly. It also spawns directly when the configured binary cannot be found, so a missing `codex`
-  fails in the usual way. Second, the child starts as the leader of its own process group (`detached: true`,
-  stdio pipes kept; pdeathsig is unaffected). `JsonRpcClient.close()` sends its SIGTERM and SIGKILL to the whole
-  group (`process.kill(-pid, signal)`), so a native child that ignores the forwarded SIGTERM dies with its
-  launcher. The group is signalled only while the launcher has not been reaped, and if the group signal fails
-  the pid alone is signalled. Third, before the first spawn of an instance, the plugin ends a recorded process
-  that is still running. The pid, the start ticks and the boot id must all match the instance meta. It sends
-  SIGTERM and then SIGKILL after `staleTermGraceMs` (5 s), to the group when the record names one (`processGroup`
-  equals the pid and `/proc` shows the pid still leads that group) and to the pid alone otherwise. A record
-  without start ticks, or a reused pid, is left alone, so no unrelated process or group is signalled. If the
-  process does not end, the plugin logs a warning and starts the new one anyway. Known limit: when the
-  launcher itself is already dead (for example killed with SIGKILL) while its native child still runs, the
-  identity of the group cannot be checked and the reap leaves that orphan alone. The plugin spawns the child
-  itself; there is no systemd scope.
+- `--listen unix://PATH` exists (WebSocket over a Unix socket) and would let the process outlive a Console
+  backend restart. The plugin does not use it. The app-server runs behind a session host (below) that speaks the
+  same newline JSON over stdio to it, which keeps the documented and T3-proven transport and gives both providers
+  one mechanism. Console never uses the per-user daemon (`codex app-server daemon`).
+- Process lifetime: the service runs with `KillMode=process` (tmux must survive a restart), so a backend restart
+  or crash leaves what it started running. For the app-server that is the intent, and the plugin is built around
+  it. The plugin asks the line transport for the host `codex`
+  (`transport/line-transport.ts`, `transport/session-host.ts`; protocol, record file and buffers in
+  `docs/structured-cutover.md`, "Session host relay"). The host is a detached Node process that starts the
+  app-server in its own process group through `setpriv --pdeathsig TERM --` relative to the host (the kernel ends
+  the app-server if the host dies; without `setpriv` the host warns and starts it plainly). On the first use after
+  a backend restart the factory finds the host's record, checks that the recorded host process is the one running
+  (pid, start ticks and boot id) and that its command line hash is the same, and connects. Then there is one
+  writer, the same process and the same loaded threads. The instance skips the handshake when the host says the
+  app-server has already received lines (`everWrote`) and takes the CLI version from the instance meta. A
+  command change, a host that does not answer, or a host whose app-server had ended is replaced; a recorded
+  app-server left running without its host (a host crash, `setpriv` missing) is ended through its recorded
+  process group, after the same identity checks, SIGTERM then SIGKILL after `staleTermGraceMs` (5 s); a record
+  with a reused pid or another boot is never acted on. `dispose('shutdown')` and `dispose('restart')` only
+  disconnect from a host; the host and the app-server keep running. Ending them is explicit
+  (`terminateHost`, or `{"type":"terminate"}` on the socket). The threads that were loaded when the backend
+  stopped are loaded again by the service with `thread/resume` on first use, as before; that is safe because the
+  process never died. The new backend asks for live output only: what the app-server did while no backend was
+  connected is read from the rollout, as after any restart. If the connection drops while the process keeps
+  running (another client took the host over), the instance behaves as for a process exit: pending requests fail
+  (a request already written is `sent: true`, an uncertain outcome that is never replayed, and
+  `exit.reason` is `disconnected`), every open session ends with `process_exited` ("Another client took over
+  this session host." or "the connection to the session host was lost"), and the next use connects again to the
+  same process. Known limit: the identity of a group whose leader is already dead cannot be checked, so a native
+  child that outlived its dead launcher is left alone.
 - Instance = one app-server process per provider instance (CODEX_HOME), started with the configured
   `command`, then `-c check_for_update_on_startup=false`, then (when coordination is enabled) the coordination
   MCP overrides below, cwd fixed to the runtime directory. Its environment is the Console's own, plus the host
   and configured `env` above, minus `AGENT_CONSOLE_SESSION_ID` and `CODEX_THREAD_ID` (a shared process carries no
-  session identity), with `CODEX_HOME` expanded. Meta `structured-instance:codex` records
-  `{ pid, startTicks, bootId, processGroup, startedAt, version }` (see Schema version 19).
+  session identity), with `CODEX_HOME` expanded; the host hands the child exactly this environment, and its own
+  environment holds no session identity. Meta `structured-instance:codex` records
+  `{ pid, startTicks, bootId, startedAt, version }` (see Schema version 19).
 - Coordination MCP pinning: Codex starts `agent_console_coordination` from the `[mcp_servers]` table in
   `~/.codex/config.toml`, whose entry names one runtime and one checkout (the live Console's). A Console with
   another runtime (a worktree dev Console, the proof) would otherwise get hooks that register with itself and
@@ -520,7 +526,7 @@ The service subscribes to each session's event stream and calls SM-provided call
   stdio; SM seams with the fake plugin (bind, resume, submit, steer, interrupt, wake delivery,
   recovery submit, model profile, idle sleep and restore, release, synthesized screen, 409 paths);
   routes; config; schema migration; coordination register resolution. The review fixes added
-  `structured-codex-process-lifetime` (the `setpriv` launch, start-ticks identity, stale process reaping),
+  `structured-session-host` (the real host program against a scripted child: record, protocol, replay and gap, terminate order, detached survival, the factory's reconnect and reap), `structured-codex-process-lifetime` (start-ticks identity, host launch, ending a recorded app-server left without its host, launcher process groups),
   `structured-session-restart` (a turn cut by a backend restart, scheduled recovery re-armed, a half-restored
   row, not-sent delivery, a turn id that runs again), `tmux-client-structured-guard` and
   `structured-session-env`, and extended the plugin, input, recovery, coordination and wake suites. The round-2
@@ -538,8 +544,9 @@ The service subscribes to each session's event stream and calls SM-provided call
   through the HTTP API, recording each step into `test-results/structured-codex-proof/<timestamp>.json`:
   a. the tree advertises the provider; b. structured bind (thread-id `conversation_ref`, `structured:`
   sentinel name, app-server `pid`, no tmux server, the child has the isolated `AGENT_COORD_RUNTIME` and no
-  session identity, its argv carries the coordination MCP overrides that the product adds, and the pid leads a
-  process group that the instance record names); c. model profile `low` before the first turn, with no restart;
+  session identity, its argv carries the coordination MCP overrides that the product adds, and the session host
+  record `<runtime>/structured/hosts/codex.json` names the same pid, its process group and start times that match
+  `/proc`, with the app-server a child of the host); c. model profile `low` before the first turn, with no restart;
   d. first message and reply; e. rollout file, index transcript path and the first turn's `turn_context`
   carrying the low model; f. hook registration with the thread id and an MCP `status` call from inside a turn,
   with an `agent-coord.mjs mcp` process of the isolated runtime seen during that turn (the MCP server is this
@@ -549,10 +556,13 @@ The service subscribes to each session's event stream and calls SM-provided call
   after a completed turn): the screen is `idle` while loaded, `asleep` on the event stream after the unload
   (the poll then has no screen), and `idle` again with a new `structured-epoch` after the restore, then a reply
   on the same app-server pid; j. profile `medium` reaches the provider on the next turn, then back to `low`;
-  k. graceful backend restart (the stdio app-server and every process of its group die with the backend) and a
-  reply from a new app-server on the same conversation; l. release, then no process of the proof remains after
-  backend shutdown: nothing whose command line holds the temp root and nothing whose environment carries the
-  isolated `AGENT_COORD_RUNTIME` (app-server, native child, hooks, MCP servers, model commands). The profile
+  k. graceful backend restart: the host and the app-server (every process of its group) survive the shutdown,
+  the new backend reconnects, and the next turn on the same conversation completes on the same app-server pid,
+  with the host record unchanged and still matching `/proc` and the host holding exactly one provider process;
+  l. release, then the host and app-server still run after backend shutdown (by design), and once the proof ends
+  the host (`terminateHost`) no process of the proof remains: nothing whose command line holds the temp root and
+  nothing whose environment carries the isolated `AGENT_COORD_RUNTIME` (app-server, native child, hooks, MCP
+  servers, model commands). The profile
   switch runs before the first turn
   because the medium profile's model is rate limited on this host at times: Codex then waits out a 429
   backoff of minutes and the turn only looks hung (the evidence lists such retries from Codex's own log).
@@ -592,6 +602,13 @@ and no others appeared in the full runs on `be43958` and `ca41634`. The round-2 
 | k. graceful backend restart | old app-server and both members of its process group gone after shutdown; row still restorable; `RESUMED` reply from a new app-server pid |
 | l. release | row `ended`; no tmux server; 3 processes of the proof alive after release (launcher, native server and 1 coordination MCP server), 0 after backend shutdown, found by command line and by `AGENT_COORD_RUNTIME` in the environment |
 
+After this run the session host relay (lane C0) changed steps b, k and l: b reads the host record instead of the
+instance meta, k asserts that the app-server pid, its start time and the host are the same after the backend
+restart and that the host holds exactly one provider process, and l ends the host explicitly before it checks that
+nothing of the proof remains. The run on the relay code (2026-10-26, working tree on top of `8fb1510`, evidence
+`test-results/structured-codex-proof/2026-10-26T15-59-04-296Z.json`, untracked) passed 12 of 12 with the same
+app-server pid before and after the restart.
+
 What shaped the proof (earlier runs on the same code, same day):
 
 - `gpt-6.1-sol` (the medium profile's model) returned HTTP 429 on some turns, and Codex waited out a server-chosen
@@ -615,7 +632,7 @@ An independent review of the first implementation (`main..be43958`) is in
 
 - An unloaded structured row never reads as working from a stale rollout. Boot settles a lost turn.
 - Scheduled recovery and half-restored `starting` rows re-arm after a backend restart.
-- The app-server starts under `setpriv --pdeathsig TERM`, and a stale instance is ended before the first spawn.
+- The app-server runs behind a session host (started with a parent death signal relative to the host); a restarted backend reconnects to the running app-server instead of starting a second one, and a recorded app-server without its host is ended before a new host starts.
 - The tmux client refuses `structured:` names.
 - Coordination liveness for structured bindings is the restorable row, not the shared pid.
 - A granted restart refuses while a turn runs.
@@ -666,14 +683,15 @@ Left open on purpose:
 - RunRecovery ignores the `retryable` flag on the `thread_closed` failure. It retries only `server_overloaded`,
   `server_unavailable` and `process_exited`.
 - A steer the server refused for a reason other than losing the race shows "Submission could not be confirmed".
-- Whether `codex app-server` exits on stdin EOF while a turn runs is unverified. A crashed backend is covered
-  by `--pdeathsig` and the group-wide stale reap, which unit tests show with a launcher-shaped stand-in
-  (`structured-codex-process-lifetime`), but the proof script still only restarts gracefully. A proof step that
-  runs the backend as a child process, SIGKILLs it during the counting command and asserts that the launcher and
-  the native binary both exit with no later rollout writes is a follow-up.
+- Whether `codex app-server` exits on stdin EOF while a turn runs is unverified (the host ends it with EOF, then
+  SIGTERM, then SIGKILL to its group, so the order does not depend on the answer). A backend crash, as opposed to a
+  graceful restart, is shown by a unit test that kills the process that started a host and finds the host and its
+  child running; the proof script restarts gracefully only. A proof step that runs the backend as a child process,
+  SIGKILLs it during the counting command and asserts that the turn completes on the same app-server is a follow-up.
 - When the launcher itself is already dead and its native child still runs (for example the launcher was killed
   with SIGKILL), the stale reap cannot check the group's identity and leaves that child alone.
-- The shared app-server stays alive after the last thread is released, until backend shutdown.
+- The shared app-server stays alive after the last thread is released, and after backend shutdown: it ends only when
+  its host is told to terminate (`terminateHost`) or the command line it was started with changes.
 
 ## Work breakdown (slice 1)
 

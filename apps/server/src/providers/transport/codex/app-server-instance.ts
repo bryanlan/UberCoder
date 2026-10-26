@@ -1,9 +1,14 @@
 // One shared `codex app-server` process (stdio JSON-RPC) serving many threads, as a `TransportInstance`.
 //
-// The process starts lazily on first use. All thread-scoped notifications and server requests are routed to
-// the owning session by `threadId`; frames for a thread no session owns (subagent children, late events) are
-// counted and logged at debug level and never merged into another session. When the process ends, every open
-// session sees `session.state: 'error'` and then `'stopped'`, and the next use spawns a new process.
+// The process runs behind a session host (`../session-host.ts`, reached through the `LineTransport` the Console
+// context provides), so it outlives a Console backend restart: the first use after a restart reconnects to the
+// running process instead of spawning a second one, and skips the handshake when the process has already been used.
+// Without a context transport (tests, embedding) the child is run directly over stdio and dies with the instance.
+// All thread-scoped notifications and server requests are routed to the owning session by `threadId`; frames for a
+// thread no session owns (subagent children, late events) are counted and logged at debug level and never merged
+// into another session. When the process ends or the connection to its host drops, every open session sees
+// `session.state: 'error'` and then `'stopped'`, and the next use connects again (a new process only when the old
+// one is gone).
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,11 +17,14 @@ import type { StructuredProviderConfig } from '../../../config/schema.js';
 import {
   ResumeFailedError,
   TransportUnavailableError,
+  type LineTransport,
+  type LineTransportFactory,
   type OpenOptions,
   type PluginContext,
   type ProviderFailure,
   type TransportInstance,
 } from '../types.js';
+import { createStdioLineTransportFactory, LineTransportSpawnError, transportOutlivesClose, transportStartedFresh, type LineTransportRequest } from '../line-transport.js';
 import { isArchivedThreadError } from './errors.js';
 import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
 import {
@@ -42,15 +50,7 @@ import {
   type CodexSessionHost,
   type CodexTimings,
 } from './app-server-session.js';
-import {
-  currentBootId,
-  isRecordedProcessRunning,
-  parseRecordedProcess,
-  processStartTicks,
-  resolveExecutable,
-  terminateRecordedProcess,
-  withParentDeathSignal,
-} from './process-lifetime.js';
+import { currentBootId, processStartTicks } from './process-lifetime.js';
 import { mergeRateLimits, type CodexRateLimitSnapshot } from './usage.js';
 
 /**
@@ -68,7 +68,10 @@ export interface CodexPluginOptions {
   clientVersion?: string;
 }
 
+/** What the backend knows of the app-server it is connected to: `{ pid, startTicks, bootId, startedAt, version }`. The session host's record file, not this, decides which process is adopted or ended. */
 export const INSTANCE_META_KEY = 'structured-instance:codex';
+/** Identity of the session host that holds the shared app-server. */
+const HOST_ID = 'codex';
 const CLIENT_NAME = 'agent_console';
 const ORIGINATOR = 'agent_console';
 
@@ -175,6 +178,20 @@ async function withDeadline<T>(promise: Promise<T>, ms: number, label: string): 
   }
 }
 
+function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+}
+
+function recordedVersion(stored: string | undefined): string | undefined {
+  if (!stored) return undefined;
+  try {
+    const version = (JSON.parse(stored) as { version?: unknown }).version;
+    return typeof version === 'string' ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function isMissingBinary(error: unknown): boolean {
   const cause = error instanceof Error ? error.cause : undefined;
   if (error instanceof JsonRpcSpawnError || cause instanceof JsonRpcSpawnError) {
@@ -197,6 +214,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private readonly context: PluginContext;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly clientVersion: string;
+  private readonly openTransport: LineTransportFactory;
   private readonly sessions = new Map<string, CodexAppServerSession>();
   private clientRef: JsonRpcClient | undefined;
   private starting: Promise<JsonRpcClient> | undefined;
@@ -205,10 +223,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private disposed = false;
   private respawnNeeded = false;
   private warnedSessionEnv = false;
-  /** The earlier backend's process is ended before the first spawn only; a later respawn follows our own exit. */
-  private staleReaped = false;
-  /** `setpriv`, looked up on first spawn. `null` when it is not installed. */
-  private setpriv: string | null | undefined;
+  /** True while the connected transport leaves the process running when it closes (a session host holds it). */
+  private processOutlivesClose = false;
 
   constructor(config: CodexStructuredConfig, context: PluginContext, options: CodexPluginOptions = {}) {
     this.config = config;
@@ -217,9 +233,10 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.baseEnv = options.baseEnv ?? process.env;
     this.clientVersion = options.clientVersion ?? packageVersion();
+    this.openTransport = context.lineTransport ?? createStdioLineTransportFactory({ log: { warn: (fields, message) => context.log.warn(fields, message) } });
   }
 
-  /** True after the process ended unexpectedly: the next use spawns a new one. */
+  /** True after the process ended or the connection to it dropped: the next use connects again. */
   get needsRespawn(): boolean {
     return this.respawnNeeded;
   }
@@ -369,8 +386,11 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.clientRef = undefined;
     for (const session of [...this.sessions.values()]) session.endLocal();
     this.sessions.clear();
-    this.context.meta.delete(INSTANCE_META_KEY);
-    if (client) await client.close();
+    // A stdio child dies with its channel. A process held by a session host keeps running, and so does its record.
+    if (client) {
+      await client.close();
+      if (!this.processOutlivesClose) this.context.meta.delete(INSTANCE_META_KEY);
+    }
   }
 
   // -------------------------------------------------------------------------------------------------------
@@ -388,24 +408,27 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private async startClient(): Promise<JsonRpcClient> {
     const cwd = this.context.runtimeDir;
     fs.mkdirSync(cwd, { recursive: true });
-    await this.reapStaleProcess();
     const env = buildAppServerEnv(this.baseEnv, os.homedir(), this.config.env);
-    let client: JsonRpcClient;
+    const argv = buildAppServerCommand(this.config.command, this.context.coordination);
+    const request: LineTransportRequest = {
+      argv,
+      cwd,
+      env: stringEnv(env),
+      hostId: HOST_ID,
+      closeGraceMs: this.timings.closeGraceMs,
+      termGraceMs: this.timings.termGraceMs,
+      staleTermGraceMs: this.timings.staleTermGraceMs,
+    };
+    let transport: LineTransport;
     try {
-      client = await JsonRpcClient.spawn({
-        command: this.spawnCommand(env, cwd),
-        cwd,
-        env,
-        log: this.log,
-        defaultRequestTimeoutMs: this.timings.requestTimeoutMs,
-        closeGraceMs: this.timings.closeGraceMs,
-        termGraceMs: this.timings.termGraceMs,
-        // The npm launcher runs the native app-server as its child; signalling the group reaches both.
-        ownProcessGroup: true,
-      });
+      // Reconnects to the running host when there is one (same command), otherwise starts it. The npm launcher runs the
+      // native app-server as its child; the host signals the whole process group, so both end together.
+      transport = await this.openTransport(request);
     } catch (error) {
-      throw toTransportError(error);
+      throw toTransportError(error instanceof LineTransportSpawnError ? new JsonRpcSpawnError(argv[0] ?? '', error) : error);
     }
+    const client = new JsonRpcClient(transport, { log: this.log, defaultRequestTimeoutMs: this.timings.requestTimeoutMs });
+    const fresh = transportStartedFresh(transport);
     client.onNotification((notification) => this.onNotification(client, notification));
     for (const method of THREAD_SERVER_REQUESTS) {
       client.handleRequest(method, (params, request) => {
@@ -421,9 +444,15 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     client.onExit((exit) => this.onExit(client, exit));
 
     try {
-      await this.initialize(client);
+      if (fresh) {
+        await this.initialize(client);
+      } else {
+        // The handshake was done by an earlier backend.
+        this.cliVersion ??= recordedVersion(this.context.meta.get(INSTANCE_META_KEY));
+        await this.confirmInitialized(client);
+      }
     } catch (error) {
-      await client.close().catch(() => undefined);
+      await client.close({ terminate: true }).catch(() => undefined); // the next start gets a clean process
       this.logStartFailure(client, error);
       throw toTransportError(error);
     }
@@ -433,6 +462,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     }
     this.clientRef = client;
     this.respawnNeeded = false;
+    this.processOutlivesClose = transportOutlivesClose(transport);
     const startTicks = client.pid !== undefined ? processStartTicks(client.pid) : undefined;
     const bootId = currentBootId();
     this.context.meta.set(
@@ -441,50 +471,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
         pid: client.pid,
         ...(startTicks ? { startTicks } : {}),
         ...(bootId ? { bootId } : {}),
-        // `pid` is the process `setpriv` execs into (the npm launcher); it leads this group, which holds the native child.
-        ...(client.processGroup !== undefined ? { processGroup: client.processGroup } : {}),
         startedAt: new Date().toISOString(),
         ...(this.cliVersion ? { version: this.cliVersion } : {}),
       }),
     );
-    this.log.info({ pid: client.pid, version: this.cliVersion }, 'codex app-server started');
+    this.log.info({ pid: client.pid, version: this.cliVersion, host: this.processOutlivesClose, reconnected: !fresh }, fresh ? 'codex app-server started' : 'reconnected to a running codex app-server');
     this.seedRateLimits(client);
     return client;
-  }
-
-  /**
-   * The app-server command, run under `setpriv --pdeathsig TERM` so the kernel ends it if the backend dies
-   * (a crash leaves it running otherwise: the service keeps `KillMode=process`). Without `setpriv`, or when the
-   * configured binary cannot be found (so a missing `codex` still fails the plain way), it starts as it is.
-   */
-  private spawnCommand(env: NodeJS.ProcessEnv, cwd: string): string[] {
-    const command = buildAppServerCommand(this.config.command, this.context.coordination);
-    if (this.setpriv === undefined) {
-      this.setpriv = resolveExecutable('setpriv', env.PATH, cwd) ?? null;
-      if (this.setpriv === null) {
-        this.log.warn({}, 'setpriv is not installed; a codex app-server left behind by a crashed backend is ended by the next backend start instead');
-      }
-    }
-    if (this.setpriv === null || resolveExecutable(command[0] ?? '', env.PATH, cwd) === undefined) return command;
-    return withParentDeathSignal(this.setpriv, command);
-  }
-
-  /**
-   * An app-server recorded by an earlier backend that is still running (the backend crashed; the child
-   * outlived it) would keep executing its turn on the same rollout this backend is about to resume. End it
-   * first, but only when the recorded pid still has the recorded start time.
-   */
-  private async reapStaleProcess(): Promise<void> {
-    if (this.staleReaped) return;
-    this.staleReaped = true;
-    const stored = this.context.meta.get(INSTANCE_META_KEY);
-    if (!stored) return;
-    this.context.meta.delete(INSTANCE_META_KEY);
-    const record = parseRecordedProcess(stored);
-    if (!record || record.pid === process.pid || !isRecordedProcessRunning(record)) return;
-    this.log.warn({ pid: record.pid }, 'codex app-server left running by an earlier backend; ending it before starting a new one');
-    const gone = await terminateRecordedProcess(record, this.timings.staleTermGraceMs);
-    if (!gone) this.log.warn({ pid: record.pid }, 'the stale codex app-server did not end; starting a new one anyway');
   }
 
   private async initialize(client: JsonRpcClient): Promise<void> {
@@ -499,7 +492,21 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       // An interrupted earlier handshake leaves the server initialized.
       if (!(error instanceof JsonRpcRequestError) || !/already initialized/i.test(error.message)) throw error;
     }
-    client.notify(INITIALIZED_NOTIFICATION);
+    await client.notify(INITIALIZED_NOTIFICATION);
+  }
+
+  /**
+   * A backend that died between `initialize` and `initialized` leaves a server that refuses every request with "Not
+   * initialized". One read-only request tells; only then is the handshake repeated.
+   */
+  private async confirmInitialized(client: JsonRpcClient): Promise<void> {
+    try {
+      await callCodex(client, 'account/read', {}, { timeoutMs: this.timings.initializeTimeoutMs });
+    } catch (error) {
+      if (!(error instanceof JsonRpcRequestError)) throw error; // the connection itself failed: the caller reports it
+      if (/not initialized/i.test(error.message)) await this.initialize(client);
+      // Any other refusal (a server without account support) still proves the server is initialized.
+    }
   }
 
   /** A process that ended while starting: the error that reaches the conversation names only how it ended; the redacted stderr tail goes to the log. */
@@ -519,18 +526,21 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       });
   }
 
-  /** The process ended on its own. A planned close (`dispose`) forgets the client first, so it never gets here. */
+  /**
+   * The process ended on its own, or the connection to its session host dropped (the process may still run; the next
+   * use reconnects). A planned close (`dispose`) forgets the client first, so it never gets here.
+   */
   private onExit(client: JsonRpcClient, exit: JsonRpcExit): void {
     if (client !== this.clientRef) return; // a failed start, or a client already replaced
     this.clientRef = undefined;
-    this.context.meta.delete(INSTANCE_META_KEY);
+    if (exit.reason === 'exited') this.context.meta.delete(INSTANCE_META_KEY);
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.respawnNeeded = true;
     // The failure message reaches the conversation as a status line, so it names only how the process ended; the
     // stderr tail (redacted) goes to the server log.
     const failure: ProviderFailure = { class: 'transport_error', code: 'process_exited', message: exitReason(exit), retryable: true };
-    this.log.warn({ code: exit.code, signal: exit.signal, sessions: sessions.length, detail: describeExit(exit) }, 'codex app-server exited unexpectedly');
+    this.log.warn({ code: exit.code, signal: exit.signal, reason: exit.reason, sessions: sessions.length, detail: describeExit(exit) }, exit.reason === 'exited' ? 'codex app-server exited unexpectedly' : 'lost the connection to the codex session host');
     for (const session of sessions) session.handleProcessExit(failure);
   }
 

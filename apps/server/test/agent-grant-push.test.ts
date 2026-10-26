@@ -32,6 +32,17 @@ describe('Grant notification actions', () => {
     expect(w.openWindow).toHaveBeenCalledWith('/');
     expect(w.fetch).not.toHaveBeenCalled();
   });
+  it('shows an agent question without grant actions and opens its conversation on click', async () => {
+    const w = worker();
+    await w.run('push', { data: { json: () => ({ title: 'Agent question', body: 'Strict or flexible?', questionId: 'session-1:7', url: '/projects/demo/codex/abc' }) } });
+    expect(w.showNotification).toHaveBeenCalledWith('Agent question', expect.objectContaining({
+      tag: 'agent-question-session-1:7', data: { url: '/projects/demo/codex/abc' }, body: 'Strict or flexible?', requireInteraction: true,
+    }));
+    expect(w.showNotification.mock.calls[0]![1]).not.toHaveProperty('actions');
+    await w.run('notificationclick', { action: '', notification: { close: vi.fn(), data: { url: '/projects/demo/codex/abc' } } });
+    expect(w.openWindow).toHaveBeenCalledWith('/projects/demo/codex/abc');
+    expect(w.fetch).not.toHaveBeenCalled();
+  });
   it('shows plain scope and the Approve, Edit and Deny actions from a push event', async () => {
     const w = worker(); await w.run('push', { data: { json: () => ({ title: 'Agent permission request', body: 'Complete the planner overnight', grantId: 'grant-id', url: '/grants?request=grant-id' }) } });
     expect(w.showNotification).toHaveBeenCalledWith('Agent permission request', expect.objectContaining({ body: 'Complete the planner overnight',

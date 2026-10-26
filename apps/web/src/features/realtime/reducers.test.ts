@@ -158,6 +158,19 @@ describe('realtime reducers', () => {
     });
   });
 
+  it('shows an open question from a session update and drops it once the update no longer carries one', () => {
+    const request = {
+      requestId: 'q1', kind: 'question' as const, summary: 'Strict or flexible?', openedAt: baseTime,
+      questions: [{ id: 'schema', question: 'Strict or flexible?', options: [{ label: 'Strict' }] }],
+    };
+    const current = conversationTimeline({ conversationRef: 'history-one', boundSession: session({ conversationRef: 'history-one', transport: 'structured' }) });
+    const asking = applySessionUpdateToTimeline(current, session({ conversationRef: 'history-one', transport: 'structured', pendingRequests: [request] }));
+    expect(asking?.boundSession?.pendingRequests).toEqual([request]);
+    // The update after the answer has no pendingRequests key at all; the old list must not survive the merge.
+    const answered = applySessionUpdateToTimeline(asking, session({ conversationRef: 'history-one', transport: 'structured' }));
+    expect(answered?.boundSession?.pendingRequests).toBeUndefined();
+  });
+
   it('removes stale pending aliases when a bound session adopts history', () => {
     const activeSession = session({ conversationRef: 'pending:one' });
     const current = tree([

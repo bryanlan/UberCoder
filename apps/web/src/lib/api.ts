@@ -16,6 +16,7 @@ import type {
   SessionScreen,
   SessionInputResponse,
   SessionModelProfileResponse,
+  SessionRequestResponse,
   UiPreferences,
   SessionKeystrokeRequest,
   SessionTransport,
@@ -218,6 +219,13 @@ export const api = {
     ),
   sendKeystrokes: (sessionId: string, body: SessionKeystrokeRequest, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, { method: 'POST', body: JSON.stringify(body) }, csrfToken),
+  /** Answer (or decline) a question an app-server session is waiting on. */
+  answerSessionRequest: (sessionId: string, requestId: string, body: SessionRequestResponse, csrfToken?: string) =>
+    request<{ session: BoundSession }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/requests/${encodeURIComponent(requestId)}`,
+      { method: 'POST', body: JSON.stringify(body) },
+      csrfToken,
+    ),
   cancelQueuedInput: (sessionId: string, requestId: string, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/queued-inputs/${encodeURIComponent(requestId)}`, { method: 'DELETE' }, csrfToken),
   setSessionModelProfile: (sessionId: string, profile: ModelProfileKey, csrfToken?: string) =>

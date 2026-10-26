@@ -10,7 +10,7 @@ import { AppDatabase } from '../src/db/database.js';
 import { AuthService } from '../src/security/auth-service.js';
 import { ImageStore } from '../src/images/store.js';
 import { registerImageRoutes } from '../src/images/routes.js';
-import { imageMessageDisplay, imagePromptDisplay, imagePromptSuffix } from '../src/images/prompt.js';
+import { imageMessageDisplay, imagePromptDisplay, imagePromptFiles, imagePromptSuffix } from '../src/images/prompt.js';
 import { registerSessionRoutes } from '../src/routes/sessions.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
@@ -163,5 +163,36 @@ describe('clipboard image backend', () => {
       expect(f.sendKeystrokes).not.toHaveBeenCalled();
       expect(response.json().recordedUserInput).toMatchObject({ text: 'Check this', images: [image] });
     } finally { await f.close(); }
+  });
+});
+
+describe('imagePromptFiles', () => {
+  const row = (id = '5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d') => ({ id, mediaType: 'image/png' as const, name: 'a.png', sizeBytes: 3, width: 2, height: 2, path: `/data/images/${id}.png` });
+
+  it('lists the stored files an envelope names, in order, with their types', () => {
+    const jpeg = { ...row('6f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d'), mediaType: 'image/jpeg' as const, path: '/data/images/6f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.jpg' };
+    const text = `Compare${imagePromptSuffix([row(), jpeg], 'codex')}`;
+    expect(imagePromptFiles(text)).toEqual([
+      { path: '/data/images/5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.png', mimeType: 'image/png' },
+      { path: '/data/images/6f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.jpg', mimeType: 'image/jpeg' },
+    ]);
+  });
+
+  it('finds nothing in a prompt without an envelope or with a damaged one', () => {
+    expect(imagePromptFiles('plain text')).toEqual([]);
+    const text = `Look${imagePromptSuffix([row()], 'claude')}`;
+    expect(imagePromptFiles(text.replace('5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.png', 'x.png'))).toEqual([]);
+    expect(imagePromptFiles(text.replace('"id":"5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d"', '"id":"nope"'))).toEqual([]);
+  });
+
+  it('refuses a row whose path is relative, outside store naming or for another type', () => {
+    for (const path of ['images/5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.png', '/etc/passwd', '/data/images/5f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d.jpg']) {
+      expect(imagePromptFiles(`x${imagePromptSuffix([{ ...row(), path }], 'codex')}`)).toEqual([]);
+    }
+  });
+
+  it('refuses the whole envelope when one row is not a stored file', () => {
+    const text = `x${imagePromptSuffix([row(), { ...row('7f8d3a52-6f1e-4f6b-9a4e-9c0f1a2b3c4d'), path: '/etc/passwd' }], 'codex')}`;
+    expect(imagePromptFiles(text)).toEqual([]);
   });
 });

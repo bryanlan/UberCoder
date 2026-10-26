@@ -5,12 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { createCodexAppServerPlugin } from '../../src/providers/transport/codex/index.js';
 import type { CodexAppServerInstance } from '../../src/providers/transport/codex/app-server-instance.js';
 import type { CodexTimings } from '../../src/providers/transport/codex/app-server-session.js';
+import { createLineTransportFactory, terminateHost } from '../../src/providers/transport/line-transport.js';
 import type { OpenOptions, PluginContext, TransportEvent, TransportSession } from '../../src/providers/transport/types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE_APP_SERVER = path.join(here, 'fake-app-server.mjs');
 export const REPLAY_APP_SERVER = path.join(here, 'replay-app-server.mjs');
 export const FIXTURES = path.join(here, 'codex-fixtures');
+/** The session host program, run from source (Node strips the types). Plugin tests use it only where they set `host: true`. */
+export const HOST_PROGRAM = path.join(here, '../../src/providers/transport/session-host.ts');
 
 export const FAST_TIMINGS: Partial<CodexTimings> = {
   requestTimeoutMs: 5_000,
@@ -76,6 +79,15 @@ export interface FakeSetup {
   context: TestContext;
   instance: CodexAppServerInstance;
   command: string[];
+  /** The Console runtime directory the session host files live under (`<runtime>/structured/hosts`). */
+  hostRuntimeDir: string;
+  /** Ends the session host and its app-server, if this setup started one. Stdio setups have nothing to end. */
+  stopHost(): Promise<void>;
+}
+
+export interface SetupOptions {
+  /** Run the app-server behind a real session host, so it outlives the instance. Default: directly over stdio. */
+  host?: boolean;
 }
 
 export function writeScenario(dir: string, scenario: Scenario): { scenarioPath: string; logFile: string } {
@@ -85,14 +97,37 @@ export function writeScenario(dir: string, scenario: Scenario): { scenarioPath: 
   return { scenarioPath, logFile };
 }
 
-export function setupFake(scenario: Scenario, timings: Partial<CodexTimings> = FAST_TIMINGS, baseEnv: NodeJS.ProcessEnv = {}): FakeSetup {
+/** A line transport factory that puts the app-server behind a session host under `runtimeDir`. */
+export function hostTransportFactory(runtimeDir: string, context: Pick<PluginContext, 'log'>) {
+  return createLineTransportFactory({ runtimeDir, log: context.log, hostProgramPath: HOST_PROGRAM });
+}
+
+export function setupFake(scenario: Scenario, timings: Partial<CodexTimings> = FAST_TIMINGS, baseEnv: NodeJS.ProcessEnv = {}, options: SetupOptions = {}): FakeSetup {
   const dir = makeTempDir();
   const { scenarioPath, logFile } = writeScenario(dir, scenario);
   const command = [process.execPath, FAKE_APP_SERVER, scenarioPath];
-  const context = makeContext(path.join(dir, 'runtime', 'structured', 'codex'));
+  const hostRuntimeDir = path.join(dir, 'runtime');
+  const context = makeContext(path.join(hostRuntimeDir, 'structured', 'codex'));
+  if (options.host) context.lineTransport = hostTransportFactory(hostRuntimeDir, context);
   const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH, ...baseEnv }, clientVersion: '9.9.9' });
   const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
-  return { dir, scenarioPath, logFile, context, instance, command };
+  const stopHost = async (): Promise<void> => {
+    if (options.host) await terminateHost(hostRuntimeDir, 'codex', context.log, { closeGraceMs: 300, termGraceMs: 300, staleTermGraceMs: 300 });
+  };
+  return { dir, scenarioPath, logFile, context, instance, command, hostRuntimeDir, stopHost };
+}
+
+/**
+ * A new backend over the same host: a new plugin instance and a new line transport factory with no memory of the
+ * old ones, the same database (meta) and runtime. The old instance is not disposed here; the test decides how it ended.
+ */
+export function restartBackend(setup: FakeSetup, timings: Partial<CodexTimings> = FAST_TIMINGS): { instance: CodexAppServerInstance; context: TestContext } {
+  const context = makeContext(setup.context.runtimeDir);
+  for (const [key, value] of setup.context.metaStore) context.metaStore.set(key, value);
+  context.lineTransport = hostTransportFactory(setup.hostRuntimeDir, context);
+  const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' });
+  const instance = plugin.create({ enabled: true, command: setup.command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
+  return { instance, context };
 }
 
 export function setupReplay(fixture: string, extraEnv: NodeJS.ProcessEnv = {}): FakeSetup & { replayLog: string } {
@@ -101,14 +136,15 @@ export function setupReplay(fixture: string, extraEnv: NodeJS.ProcessEnv = {}): 
   const stateFile = path.join(dir, 'replay-state.json');
   const transcript = path.join(FIXTURES, fixture, 'codex_transcript.ndjson');
   const command = [process.execPath, REPLAY_APP_SERVER, transcript, stateFile];
-  const context = makeContext(path.join(dir, 'runtime', 'structured', 'codex'));
+  const hostRuntimeDir = path.join(dir, 'runtime');
+  const context = makeContext(path.join(hostRuntimeDir, 'structured', 'codex'));
   const plugin = createCodexAppServerPlugin({
     timings: FAST_TIMINGS,
     baseEnv: { PATH: process.env.PATH, REPLAY_LOG: replayLog, REPLAY_OPTIONAL_METHODS: 'account/rateLimits/read,thread/backgroundTerminals/list', ...extraEnv },
     clientVersion: '9.9.9',
   });
   const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
-  return { dir, scenarioPath: transcript, logFile: replayLog, replayLog, context, instance, command };
+  return { dir, scenarioPath: transcript, logFile: replayLog, replayLog, context, instance, command, hostRuntimeDir, stopHost: async () => undefined };
 }
 
 export function readLog(file: string): LogLine[] {

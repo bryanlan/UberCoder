@@ -1,24 +1,20 @@
-// Plain-TypeScript JSON-RPC client over the stdio of a child process (newline-delimited JSON, no `jsonrpc`
-// field), ported from the patterns in T3 Code's `packages/effect-codex-app-server/src/protocol.ts`
+// Plain-TypeScript JSON-RPC client over a `LineTransport` (newline-delimited JSON, no `jsonrpc` field), ported from
+// the patterns in T3 Code's `packages/effect-codex-app-server/src/protocol.ts`
 // (MIT, Copyright (c) 2026 T3 Tools Inc.; see THIRD_PARTY_NOTICES.md):
-//   - a line splitter with a per-line byte cap and `\r` stripping;
 //   - a table of pending requests keyed by numeric id starting at 1;
 //   - routing of incoming frames by shape (method + id = server request, method only = notification,
 //     id + result/error = response);
-//   - every pending request fails when the process ends.
-// Differences: per-request timeouts, a bounded stderr tail, an explicit staged `close()`, and server
-// request handlers that always answer (an unknown method gets a `-32601` reply).
+//   - every pending request fails when the channel ends.
+// Differences: per-request timeouts, and server request handlers that always answer (an unknown method gets a
+// `-32601` reply). Starting the process, line splitting, the stderr tail and the staged close belong to the
+// transport (`../line-transport.ts`): a stdio child, or a session host that outlives the Console backend.
 
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { transportStderrTail, type LineTransportExit } from '../line-transport.js';
+import { NotSentError, type LineTransport } from '../types.js';
 import { redactedLogValue, redactFreeText } from './redact.js';
 
-export const DEFAULT_MAX_LINE_BYTES = 128 * 1024 * 1024;
-export const DEFAULT_STDERR_TAIL_BYTES = 64 * 1024;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-export const DEFAULT_CLOSE_GRACE_MS = 5_000;
 export const MAX_CONCURRENT_SERVER_REQUEST_HANDLERS = 32;
-/** After `exit`, wait this long for the stdout pipe to drain before the exit is final. */
-const EXIT_FLUSH_MS = 200;
 
 export const JSON_RPC_METHOD_NOT_FOUND = -32601;
 export const JSON_RPC_INTERNAL_ERROR = -32603;
@@ -35,11 +31,13 @@ export interface JsonRpcNotification {
 export interface JsonRpcExit {
   code: number | null;
   signal: NodeJS.Signals | null;
-  /** True when {@link JsonRpcClient.close} was called before the process ended. */
+  /** `exited`: the process ended. `disconnected`: the channel to a session host dropped; the process may still be running. */
+  reason: 'exited' | 'disconnected';
+  /** True when {@link JsonRpcClient.close} was called before the channel ended. */
   expected: boolean;
   /** Last bytes of stderr (ANSI stripped). */
   stderrTail: string;
-  /** Set when the client ended the connection itself (oversized line). */
+  /** Set when the connection was ended by the channel itself (oversized line, another client took over the host). */
   error?: Error;
 }
 
@@ -67,25 +65,9 @@ export interface JsonRpcLogger {
   warn?(fields: object, message: string): void;
 }
 
-export interface JsonRpcSpawnOptions {
-  /** argv; `command[0]` is the executable. */
-  command: string[];
-  cwd: string;
-  env: NodeJS.ProcessEnv;
+export interface JsonRpcClientOptions {
   log?: JsonRpcLogger;
-  maxLineBytes?: number;
-  stderrTailBytes?: number;
   defaultRequestTimeoutMs?: number;
-  /** How long `close()` waits after ending stdin before SIGTERM. */
-  closeGraceMs?: number;
-  /** How long `close()` waits after SIGTERM before SIGKILL. */
-  termGraceMs?: number;
-  /**
-   * Start the process as the leader of its own process group, and send `close()`'s SIGTERM and SIGKILL to the whole
-   * group. A launcher (the npm `codex` is a Node script) runs the real server as its child; a signal to the launcher
-   * alone does not end a child that ignores the forwarded SIGTERM, but the group signal reaches both.
-   */
-  ownProcessGroup?: boolean;
 }
 
 /** The server answered a request with a JSON-RPC error. */
@@ -102,15 +84,15 @@ export class JsonRpcRequestError extends Error {
   }
 }
 
-/** The process ended (or its stdin was closed) while a request was pending or being sent. */
+/** The channel ended (the process exited or the connection to its session host dropped) while a request was pending or being sent. */
 export class JsonRpcExitError extends Error {
   readonly exit: JsonRpcExit;
-  /** False when the request was refused before any byte was written, so it certainly did not reach the process. */
+  /** False when the request was refused before any byte was written, so it certainly did not reach the process. A request already written when a session host connection dropped is `true`: the host may have passed it on. */
   readonly sent: boolean;
   constructor(exit: JsonRpcExit, message?: string, sent = true) {
     // The message can become a conversation status line, so it names only how the process ended; the redacted
     // stderr tail stays on `exit.stderrTail` and in `describeExit` for the server log.
-    super(message ?? `The process ended (${exitReason(exit)}).`);
+    super(message ?? (exit.reason === 'disconnected' ? `The connection ended (${exitReason(exit)}).` : `The process ended (${exitReason(exit)}).`));
     this.name = 'JsonRpcExitError';
     this.exit = exit;
     this.sent = sent;
@@ -155,69 +137,18 @@ export class JsonRpcReplyError extends Error {
   }
 }
 
-/** How the process ended, in one short phrase and without any process output: "exit code 1", "signal SIGKILL". */
+/** How the process ended, in one short phrase and without any process output: "exit code 1", "signal SIGKILL", "the connection to the session host was lost". */
 export function exitReason(exit: JsonRpcExit): string {
   if (exit.error) return exit.error.message;
+  if (exit.reason === 'disconnected') return 'the connection to the session host was lost';
   return exit.signal ? `signal ${exit.signal}` : `exit code ${exit.code ?? 'unknown'}`;
 }
 
 /** One-line description of how the process ended, with the last stderr lines (redacted) when there are any. For logs and errors, not for conversation lines. */
 export function describeExit(exit: JsonRpcExit): string {
-  const how = exit.signal ? `signal ${exit.signal}` : `code ${exit.code ?? 'unknown'}`;
+  const how = exit.error ? exit.error.message : exit.reason === 'disconnected' ? 'the connection to the session host was lost' : exit.signal ? `signal ${exit.signal}` : `code ${exit.code ?? 'unknown'}`;
   const tail = exit.stderrTail.replace(ANSI_PATTERN, '').trim().split('\n').slice(-3).join(' | ');
-  return redactFreeText(`The process ended (${how})${tail ? `: ${tail}` : '.'}`, 600);
-}
-
-/** Splits a byte stream into lines. A line above `maxBytes` (delimiter excluded) is reported once and ends the splitter. */
-export class LineSplitter {
-  private parts: Buffer[] = [];
-  private size = 0;
-  private dead = false;
-
-  constructor(
-    private readonly maxBytes: number,
-    private readonly onLine: (line: string) => void,
-    private readonly onOverflow: (bytes: number) => void,
-  ) {}
-
-  get overflowed(): boolean {
-    return this.dead;
-  }
-
-  push(chunk: Buffer): void {
-    let start = 0;
-    while (start < chunk.length && !this.dead) {
-      const newline = chunk.indexOf(0x0a, start);
-      const end = newline === -1 ? chunk.length : newline;
-      const segment = chunk.subarray(start, end);
-      this.size += segment.length;
-      if (this.size > this.maxBytes) {
-        this.dead = true;
-        this.parts = [];
-        this.onOverflow(this.size);
-        return;
-      }
-      if (segment.length > 0) this.parts.push(segment);
-      if (newline === -1) return;
-      this.emitLine();
-      start = newline + 1;
-    }
-  }
-
-  /** Flushes a final line that had no trailing newline. */
-  end(): void {
-    if (this.dead || this.size === 0) return;
-    this.emitLine();
-  }
-
-  private emitLine(): void {
-    const buffer = this.parts.length === 1 ? this.parts[0]! : Buffer.concat(this.parts);
-    this.parts = [];
-    this.size = 0;
-    let line = buffer.toString('utf8');
-    if (line.endsWith('\r')) line = line.slice(0, -1);
-    this.onLine(line);
-  }
+  return redactFreeText(`The ${exit.reason === 'disconnected' ? 'connection' : 'process'} ended (${how})${tail ? `: ${tail}` : '.'}`, 600);
 }
 
 interface PendingRequest {
@@ -247,98 +178,31 @@ export class JsonRpcClient {
   /** Counters for diagnostics and tests. */
   readonly stats = { notifications: 0, serverRequests: 0, unroutableFrames: 0, parseFailures: 0 };
 
-  private readonly child: ChildProcessWithoutNullStreams;
+  private readonly transport: LineTransport;
   private readonly log: JsonRpcLogger;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly notificationHandlers = new Set<(notification: JsonRpcNotification) => void>();
   private readonly exitHandlers = new Set<(exit: JsonRpcExit) => void>();
   private readonly requestHandlers = new Map<string, JsonRpcServerRequestHandler>();
-  private readonly splitter: LineSplitter;
-  private readonly stderrChunks: Buffer[] = [];
-  private stderrBytes = 0;
-  private readonly stderrLimit: number;
   private readonly defaultTimeoutMs: number;
-  private readonly closeGraceMs: number;
-  private readonly termGraceMs: number;
-  private readonly ownProcessGroup: boolean;
   private nextId = 1;
   private activeServerRequests = 0;
-  private spawned = false;
   private closing = false;
   private closePromise: Promise<void> | undefined;
-  private exitFlushTimer: NodeJS.Timeout | undefined;
-  private rawExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  private fatal: Error | undefined;
   private finished: JsonRpcExit | undefined;
   private finishedResolvers: Array<() => void> = [];
-  private readonly ready: Promise<void>;
-  private resolveReady: () => void = () => undefined;
-  private rejectReady: (error: Error) => void = () => undefined;
 
-  private constructor(child: ChildProcessWithoutNullStreams, options: JsonRpcSpawnOptions) {
-    this.child = child;
+  /** Takes over the transport: from here on this client is its only reader and writer. */
+  constructor(transport: LineTransport, options: JsonRpcClientOptions = {}) {
+    this.transport = transport;
     this.log = options.log ?? {};
-    this.stderrLimit = options.stderrTailBytes ?? DEFAULT_STDERR_TAIL_BYTES;
     this.defaultTimeoutMs = options.defaultRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    this.closeGraceMs = options.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
-    this.termGraceMs = options.termGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
-    this.ownProcessGroup = options.ownProcessGroup === true;
-    this.ready = new Promise<void>((resolve, reject) => {
-      this.resolveReady = resolve;
-      this.rejectReady = reject;
-    });
-    this.ready.catch(() => undefined); // spawn() awaits it; avoid an unhandled rejection if nobody does
-    this.splitter = new LineSplitter(
-      options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES,
-      (line) => this.handleLine(line),
-      (bytes) => this.failFatal(new JsonRpcProtocolError(`An incoming message exceeded the line limit (${bytes} bytes read).`)),
-    );
-
-    child.stdout.on('data', (chunk: Buffer) => this.splitter.push(chunk));
-    child.stdout.on('end', () => this.splitter.end());
-    child.stderr.on('data', (chunk: Buffer) => this.appendStderr(chunk));
-    child.stdin.on('error', (error) => this.log.debug?.({ error: error.message }, 'codex app-server stdin error'));
-    child.once('spawn', () => {
-      this.spawned = true;
-      this.resolveReady();
-    });
-    child.on('error', (error) => {
-      if (this.spawned) {
-        this.log.warn?.({ error: error.message }, 'codex app-server process error');
-        return;
-      }
-      this.finish({ code: null, signal: null, error });
-      this.rejectReady(new JsonRpcSpawnError(options.command[0] ?? '', error));
-    });
-    child.once('exit', (code, signal) => {
-      this.rawExit = { code, signal };
-      // The stdout pipe can outlive the process (an inherited descriptor); do not wait for it forever.
-      this.exitFlushTimer = setTimeout(() => this.finish(), EXIT_FLUSH_MS);
-      this.exitFlushTimer.unref();
-    });
-    child.once('close', (code, signal) => {
-      this.rawExit ??= { code, signal };
-      this.finish();
-    });
-  }
-
-  /** Spawns the process and resolves once it exists. Rejects with {@link JsonRpcSpawnError} (for example ENOENT). */
-  static async spawn(options: JsonRpcSpawnOptions): Promise<JsonRpcClient> {
-    const [executable, ...args] = options.command;
-    if (!executable) throw new JsonRpcSpawnError('', new Error('The command is empty.'));
-    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], detached: options.ownProcessGroup === true });
-    const client = new JsonRpcClient(child, options);
-    await client.ready;
-    return client;
+    transport.onLine((line) => this.handleLine(line));
+    transport.onExit((info) => this.finish(info));
   }
 
   get pid(): number | undefined {
-    return this.child.pid;
-  }
-
-  /** The id of the process group the process leads (equal to its pid), when it was started with `ownProcessGroup`. */
-  get processGroup(): number | undefined {
-    return this.ownProcessGroup ? this.child.pid : undefined;
+    return this.transport.pid;
   }
 
   get exited(): boolean {
@@ -351,7 +215,7 @@ export class JsonRpcClient {
 
   /** Last bytes of stderr with ANSI colour codes removed. Diagnostics only; never parse it. */
   stderrTail(): string {
-    return Buffer.concat(this.stderrChunks).toString('utf8').replace(ANSI_PATTERN, '');
+    return transportStderrTail(this.transport);
   }
 
   request<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): Promise<T> {
@@ -377,19 +241,23 @@ export class JsonRpcClient {
         }, timeoutMs);
       }
       this.pending.set(id, entry);
-      try {
-        this.writeFrame({ id, method, ...(params !== undefined ? { params } : {}) });
-      } catch (error) {
+      this.writeFrame({ id, method, ...(params !== undefined ? { params } : {}) }).catch((error: unknown) => {
+        // Only a channel that certainly wrote nothing makes the request "not sent". Any other write failure leaves the
+        // outcome unknown: the request stays pending and the channel's exit fails it as sent.
+        if (!(error instanceof NotSentError) || this.pending.get(id) !== entry) return;
         this.pending.delete(id);
         if (entry.timer) clearTimeout(entry.timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
+        reject(this.exitError(false));
+      });
     });
   }
 
-  notify(method: string, params?: unknown): void {
-    if (this.finished) throw this.exitError();
-    this.writeFrame({ method, ...(params !== undefined ? { params } : {}) });
+  /** Sends a notification. Rejects with {@link JsonRpcExitError} (`sent: false`) when the channel has ended. */
+  notify(method: string, params?: unknown): Promise<void> {
+    if (this.finished) return Promise.reject(this.exitError(false));
+    return this.writeFrame({ method, ...(params !== undefined ? { params } : {}) }).catch((error: unknown) => {
+      throw error instanceof NotSentError ? this.exitError(false) : error;
+    });
   }
 
   /** Subscribes to server notifications. Returns the unsubscribe function. */
@@ -398,7 +266,7 @@ export class JsonRpcClient {
     return () => this.notificationHandlers.delete(handler);
   }
 
-  /** Subscribes to the process exit. Fires once. */
+  /** Subscribes to the end of the channel. Fires once. */
   onExit(handler: (exit: JsonRpcExit) => void): () => void {
     if (this.finished) {
       handler(this.finished);
@@ -414,51 +282,24 @@ export class JsonRpcClient {
   }
 
   /**
-   * Ends stdin and waits up to `closeGraceMs` for the process to exit, then sends SIGTERM and waits up to
-   * `termGraceMs`, then SIGKILL. Resolves once the process is gone (or after a final best-effort wait).
+   * Closes the channel and resolves once it is gone. What that does to the process is the transport's: a stdio child
+   * is ended (stdin EOF, SIGTERM, SIGKILL, each after a grace period); a session host connection only disconnects, the
+   * process keeps running, unless `terminate` asks the host to end it.
    */
-  close(): Promise<void> {
-    this.closePromise ??= this.closeStaged();
+  close(options: { terminate?: boolean } = {}): Promise<void> {
+    this.closePromise ??= this.closeNow(options);
     return this.closePromise;
   }
 
-  private async closeStaged(): Promise<void> {
+  private async closeNow(options: { terminate?: boolean }): Promise<void> {
     this.closing = true;
     if (this.finished) return;
     try {
-      this.child.stdin.end();
-    } catch {
-      // Already closed.
+      await this.transport.close(options);
+    } catch (error) {
+      this.log.warn?.({ error: error instanceof Error ? error.message : String(error) }, 'closing the codex app-server connection failed');
     }
-    if (await this.waitFinished(this.closeGraceMs)) return;
-    this.log.warn?.({ pid: this.pid }, 'codex app-server ignored stdin EOF; sending SIGTERM');
-    this.signal('SIGTERM');
-    if (await this.waitFinished(this.termGraceMs)) return;
-    this.log.warn?.({ pid: this.pid }, 'codex app-server ignored SIGTERM; sending SIGKILL');
-    this.signal('SIGKILL');
     await this.waitFinished(2_000);
-  }
-
-  /**
-   * Signals the process, or its whole process group when it leads one. The group is signalled only while the
-   * leader has not been reaped, because its pid is then still ours; if the group signal fails the process alone
-   * is signalled.
-   */
-  private signal(signal: NodeJS.Signals): void {
-    const group = this.processGroup;
-    if (group !== undefined && this.rawExit === undefined) {
-      try {
-        process.kill(-group, signal);
-        return;
-      } catch {
-        // No such group, or not permitted: fall back to the process itself.
-      }
-    }
-    try {
-      this.child.kill(signal);
-    } catch {
-      // Already gone.
-    }
   }
 
   private waitFinished(ms: number): Promise<boolean> {
@@ -472,58 +313,29 @@ export class JsonRpcClient {
     });
   }
 
-  private appendStderr(chunk: Buffer): void {
-    this.stderrChunks.push(chunk);
-    this.stderrBytes += chunk.length;
-    while (this.stderrBytes > this.stderrLimit && this.stderrChunks.length > 0) {
-      const first = this.stderrChunks[0]!;
-      const excess = this.stderrBytes - this.stderrLimit;
-      if (first.length <= excess) {
-        this.stderrChunks.shift();
-        this.stderrBytes -= first.length;
-      } else {
-        this.stderrChunks[0] = first.subarray(excess);
-        this.stderrBytes -= excess;
-      }
-    }
-  }
-
-  private writeFrame(frame: Record<string, unknown>): void {
-    if (this.finished || this.child.stdin.destroyed || !this.child.stdin.writable) throw this.exitError(false);
-    const line = `${JSON.stringify(frame)}\n`;
-    this.log.debug?.(this.describeFrame('out', frame, line.length), 'codex protocol');
-    this.child.stdin.write(line, (error) => {
-      if (error) this.log.debug?.({ error: error.message }, 'codex app-server stdin write failed');
-    });
+  private writeFrame(frame: Record<string, unknown>): Promise<void> {
+    const line = JSON.stringify(frame);
+    this.log.debug?.(this.describeFrame('out', frame, line.length + 1), 'codex protocol');
+    return this.transport.write(line);
   }
 
   private exitError(sent = true): JsonRpcExitError {
-    const exit = this.finished ?? { code: null, signal: null, expected: this.closing, stderrTail: this.stderrTail() };
+    const exit = this.finished ?? { code: null, signal: null, reason: 'exited' as const, expected: this.closing, stderrTail: this.stderrTail() };
     return new JsonRpcExitError(exit, exit.error ? exit.error.message : undefined, sent);
   }
 
-  private failFatal(error: Error): void {
-    if (this.fatal) return;
-    this.fatal = error;
-    this.log.warn?.({ error: error.message, pid: this.pid }, 'codex app-server connection failed');
-    this.signal('SIGKILL');
-    this.finish({ code: null, signal: 'SIGKILL', error });
-  }
-
-  private finish(override?: { code: number | null; signal: NodeJS.Signals | null; error?: Error }): void {
+  private finish(info: LineTransportExit): void {
     if (this.finished) return;
-    if (this.exitFlushTimer) clearTimeout(this.exitFlushTimer);
-    const raw = override ?? this.rawExit ?? { code: null, signal: null };
-    const error = override?.error ?? this.fatal;
     const exit: JsonRpcExit = {
-      code: raw.code,
-      signal: raw.signal,
+      code: info.code,
+      signal: info.signal as NodeJS.Signals | null,
+      reason: info.reason,
       expected: this.closing,
       stderrTail: this.stderrTail(),
-      ...(error ? { error } : {}),
+      ...(info.error ? { error: info.error } : {}),
     };
     this.finished = exit;
-    const failure = new JsonRpcExitError(exit, error ? error.message : undefined);
+    const failure = new JsonRpcExitError(exit, info.error ? info.error.message : undefined);
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const entry of pending) {
@@ -660,19 +472,11 @@ export class JsonRpcClient {
   }
 
   private reply(id: JsonRpcId, result: unknown): void {
-    try {
-      this.writeFrame({ id, result });
-    } catch {
-      // The process is gone; nobody waits for the answer.
-    }
+    this.writeFrame({ id, result }).catch(() => undefined); // the channel is gone; nobody waits for the answer
   }
 
   private replyError(id: JsonRpcId, code: number, message: string, data?: unknown): void {
-    try {
-      this.writeFrame({ id, error: { code, message, ...(data !== undefined ? { data } : {}) } });
-    } catch {
-      // The process is gone; nobody waits for the answer.
-    }
+    this.writeFrame({ id, error: { code, message, ...(data !== undefined ? { data } : {}) } }).catch(() => undefined);
   }
 
   /** Method, id and size only. Frames can carry whole command outputs and diffs, so they are never logged. */
