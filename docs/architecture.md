@@ -572,11 +572,12 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
 
 - Transport column: `bound_sessions.transport` (`tmux` by default, `structured`; schema 19) is chosen at
   bind time and persisted on the row, so turning the flag off later leaves existing rows working.
-  Structured rows store the sentinel tmux name `structured:<sessionId>` (a marker only: tmux 3.4 rewrites
-  the colon and would create a session), have no `raw_log_path`, and keep the app-server process id in
-  `pid`. `SessionManager` stays the lifecycle owner and dispatches on `session.transport` at each
-  tmux-dependent entry point. A structured row never reaches a tmux call; tests enforce this by counting
-  tmux calls on a fake client.
+  Structured rows store the sentinel tmux name `structured:<sessionId>`, have no `raw_log_path`, and keep
+  the app-server process id in `pid`. tmux 3.4 does not reject the colon (it would create a session named
+  `structured_<id>`), so the tmux client refuses any name with the `structured:` prefix in every method
+  (`assertTmuxSessionName`). `SessionManager` stays the lifecycle owner and dispatches on `session.transport`
+  at each tmux-dependent entry point. A structured row never reaches a tmux call; tests enforce this by
+  counting calls on a fake client that applies the same guard.
 - Service: `sessions/structured/structured-session-service.ts` owns the loaded transport sessions, the
   active turn, the steer-versus-new-turn rule (human text steers a running turn, otherwise starts one),
   exactly-once turn terminals, interrupts and the provider process environment. It reports through
@@ -587,7 +588,11 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   `providers/transport/codex/` implements it with one shared `codex app-server` child per Console (stdio
   JSON-RPC) and one thread per conversation, routed by thread id. Plugin events carry no message bodies:
   durable history is still the Codex rollout, so transcript parsing, search and live-output
-  normalization are unchanged, and replayed events never move recency.
+  normalization are unchanged, and replayed events never move recency. The plugin starts the child through
+  `setpriv --pdeathsig TERM --`, so a crashed backend does not leave an app-server running a turn (the
+  service keeps `KillMode=process`). It records the child's pid, start ticks and boot id in the instance
+  meta, and the next backend ends a matching stale process before its first spawn. Without `setpriv` it
+  spawns the command directly.
 - Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
   A server request that still arrives (approval, elicitation, user-input question) is declined and
   recorded as a status event. There is no approval UI.
@@ -599,12 +604,20 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   `structuredSessions.<provider>.env` overrides them. The coordination MCP entry in
   `~/.codex/config.toml` pins its own `AGENT_COORD_RUNTIME`, so an isolated Console must override that
   per process (see `scripts/prove-structured-codex.mjs`).
+- Coordination liveness: a structured assignment is alive while a restorable bound structured row exists
+  for its thread, not while the shared process runs. A backend restart or an app-server exit therefore does
+  not disconnect the assignment or page its supervisor, because the thread loads on demand.
+- Granted restart: on a structured row it refuses while a turn runs ("Restart is waiting for the current
+  work to finish.") and never interrupts a human's turn. Otherwise it unloads the thread and starts the
+  restart prompt on a fresh load epoch.
 - Limits: pressure suspension skips structured rows (a shared process cannot be suspended per thread);
   the recovery and launch memory floors still apply. Image attachments, streamed assistant text and
   approval UI are not in slice 1.
-- Restart limitation: the stdio child ends with the backend. A running structured turn is lost on a
-  backend restart (RunRecovery reports `process_exited`); the next use starts a new app-server and resumes
-  the thread from its rollout. A socket-mode process that outlives the backend is a follow-up.
+- Restart limitation: the stdio child ends with the backend, also after a crash (through the `--pdeathsig`
+  launch). A running structured turn is lost on a backend restart (RunRecovery reports `process_exited`);
+  the next use starts a new app-server and resumes the thread from its rollout. After a restart an unloaded
+  row never reads as working, and a scheduled recovery or a half-restored row re-arms at boot. A socket-mode
+  process that outlives the backend is a follow-up.
 
 ## Provider run failures and bounded recovery
 

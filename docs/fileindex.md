@@ -325,8 +325,12 @@ Run recovery ownership (requires explicit unattended permission):
   events, instance, session) and the plugin registry.
 - `apps/server/src/providers/transport/codex/` — the `codex app-server` plugin: `jsonrpc.ts` (stdio
   JSON-RPC client), `protocol.ts` (wire shapes), `app-server-instance.ts` (shared child process, thread
-  routing, environment), `app-server-session.ts` (thread and turn lifecycle, event mapping, steer and
-  interrupt), `errors.ts`, `usage.ts` and `redact.ts` (ported from T3 Code; see `THIRD_PARTY_NOTICES.md`).
+  routing, environment, launch and stale-process reaping), `app-server-session.ts` (thread and turn
+  lifecycle, event mapping, steer and interrupt), `process-lifetime.ts` (process start-ticks identity, the
+  `setpriv --pdeathsig TERM` command wrapper and ending a recorded stale process), `errors.ts`, `usage.ts`
+  and `redact.ts` (ported from T3 Code; see `THIRD_PARTY_NOTICES.md`).
+- `apps/server/src/sessions/tmux-client.ts`: also holds `assertTmuxSessionName`, which makes every
+  `ShellTmuxClient` method refuse a `structured:` session name.
 - `apps/server/src/sessions/structured/structured-session-service.ts` — loaded sessions, active turn,
   steer-versus-turn policy, exactly-once terminals and process environment; `structured-run-monitor.ts`
   — run state for RunRecovery from turn events plus the rollout monitor.
@@ -337,8 +341,17 @@ Run recovery ownership (requires explicit unattended permission):
   Codex end to end against a fake app-server, process environment). Helpers: `test/helpers/structured-fixtures.ts`,
   `structured-session-fixture.ts`, `codex-harness.ts`, `fake-app-server.mjs`, `replay-app-server.mjs`
   and `codex-fixtures/`.
+- `apps/server/test/structured-codex-process-lifetime.test.ts`: the `setpriv` launch (a fake `setpriv` script),
+  `/proc` start-ticks identity, and ending a stale app-server (small node processes stand in for it).
+- `apps/server/test/structured-session-restart.test.ts`: a turn cut by a backend restart, scheduled recovery
+  and half-restored rows re-armed at boot, not-sent delivery, a turn id that runs again.
+- `apps/server/test/structured-session-env.test.ts`: the provider process environment (coordination
+  variables, configured `env`).
+- `apps/server/test/tmux-client-structured-guard.test.ts`: the tmux client refuses the `structured:` name in
+  every method.
 - `scripts/prove-structured-codex.mjs` — opt-in real-Codex proof of the whole lane through the HTTP API;
   evidence JSON under `test-results/structured-codex-proof/`.
-- Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register,
+- Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register and
+  structured liveness, `sessions/tmux-client.ts`,
   `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls
   move together; review them with `docs/structured-providers.md` and the structured tests.

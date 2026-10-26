@@ -221,7 +221,16 @@ Server coverage: `NODE_ENV=test npm run test -w @agent-console/server -- structu
 then `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane Sidebar api`. The structured tests use
 private SQLite files, the fake transport plugin, and a scripted fake `codex app-server` plus recorded wire
 transcripts (`test/helpers/fake-app-server.mjs`, `replay-app-server.mjs`, `codex-fixtures/`). They never start
-Codex or tmux, and the session tests assert that no tmux call is made for a structured row.
+Codex or tmux, and the session tests assert that no tmux call is made for a structured row. The fake tmux
+client applies the same `structured:` name guard as the real one, so a stray call fails the test.
+
+Review-fix suites: `NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-process-lifetime structured-session-restart structured-session-env tmux-client-structured-guard`.
+`structured-codex-process-lifetime` reads `/proc` (Linux only). It runs a shell script as a fake `setpriv`
+and starts small node processes as stand-ins for a stranded app-server, and kills them when it ends.
+`structured-session-restart` covers a turn cut by a backend restart (never working while unloaded, also after an
+idle sleep), scheduled recovery re-armed at boot, a half-restored `starting` row, not-sent delivery and a turn
+id that runs again. `tmux-client-structured-guard` checks every client method that takes a session name.
+`structured-session-env` checks the coordination variables and configured `env` that reach the provider process.
 
 Opt-in installed-binary check: `AGENT_CONSOLE_REAL_CODEX=1 NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-plugin`
 also runs a handshake against the host `codex app-server` (initialize, model list, account read). It opens no
