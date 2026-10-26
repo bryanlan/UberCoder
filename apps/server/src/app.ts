@@ -6,12 +6,12 @@ import fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
-import { PROVIDERS, type ProviderId } from '@agent-console/shared';
 import { ConfigService } from './config/service.js';
 import { AppDatabase } from './db/database.js';
 import { IndexingService } from './indexing/indexing-service.js';
 import { ProjectService } from './projects/project-service.js';
 import { ProviderRegistry } from './providers/registry.js';
+import { createClaudePlugin } from './providers/transport/claude/index.js';
 import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
 import { createLineTransportFactory } from './providers/transport/line-transport.js';
 import { TransportPluginRegistry } from './providers/transport/registry.js';
@@ -76,7 +76,10 @@ export async function buildApp(options: AppOptions = {}) {
   const search = new ConversationSearchService(db, projectService, liveOutputReader);
   let grants: GrantService;
   const transportPlugins = options.transportPlugins ?? new TransportPluginRegistry();
-  if (!options.transportPlugins) transportPlugins.register(createCodexAppServerPlugin());
+  if (!options.transportPlugins) {
+    transportPlugins.register(createCodexAppServerPlugin());
+    transportPlugins.register(createClaudePlugin());
+  }
   // Provider processes run behind session hosts that outlive this process, so a restart reconnects to them. Injected (test) plugins bring their own transport.
   const lineTransport = options.transportPlugins ? undefined : createLineTransportFactory({
     runtimeDir: config.runtimeDir,
@@ -93,7 +96,8 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
-    structuredSessions: config.structuredSessions,
+    structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude },
+    defaultTransport: config.structuredSessions.defaultTransport,
     lineTransport,
     // Hooks and the coordination MCP inside a structured thread find this Console the way tmux sessions do.
     structuredEnv: config.coordination.enabled ? { AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_CONFIG: configService.getConfigPath() } : undefined,
@@ -168,12 +172,13 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
-  // Structured lanes are fixed for the life of the process, like the rest of the session configuration.
-  const structuredConfig: Partial<Record<ProviderId, { enabled: boolean }>> = config.structuredSessions;
-  const structuredProviders = PROVIDERS.filter((provider) => structuredConfig[provider]?.enabled === true);
+  // Structured lanes are fixed for the life of the process, like the rest of the session configuration. A provider is
+  // advertised only when its lane is enabled and a transport plugin serves it.
+  const structuredProviders = sessions.enabledStructuredProviders();
   await registerProjectRoutes(app, authService, indexing, sessions, structuredProviders);
   await registerSearchRoutes(app, authService, search);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders,
+    config.structuredSessions.defaultTransport);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions, images);
   registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);

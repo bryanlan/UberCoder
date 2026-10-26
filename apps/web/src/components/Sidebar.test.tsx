@@ -191,6 +191,32 @@ describe('structured New Chat option', () => {
     expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'codex');
   });
 
+  it('offers Claude (headless) only when the tree advertises claude, and creates it with the structured transport', async () => {
+    const onNewConversation = renderSidebar(treeWith(['claude']));
+    const user = userEvent.setup();
+
+    await openProjectMenu(user);
+    expect(screen.queryByRole('button', { name: 'Codex (app-server)' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Claude (headless)' }));
+    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude', { transport: 'structured' });
+  });
+
+  it('adds Claude (headless) to the mobile new-chat picker beside Codex (app-server) when both are advertised', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    try {
+      const user = userEvent.setup();
+      const onNewConversation = renderSidebar(treeWith(['codex', 'claude']));
+      await user.click(screen.getByRole('button', { name: 'New chat' }));
+      expect(screen.getByRole('button', { name: 'Codex (app-server)' })).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Claude (headless)' }));
+      expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude', { transport: 'structured' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     ['an absent list', undefined],
     ['an empty list', []],

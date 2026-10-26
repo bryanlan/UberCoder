@@ -1,13 +1,14 @@
 import {
   CLAUDE_COST_PROFILES,
   CODEX_COST_PROFILES,
+  type AgentLaunchContext,
   type BoundSession,
   type ModelProfileKey,
   type PendingRequestSummary,
   type ProviderId,
   type SessionScreen,
 } from '@agent-console/shared';
-import { DEFAULT_STRUCTURED_PROVIDER_CONFIG, type StructuredProviderConfig } from '../../config/schema.js';
+import { defaultStructuredProviderConfig, type StructuredProviderConfig } from '../../config/schema.js';
 import { nowIso } from '../../lib/time.js';
 import type { TransportPluginRegistry } from '../../providers/transport/registry.js';
 import {
@@ -19,6 +20,7 @@ import {
   type ProviderFailure,
   type RequestResponse,
   type TransportEvent,
+  type TransportCapabilities,
   type TransportInstance,
   type TransportSession,
   type TurnInput,
@@ -58,6 +60,11 @@ export interface StructuredSessionServiceOptions {
    * MCP servers inside a thread reach this Console). The provider's configured `env` overrides it.
    */
   hostEnv?: Record<string, string>;
+  /**
+   * The standing-authority text for a session a grant launched (`launchContext` on its row). Passed to a plugin as
+   * `OpenOptions.appendSystemPrompt`; the text is the same one the tmux launch appends to the system prompt.
+   */
+  authorityContext?: (context: AgentLaunchContext) => string | undefined;
   logger?: { warn(bindings: object, message: string): void };
 }
 
@@ -156,8 +163,11 @@ export class StructuredSessionService {
   private readonly meta: PluginContext['meta'];
   private readonly callbacks: StructuredCallbacks;
   private readonly hostEnv: Record<string, string>;
+  private readonly authorityContext?: (context: AgentLaunchContext) => string | undefined;
   private readonly logger?: { warn(bindings: object, message: string): void };
   private readonly instances = new Map<string, TransportInstance>();
+  /** The context each instance was created with: a per-session conversation reads the coordination identity from it. */
+  private readonly contexts = new Map<string, PluginContext>();
   private readonly sessions = new Map<string, LoadedSession>();
   private readonly loading = new Map<string, Promise<'loaded' | 'unavailable'>>();
   private readonly failures = new Map<string, string>();
@@ -169,6 +179,7 @@ export class StructuredSessionService {
     this.meta = options.meta;
     this.callbacks = options.callbacks;
     this.hostEnv = options.hostEnv ?? {};
+    this.authorityContext = options.authorityContext;
     this.logger = options.logger;
   }
 
@@ -187,7 +198,20 @@ export class StructuredSessionService {
   }
 
   configFor(provider: ProviderId): StructuredProviderConfig {
-    return this.config[provider] ?? DEFAULT_STRUCTURED_PROVIDER_CONFIG;
+    return this.config[provider] ?? defaultStructuredProviderConfig(provider);
+  }
+
+  /**
+   * How the provider's processes are shared: one process for every conversation (`shared`) or one per conversation
+   * (`per-session`). Undefined when no plugin serves the provider. Decisions about the process (can memory pressure end it,
+   * does a release end it) follow this capability, never the plugin's name.
+   */
+  processModel(provider: ProviderId): TransportCapabilities['processModel'] | undefined {
+    try {
+      return this.instanceFor(provider).capabilities.processModel;
+    } catch {
+      return undefined;
+    }
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------------
@@ -200,8 +224,9 @@ export class StructuredSessionService {
     profile?: ModelProfileKey;
     model?: string;
     effort?: string;
+    launchContext?: AgentLaunchContext;
   }): Promise<{ nativeSessionId: string; transcriptPath?: string; pid?: number }> {
-    const state = await this.open(input.sessionId, input.provider, input.cwd, undefined, input.profile, { model: input.model, effort: input.effort });
+    const state = await this.open(input.sessionId, input.provider, input.cwd, undefined, input.profile, { model: input.model, effort: input.effort }, input.launchContext);
     return { nativeSessionId: state.transport.nativeSessionId, transcriptPath: this.transcriptPath(input.sessionId), pid: state.pid };
   }
 
@@ -212,7 +237,7 @@ export class StructuredSessionService {
     const nativeSessionId = session.resumeConversationRef ?? session.conversationRef;
     if (nativeSessionId.startsWith('pending:')) throw new StructuredUnavailableError('The conversation has no provider session id yet.');
     const state = await this.open(session.id, session.provider, cwd, nativeSessionId, sessionProfile(session),
-      { model: session.launchContext?.model, effort: session.launchContext?.effort });
+      { model: session.launchContext?.model, effort: session.launchContext?.effort }, session.launchContext);
     return { transcriptPath: this.transcriptPath(session.id), pid: state.pid };
   }
 
@@ -283,10 +308,12 @@ export class StructuredSessionService {
   async unload(session: Pick<BoundSession, 'id'>): Promise<void> {
     const state = this.sessions.get(session.id);
     if (!state) return;
+    // The host asked for this end, so the stopped state that follows is not a lost connection.
     state.closing = true;
     this.forget(state);
+    // Shared process: the thread leaves memory and the process keeps serving other threads. Per-session: the process is this
+    // conversation's alone, so unloading ends it (the transport confirms the exit) and the next load resumes by native id.
     try { await state.transport.unload(); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured unload failed.'); }
-    // A per-session process only ends when closed; a shared process keeps serving other threads.
     try { await state.transport.close('shutdown'); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured close failed.'); }
   }
 
@@ -298,7 +325,10 @@ export class StructuredSessionService {
     if (!state) return;
     state.closing = true;
     this.forget(state);
-    try { await state.transport.unload(); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured unload failed.'); }
+    // A per-session process ends with the release itself; a shared one drops the thread first and keeps running.
+    if (state.transport.capabilities.processModel !== 'per-session') {
+      try { await state.transport.unload(); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured unload failed.'); }
+    }
     await state.transport.close('release');
   }
 
@@ -447,8 +477,10 @@ export class StructuredSessionService {
     const plugin = this.registry.get(provider);
     if (!plugin) throw new StructuredUnavailableError(`No structured transport plugin is registered for ${provider}.`);
     const config = this.configFor(provider);
-    const instance = plugin.create({ ...config, env: { ...this.hostEnv, ...config.env } }, this.createContext(plugin.id));
+    const context = this.createContext(plugin.id);
+    const instance = plugin.create({ ...config, env: { ...this.hostEnv, ...config.env } }, context);
     this.instances.set(provider, instance);
+    this.contexts.set(provider, context);
     return instance;
   }
 
@@ -459,6 +491,7 @@ export class StructuredSessionService {
     nativeSessionId: string | undefined,
     profile: ModelProfileKey | undefined,
     fallbackModel: { model?: string; effort?: string },
+    launchContext: AgentLaunchContext | undefined,
   ): Promise<LoadedSession> {
     const instance = this.instanceFor(provider);
     const selected = profile ? profileTable(provider)[profile] : undefined;
@@ -468,7 +501,12 @@ export class StructuredSessionService {
       model: selected?.model ?? fallbackModel.model,
       effort: selected?.reasoningEffort ?? fallbackModel.effort,
       policy: { approvals: 'never', sandbox: 'full-access' },
+      ...this.identityOptions(provider, instance, sessionId, nativeSessionId !== undefined, launchContext),
     };
+    // One process per conversation: a second open while the first is loaded would put two writers on one transcript.
+    if (instance.capabilities.processModel === 'per-session' && this.sessions.get(sessionId)?.loaded) {
+      throw new StructuredUnavailableError('This conversation already has a running provider process.');
+    }
     let transport: TransportSession;
     try {
       transport = nativeSessionId ? await instance.resume(nativeSessionId, options) : await instance.start(options);
@@ -484,7 +522,8 @@ export class StructuredSessionService {
       transport,
       instance,
       epoch,
-      pid: connection.pid,
+      // A per-session transport knows its own process; a shared instance reports the one process every thread uses.
+      pid: transport.pid ?? connection.pid,
       loaded: true,
       closing: false,
       lostReported: false,
@@ -504,6 +543,34 @@ export class StructuredSessionService {
     if (this.meta.get(structuredRequestsKey(sessionId))) this.publishRequests(state);
     void this.consume(state);
     return state;
+  }
+
+  /**
+   * What only a per-session process needs: it carries this conversation's identity in its environment and coordination MCP
+   * config. A shared process serves many conversations and never gets one conversation's identity. The authority text and
+   * the snapshot choice apply to any plugin that has a system prompt to append to.
+   */
+  private identityOptions(
+    provider: ProviderId,
+    instance: TransportInstance,
+    sessionId: string,
+    resuming: boolean,
+    launchContext: AgentLaunchContext | undefined,
+  ): Pick<OpenOptions, 'env' | 'consoleIdentity' | 'appendSystemPrompt' | 'systemPromptSnapshot'> {
+    const authority = launchContext ? this.authorityContext?.(launchContext) : undefined;
+    const options: Pick<OpenOptions, 'env' | 'consoleIdentity' | 'appendSystemPrompt' | 'systemPromptSnapshot'> = {
+      ...(authority ? { appendSystemPrompt: authority } : {}),
+      // The provider replays the system prompt recorded on a conversation's first request. A resumed granted session must
+      // rebuild it, so the authority text names the grants that are active now: a revoked grant must not stay in the prompt,
+      // also when nothing is left to append.
+      ...(launchContext && resuming ? { systemPromptSnapshot: 'off' as const } : {}),
+    };
+    if (instance.capabilities.processModel !== 'per-session') return options;
+    // The configured env wins over the Console's variables, as it does for the instance; the session id is never overridable.
+    options.env = { ...this.hostEnv, ...this.configFor(provider).env, AGENT_CONSOLE_SESSION_ID: sessionId };
+    const coordination = this.contexts.get(provider)?.coordination;
+    if (coordination) options.consoleIdentity = { sessionId, runtimeDir: coordination.runtimeDir, helperPath: coordination.helperPath };
+    return options;
   }
 
   private forget(state: LoadedSession): void {
@@ -563,6 +630,9 @@ export class StructuredSessionService {
   }
 
   private async dropInstanceIfDisconnected(provider: ProviderId, instance: TransportInstance): Promise<void> {
+    // A per-session instance holds no connection that the loss of one conversation could break: every conversation has its
+    // own process, and the instance only starts them. Replacing it would strand a conversation that is opening right now.
+    if (instance.capabilities.processModel === 'per-session') return;
     const connection = await instance.alive().catch(() => ({ connected: false }));
     if (connection.connected || this.instances.get(provider) !== instance) return;
     this.instances.delete(provider);

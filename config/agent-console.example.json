@@ -27,9 +27,16 @@
     "pressureSuspendIdleMinutes": 60
   },
   "structuredSessions": {
+    "defaultTransport": "tmux",
     "codex": {
       "enabled": false,
       "command": ["codex", "app-server"],
+      "idleUnloadMinutes": 60,
+      "env": {}
+    },
+    "claude": {
+      "enabled": false,
+      "command": ["claude"],
       "idleUnloadMinutes": 60,
       "env": {}
     }

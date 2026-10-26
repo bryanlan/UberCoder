@@ -317,6 +317,16 @@ export async function registerSessionRoutes(
     }
   });
 
+  // Read-only dry run of moving tmux conversations to the structured transport: counts by what the next pass would do.
+  app.get('/api/sessions/structured-migration', async (request, reply) => {
+    try {
+      await authService.ensureAuthenticated(request, reply, false);
+    } catch {
+      return;
+    }
+    return await sessions.structuredMigrationReport();
+  });
+
   app.get('/api/sessions/:sessionId/screen', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply, false);

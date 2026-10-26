@@ -1583,6 +1583,8 @@ export function ConversationPane({
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const structuredSession = boundSession?.transport === 'structured';
+  // Claude runs headless; Codex runs through its app-server protocol. Neither has a terminal.
+  const structuredLabel = boundSession?.provider === 'claude' ? 'headless' : 'app-server';
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = isMobile ? !mobileDetailsOpen : mobileChromeHidden;
   const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
@@ -1857,7 +1859,7 @@ export function ConversationPane({
               summary={[
                 timeline.conversation.title,
                 conversationStatus,
-                structuredSession ? 'app-server' : undefined,
+                structuredSession ? structuredLabel : undefined,
                 timeline.conversation.degraded ? 'Degraded parse' : undefined,
               ].filter(Boolean).join(' · ')}
               className=""
@@ -1917,7 +1919,7 @@ export function ConversationPane({
                     {conversationStatus}
                   </span>
                   {structuredSession && (
-                    <span title="Driven through the Codex app-server protocol rather than a terminal" className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">app-server</span>
+                    <span title={`Driven through the ${boundSession?.provider === 'claude' ? 'Claude headless protocol' : 'Codex app-server protocol'} rather than a terminal`} className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">{structuredLabel}</span>
                   )}
                   {timeline.conversation.degraded && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
@@ -2045,7 +2047,7 @@ export function ConversationPane({
           </div>
         ) : boundSession ? (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
-            {structuredSession ? 'Send a message to start this app-server session.' : WAITING_FOR_SESSION_OUTPUT_TEXT}
+            {structuredSession ? `Send a message to start this ${structuredLabel} session.` : WAITING_FOR_SESSION_OUTPUT_TEXT}
           </div>
         ) : (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">

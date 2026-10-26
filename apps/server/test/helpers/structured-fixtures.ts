@@ -86,6 +86,8 @@ export class FakeTransportSession implements TransportSession {
   readonly events: AsyncIterable<TransportEvent>;
   transcriptPath: string | undefined;
   activeTurnId: string | undefined;
+  /** A per-session fake gets its own pid, as the real plugin reports its conversation's process. */
+  pid: number | undefined;
   closed = false;
   /** The next `sendTurn` rejects with this error (once), after being recorded as a call. */
   failNextSend: Error | undefined;
@@ -192,6 +194,7 @@ export class FakeTransportInstance implements TransportInstance {
   pid: number | undefined = process.pid;
   disposed = false;
   private threadCounter = 0;
+  private pidCounter = 0;
 
   constructor(
     readonly plugin: string,
@@ -221,7 +224,9 @@ export class FakeTransportInstance implements TransportInstance {
   }
 
   async alive(): Promise<{ pid?: number; connected: boolean }> {
-    return { pid: this.pid, connected: !this.disposed };
+    // A per-session instance is "connected" while it has a running process, as the real plugin reports it.
+    const connected = this.capabilities.processModel === 'per-session' ? !this.disposed && this.sessions.some(session => !session.closed) : !this.disposed;
+    return { pid: this.pid, connected };
   }
 
   async dispose(reason: 'shutdown' | 'restart'): Promise<void> {
@@ -232,6 +237,7 @@ export class FakeTransportInstance implements TransportInstance {
 
   private open(nativeSessionId: string, options: OpenOptions, resumed: boolean): FakeTransportSession {
     const session = new FakeTransportSession(this, nativeSessionId, options, resumed);
+    if (this.capabilities.processModel === 'per-session') session.pid = 40_000 + ++this.pidCounter;
     this.sessions.push(session);
     return session;
   }

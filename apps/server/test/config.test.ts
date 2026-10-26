@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigService } from '../src/config/service.js';
+import { defaultStructuredProviderConfig } from '../src/config/schema.js';
 
 async function writeTempConfig(body: object): Promise<string> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-config-'));
@@ -480,43 +481,73 @@ describe('ConfigService', () => {
 
   describe('structuredSessions', () => {
     const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
-    const defaults = { codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} } };
+    const codexDefaults = { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
+    const claudeDefaults = { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} };
+    const defaults = { defaultTransport: 'tmux', codex: codexDefaults, claude: claudeDefaults };
 
-    it('defaults to disabled when the block is absent or partial', async () => {
+    it('defaults to disabled, on tmux, when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
       const emptyCodex = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: {} } });
+      const emptyClaude = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: {} } });
       const emptyBlock = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: {} });
       try {
-        for (const configPath of [absent, emptyCodex, emptyBlock]) {
+        for (const configPath of [absent, emptyCodex, emptyClaude, emptyBlock]) {
           expect(new ConfigService(configPath).getConfig().structuredSessions).toEqual(defaults);
         }
       } finally {
-        for (const configPath of [absent, emptyCodex, emptyBlock]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+        for (const configPath of [absent, emptyCodex, emptyClaude, emptyBlock]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('gives every parse its own default objects, so one config never shares state with another', async () => {
+      const first = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      const second = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      try {
+        const a = new ConfigService(first).getConfig().structuredSessions;
+        const b = new ConfigService(second).getConfig().structuredSessions;
+        expect(a.codex).not.toBe(b.codex);
+        expect(a.claude.command).not.toBe(b.claude.command);
+        expect(a.codex.env).not.toBe(b.codex.env);
+        expect(defaultStructuredProviderConfig('claude')).toEqual(claudeDefaults);
+        expect(defaultStructuredProviderConfig('codex')).toEqual(codexDefaults);
+      } finally {
+        for (const configPath of [first, second]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
     });
 
     it('parses an enabled block and fills the fields it omits', async () => {
       const full = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
-        structuredSessions: { codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } } } });
-      const enabledOnly = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: true } } });
+        structuredSessions: { defaultTransport: 'structured', codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
+          claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } } } });
+      const enabledOnly = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: true }, claude: { enabled: true } } });
       const invalid = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { command: [] } } });
-      const invalidIdle = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { idleUnloadMinutes: 0 } } });
-      const invalidEnv = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { env: { PORT: 1 } } } });
+      const invalidClaude = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { command: [] } } });
+      const invalidIdle = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { idleUnloadMinutes: 0 } } });
+      const invalidEnv = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { env: { PORT: 1 } } } });
+      const invalidTransport = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { defaultTransport: 'screen' } });
       try {
-        expect(new ConfigService(full).getConfig().structuredSessions)
-          .toEqual({ codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } } });
-        expect(new ConfigService(enabledOnly).getConfig().structuredSessions)
-          .toEqual({ codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} } });
-        expect(() => new ConfigService(invalid)).toThrow();
-        expect(() => new ConfigService(invalidIdle)).toThrow();
-        expect(() => new ConfigService(invalidEnv)).toThrow();
+        expect(new ConfigService(full).getConfig().structuredSessions).toEqual({
+          defaultTransport: 'structured',
+          codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
+          claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } },
+        });
+        expect(new ConfigService(enabledOnly).getConfig().structuredSessions).toEqual({
+          defaultTransport: 'tmux',
+          codex: { ...codexDefaults, enabled: true },
+          claude: { ...claudeDefaults, enabled: true },
+        });
+        for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv, invalidTransport]) expect(() => new ConfigService(configPath)).toThrow();
       } finally {
-        for (const configPath of [full, enabledOnly, invalid, invalidIdle, invalidEnv]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+        for (const configPath of [full, enabledOnly, invalid, invalidClaude, invalidIdle, invalidEnv, invalidTransport]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
     });
 
     it('survives every persist path without loss', async () => {
-      const block = { codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } } };
+      const block = {
+        defaultTransport: 'structured',
+        codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } },
+        claude: { enabled: true, command: ['claude', '--debug'], idleUnloadMinutes: 7, env: { OTHER: '2' } },
+      };
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
       try {
         const service = new ConfigService(configPath);
@@ -538,7 +569,7 @@ describe('ConfigService', () => {
       } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
     });
 
-    it('ships the disabled lane in the example config', async () => {
+    it('ships both lanes off and the default on tmux in the example config', async () => {
       const example = JSON.parse(await fs.readFile(new URL('../../../config/agent-console.example.json', import.meta.url), 'utf8'));
       expect(example.structuredSessions).toEqual(defaults);
     });

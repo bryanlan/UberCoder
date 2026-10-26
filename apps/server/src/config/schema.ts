@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SESSION_TRANSPORTS } from '@agent-console/shared';
 
 const portSchema = z.number().int().min(1).max(65535);
 
@@ -64,22 +65,39 @@ const sessionsConfigSchema = z.object({
 });
 
 // Structured (protocol-driven, non-tmux) sessions per provider. Off unless a provider is enabled explicitly.
-const structuredProviderSchema = z.object({
-  enabled: z.boolean().default(false),
-  command: z.array(z.string()).min(1).default(['codex', 'app-server']),
-  idleUnloadMinutes: z.number().positive().default(60),
-  // Extra environment for the provider process, applied over the Console's own coordination variables.
-  env: z.record(z.string(), z.string()).default({}),
-});
+function structuredProviderSchema(defaultCommand: readonly string[]) {
+  return z.object({
+    enabled: z.boolean().default(false),
+    // The provider executable and any leading arguments; a fresh array per parse so a config never shares the default.
+    command: z.array(z.string()).min(1).default(() => [...defaultCommand]),
+    idleUnloadMinutes: z.number().positive().default(60),
+    // Extra environment for the provider process, applied over the Console's own coordination variables.
+    env: z.record(z.string(), z.string()).default({}),
+  });
+}
+
+const STRUCTURED_PROVIDER_DEFAULT_COMMANDS = { codex: ['codex', 'app-server'], claude: ['claude'] } as const;
+const codexStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.codex);
+const claudeStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.claude);
 
 /** One provider's structured-session settings. The host service and the provider's transport plugin both take this shape. */
-export type StructuredProviderConfig = z.output<typeof structuredProviderSchema>;
-/** What a provider without a `structuredSessions` entry gets: the lane is off. */
-export const DEFAULT_STRUCTURED_PROVIDER_CONFIG: StructuredProviderConfig = structuredProviderSchema.parse({});
+export type StructuredProviderConfig = z.output<typeof codexStructuredSchema>;
+/** What a provider without a `structuredSessions` entry gets: the lane is off. A fresh object per call. */
+export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURED_PROVIDER_DEFAULT_COMMANDS): StructuredProviderConfig {
+  return (provider === 'claude' ? claudeStructuredSchema : codexStructuredSchema).parse({});
+}
 
 const structuredSessionsConfigSchema = z.object({
-  codex: structuredProviderSchema.default(DEFAULT_STRUCTURED_PROVIDER_CONFIG),
-}).default({ codex: DEFAULT_STRUCTURED_PROVIDER_CONFIG });
+  // The transport a new conversation gets when the request does not name one (new chats, binds, granted launches), and
+  // the transport the backend moves existing tmux conversations to. Only effective for a provider whose lane is enabled.
+  defaultTransport: z.enum(SESSION_TRANSPORTS).default('tmux'),
+  codex: codexStructuredSchema.default(() => defaultStructuredProviderConfig('codex')),
+  claude: claudeStructuredSchema.default(() => defaultStructuredProviderConfig('claude')),
+}).default(() => ({
+  defaultTransport: 'tmux' as const,
+  codex: defaultStructuredProviderConfig('codex'),
+  claude: defaultStructuredProviderConfig('claude'),
+}));
 
 export const appConfigSchema = z.object({
   server: serverConfigSchema,

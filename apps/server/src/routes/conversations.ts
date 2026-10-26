@@ -26,6 +26,7 @@ import { nowIso } from '../lib/time.js';
 import { saveConversationTitle } from '../lib/conversation-title.js';
 import { TITLE_GENERATION_AWAITING_MESSAGE } from '../titles/service.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
+import { resolveDefaultTransport } from '../sessions/structured/default-transport.js';
 
 const providerSchema = z.enum(PROVIDERS);
 const projectProviderParamsSchema = z.object({
@@ -35,7 +36,8 @@ const projectProviderParamsSchema = z.object({
 const conversationParamsSchema = projectProviderParamsSchema.extend({
   conversationRef: z.string().min(1),
 });
-const transportSchema = z.enum(SESSION_TRANSPORTS).default('tmux');
+// Omitted: the configured default transport (structuredSessions.defaultTransport), resolved per provider by the route.
+const transportSchema = z.enum(SESSION_TRANSPORTS).optional();
 const newConversationBodySchema = z.object({
   transport: transportSchema,
 });
@@ -253,6 +255,8 @@ export async function registerConversationRoutes(
   eventBus: RealtimeEventBus,
   liveOutputReader: LiveOutputReader = new LiveOutputReader(),
   structuredProviders: readonly ProviderId[] = [],
+  /** `structuredSessions.defaultTransport`: what a bind that names no transport gets, for providers with the structured lane on. */
+  defaultTransport: SessionTransport = 'tmux',
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
@@ -407,7 +411,7 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId } = parsedParams;
-    const { transport } = parsedBody.data;
+    const transport = parsedBody.data.transport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
     if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
       return;
     }
@@ -508,7 +512,8 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId, conversationRef } = parsedParams;
-    const { transport } = parsedBody.data;
+    const requestedTransport = parsedBody.data.transport;
+    const transport = requestedTransport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
     if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
       return;
     }
@@ -546,8 +551,9 @@ export async function registerConversationRoutes(
       );
     if (!parsedBody.data.force) {
       if (existingSession?.shouldRestore) {
-        // Never answer an explicit app-server request with a terminal session.
-        if (transport === 'structured' && existingSession.transport !== 'structured') {
+        // Never answer an explicit app-server request with a terminal session. A bind that named no transport takes the
+        // conversation as it is bound: a tmux conversation that has not moved over yet stays on tmux until it does.
+        if (requestedTransport === 'structured' && existingSession.transport !== 'structured') {
           reply.code(409).send({
             error: 'Conversation is already bound to a terminal session. Release it before starting an app-server session.',
           });

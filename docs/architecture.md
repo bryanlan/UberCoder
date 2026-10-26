@@ -615,7 +615,17 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
 - Granted restart: on a structured row it refuses while a turn runs ("Restart is waiting for the current
   work to finish.") and never interrupts a human's turn. Otherwise it unloads the thread and starts the
   restart prompt on a fresh load epoch.
-- Limits: pressure suspension skips structured rows (a shared process cannot be suspended per thread);
+- Per-session plugins (Claude): `capabilities.processModel: 'per-session'` makes the service start one process per
+  Console session. Idle sleep, manual suspend and memory pressure end that process and mark the row; the next message
+  resumes the same native conversation. The conversation's process gets its own environment (`AGENT_CONSOLE_SESSION_ID`),
+  coordination MCP identity and, for a granted launch, the grant authority text. Rows on a shared process are still not
+  suspended under memory pressure.
+- Default transport and migration: `structuredSessions.defaultTransport` (`tmux` unless set) is the transport of a
+  bind that names none, including granted launches, for providers whose lane is on. While it is `structured`,
+  `reconcileSessions` also moves existing tmux conversations over: a live tmux session is stopped like idle sleep and
+  confirmed dead, then the row becomes a sleeping structured row that resumes on its next message.
+  `GET /api/sessions/structured-migration` reports what would move. See `docs/structured-cutover.md`.
+- Limits: pressure suspension skips rows on a shared process (it cannot be suspended per thread);
   the recovery and launch memory floors still apply. Image attachments, streamed assistant text and
   approval UI are not in slice 1.
 - Restart limitation: the stdio child ends with the backend, also after a crash (through the `--pdeathsig`

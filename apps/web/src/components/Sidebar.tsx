@@ -15,6 +15,9 @@ import { startConversationDrag } from '../features/conversation/agent-reference'
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
+/** The New Chat action for a provider's structured (non-terminal) lane. */
+const STRUCTURED_ACTION_LABELS: Record<ProviderId, string> = { codex: 'Codex (app-server)', claude: 'Claude (headless)' };
+
 function providerMeta(provider: ProviderId) {
   return provider === 'codex'
     ? { label: 'Codex', icon: Sparkles }
@@ -432,7 +435,7 @@ function ProjectSection({
   mobile = false,
   creatingConversationKey,
   creatingAnyConversation,
-  structuredCodexAvailable,
+  structuredProviders,
   onNewConversation,
   onRenameProject,
   renamingProject,
@@ -456,7 +459,7 @@ function ProjectSection({
   mobile?: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
-  structuredCodexAvailable: boolean;
+  structuredProviders: readonly ProviderId[];
   onNewConversation: (projectSlug: string, provider: ProviderId, options?: { transport?: SessionTransport }) => void;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
@@ -659,7 +662,7 @@ function ProjectSection({
                     <Sparkles className="h-3.5 w-3.5 text-sky-300" />
                     {creatingConversationKey === `${project.slug}:codex` ? 'Starting Codex…' : 'New Codex conversation'}
                   </button>
-                  {structuredCodexAvailable && (
+                  {structuredProviders.includes('codex') && (
                     <button
                       type="button"
                       onClick={() => {
@@ -671,7 +674,7 @@ function ProjectSection({
                       className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Sparkles className="h-3.5 w-3.5 text-sky-300" />
-                      {creatingConversationKey === `${project.slug}:codex:structured` ? 'Starting Codex (app-server)…' : 'Codex (app-server)'}
+                      {creatingConversationKey === `${project.slug}:codex:structured` ? `Starting ${STRUCTURED_ACTION_LABELS.codex}…` : STRUCTURED_ACTION_LABELS.codex}
                     </button>
                   )}
                   <button
@@ -687,6 +690,21 @@ function ProjectSection({
                     <Bot className="h-3.5 w-3.5 text-sky-300" />
                     {creatingConversationKey === `${project.slug}:claude` ? 'Starting Claude…' : 'New Claude conversation'}
                   </button>
+                  {structuredProviders.includes('claude') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onClose();
+                        onNewConversation(project.slug, 'claude', { transport: 'structured' });
+                      }}
+                      disabled={creatingAnyConversation}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Bot className="h-3.5 w-3.5 text-sky-300" />
+                      {creatingConversationKey === `${project.slug}:claude:structured` ? `Starting ${STRUCTURED_ACTION_LABELS.claude}…` : STRUCTURED_ACTION_LABELS.claude}
+                    </button>
+                  )}
                   {project.allowedLocalhostPorts.length > 0 && (
                     <div className="mt-1 border-t border-slate-800 pt-1">
                       {project.allowedLocalhostPorts.map((port) => (
@@ -813,7 +831,7 @@ export function Sidebar({
   const { width, resizing, separatorProps } = useSidebarWidth(open);
   const effectiveWorkMode = isMobile ? !mobileShowAll : workMode;
   const creatingAnyConversation = Boolean(creatingConversationKey);
-  const structuredCodexAvailable = tree?.structuredProviders?.includes('codex') === true;
+  const structuredProviders = tree?.structuredProviders ?? [];
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [searchQuery, setSearchQuery] = useState('');
@@ -1003,9 +1021,9 @@ export function Sidebar({
                 <div className="mb-2 font-medium">{project.displayName}</div>
                 <div className="flex gap-2">{(['codex', 'claude'] as const).map(provider => (
                   <button key={provider} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{providerMeta(provider).label}</button>
-                ))}{structuredCodexAvailable && (
-                  <button type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, 'codex', { transport: 'structured' }); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">Codex (app-server)</button>
-                )}</div>
+                ))}{(['codex', 'claude'] as const).filter(provider => structuredProviders.includes(provider)).map(provider => (
+                  <button key={`${provider}:structured`} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider, { transport: 'structured' }); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{STRUCTURED_ACTION_LABELS[provider]}</button>
+                ))}</div>
               </section>
             )) : showingSubmittedSearchResults ? (
               <SearchResultsPanel
@@ -1023,7 +1041,7 @@ export function Sidebar({
                 mobile={isMobile}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
-                structuredCodexAvailable={structuredCodexAvailable}
+                structuredProviders={structuredProviders}
                 onNewConversation={onNewConversation}
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}

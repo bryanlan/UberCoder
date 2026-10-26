@@ -3031,6 +3031,7 @@ describe('conversation routes', () => {
       sessions: Record<string, unknown>;
       structuredProviders?: Array<'codex' | 'claude'>;
       omitStructuredProviders?: boolean;
+      defaultTransport?: 'tmux' | 'structured';
     }) {
       const app = fastify();
       const args = [
@@ -3058,7 +3059,7 @@ describe('conversation routes', () => {
       if (input.omitStructuredProviders) {
         await registerConversationRoutes(...args);
       } else {
-        await registerConversationRoutes(...args, undefined, input.structuredProviders ?? []);
+        await registerConversationRoutes(...args, undefined, input.structuredProviders ?? [], input.defaultTransport);
       }
       await app.ready();
       return app;
@@ -3343,6 +3344,87 @@ describe('conversation routes', () => {
         } finally {
           await app.close();
         }
+      });
+    });
+
+    describe('default transport', () => {
+      const history: ConversationSummary = {
+        ref: 'thread-history', kind: 'history', projectSlug: 'demo', provider: 'codex', title: 'Earlier chat',
+        createdAt: '2026-10-26T09:00:00.000Z', updatedAt: '2026-10-26T09:30:00.000Z', isBound: false, degraded: false,
+      };
+
+      it('gives a new chat that names no transport the configured default, for providers whose lane is on', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({ id: 'session-new', transport: input.transport === 'structured' ? 'structured' : 'tmux' }));
+          const app = await buildBindApp({
+            db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'], defaultTransport: 'structured',
+          });
+          try {
+            const codex = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
+            expect(codex.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'structured', kind: 'pending' }));
+
+            // The Claude lane is off, so its default stays tmux rather than failing the request.
+            const claude = await app.inject({ method: 'POST', url: '/api/conversations/demo/claude/new/bind', payload: {} });
+            expect(claude.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
+
+            // Naming tmux is still allowed.
+            const explicit = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: { transport: 'tmux' } });
+            expect(explicit.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('keeps tmux for a new chat when tmux is the default, even with the structured lane on', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn(async () => baseSession({ id: 'session-new' }));
+          const app = await buildBindApp({
+            db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'], defaultTransport: 'tmux',
+          });
+          try {
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
+            expect(response.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('binds a history conversation that names no transport on the default, but returns a tmux owner that has not moved over', async () => {
+        await withDb(async (db, tempDir) => {
+          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
+          const owner = baseSession({ id: 'session-owner', conversationRef: 'thread-history' });
+          let current: BoundSession | undefined;
+          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({ id: 'session-history', conversationRef: 'thread-history', transport: input.transport === 'structured' ? 'structured' : 'tmux' }));
+          const ensureSession = vi.fn(async () => owner);
+          const app = await buildBindApp({
+            db,
+            tempDir,
+            sessions: { bindConversation, ensureSession, getSessionByConversation: vi.fn(() => current), getSessionById: vi.fn() },
+            structuredProviders: ['codex'],
+            defaultTransport: 'structured',
+          });
+          try {
+            const fresh = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
+            expect(fresh.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'structured', kind: 'history' }));
+
+            current = owner;
+            bindConversation.mockClear();
+            const bound = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
+            expect(bound.statusCode).toBe(200);
+            expect(bound.json().session.id).toBe('session-owner');
+            expect(ensureSession).toHaveBeenCalledWith('session-owner');
+            expect(bindConversation).not.toHaveBeenCalled();
+          } finally {
+            await app.close();
+          }
+        });
       });
     });
 

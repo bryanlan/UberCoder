@@ -339,8 +339,11 @@ Run recovery ownership (requires explicit unattended permission):
 - `apps/server/src/sessions/structured/structured-session-service.ts` — loaded sessions, active turn,
   steer-versus-turn policy, exactly-once terminals and process environment; `structured-run-monitor.ts`
   — run state for RunRecovery from turn events plus the rollout monitor.
+- `apps/server/src/sessions/structured/default-transport.ts` — the pure rule for the transport of a bind that names
+  none (`structuredSessions.defaultTransport` for a provider whose lane is on); routes and `SessionManager` share it.
 - `apps/server/src/sessions/session-manager.ts` — owns the structured seams (`session.transport`
-  dispatch at bind, restore, input, wake, recovery, sleep, model profile, release).
+  dispatch at bind, restore, input, wake, recovery, sleep, model profile, release) and the move of tmux
+  conversations to the structured transport (`migrateTmuxRowToStructured`, `structuredMigrationReport`).
 - `apps/server/test/structured-*.test.ts` — plugin (scripted fake and recorded wire transcripts), fake
   plugin contract, and session-manager seams (bind, input, lifecycle, recovery, wake, coordination,
   Codex end to end against a fake app-server, process environment). Helpers: `test/helpers/structured-fixtures.ts`,
@@ -356,6 +359,11 @@ Run recovery ownership (requires explicit unattended permission):
   and half-restored rows re-armed at boot, not-sent delivery, a turn id that runs again.
 - `apps/server/test/structured-session-env.test.ts`: the provider process environment (coordination
   variables, configured `env`).
+- `apps/server/test/structured-session-per-session.test.ts`: per-session processes (environment, coordination
+  identity, authority text, own pid, idle sleep, manual suspend, pressure, release, unexpected exit).
+  `structured-session-migration.test.ts`: moving tmux conversations over and the dry run.
+  `structured-session-default-transport.test.ts` and `structured-session-launches.test.ts`: the default transport for
+  binds and granted launches.
 - `apps/server/test/tmux-client-structured-guard.test.ts`: the tmux client refuses the `structured:` name in
   every method.
 - `scripts/prove-structured-codex.mjs` — opt-in real-Codex proof of the whole lane through the HTTP API;

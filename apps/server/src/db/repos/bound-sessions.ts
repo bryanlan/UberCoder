@@ -191,6 +191,30 @@ export class BoundSessionsRepo {
     })();
   }
 
+  /**
+   * Moves a tmux row to the structured transport in one step: the row stops naming a tmux session, raw log or process, and
+   * starts asleep, so the next input resumes the same native conversation through the provider's transport. Compare-and-set on
+   * the transport: undefined when the row is gone or is not a tmux row. An existing sleep marker keeps its time.
+   */
+  setTransport(id: string, change: { tmuxSessionName: string; idleSuspendedAt?: string; updatedAt: string }): BoundSession | undefined {
+    return this.sqlite.transaction(() => {
+      const current = this.getById(id);
+      if (!current || current.transport !== 'tmux') return undefined;
+      this.sqlite.prepare(`
+        update bound_sessions
+        set transport = 'structured',
+            tmux_session_name = ?,
+            raw_log_path = null,
+            pid = null,
+            is_working = 0,
+            idle_suspended_at = coalesce(idle_suspended_at, ?),
+            updated_at = ?
+        where id = ? and transport = 'tmux'
+      `).run(change.tmuxSessionName, change.idleSuspendedAt ?? null, nextUpdatedAt(current.updatedAt, change.updatedAt), id);
+      return this.getById(id);
+    })();
+  }
+
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   replaceModelProfileRequest(id: string, request: ModelProfileRequest | undefined, updatedAt: string): BoundSession | undefined {
     return this.sqlite.transaction(() => {

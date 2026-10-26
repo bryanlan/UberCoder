@@ -1204,6 +1204,13 @@ describe('ConversationPane app-server (structured) sessions', () => {
     expect(screen.getByText('Bound')).toBeVisible();
   });
 
+  it('labels a structured Claude session headless, not app-server', () => {
+    renderPane({ sessionOverrides: { ...structured, provider: 'claude', claudeProfile: 'medium' } });
+
+    expect(screen.getByText('headless')).toBeVisible();
+    expect(screen.queryByText('app-server')).not.toBeInTheDocument();
+  });
+
   it('keeps Send, Esc and Stop, the model profile controls, copy, suspend and release', () => {
     renderPane({ sessionOverrides: structured });
 

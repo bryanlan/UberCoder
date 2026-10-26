@@ -4,7 +4,7 @@ import { imagePromptDisplay, imagePromptFiles } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, PROVIDERS, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -32,6 +32,7 @@ import {
   type StructuredSessionState,
   type StructuredTerminalStatus,
 } from './structured/structured-session-service.js';
+import { resolveDefaultTransport } from './structured/default-transport.js';
 import { StructuredRunMonitor } from './structured/structured-run-monitor.js';
 import { STRUCTURED_REQUESTS_KEY_PREFIX, type StructuredQuestionNotice } from './structured/pending-requests.js';
 import {
@@ -142,6 +143,11 @@ interface SessionManagerOptions {
   transportPlugins?: TransportPluginRegistry;
   /** Per-provider structured-session settings. A provider without an enabled entry cannot bind new structured sessions. */
   structuredSessions?: StructuredSessionsConfig;
+  /**
+   * The transport a conversation gets when its bind does not name one, and the one existing tmux conversations move to.
+   * Only effective for a provider whose structured lane is enabled. Defaults to tmux.
+   */
+  defaultTransport?: SessionTransport;
   /** Environment every structured provider process gets (coordination runtime and config path); the provider's own `env` wins. */
   structuredEnv?: Record<string, string>;
   /** Opens line channels to structured provider processes (session hosts that outlive the backend). Without it a plugin runs its child directly over stdio. */
@@ -297,6 +303,46 @@ function splitLiteralTextForTmux(text: string): string[] {
   return chunks;
 }
 
+/**
+ * What the move of tmux conversations to the structured transport does with a row. `dead` and `idle` are the rows that
+ * move; the rest wait or stay. See `SessionManager.structuredMigrationReport`.
+ */
+export type StructuredMigrationOutcome =
+  /** The tmux session already ended: the row moves without a tmux call. */
+  | 'dead'
+  /** The tmux session is alive and the row is not working: it moves once the idle guard confirms an idle screen. */
+  | 'idle'
+  | 'working'
+  | 'queuedInput'
+  | 'modelRequest'
+  /** The conversation has no native id yet (`pending:`). */
+  | 'pending'
+  /** A Claude conversation whose transcript file is missing cannot be resumed. */
+  | 'noTranscript'
+  /** The row is starting or in an error state. */
+  | 'notBound'
+  /** The tmux session could not be checked. */
+  | 'unverified'
+  /** The tmux session is gone but the provider process still runs outside this binding. */
+  | 'externalOwner'
+  /** The provider's structured lane is off. */
+  | 'providerOff';
+
+const STRUCTURED_MIGRATION_OUTCOMES: readonly StructuredMigrationOutcome[] = [
+  'dead', 'idle', 'working', 'queuedInput', 'modelRequest', 'pending', 'noTranscript', 'notBound', 'unverified', 'externalOwner', 'providerOff',
+];
+
+export interface StructuredMigrationReport {
+  defaultTransport: SessionTransport;
+  /** Providers whose structured lane is on; rows of any other provider stay on tmux. */
+  providers: ProviderId[];
+  /** Restorable conversations already on the structured transport. */
+  structuredRows: number;
+  /** Restorable tmux conversations, counted by what the next pass would do with each. */
+  outcomes: Record<StructuredMigrationOutcome, number>;
+  rows: Array<{ id: string; provider: ProviderId; projectSlug: string; title?: string; outcome: StructuredMigrationOutcome }>;
+}
+
 interface SessionManagerLogger {
   warn(bindings: unknown, message?: string): void;
   info?(bindings: unknown, message?: string): void;
@@ -348,6 +394,9 @@ export class SessionManager {
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private readonly launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
   private readonly notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
+  private readonly defaultTransport: SessionTransport;
+  /** Provider-and-reason pairs already logged, so a standing condition is reported once and not on every pass. */
+  private readonly loggedOnce = new Set<string>();
   private stopped = false;
 
   constructor(
@@ -364,6 +413,7 @@ export class SessionManager {
     this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
     this.launchAuthorityContext = options.launchAuthorityContext;
     this.notifyStructuredQuestion = options.notifyStructuredQuestion;
+    this.defaultTransport = options.defaultTransport ?? 'tmux';
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -392,6 +442,7 @@ export class SessionManager {
       registry: options.transportPlugins ?? new TransportPluginRegistry(),
       config: options.structuredSessions ?? {},
       hostEnv: options.structuredEnv,
+      authorityContext: options.launchAuthorityContext,
       meta: structuredMeta,
       logger: this.logger ? { warn: (bindings, message) => this.logger?.warn(bindings, message) } : undefined,
       createContext: (pluginId) => {
@@ -399,7 +450,8 @@ export class SessionManager {
         fs.mkdirSync(pluginRuntimeDir, { recursive: true });
         return {
           runtimeDir: pluginRuntimeDir,
-          // The same runtime and helper the tmux launch pins, minus a session id: one process serves every thread.
+          // The same runtime and helper the tmux launch pins. A shared process serves every thread, so the identity has no session
+          // id here; a per-session plugin gets its conversation's id with `OpenOptions.consoleIdentity`.
           ...(this.coordinationEnabled ? { coordination: { runtimeDir: this.runtimeDir, helperPath: this.coordinationHelperPath() } } : {}),
           log: {
             info: (bindings, message) => this.logger?.info?.(bindings, message),
@@ -1274,7 +1326,22 @@ export class SessionManager {
       sessions.sort((a, b) => this.sessionIdleTimestampMs(a) - this.sessionIdleTimestampMs(b));
     }
     let pressureSuspended = false;
+    let migrated = 0;
     for (let session of sessions) {
+      // With the structured lane the default, tmux conversations move over one at a time, suspended ones included.
+      if (session.transport === 'tmux' && this.migratesToStructured(session.provider)) {
+        // A failed move must never stop the rest of the pass: the row simply stays on tmux and is tried again.
+        const outcome = await this.runtimes.run(session.id, 'migrateToStructured', () => this.migrateTmuxRowToStructured(session)).catch((error: unknown) => {
+          this.logger?.warn({ err: error, sessionId: session.id }, 'Moving a tmux conversation to the structured transport failed.');
+          return 'busy' as const;
+        });
+        if (outcome === 'converted') {
+          migrated += 1;
+          continue;
+        }
+        session = this.db.boundSessions.getById(session.id) ?? session;
+        if (session.transport !== 'tmux') continue;
+      }
       // A user suspension survives reconciliation and backend restarts until
       // that conversation is explicitly opened again.
       if (session.manualSuspendedAt) continue;
@@ -1349,7 +1416,7 @@ export class SessionManager {
       }
       // On the first low-memory sample, wait for confirmation before marking
       // a finished dead session suspended, but do not relaunch it meanwhile.
-      if (this.consecutiveLowMemorySamples > 0 && this.isPressureSuspendable(session)
+      if (this.consecutiveLowMemorySamples > 0 && session.transport !== 'structured' && this.isPressureSuspendable(session)
         && !this.hasActiveCoordinationAssignment(session)
         && this.providerTurnIsWorking(session.id) !== true
         && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') continue;
@@ -1358,6 +1425,7 @@ export class SessionManager {
       await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session,
         { restoreMissing: session.transport !== 'structured' || session.status === 'error' || session.status === 'starting', resumeIdle: true }));
     }
+    if (migrated > 0) this.logger?.info?.({ migrated }, 'Moved tmux conversations to the structured transport.');
   }
 
   private sessionIdleTimestampMs(session: BoundSession): number {
@@ -1394,8 +1462,9 @@ export class SessionManager {
   }
 
   private isPressureSuspendable(session: BoundSession): boolean {
-    // A shared structured process cannot be suspended per thread, so memory pressure leaves these rows alone.
-    if (session.transport === 'structured' || !session.shouldRestore || session.status !== 'bound' || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest
+    // A shared structured process cannot be suspended per thread, so memory pressure leaves these rows alone. A per-session
+    // process is this conversation's alone: ending it frees its memory, as killing a tmux session does.
+    if ((session.transport === 'structured' && this.structured.processModel(session.provider) !== 'per-session') || !session.shouldRestore || session.status !== 'bound' || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest
       || session.manualSuspendedAt || session.pressureSuspendedAt || session.conversationRef.startsWith('pending:')) {
       return false;
     }
@@ -1411,6 +1480,7 @@ export class SessionManager {
     if (threshold === undefined) return false;
     const session = this.db.boundSessions.getById(staleSession.id);
     if (!session || !this.isPressureSuspendable(session)) return false;
+    if (session.transport === 'structured') return await this.suspendStructuredPressureSession(session, threshold);
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (liveness === 'unknown') return false;
     if (liveness === 'alive') {
@@ -1930,7 +2000,7 @@ export class SessionManager {
     codexProfile?: CodexCostProfileKey;
     claudeProfile?: ClaudeCostProfileKey;
     autoTrackedAt?: string;
-    /** Session transport; defaults to 'tmux'. 'structured' drives the provider through a transport plugin. */
+    /** Session transport. Omitted: the configured default. 'structured' drives the provider through a transport plugin. */
     transport?: SessionTransport;
   }): Promise<BoundSession> {
     const bindKey = `${input.project.slug}:${input.provider.id}:${input.conversationRef}`;
@@ -2214,7 +2284,8 @@ export class SessionManager {
       }
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
-    if (input.transport === 'structured') {
+    // A bind that names no transport gets the configured default (tmux unless the structured lane is the default).
+    if ((input.transport ?? this.defaultTransportFor(input.provider.id)) === 'structured') {
       return await this.bindStructuredConversation(input, sessionId);
     }
 
@@ -3899,6 +3970,133 @@ export class SessionManager {
     return liveness === 'unknown' ? undefined : liveness === 'alive';
   }
 
+  /**
+   * The transport a bind gets when the request does not name one: the configured default, but only for a provider whose
+   * structured lane is enabled. A default that cannot be honoured falls back to tmux and says so once per provider.
+   */
+  defaultTransportFor(provider: ProviderId): SessionTransport {
+    const transport = resolveDefaultTransport(this.defaultTransport, this.enabledStructuredProviders(), provider);
+    if (this.defaultTransport === 'structured' && transport === 'tmux') {
+      this.logOnce(`default-transport:${provider}`, () => this.logger?.warn({ provider },
+        'structuredSessions.defaultTransport is "structured" but the provider lane is not enabled; new conversations use tmux.'));
+    }
+    return transport;
+  }
+
+  /** The providers whose structured lane is on (enabled in config, with a transport plugin registered). */
+  enabledStructuredProviders(): ProviderId[] {
+    return PROVIDERS.filter(provider => this.structured.isEnabled(provider));
+  }
+
+  private logOnce(key: string, log: () => void): void {
+    if (this.loggedOnce.has(key)) return;
+    this.loggedOnce.add(key);
+    log();
+  }
+
+  // ---- Moving tmux conversations to the structured transport ----------------------------------------------
+  // When structured is the default transport and a provider's lane is on, reconcileSessions moves each tmux conversation of
+  // that provider over: the row keeps its identity (id, native conversation, title, recency) and becomes a sleeping
+  // structured row, so the next message resumes the same native conversation through the provider's transport. A live tmux
+  // process is stopped the way idle sleep stops it and must be confirmed dead before the row flips: never two writers.
+
+  private migratesToStructured(provider: ProviderId): boolean {
+    return this.defaultTransport === 'structured' && this.structured.isEnabled(provider);
+  }
+
+  /** What a pass would do with a tmux row right now. Read-only: it never touches the process or the row. */
+  private async classifyForStructuredMigration(session: BoundSession): Promise<StructuredMigrationOutcome> {
+    if (!this.migratesToStructured(session.provider)) return 'providerOff';
+    if (session.conversationRef.startsWith('pending:')) return 'pending';
+    if (session.status !== 'bound') return 'notBound';
+    if (session.modelProfileRequest) return 'modelRequest';
+    if (session.queuedInputs?.length) return 'queuedInput';
+    if (session.isWorking) return 'working';
+    // Claude resumes from its transcript file; without one the conversation cannot continue on any transport.
+    if (session.provider === 'claude' && !(await this.hasReadableIndexedTranscript(session))) return 'noTranscript';
+    const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    if (liveness === 'unknown') return 'unverified';
+    if (liveness === 'alive') return 'idle';
+    // The tmux session is gone. A provider process that kept running outside this binding would be a second writer.
+    const owner = this.assignmentForSession(session);
+    return owner?.processStart && processStart(owner.pid) === owner.processStart ? 'externalOwner' : 'dead';
+  }
+
+  /** The dry run: the same classification a pass uses, counted. Reads the database and asks tmux whether sessions exist. */
+  async structuredMigrationReport(): Promise<StructuredMigrationReport> {
+    const outcomes = Object.fromEntries(STRUCTURED_MIGRATION_OUTCOMES.map(outcome => [outcome, 0])) as Record<StructuredMigrationOutcome, number>;
+    const rows: StructuredMigrationReport['rows'] = [];
+    let structuredRows = 0;
+    for (const session of this.listRestorableSessions()) {
+      if (session.transport === 'structured') {
+        structuredRows += 1;
+        continue;
+      }
+      const outcome = await this.classifyForStructuredMigration(session);
+      outcomes[outcome] += 1;
+      rows.push({ id: session.id, provider: session.provider, projectSlug: session.projectSlug, ...(session.title ? { title: session.title } : {}), outcome });
+    }
+    return {
+      defaultTransport: this.defaultTransport,
+      providers: this.enabledStructuredProviders(),
+      structuredRows,
+      outcomes,
+      rows,
+    };
+  }
+
+  /**
+   * One row's move. Runs under the session's command lock, so no restore or input interleaves. `converted` means the row is
+   * now structured; `busy` means a live tmux session did not pass the idle guard and is untouched (the next pass tries again);
+   * anything else is why the row stays.
+   */
+  private async migrateTmuxRowToStructured(staleSession: BoundSession): Promise<StructuredMigrationOutcome | 'converted' | 'busy'> {
+    let session = this.db.boundSessions.getById(staleSession.id);
+    if (!session || session.transport !== 'tmux' || !session.shouldRestore || session.status === 'ended' || session.status === 'releasing') return 'notBound';
+    const outcome = await this.classifyForStructuredMigration(session);
+    if (outcome !== 'dead' && outcome !== 'idle') {
+      if (outcome === 'noTranscript') this.logOnce(`migration-no-transcript:${session.id}`, () => this.logger?.warn(
+        { sessionId: session!.id, provider: session!.provider, conversationRef: session!.conversationRef },
+        'A Claude conversation has no transcript file, so it stays on tmux.'));
+      return outcome;
+    }
+    if (outcome === 'idle') {
+      // The idle-sleep guard: owner, screen, drafts, queued input, selections. Anything it refuses leaves the process alone.
+      if (await this.suspensionBlockReason(session, 'idle')) return 'busy';
+      const latest = this.db.boundSessions.getById(session.id);
+      if (!latest || await this.classifyForStructuredMigration(latest) !== 'idle') return 'busy';
+      if (await this.tmuxClient.getOption(latest.tmuxSessionName, '@agent_console_session_id').catch(() => undefined) !== latest.id) return 'busy';
+      try {
+        await this.tmuxClient.killSession(latest.tmuxSessionName);
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: latest.id }, 'Failed to stop a tmux session while moving it to the structured transport.');
+      }
+      // The row flips only when the process is confirmed gone.
+      if (await checkTmuxLiveness(this.tmuxClient, latest.tmuxSessionName) !== 'dead') return 'busy';
+      session = latest;
+    } else {
+      // Re-read after the awaits: the move needs the same answer it started with.
+      const latest = this.db.boundSessions.getById(session.id);
+      if (!latest || await this.classifyForStructuredMigration(latest) !== 'dead') return 'busy';
+      session = latest;
+    }
+    this.stopWatching(session.id);
+    this.runtimes.clearEphemeral(session.id);
+    this.runRecovery.cancel(session.id);
+    this.db.meta.set(peerWakeComposerKey(session.id), '');
+    const at = nowIso();
+    const converted = this.db.boundSessions.setTransport(session.id, {
+      tmuxSessionName: `${STRUCTURED_SESSION_NAME_PREFIX}${session.id}`,
+      // A manual or pressure suspension already keeps the row asleep; every other row sleeps until its next message.
+      ...(session.manualSuspendedAt || session.pressureSuspendedAt ? {} : { idleSuspendedAt: at }),
+      updatedAt: at,
+    });
+    if (!converted) return 'busy';
+    this.appendEvent(converted, { type: 'status', text: 'Moved to the structured transport; the next message resumes this conversation.', timestamp: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: converted });
+    return 'converted';
+  }
+
   private structuredEventsLive(): boolean {
     return !this.stopped && this.db.isOpen();
   }
@@ -4241,6 +4439,30 @@ export class SessionManager {
     if (suspended) this.eventBus.emit({ type: 'session.updated', session: suspended });
   }
 
+  /** The structured counterpart of the pressure suspension: end the idle conversation's own process and mark the row. */
+  private async suspendStructuredPressureSession(staleSession: BoundSession, threshold: number): Promise<boolean> {
+    // A conversation that is not loaded holds no memory, and nothing restores it on its own.
+    if (!this.structured.alive(staleSession)) return false;
+    if (await this.suspensionBlockReason(staleSession, 'pressure')) return false;
+    const current = this.db.boundSessions.getById(staleSession.id);
+    const availableBeforeBytes = this.availableMemoryBytes();
+    if (!current || !this.isPressureSuspendable(current) || availableBeforeBytes === undefined || availableBeforeBytes >= threshold) return false;
+    if (!this.structured.alive(current) || this.structured.turnActive(current)) return false;
+    await this.structured.unload(current);
+    this.stopWatching(current.id);
+    this.runtimes.clearEphemeral(current.id);
+    this.runRecovery.cancel(current.id);
+    this.db.meta.set(peerWakeComposerKey(current.id), '');
+    const suspended = this.db.boundSessions.setPressureSuspendedAt(current.id, nowIso());
+    if (!suspended) return false;
+    this.appendEvent(suspended, { type: 'status', text: 'Session suspended because available memory was low; it will restore on next use.', timestamp: nowIso() });
+    this.logger?.warn({ sessionId: suspended.id, availableBeforeBytes, availableAfterBytes: this.availableMemoryBytes(), thresholdBytes: threshold },
+      'Suspended idle structured session under memory pressure.');
+    this.publishStructuredScreen(suspended.id); // now reads "asleep"
+    this.eventBus.emit({ type: 'session.updated', session: suspended });
+    return true;
+  }
+
   private async applyStructuredModelProfile(session: BoundSession, request: Extract<ModelProfileRequest, { state: 'queued' }>): Promise<void> {
     if (this.structured.turnActive(session)) {
       this.deferModelProfileRequest(session, request, 'turn_running');
@@ -4452,6 +4674,7 @@ export class SessionManager {
           profile: providerId === 'codex' ? session.codexProfile : session.claudeProfile,
           model: input.launchContext?.model,
           effort: input.launchContext?.effort,
+          launchContext: input.launchContext,
         });
         nativeRef = created.nativeSessionId;
         started = created;

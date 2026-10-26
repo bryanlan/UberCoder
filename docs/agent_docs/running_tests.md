@@ -236,6 +236,15 @@ id that runs again. `tmux-client-structured-guard` checks every client method th
 `structured-session-env` checks the coordination variables and configured `env` that reach the provider process,
 and the coordination identity (`runtimeDir`, `helperPath`) the plugin pins into the app-server argv.
 
+Lane C2 suites (run with `--testTimeout 10000 --maxWorkers=2`; each tmux bind in the migration and launch suites costs
+about half a second, so `structured-session-migration` takes about 25 s): `structured-session-per-session` (a fake
+plugin with `processModel: 'per-session'`: environment and coordination identity, authority text, own pid, idle sleep
+that is not a lost connection, pressure suspension, release, an unexpected exit), `structured-session-migration`
+(tmux conversations moved to the structured transport against a fake tmux and fake plugins, plus the dry run and its
+route), `structured-session-default-transport` and `structured-session-launches` (a bind or granted launch that names
+no transport takes `structuredSessions.defaultTransport`). The `config`, `conversation-routes` and `projects-routes`
+suites cover the config keys, the route default and the advertised providers.
+
 Opt-in installed-binary check: `AGENT_CONSOLE_REAL_CODEX=1 NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-plugin`
 also runs a handshake against the host `codex app-server` (initialize, model list, account read). It opens no
 thread and spends no quota.

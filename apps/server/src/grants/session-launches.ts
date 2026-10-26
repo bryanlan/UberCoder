@@ -13,7 +13,7 @@ interface LaunchInput {
   projectSlug?: string; provider?: ProviderId; model?: string; effort?: string; flags?: string[];
   prompt?: string; title?: string; supervisorId?: string; grantId?: string; sessionId?: string; targetAssignmentId?: string; requestId?: string;
   previousPid?: number;
-  /** A structured session shares its provider process, so a restart is proven by a new load epoch instead of a new pid. */
+  /** A structured session proves a restart by a new load epoch, not a new pid: a shared process keeps its pid across threads. */
   previousEpoch?: string;
 }
 interface RequestRow { id: string; assignment_id: string; grant_id: string; action: AgentGrantAction;

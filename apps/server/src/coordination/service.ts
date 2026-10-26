@@ -106,8 +106,9 @@ export class CoordinationService {
   }
 
   /**
-   * A structured thread shares its provider process with other threads, so its hook cannot carry a per-thread
-   * Console session id. The binding is found from the thread id instead; only a unique match counts.
+   * A thread on a shared provider process (Codex) cannot carry a per-thread Console session id in its hook. The binding
+   * is found from the thread id instead; only a unique match counts. A per-session process (Claude) carries
+   * `AGENT_CONSOLE_SESSION_ID` and is matched by `consoleSessionId` first.
    */
   private structuredSessionForThread(provider: string, nativeSessionId: string): string | undefined {
     const rows = this.db.sqlite.prepare(`select id from bound_sessions where transport='structured' and provider=?

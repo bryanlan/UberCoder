@@ -189,7 +189,8 @@ Host changes for `per-session` plugins in `StructuredSessionService`: one instan
 that spawns a process per session (through the relay); idle sleep and pressure suspension end the process
 (end of input, then group SIGTERM, then SIGKILL) and set the marker; restore resumes by native id; model
 profile change applies live; `providerAlive` is "relay reports the child alive"; coordination liveness uses
-the child pid as the tmux path does today; granted launches pass `transport`.
+the child pid as the tmux path does today; granted launches pass `transport`. Built in lane C2: see "Per-session
+host support, default transport and migration (lane C2)" below.
 
 ## Session host relay
 
@@ -264,6 +265,130 @@ Node 22.18 or later, which the tests and `tsx` development use).
   prevents that case unless the child ignores SIGTERM.
 - Idle: a Claude host exits when its child exits; a Codex host lives as long as the app-server.
 
+## Per-session host support, default transport and migration (lane C2)
+
+Built in lane C2 on top of the relay (C0) and the Claude plugin (C1). Everything keys on the plugin's declared
+`capabilities.processModel`, never on the plugin id, so a later ACP plugin gets the same treatment.
+
+**Per-session processes in `StructuredSessionService` and `SessionManager`**
+
+- One instance object per provider; for `processModel: 'per-session'` it starts one process per Console session
+  (the plugin names the relay host after the session, `claude-<sessionId>`; C0 rejects a colon in a host id).
+  The service refuses a second open for a conversation that is loaded, and a lost conversation never replaces the
+  instance (a per-session instance holds no shared connection that one conversation could break).
+- `OpenOptions` gains four optional fields, handed to per-session plugins only where noted: `env` (per-session
+  only: the Console's coordination variables, the provider's configured `env` over them, and
+  `AGENT_CONSOLE_SESSION_ID`, which the configured `env` can never override); `consoleIdentity`
+  (per-session only, only with coordination on: `{ sessionId, runtimeDir, helperPath }`, the values the tmux launch
+  pins, for the conversation's own coordination MCP config); `appendSystemPrompt` (any plugin: the grant authority
+  text `launchAuthorityContext` builds for a session a grant launched, the same text the tmux launch passes to
+  `--append-system-prompt`); `systemPromptSnapshot: 'off'` (on every resume of a session a grant launched, also when no
+  authority text is left to append, so the resumed prompt names the grants active now and not the ones recorded on the
+  first request; unproven against the real CLI, see "Open items"). A shared process still never gets a conversation's identity.
+- `TransportSession.pid` (optional): a per-session transport reports its own process, and the service stores it as the
+  row `pid`; a shared instance keeps reporting the one shared pid.
+- Idle sleep is `unload()`: the process ends, the row gets `idleSuspendedAt`, the next message `resume`s by native id.
+  `close('release')` ends the process too and is what release uses (a per-session release skips the unload).
+  The `stopped` state that follows an unload is a normal end: the service marks the session `closing` before it ends
+  it, so only an exit the host did not ask for becomes a lost connection (status line, `isWorking=false`, RunRecovery
+  `process_exited` for unattended work).
+- Memory pressure suspends an idle per-session conversation (process ended, `pressureSuspendedAt`, restored by selecting
+  it) with the same guards as tmux rows: no turn running, no queued input, no model change, no active coordination
+  assignment, the two-sample confirmation and the idle window. Shared-process rows are still skipped.
+- Model and effort go on the next `sendTurn`, as for Codex; the Claude plugin applies them live.
+- Coordination liveness is unchanged: an assignment stays alive while a restorable bound structured row exists, so an
+  ended per-session process does not disconnect it.
+
+**Config** (`config/schema.ts`, `config/agent-console.example.json`)
+
+```json
+"structuredSessions": {
+  "defaultTransport": "tmux",
+  "codex":  { "enabled": false, "command": ["codex", "app-server"], "idleUnloadMinutes": 60, "env": {} },
+  "claude": { "enabled": false, "command": ["claude"],             "idleUnloadMinutes": 60, "env": {} }
+}
+```
+
+`defaultTransport` is `tmux` or `structured` and defaults to `tmux`. It is the transport of every bind that does not
+name one (new chats, history binds, auto-tracked conversations and granted launches) and the switch for the migration
+below. It only takes effect for a provider whose lane is enabled; for a provider whose lane is off the bind falls back to
+tmux and logs one warning per provider. An explicit `transport` in a request always wins (explicit `structured` for a
+provider whose lane is off is still a 400).
+
+**Default transport**
+
+- `SessionManager.defaultTransportFor(provider)` resolves it; the routes use the same pure function
+  (`sessions/structured/default-transport.ts`) because they hold the advertised-provider list. `bindConversation`
+  with no `transport` takes the default, so granted launches (`grants/session-launches.ts`) and auto-tracked conversations
+  follow it without a code path of their own.
+- A bind that names no transport and finds the conversation already bound on tmux returns that tmux session (it has
+  not been moved yet); only an explicit `structured` request is refused with the existing 409.
+- `GET /api/projects/tree` advertises each provider whose lane is enabled and has a registered plugin;
+  the sidebar offers "Codex (app-server)" and "Claude (headless)" per advertised provider. `app.ts` registers
+  `createClaudePlugin()` beside the Codex plugin.
+
+**Migration of live tmux bindings** (decision 4)
+
+`reconcileSessions` (first pass 5 s after start, then every 30 s) runs this for every restorable tmux row whose provider
+has its lane on while `defaultTransport` is `structured`. It runs under the row's command lock, one row at a time,
+and a failure on one row is logged and never stops the pass.
+
+1. Classify the row. It moves only when `status` is `bound`, the conversation ref is a native id (not `pending:`), the row
+   is not working, has no queued input, no model change in flight, and (Claude) its transcript file is indexed and
+   readable. A tmux session that is gone while the provider process still runs outside the binding is left alone.
+2. A live tmux session passes the idle-sleep guard (owner option, screen readable and idle, no unsent draft, no native
+   selection, no unsent peer notice), is killed, and must be confirmed dead. If any step fails the row is untouched and
+   the next pass tries again. A dead session moves without a kill, screen read or key press (only the liveness check).
+3. `BoundSessionsRepo.setTransport` flips the row in one transaction: `transport='structured'`,
+   `tmux_session_name='structured:<id>'`, `raw_log_path` and `pid` cleared, `idle_suspended_at` set to now (an existing
+   idle marker keeps its time; a manual or pressure suspension keeps its own marker and gets no idle one). Identity,
+   native conversation, title and recency do not change. A status line "Moved to the structured transport; the next
+   message resumes this conversation." is appended and `session.updated` is emitted.
+4. The row is now asleep. Its next message restores it through the plugin (`resume` by native id). Nothing is loaded at
+   move time, so a flip does not start 38 provider processes.
+
+Working rows, rows with queued input or a model change, `pending:` rows and Claude rows with no transcript stay on
+tmux and are retried on later passes (a missing transcript is logged once per row). Rows move one way: lowering
+`defaultTransport` later does not move them back (release and rebind with an explicit `tmux` to do that).
+
+`SessionManager.structuredMigrationReport()` is the dry run: for every restorable tmux row it returns the outcome the
+next pass would reach, with counts. It reads the database and asks tmux whether each session exists; it kills, moves
+and captures nothing. Outcomes: `dead` and `idle` move; `working`, `queuedInput`, `modelRequest`, `pending`,
+`noTranscript`, `notBound`, `unverified`, `externalOwner` and `providerOff` wait. It is served at
+`GET /api/sessions/structured-migration` (authenticated, no CSRF token, read-only) with `defaultTransport`, the
+providers whose lane is on, `structuredRows` (rows already moved) and one entry per row.
+
+**Flip procedure**
+
+1. Deploy the Phase A build with the defaults off. An absent `structuredSessions` block means both lanes off and tmux
+   the default, so nothing changes. Do not write the new keys into the live `config.json` before this build is the one
+   running (Zod strips unknown keys when settings are saved).
+2. Edit the live `config.json`: `structuredSessions.codex.enabled: true`, `structuredSessions.claude.enabled: true`,
+   `structuredSessions.defaultTransport: "structured"`. Restart `agent-console.service` (configuration is read at start).
+   Provider processes behind session hosts survive the restart.
+3. Read `GET /api/sessions/structured-migration` before the first pass (it runs 5 s after start) or just after: the
+   counts say how many rows move now (`dead`, `idle`) and what blocks the rest.
+4. The migration runs inside reconcile. Watch the report fall to the rows that cannot move; each moved row shows the
+   status line above. Working rows move when they go idle.
+5. Rollback: set `defaultTransport` back to `tmux` and restart. New conversations return to tmux; rows already moved
+   keep working on the structured transport, because the transport is stored on the row.
+
+**Open items found while building C2**
+
+- A per-session process that survived a backend restart behind its host is not owned by the new backend until the
+  conversation is used again (structured rows load on first use). Until then idle sleep, pressure suspension and
+  release see an unloaded row and do not end that process. The plugin can reattach it on `resume`, but there is no
+  "reattach if running, do nothing otherwise" call, so the host cannot adopt or reap survivors without starting a
+  process for a conversation that has none. It needs a small optional instance method (for example
+  `reattach(nativeSessionId, options)` returning undefined when no process is running) in C1, and a boot-time or
+  sleep-time call in the service.
+- `--system-prompt-snapshot off` on a resume with authority text is unproven against the real CLI.
+- A migrated or history-bound Claude row has no cost profile, so its resumed process starts without `--model` and
+  `--effort` and takes the CLI defaults. The tmux resume command carries `--effort medium` from the config template.
+  Check what a resumed headless session reports before the flip, or give migrated rows a profile.
+- Idle sleep and pressure suspension end a Claude process by Console recency alone; the tmux path also refuses while the
+  screen shows background work. A headless process with a long background task would be ended at idle.
+
 ## Parity features
 
 - **Question and approval card.** New `request.opened` events become a card in the conversation pane with
@@ -273,13 +398,14 @@ Node 22.18 or later, which the tests and `tsx` development use).
   grant push channel. Elicitations from MCP servers stay declined.
 - **Images.** The existing attachment flow (image store) feeds Codex `localImage` items and Claude base64
   image blocks; the route stops refusing images for structured rows.
-- **Granted launches** gain `transport` (default from config) so helpers launch structurally.
+- **Granted launches** follow the default transport (built in C2): a bind that names no transport takes
+  `structuredSessions.defaultTransport` for providers whose lane is on, so helpers launch structurally after the flip.
 - **Default transport** config: `structuredSessions.defaultTransport: 'tmux' | 'structured'` plus the
-  per-provider `enabled` flags; `/new/bind` and granted launches use the default when the body does not
-  say. The flip is a config change on the live server after the Phase A build is deployed.
-- **Migration** command in the backend, run once at the flip (`POST /api/admin/structured-migration` or a
-  script against the live database with the backend stopped): converts idle tmux rows as described in
-  decision 4 and reports the rows left on tmux because they were working.
+  per-provider `enabled` flags; `/new/bind`, history binds and granted launches use the default when the body does not
+  say (built in C2). The flip is a config change on the live server after the Phase A build is deployed.
+- **Migration** (built in C2): runs inside `reconcileSessions` while the default is structured, not as a one-off command;
+  converts tmux rows as described in decision 4, retries rows that were working on later passes, and
+  `GET /api/sessions/structured-migration` reports what is left and why.
 
 ## tmux retirement (Phase B)
 
@@ -312,7 +438,7 @@ the fake plugin). `bound_sessions.tmux_session_name` becomes nullable in a later
 |---|---|
 | C0 | Session host relay plus Codex plugin reconnect through it; backend boot reconnect; meta and liveness |
 | C1 | Claude plugin (CLI stream-json), fake `claude`, port of T3 behaviors, tests |
-| C2 | Host per-session support, Claude seams (sleep, pressure, profile restart, liveness), granted launch transport, default transport, migration |
+| C2 | Host per-session support, Claude seams (sleep, pressure, profile restart, liveness), granted launch transport, default transport, migration. Built; see "Per-session host support, default transport and migration (lane C2)" |
 | C3 | Question card and answer route, images, web changes, push for pending questions |
 | C4 | Proof scripts, docs, Opus review rounds and fix loops, live deploy of Phase A behind the flag, then the flip |
 | Phase B | tmux retirement after the agreed real-use window |

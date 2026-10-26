@@ -28,7 +28,11 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       pressureSuspendAvailableMiB: 3072,
       pressureSuspendIdleMinutes: 60,
     },
-    structuredSessions: { codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} } },
+    structuredSessions: {
+      defaultTransport: 'tmux',
+      codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
+      claude: { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} },
+    },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',

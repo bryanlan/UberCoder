@@ -114,21 +114,33 @@ export const SESSION_TRANSPORTS = ['tmux', 'structured'] as const;
 export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
 // BoundSession gains:  transport: SessionTransport;
 // TreeResponse gains:  structuredProviders?: ProviderId[];   // providers whose structured flag is on
-// POST /new/bind body: { transport?: SessionTransport }       // default 'tmux'
+// POST /new/bind body: { transport?: SessionTransport }       // omitted: structuredSessions.defaultTransport (default 'tmux')
 ```
 
 ### Config (`apps/server/src/config/schema.ts`)
 
 ```json
 "structuredSessions": {
+  "defaultTransport": "tmux",
   "codex": {
     "enabled": false,
     "command": ["codex", "app-server"],
     "idleUnloadMinutes": 60,
     "env": {}
+  },
+  "claude": {
+    "enabled": false,
+    "command": ["claude"],
+    "idleUnloadMinutes": 60,
+    "env": {}
   }
 }
 ```
+
+`defaultTransport` (`tmux` or `structured`, default `tmux`) is the transport of a bind that names none and the switch for
+moving existing tmux conversations over; it only takes effect for a provider whose lane is enabled. The Claude block has
+the same shape as the Codex one; `command` is the `claude` executable and any leading arguments. See
+`docs/structured-cutover.md`, "Per-session host support, default transport and migration (lane C2)".
 
 `env` is extra environment for the provider process. The Console first sets `AGENT_COORD_RUNTIME` (its
 runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordination is enabled, mirroring what
@@ -193,8 +205,9 @@ export interface TransportSession {
   steer?(turnId: string, input: TurnInput): Promise<void>;  // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
   interrupt(turnId: string): Promise<void>;                 // resolves when the request is accepted; terminal follows as an event
   respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void>;
-  unload(): Promise<void>;                                  // shared process: drop the thread from memory; per-session: no-op
-  close(reason: 'release' | 'shutdown' | 'error'): Promise<void>;
+  readonly pid?: number;                                    // per-session plugins: this conversation's own process
+  unload(): Promise<void>;                                  // shared process: drop the thread from memory; per-session: end this conversation's process (it stays resumable)
+  close(reason: 'release' | 'shutdown' | 'error'): Promise<void>; // per-session: ends the process whatever the reason
 }
 
 export interface OpenOptions {
@@ -202,7 +215,10 @@ export interface OpenOptions {
   cwd: string;
   model?: string; effort?: string;
   policy: { approvals: 'never' | 'on-request'; sandbox: 'full-access' | 'workspace-write' | 'read-only' };
-  env?: Record<string, string>;
+  env?: Record<string, string>;                             // per-session only: coordination variables, configured env, AGENT_CONSOLE_SESSION_ID
+  consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string }; // per-session only, coordination on
+  appendSystemPrompt?: string;                              // grant authority text of a granted launch
+  systemPromptSnapshot?: 'on' | 'off';                      // 'off' on every resume of a granted session
 }
 
 export interface TransportInstance {
@@ -418,7 +434,8 @@ Line numbers are from `main` at `af009e3`.
 | RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `deferred` delivery (nothing was sent: the transport's `NotSentError`, a turn that started first, an unloaded thread) throws `RecoverySubmitDeferredError`; RunRecovery then gives the attempt back and schedules the retry one backoff step later, inside the same 10-minute recovery window, instead of stopping as "outcome uncertain". Only a `failed` delivery or another error stops recovery as uncertain. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
 | `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `alive ? turnActive : false`: a thread that is not loaded runs nothing, so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
 | `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot. Boot settles lost work only: a row still marked working loses its turn with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
-| `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skip structured rows in slice 1 (a shared process cannot be suspended per thread). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `queued_input`. |
+| `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `queued_input`. |
+| `reconcileSessions`, `defaultTransportFor`, `migrateTmuxRowToStructured` (lane C2) | While `structuredSessions.defaultTransport` is `structured`, each restorable tmux row of a provider whose lane is on is classified and, when idle or dead, flipped to a sleeping structured row (`BoundSessionsRepo.setTransport`); a live tmux session is stopped like idle sleep and confirmed dead first. `structuredMigrationReport()` is the dry run, served at `GET /api/sessions/structured-migration`. A bind that names no transport takes `defaultTransportFor(provider)`. See `docs/structured-cutover.md`. |
 | `releaseSessionInternal` (3481) | `interrupt` if a turn is active, then `unload`, then `ended`; delete the runtime dir as today. |
 | `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running (or one starts during the switch) put the request back to `queued` with `turn_running`, and the next `turn.terminal` re-runs it. The next `sendTurn` carries `model`/`effort`. |
 | `restartGrantedSession` (1830), `closeGrantedSession` (1869) | Restart: refuse with "Restart is waiting for the current work to finish." while a turn is active. A grant never stops a human's running turn; tmux refuses in the same situation. Otherwise `unload`, reset the run monitor, `ensureLoaded`, `sendTurn(prompt)`. Close: same as release. Completion of a crash-resumed restart compares `structured-epoch` instead of `pid`. |
@@ -495,13 +512,17 @@ The service subscribes to each session's event stream and calls SM-provided call
 ## Routes and web
 
 - `POST /api/conversations/:projectSlug/:provider/new/bind` accepts `{ transport?: 'tmux' |
-  'structured' }`. Structured is refused with 400 unless `structuredSessions.<provider>.enabled`.
-- `POST .../:conversationRef/bind` (history resume) accepts the same field; a structured resume of a
-  conversation that another live binding owns is refused like today (one restorable owner).
+  'structured' }`. Omitted, it takes `structuredSessions.defaultTransport` for a provider whose lane is on, else
+  tmux. An explicit structured request is refused with 400 unless `structuredSessions.<provider>.enabled`.
+- `POST .../:conversationRef/bind` (history resume) accepts the same field; an explicit structured resume of a
+  conversation that another live binding owns is refused like today (one restorable owner). A request that names no
+  transport and finds a tmux binding returns that binding.
+- `GET /api/sessions/structured-migration` is the read-only dry run of moving tmux conversations to the structured
+  transport (authenticated).
 - `GET /api/projects` tree response gains `structuredProviders`.
 - `GET /api/sessions/:id/screen` returns the synthesized screen for structured rows.
   `GET /api/sessions/:id/raw-output` returns 404 for structured rows.
-- Web: New Chat shows a second action, "Codex (app-server)", when the tree advertises the provider.
+- Web: New Chat shows a second action per advertised provider, "Codex (app-server)" and "Claude (headless)".
   `ConversationPane.tsx` for `boundSession.transport === 'structured'`: hide Text Bypass, the
   arrow/Backspace/Tab keys, the native-selection affordances and the terminal panel; keep Send, Esc/Stop,
   model profile controls, `QueuedInputNotice`, `RunFailureNotice`, suspend and close. A small
@@ -515,8 +536,9 @@ The service subscribes to each session's event stream and calls SM-provided call
 - Image attachments on structured sessions (route refuses with a clear error).
 - Claude Agent SDK plugin and ACP plugin. The contract above is written for them; a contract test
   suite runs the fake plugin through the same host paths so nothing in the host is Codex-shaped.
-- Pressure suspension of structured rows and restart of an idle shared process under memory pressure.
-- Granted launches of structured sessions (`launch_session` has no `transport`).
+- Pressure suspension of rows on a shared process (per-session plugins are suspended since lane C2) and restart of an
+  idle shared process under memory pressure.
+- Granted launches of structured sessions: not in slice 1; built in lane C2 (a granted launch takes the default transport).
 - Per-thread MCP environment injection.
 
 ## Verification

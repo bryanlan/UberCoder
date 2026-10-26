@@ -62,11 +62,21 @@ export interface TransportSession {
   readonly capabilities: TransportCapabilities;
   readonly events: AsyncIterable<TransportEvent>; // single consumer; ends after session.state 'stopped'
   readonly transcriptPath?: string; // when the provider reports it
+  /** Per-session plugins: the pid of this conversation's own process. Shared plugins leave it out (the instance reports the shared pid). */
+  readonly pid?: number;
   sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
   steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
   interrupt(turnId: string): Promise<void>; // resolves when the request is accepted; terminal follows as an event
   respond(requestId: string, response: RequestResponse): Promise<void>; // answers a pending request; unknown ids resolve without effect
-  unload(): Promise<void>; // shared process: drop the thread from memory; per-session: no-op
+  /**
+   * Idle sleep and manual suspend. Shared process: drop the thread from memory (the process keeps serving other threads).
+   * Per-session: end this conversation's own process; the conversation stays resumable by its native id.
+   */
+  unload(): Promise<void>;
+  /**
+   * The host is finished with the session. Per-session plugins end the process whatever the reason; `release` also means the
+   * conversation is over. A shared process keeps running for its other threads.
+   */
   close(reason: 'release' | 'shutdown' | 'error'): Promise<void>;
 }
 
@@ -98,7 +108,23 @@ export interface OpenOptions {
   model?: string;
   effort?: string;
   policy: { approvals: 'never' | 'on-request'; sandbox: 'full-access' | 'workspace-write' | 'read-only' };
+  /**
+   * Per-session plugins only: the environment for this conversation's process (the Console's coordination variables, the
+   * provider's configured `env`, and `AGENT_CONSOLE_SESSION_ID`). A shared process never gets one conversation's identity.
+   */
   env?: Record<string, string>;
+  /**
+   * Per-session plugins only, and only when coordination is enabled: what a conversation's own coordination MCP config needs
+   * (the same runtime directory, helper script and session id the tmux launch pins).
+   */
+  consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string };
+  /** The standing-authority text of a session a grant launched; the same text the tmux launch appends to the system prompt. */
+  appendSystemPrompt?: string;
+  /**
+   * `'off'`: the provider rebuilds its system prompt on this launch instead of replaying the one recorded on the first
+   * request, so changed `appendSystemPrompt` text reaches a resumed conversation. Omitted or `'on'`: the provider's default.
+   */
+  systemPromptSnapshot?: 'on' | 'off';
 }
 
 export interface TransportInstance {

@@ -7,15 +7,19 @@ import type { ProviderAdapter } from '../../src/providers/types.js';
 import { AppDatabase } from '../../src/db/database.js';
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { TransportPluginRegistry } from '../../src/providers/transport/registry.js';
-import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
+import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
 import { FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
 
 export const structuredSessionsConfig = {
   codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
+  claude: { enabled: true, command: ['fake-claude'], idleUnloadMinutes: 60, env: {} },
 };
 
 export interface StructuredSessionFixtureOptions {
+  /** The main plugin; its `id` ('codex' by default, or 'claude') decides which provider the bind helpers use. */
   plugin?: FakeTransportPluginOptions;
+  /** More plugins registered beside the main one (for example a Claude plugin beside the Codex one). */
+  extraPlugins?: FakeTransportPluginOptions[];
   manager?: Parameters<typeof createRecoveryManager>[6];
   /** Leave the structured lane off to prove binds are refused. */
   disabled?: boolean;
@@ -29,12 +33,17 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
   const tmux = new FakeTmux();
   const plugin = new FakeTransportPlugin(options.plugin);
+  const extraPlugins = (options.extraPlugins ?? []).map(extra => new FakeTransportPlugin(extra));
   const registry = new TransportPluginRegistry();
   registry.register(plugin);
+  for (const extra of extraPlugins) registry.register(extra);
+  const providerId: 'codex' | 'claude' = plugin.id === 'claude' ? 'claude' : 'codex';
+  const adapter = options.provider ?? (providerId === 'claude' ? claudeProvider : provider);
+  const providerName = providerId === 'claude' ? 'Claude' : 'Codex';
   const bus = new RealtimeEventBus();
   const events: SessionEvent[] = [];
   bus.subscribe((event) => { events.push(event); });
-  const manager = createRecoveryManager(db, tmux, root, bus, options.provider ?? provider, providerSettings, {
+  const manager = createRecoveryManager(db, tmux, root, bus, adapter, providerSettings, {
     transportPlugins: registry,
     structuredSessions: options.disabled ? undefined : structuredSessionsConfig,
     ...options.manager,
@@ -45,19 +54,19 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     const pendingRef = `pending:${randomUUID()}`;
     const now = new Date().toISOString();
     const pending: ConversationSummary = {
-      ref: pendingRef, kind: 'pending', projectSlug: project.slug, provider: 'codex', title: 'New Codex conversation',
+      ref: pendingRef, kind: 'pending', projectSlug: project.slug, provider: providerId, title: `New ${providerName} conversation`,
       createdAt: now, updatedAt: now, isBound: false, degraded: false, rawMetadata: { pending: true },
     };
     db.pendingConversations.put(pending);
     const session = await manager.bindConversation({
-      project, provider, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured', ...extra,
+      project, provider: adapter, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured', ...extra,
     });
     return { session, pendingRef };
   };
 
   const bindHistory = (conversationRef: string, extra: Partial<Parameters<typeof manager.bindConversation>[0]> = {}) =>
     manager.bindConversation({
-      project, provider, providerSettings, conversationRef, title: 'History', kind: 'history', transport: 'structured', ...extra,
+      project, provider: adapter, providerSettings, conversationRef, title: 'History', kind: 'history', transport: 'structured', ...extra,
     });
 
   const row = (id: string): BoundSession => db.boundSessions.getById(id)!;
@@ -78,8 +87,9 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     const nextPlugin = new FakeTransportPlugin(options.plugin);
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);
+    for (const extra of options.extraPlugins ?? []) nextRegistry.register(new FakeTransportPlugin(extra));
     const nextTmux = new FakeTmux();
-    const nextManager = createRecoveryManager(db, nextTmux, root, bus, options.provider ?? provider, providerSettings, {
+    const nextManager = createRecoveryManager(db, nextTmux, root, bus, adapter, providerSettings, {
       transportPlugins: nextRegistry, structuredSessions: structuredSessionsConfig, ...options.manager,
     });
     const next = { manager: nextManager, plugin: nextPlugin, tmux: nextTmux };
@@ -94,7 +104,7 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     fs.rmSync(root, { recursive: true, force: true });
   };
 
-  return { root, db, tmux, plugin, registry, bus, events, manager, restartBackend, bindNew, bindHistory, row, thread, calls, eventTypes, tmuxTouched, cleanup };
+  return { root, db, tmux, plugin, extraPlugins, providerId, adapter, registry, bus, events, manager, restartBackend, bindNew, bindHistory, row, thread, calls, eventTypes, tmuxTouched, cleanup };
 }
 
 export type StructuredSessionFixture = ReturnType<typeof structuredSessionFixture>;
