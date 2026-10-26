@@ -316,3 +316,29 @@ Run recovery ownership (requires explicit unattended permission):
 - `apps/server/test/codex-run-state.test.ts`, `claude-run-state.test.ts`, `run-recovery.test.ts`, and
   `apps/web/e2e/run-recovery.spec.ts` — provider/transport/controller and desktop/mobile
   consumer regressions; browser fixtures never submit to a real provider.
+
+## Structured provider lane
+
+- `docs/structured-providers.md` — plan, contracts, slice boundaries and verification evidence;
+  `docs/research/codex-app-server-2026-10-26/` holds the protocol brief and seam maps it was built from.
+- `apps/server/src/providers/transport/{types,registry}.ts` — transport plugin contract (capabilities,
+  events, instance, session) and the plugin registry.
+- `apps/server/src/providers/transport/codex/` — the `codex app-server` plugin: `jsonrpc.ts` (stdio
+  JSON-RPC client), `protocol.ts` (wire shapes), `app-server-instance.ts` (shared child process, thread
+  routing, environment), `app-server-session.ts` (thread and turn lifecycle, event mapping, steer and
+  interrupt), `errors.ts`, `usage.ts` and `redact.ts` (ported from T3 Code; see `THIRD_PARTY_NOTICES.md`).
+- `apps/server/src/sessions/structured/structured-session-service.ts` — loaded sessions, active turn,
+  steer-versus-turn policy, exactly-once terminals and process environment; `structured-run-monitor.ts`
+  — run state for RunRecovery from turn events plus the rollout monitor.
+- `apps/server/src/sessions/session-manager.ts` — owns the structured seams (`session.transport`
+  dispatch at bind, restore, input, wake, recovery, sleep, model profile, release).
+- `apps/server/test/structured-*.test.ts` — plugin (scripted fake and recorded wire transcripts), fake
+  plugin contract, and session-manager seams (bind, input, lifecycle, recovery, wake, coordination,
+  Codex end to end against a fake app-server, process environment). Helpers: `test/helpers/structured-fixtures.ts`,
+  `structured-session-fixture.ts`, `codex-harness.ts`, `fake-app-server.mjs`, `replay-app-server.mjs`
+  and `codex-fixtures/`.
+- `scripts/prove-structured-codex.mjs` — opt-in real-Codex proof of the whole lane through the HTTP API;
+  evidence JSON under `test-results/structured-codex-proof/`.
+- Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register,
+  `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls
+  move together; review them with `docs/structured-providers.md` and the structured tests.

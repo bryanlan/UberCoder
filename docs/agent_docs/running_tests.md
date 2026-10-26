@@ -214,3 +214,32 @@ Cooperative priority trial: `NODE_ENV=test npm run test -w @agent-console/server
 Supervisor workflow trial: run `NODE_ENV=test npm run test -w @agent-console/server -- assignment-continuation message-priority peer-message-wake peer-wake-audit agent-session-launches coordination wiki --maxWorkers=1 --no-file-parallelism`, then `NODE_ENV=test npm run test -w @agent-console/web -- CoordinationPanel --maxWorkers=1 --no-file-parallelism`. Disposable fixtures cover digest cadence and overflow, P3 isolation, state-transition deduplication, expired-unread acknowledgement, dispatch ownership/revision/idempotency, preserved budgets, native drafts, Stop and last-moment permission changes. These fixtures do not measure live token savings.
 
 Wiki freshness and P1 reason: `NODE_ENV=test npm run test -w @agent-console/server -- wiki message-priority assignment-continuation coordination peer-message-wake peer-wake-audit agent-session-launches --maxWorkers=1 --no-file-parallelism`, then `NODE_ENV=test npm run test -w @agent-console/web -- WikiPage CoordinationPanel --maxWorkers=1 --no-file-parallelism`. Fixtures cover schema 1/2 migration, replacement cycles/history/search, reason validation, immutable retries, expiry and guarded wake/reusable task behavior. Peer-wake fixtures simulate native Ctrl-C composer clearing used by the deployed Escape contract.
+
+## Structured provider lane
+
+Server coverage: `NODE_ENV=test npm run test -w @agent-console/server -- structured config database conversation-routes session-routes projects-routes`,
+then `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane Sidebar api`. The structured tests use
+private SQLite files, the fake transport plugin, and a scripted fake `codex app-server` plus recorded wire
+transcripts (`test/helpers/fake-app-server.mjs`, `replay-app-server.mjs`, `codex-fixtures/`). They never start
+Codex or tmux, and the session tests assert that no tmux call is made for a structured row.
+
+Opt-in installed-binary check: `AGENT_CONSOLE_REAL_CODEX=1 NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-plugin`
+also runs a handshake against the host `codex app-server` (initialize, model list, account read). It opens no
+thread and spends no quota.
+
+Opt-in real proof: after `npm run build`, run
+`env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log`.
+It starts an isolated backend (temp database, runtime and scratch git project, private tmux socket, free port
+in 14390-14399) with `structuredSessions.codex.enabled`, and drives one real structured Codex conversation
+through the HTTP API: bind, model profile, first reply, rollout and index path, hook registration and a
+coordination MCP call, mid-turn steer, Stop, manual sleep and restore, a medium-profile round trip, backend
+restart and resume, release (12 steps). It switches to the low profile before the first turn because the
+medium profile's model is sometimes rate limited (HTTP 429, Codex backs off for minutes); the evidence lists
+any such retries from Codex's own log.
+The coordination MCP entry in `~/.codex/config.toml` pins the live runtime, so the proof overrides it per
+process with `-c mcp_servers.agent_console_coordination.*`. It needs the host Codex login, runs about ten short
+real turns (about a minute when the provider is not rate limited), and removes its temp root and any app-server it started. Step results print to stderr as
+`PROOF` lines; the Fastify request log goes to stdout. Evidence JSON (step name, result, timing, thread id,
+model, pids; no message bodies) is written after every step to `test-results/structured-codex-proof/<timestamp>.json`.
+The rollout files it creates stay under `~/.codex/sessions`. Idle sleep after `idleUnloadMinutes` is covered by
+unit tests only; the proof sleeps the thread manually.

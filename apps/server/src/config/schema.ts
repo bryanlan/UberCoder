@@ -68,12 +68,14 @@ const structuredProviderSchema = z.object({
   enabled: z.boolean().default(false),
   command: z.array(z.string()).min(1).default(['codex', 'app-server']),
   idleUnloadMinutes: z.number().positive().default(60),
+  // Extra environment for the provider process, applied over the Console's own coordination variables.
+  env: z.record(z.string(), z.string()).default({}),
 });
 
 const structuredSessionsConfigSchema = z.object({
-  codex: structuredProviderSchema.default({ enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 }),
+  codex: structuredProviderSchema.default({ enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} }),
 }).default({
-  codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 },
+  codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
 });
 
 export const appConfigSchema = z.object({

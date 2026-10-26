@@ -563,6 +563,49 @@ See [the audit contract](peer-wake-audit.md).
 `apps/server/src/wiki/` owns durable pages and append-only revisions keyed by Git common directory, so worktrees share a wiki. It stores them in a private SQLite file separate from Console's main database and maintains a consistent local SQLite backup snapshot. Both databases contain records that must be preserved. Authenticated browser routes and the `agent_wiki` MCP/CLI surface provide explicit read, search, history and compare-and-set edit operations. The browser's Wiki view renders links between pages. Wiki text is peer data and never authorizes source edits or external actions. See [the wiki contract](agent-wiki.md).
 
 
+## Structured provider lane
+
+Behind `structuredSessions.<provider>.enabled` (default off), a conversation can be driven through a
+provider protocol instead of a hidden tmux session. Codex is the first provider, through
+`codex app-server`. The plan, contracts and verification evidence are in
+[the lane plan](structured-providers.md); this section is the summary.
+
+- Transport column: `bound_sessions.transport` (`tmux` by default, `structured`; schema 19) is chosen at
+  bind time and persisted on the row, so turning the flag off later leaves existing rows working.
+  Structured rows store the sentinel tmux name `structured:<sessionId>` (a marker only: tmux 3.4 rewrites
+  the colon and would create a session), have no `raw_log_path`, and keep the app-server process id in
+  `pid`. `SessionManager` stays the lifecycle owner and dispatches on `session.transport` at each
+  tmux-dependent entry point. A structured row never reaches a tmux call; tests enforce this by counting
+  tmux calls on a fake client.
+- Service: `sessions/structured/structured-session-service.ts` owns the loaded transport sessions, the
+  active turn, the steer-versus-new-turn rule (human text steers a running turn, otherwise starts one),
+  exactly-once turn terminals, interrupts and the provider process environment. It reports through
+  callbacks; `SessionManager` keeps the journal, recency, run state, recovery and realtime events.
+  `StructuredRunMonitor` feeds RunRecovery from turn events and attaches the Codex rollout monitor once
+  the transcript path is indexed.
+- Plugin: `providers/transport/types.ts` is the contract (capabilities, events, instance, session).
+  `providers/transport/codex/` implements it with one shared `codex app-server` child per Console (stdio
+  JSON-RPC) and one thread per conversation, routed by thread id. Plugin events carry no message bodies:
+  durable history is still the Codex rollout, so transcript parsing, search and live-output
+  normalization are unchanged, and replayed events never move recency.
+- Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
+  A server request that still arrives (approval, elicitation, user-input question) is declined and
+  recorded as a status event. There is no approval UI.
+- Identity: the thread id is known at `thread/start`, so the binding is written with it at once and the
+  pending alias is adopted immediately. A shared process cannot carry a per-session
+  `AGENT_CONSOLE_SESSION_ID`; hooks and the coordination MCP identify the thread by its id and
+  `CoordinationService.register` resolves the Console session from the structured binding. With
+  coordination on, the Console gives the process `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`;
+  `structuredSessions.<provider>.env` overrides them. The coordination MCP entry in
+  `~/.codex/config.toml` pins its own `AGENT_COORD_RUNTIME`, so an isolated Console must override that
+  per process (see `scripts/prove-structured-codex.mjs`).
+- Limits: pressure suspension skips structured rows (a shared process cannot be suspended per thread);
+  the recovery and launch memory floors still apply. Image attachments, streamed assistant text and
+  approval UI are not in slice 1.
+- Restart limitation: the stdio child ends with the backend. A running structured turn is lost on a
+  backend restart (RunRecovery reports `process_exited`); the next use starts a new app-server and resumes
+  the thread from its rollout. A socket-mode process that outlives the backend is a follow-up.
+
 ## Provider run failures and bounded recovery
 
 Live input rejection never automatically releases, restarts, rebinds, or replays input

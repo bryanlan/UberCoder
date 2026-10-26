@@ -480,7 +480,7 @@ describe('ConfigService', () => {
 
   describe('structuredSessions', () => {
     const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
-    const defaults = { codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 } };
+    const defaults = { codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} } };
 
     it('defaults to disabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
@@ -497,24 +497,26 @@ describe('ConfigService', () => {
 
     it('parses an enabled block and fills the fields it omits', async () => {
       const full = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
-        structuredSessions: { codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15 } } });
+        structuredSessions: { codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } } } });
       const enabledOnly = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: true } } });
       const invalid = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { command: [] } } });
       const invalidIdle = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { idleUnloadMinutes: 0 } } });
+      const invalidEnv = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { env: { PORT: 1 } } } });
       try {
         expect(new ConfigService(full).getConfig().structuredSessions)
-          .toEqual({ codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15 } });
+          .toEqual({ codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } } });
         expect(new ConfigService(enabledOnly).getConfig().structuredSessions)
-          .toEqual({ codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60 } });
+          .toEqual({ codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} } });
         expect(() => new ConfigService(invalid)).toThrow();
         expect(() => new ConfigService(invalidIdle)).toThrow();
+        expect(() => new ConfigService(invalidEnv)).toThrow();
       } finally {
-        for (const configPath of [full, enabledOnly, invalid, invalidIdle]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+        for (const configPath of [full, enabledOnly, invalid, invalidIdle, invalidEnv]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
     });
 
     it('survives every persist path without loss', async () => {
-      const block = { codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5 } };
+      const block = { codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } } };
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
       try {
         const service = new ConfigService(configPath);

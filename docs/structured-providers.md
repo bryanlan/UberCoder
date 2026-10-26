@@ -1,8 +1,9 @@
 # Structured provider lane
 
-Date: 2026-10-26. Branch: `feature/structured-provider-lane`. Status: slice 1 implementation plan and
-contract. The lane ships behind a config flag that defaults off. Nothing in this document changes the
-running Console until the flag is turned on for a provider.
+Date: 2026-10-26. Branch: `feature/structured-provider-lane`. Status: slice 1 implemented; see
+Verification evidence. The lane ships behind a config flag that defaults off. Nothing in this document
+changes the running Console until the flag is turned on for a provider. The text below was corrected to the
+implementation on 2026-10-26; where it still differs from the code, the code governs.
 
 ## Decision
 
@@ -52,8 +53,8 @@ used here as reference and, where marked, as copied code with its license notice
                                              v  TransportPlugin contract (providers/transport/types.ts)
                                 +---------------------------+
                                 | CodexAppServerPlugin      |  providers/transport/codex/
-                                | one app-server process on |  JSON-RPC over a Unix socket,
-                                | a Unix socket, N threads  |  launched in a systemd scope
+                                | one app-server child on   |  JSON-RPC over the child's stdio,
+                                | stdio, N threads          |  spawned by the plugin
                                 +---------------------------+
 ```
 
@@ -84,9 +85,10 @@ Rules:
 ### Schema version 19
 
 - `bound_sessions.transport TEXT NOT NULL DEFAULT 'tmux'`.
-- `tmux_session_name` stays NOT NULL. Structured rows store the sentinel `structured:<sessionId>`.
-  tmux refuses session names with a colon, so an accidental tmux call fails loudly instead of touching
-  a real session.
+- `tmux_session_name` stays NOT NULL. Structured rows store the sentinel `structured:<sessionId>`. The
+  sentinel only marks the row: tmux 3.4 does not reject the colon (it rewrites it to `_` and creates a
+  session), so the protection is the dispatch rule (a structured row never reaches a tmux call), which the
+  structured session tests enforce by counting tmux calls on the fake client.
 - `raw_log_path` is NULL for structured rows; `event_log_path` is set (the event log is shared).
 - `pid` holds the app-server process id for structured rows (readers that use `pid` as "a live
   helper exists" keep working: worker roster, grant concurrency).
@@ -112,10 +114,18 @@ export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
   "codex": {
     "enabled": false,
     "command": ["codex", "app-server"],
-    "idleUnloadMinutes": 60
+    "idleUnloadMinutes": 60,
+    "env": {}
   }
 }
 ```
+
+`env` is extra environment for the provider process. The Console first sets `AGENT_COORD_RUNTIME` (its
+runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordination is enabled, mirroring what
+the tmux path gets from `providers.codex.commands.env`; `env` overrides them. Hooks inside a thread read
+`AGENT_COORD_RUNTIME` to find the Console. The coordination MCP entry in `~/.codex/config.toml` pins its own
+`AGENT_COORD_RUNTIME`, which suits the live Console; an isolated Console (the proof script) overrides it per
+process with `-c mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=...` in `command`.
 
 - Absent block or `enabled: false` means the lane is off: no New Chat option, `/new/bind` with
   `transport: 'structured'` returns 400, and no app-server process is ever started.
@@ -243,10 +253,12 @@ the source of truth for field names):
   socket mode is a follow-up and the plugin's connection layer is written so it can be added without
   touching the protocol code. Console never uses the per-user daemon (`codex app-server daemon`).
 - Instance = one app-server process per provider instance (CODEX_HOME), started with the configured
-  `command` plus `-c check_for_update_on_startup=false`, cwd fixed to the runtime directory, env
-  `CODEX_HOME` expanded. Meta `structured-instance:codex` records `{ pid, startedAt, version }`.
+  `command` plus `-c check_for_update_on_startup=false`, cwd fixed to the runtime directory. Its environment
+  is the Console's own, plus the host and configured `env` above, minus `AGENT_CONSOLE_SESSION_ID` and
+  `CODEX_THREAD_ID` (a shared process carries no session identity), with `CODEX_HOME` expanded. Meta
+  `structured-instance:codex` records `{ pid, startedAt, version }`.
 - Thread = Console conversation. `start` = `thread/start { cwd, model, approvalPolicy: 'never',
-  sandbox: 'danger-full-access', approvalsReviewer: 'user', config: { model_reasoning_effort },
+  sandbox: 'danger-full-access', approvalsReviewer: 'user', config: { mcp_optional_startup_grace_ms: 10000, model_reasoning_effort },
   ephemeral: false }`; the response carries `thread.id` (UUID, equals the rollout session id and the
   hook `session_id`) and `thread.path` (rollout JSONL, may be null until the first turn). `resume` =
   `thread/resume { threadId, excludeTurns: true, cwd, model, approvalPolicy, sandbox, config }`;
@@ -259,7 +271,8 @@ the source of truth for field names):
   just completed, the host resends the text as a new turn. `interrupt` = `turn/interrupt { threadId,
   turnId }`, then terminate tracked background terminals (`thread/backgroundTerminals/terminate`,
   experimental), wait up to 10 s for `turn/completed`, else finalize locally as `interrupted`.
-  `unload` = `thread/unsubscribe`.
+  `unload` = `thread/unsubscribe`. `thread/closed` (the server unloaded the thread) finalizes a running turn
+  as `failed` with the retryable code `thread_closed` and ends the session locally.
 - Notifications map to `TransportEvent`: `turn/started` to `turn.started` (events for a turn can
   arrive before the `turn/start` response, so buffer by `turnId`); `item/completed` to
   `item.completed` (authoritative item state; `turn/completed.turn.items` is only a summary);
@@ -297,8 +310,9 @@ stdin carries `session_id` = thread id; tool-call shells get `CODEX_THREAD_ID`; 
 reads `_meta.threadId`. Hook processes inherit the shared app-server environment, so
 `AGENT_CONSOLE_SESSION_ID` cannot identify a thread; the server resolves the Console session from the
 structured binding instead (see Coordination). MCP servers from config start per loaded thread, so
-idle threads are unsubscribed. The prove script verifies hook registration and an MCP coordination call
-from inside a structured turn.
+idle threads are unsubscribed. Codex waits only about one second for optional MCP servers before the first
+model request, so every thread starts with `mcp_optional_startup_grace_ms: 10000` (the value T3 Code uses).
+The prove script verifies hook registration and an MCP coordination call from inside a structured turn.
 
 ## SessionManager seams (slice 1)
 
@@ -313,11 +327,11 @@ Line numbers are from `main` at `af009e3`.
 | `getSessionScreen` (3594) | Return a synthesized `SessionScreen`: `inputActive: true`, empty content, `status` from the thread state, `model` from the profile. No tmux. |
 | `drainQueuedInputInternal` (2357), `sendInputInternal` (2151), `sendKeystrokesInternal` (2582) | Human text plus Enter: if no turn is running, `sendTurn`; if a turn is running and the plugin can steer, `steer`; journal `queued -> submitting -> submitted` with `turnId`. Escape: `interrupt` the active turn. Other keys, Text Bypass text-only and literal selection tokens: 409 with a clear message. `allowsLiteralSelectionKeystroke` (3568) returns false. |
 | `drainAssignments` (648-846) | Replace the tmux liveness/owner/screen/submit block with `deliverAutomatic(session, prompt)` returning `submitted | deferred | failed`; keep attempt records, follow-ups, continuation bookkeeping and `status` events in SM. Guard order unchanged: working, queued input, manual pause, run failure. |
-| RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. The rollout-based `CodexRunMonitor` stays attached once the index has the transcript path. |
+| RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
 | `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. Runs older than the epoch cannot own working state. `turn.started`/`turn.terminal` events also drive `isWorking` directly through `syncSessionWorkingState`. |
 | `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`. Pressure: skip structured rows in slice 1 (a shared process cannot be suspended per thread). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `queued_input`. |
 | `releaseSessionInternal` (3481) | `interrupt` if a turn is active, then `unload`, then `ended`; delete the runtime dir as today. |
-| `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running defer with `turn_running` and complete at the next terminal. The next `sendTurn` carries `model`/`effort`. |
+| `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running (or one starts during the switch) put the request back to `queued` with `turn_running`, and the next `turn.terminal` re-runs it. The next `sendTurn` carries `model`/`effort`. |
 | `restartGrantedSession` (1830), `closeGrantedSession` (1869) | Restart: `interrupt` if active, `ensureLoaded`, `sendTurn(prompt)`. Close: same as release. Completion of a crash-resumed restart compares `structured-epoch` instead of `pid`. |
 | `retainFinishedInbox` (485), `isWorkReleaseDue` path (1170) | Use `providerAlive(session)`: tmux liveness for tmux rows, "thread loaded on a live connection" for structured rows. |
 | `ensureSessionLogPaths` (1517), `watchSessionOutput` | Do not create or tail `raw.log` for structured rows. |
@@ -326,18 +340,21 @@ Line numbers are from `main` at `af009e3`.
 `StructuredSessionService` API used by SM (all run under `runtimes.run(sessionId, label)` by SM):
 
 ```ts
-start(input: { sessionId; project; provider; cwd; profile?; initialPrompt? }): Promise<{ nativeSessionId; transcriptPath?; pid }>
-resume(session): Promise<{ transcriptPath?; pid }>
-ensureLoaded(session): Promise<'loaded' | 'unavailable'>
-submitHuman(session, record: QueuedInputRecord, images): Promise<{ turnId; mode: 'turn' | 'steer' }>
+start(input: { sessionId; provider; cwd; profile?; model?; effort? }): Promise<{ nativeSessionId; transcriptPath?; pid? }>
+resume(session, cwd): Promise<{ transcriptPath?; pid? }>
+ensureLoaded(session, cwd?): Promise<'loaded' | 'unavailable'>
+submitHuman(session, record: { requestId; text }, images?): Promise<{ turnId; mode: 'turn' | 'steer' }>
 interrupt(session): Promise<'interrupted' | 'idle'>
-deliverAutomatic(session, prompt): Promise<'submitted' | 'deferred' | 'failed'>
+deliverAutomatic(session, prompt): Promise<{ status: 'submitted' | 'deferred' | 'failed'; reason?; turnId? }>
 setProfile(session, profile): Promise<'applied' | 'deferred'>
 unload(session): Promise<void>
 release(session): Promise<void>
 alive(session): boolean
 screen(session): SessionScreen
 ```
+
+`start` takes no opening prompt: `SessionManager` journals the prompt and sends it as the first turn after
+`start` returns, and rolls the bind back if that send fails.
 
 The service subscribes to each session's event stream and calls SM-provided callbacks:
 `onTurnStarted`, `onItemCompleted` (live only: `lastOutputAt = lastActivityAt = now`),
@@ -392,23 +409,70 @@ The service subscribes to each session's event stream and calls SM-provided call
 ## Verification
 
 - Unit tests (Vitest, `apps/server/test/structured-*.test.ts`): plugin contract with the fake plugin;
-  Codex JSON-RPC client against a scripted fake app-server (`test/helpers/fake-app-server.mjs`) over a
-  Unix socket; SM seams with the fake plugin (bind, resume, submit, steer, interrupt, wake delivery,
+  Codex JSON-RPC client against a scripted fake app-server (`test/helpers/fake-app-server.mjs`) over
+  stdio; SM seams with the fake plugin (bind, resume, submit, steer, interrupt, wake delivery,
   recovery submit, model profile, idle sleep and restore, release, synthesized screen, 409 paths);
   routes; config; schema migration; coordination register resolution.
 - Web tests: New Chat option, hidden controls, badge.
-- `npm run typecheck && npm run build` and the full `npm test` (baseline on `main`: one timing-sensitive
-  pre-existing failure, `claude-run-state > never sends Enter when Stop arrives during automatic text
-  entry`).
-- Real Codex proof: `scripts/prove-structured-codex.mjs` (opt-in, needs a host Codex login). It builds
-  the server, starts an isolated backend on a free port with a temp config (`structuredSessions.codex.
-  enabled: true`, coordination enabled, a scratch git project), then: creates a structured chat; sends a
-  prompt; waits for `turn.terminal`; checks the rollout file and the index transcript path; checks the
-  coordination assignment registered by the hook with the thread id and that the agent could call the
-  coordination MCP; steers a running turn; interrupts a turn with Escape; switches the model profile and
-  checks the next turn's model; sleeps and restores the thread; restarts the backend process and sends
-  another turn on the same conversation (the app-server survives); releases the session; disposes the
-  instance. Evidence JSON goes to `test-results/structured-codex-proof/<timestamp>.json`.
+- `npm run typecheck && npm run build` and the full `npm test`. The full server run on `be43958` had three
+  failures, identical on untouched `main` (`claude-ready-lifecycle` twice, `claude-run-state > never sends
+  Enter when Stop arrives during automatic text entry`).
+- Real Codex proof: `scripts/prove-structured-codex.mjs` (opt-in with `--run`, needs `npm run build` and a
+  host Codex login). It starts an isolated backend (temp database and runtime, scratch git project, private
+  tmux socket, `structuredSessions.codex.enabled`, coordination enabled) and drives one structured chat
+  through the HTTP API, recording each step into `test-results/structured-codex-proof/<timestamp>.json`:
+  a. the tree advertises the provider; b. structured bind (thread-id `conversation_ref`, `structured:`
+  sentinel name, app-server `pid`, no tmux server, the child has the isolated `AGENT_COORD_RUNTIME` and no
+  session identity); c. model profile `low` before the first turn, with no restart; d. first message and
+  reply; e. rollout file, index transcript path and the first turn's `turn_context` carrying the low model;
+  f. hook registration with the thread id and an MCP `status` call from inside a turn; g. a message sent
+  mid-turn is delivered as a steer; h. Escape interrupts a running turn (`turn_aborted`); i. manual sleep
+  (refused while the assignment is `active`, allowed after a completed turn) and restore; j. profile
+  `medium` reaches the provider on the next turn, then back to `low`; k. backend restart (the stdio
+  app-server dies with the backend) and a reply from a new app-server on the same conversation; l. release,
+  then no process of the proof remains after backend shutdown. The profile switch runs before the first turn
+  because the medium profile's model is rate limited on this host at times: Codex then waits out a 429
+  backoff of minutes and the turn only looks hung (the evidence lists such retries from Codex's own log).
+  Step j therefore waits for the medium turn to start, not to answer.
+
+## Verification evidence
+
+Real Codex proof, 2026-10-26, `codex-cli 0.164.0`, run on `be43958` plus the uncommitted W4 changes (env
+plumbing, proof script, docs). It does not cover later review fixes; rerun it after they land.
+`node scripts/prove-structured-codex.mjs --run` passed 12 of 12 steps in two consecutive runs (57 and 64 seconds).
+Evidence files (untracked, regenerated by each run): `test-results/structured-codex-proof/2026-10-26T07-48-43-016Z.json`
+and `2026-10-26T07-51-45-597Z.json`. The table shows the first run.
+
+| Step | Result and key values |
+|---|---|
+| a. tree | `structuredProviders: ['codex']` |
+| b. bind | `transport: structured`; `conversation_ref` is the thread UUID; `tmux_session_name` `structured:<id>`; `raw_log_path` null; `pid` is the app-server; no tmux server on the private socket; child environment has the isolated `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`, no `AGENT_CONSOLE_SESSION_ID` |
+| c. profile before first turn | `low` applied with the same pid, request cleared, screen shows `gpt-6-luna xhigh` |
+| d. first message | queue record `submitted`, `deliveryMode: turn`, reply `PONG`, `lastResponseAt` set |
+| e. rollout | file under `~/.codex/sessions`, session id matches, index `transcript_path` set, first `turn_context.model` is `gpt-6-luna` |
+| f. coordination | the SessionStart hook registered `native_session_id` = thread id in the isolated runtime; the agent called the `agent_coordination` MCP tool (rollout shows the call) and replied `REGISTERED`; `last_seen_at` advanced |
+| g. steer | message sent mid-turn: `deliveryMode: steer`, same `turnId`; reply `STEERED` |
+| h. Stop | Escape: idle within 0.3 s, rollout `turn_aborted` with reason `interrupted` |
+| i. sleep | manual suspend refused (HTTP 409) while the assignment was `active` after the interrupted turn; allowed after a completed turn; `manualSuspendedAt` set then cleared; `RESTORED` reply on the same app-server pid |
+| j. medium round trip | `medium` applied; the next turn's `turn_context.model` is `gpt-6.1-sol`; turn stopped; back to `low`; same pid |
+| k. backend restart | old app-server gone after shutdown; row still restorable; `RESUMED` reply from a new app-server pid |
+| l. release | row `ended`; no tmux server; after backend shutdown no process of the proof remains |
+
+What shaped the proof (earlier runs on the same code, same day):
+
+- `gpt-6.1-sol` (the medium profile's model) returned HTTP 429 on some turns, and Codex waited out a server-chosen
+  backoff of 25 to 519 seconds, so turns looked hung with no model output. Codex records this in its own log
+  database (`~/.codex/logs_*.sqlite`, target `codex_core::responses_retry`), not in the rollout. The proof
+  therefore switches to the low profile before the first turn and lists retries in its evidence
+  (`providerRetries`). A plugin-level probe of the same model, three turns, answered in 2 to 5 s, so the stalls
+  were provider-side, not Console-side.
+- An interrupted turn runs no Stop hook, so the assignment stays `active` and manual sleep is refused until a
+  turn completes. This is the existing rule for tmux sessions, applied to structured rows.
+
+Not covered by the proof: automatic idle sleep after `idleUnloadMinutes` (unit tests only; the proof sleeps
+manually), pressure suspension (skipped for structured rows by design), RunRecovery and peer-wake delivery
+against real Codex (fake-plugin tests only), a backend crash with a running turn (the proof restarts
+gracefully), the image, approval and streaming paths (not in slice 1).
 
 ## Work breakdown (slice 1)
 

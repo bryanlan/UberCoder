@@ -30,7 +30,8 @@
     "codex": {
       "enabled": false,
       "command": ["codex", "app-server"],
-      "idleUnloadMinutes": 60
+      "idleUnloadMinutes": 60,
+      "env": {}
     }
   },
   "security": {
