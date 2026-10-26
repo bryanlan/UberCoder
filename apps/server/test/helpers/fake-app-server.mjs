@@ -8,6 +8,7 @@
 //     "version": "0.164.0",                      // reported in the initialize userAgent
 //     "logFile": "/path/fake.log",               // every received frame and process event is appended as JSON
 //     "stderr": "text",                          // written to stderr at startup
+//     "exitAtStart": 3,                          // exit with this code right after startup (before any request is answered)
 //     "ignoreStdinEof": false,                   // keep running after stdin closes
 //     "ignoreSigterm": false,                    // keep running on SIGTERM
 //     "initializeError": { code, message },      // answer the first initialize with this error (the connection stays usable)
@@ -147,6 +148,8 @@ function handleFrame(frame) {
 
 if (scenario.stderr) process.stderr.write(scenario.stderr);
 log({ dir: 'event', event: 'start', pid: process.pid, argv: process.argv.slice(2), env: { CODEX_HOME: process.env.CODEX_HOME ?? null, ORIGINATOR: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ?? null, SESSION: process.env.AGENT_CONSOLE_SESSION_ID ?? null, THREAD: process.env.CODEX_THREAD_ID ?? null }, cwd: process.cwd() });
+
+if (scenario.exitAtStart !== undefined) process.stderr.write('', () => process.exit(scenario.exitAtStart));
 
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', (line) => {

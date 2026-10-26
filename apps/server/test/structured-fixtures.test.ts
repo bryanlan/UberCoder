@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import {
+  NotSentError,
   PreviousTurnActiveError,
   ResumeFailedError,
   TransportUnavailableError,
@@ -114,7 +115,42 @@ describe('FakeTransportPlugin', () => {
     expect(await pending).toEqual({ done: false, value: { type: 'session.state', state: 'stopped' } });
     expect(await iterator.next()).toEqual({ done: true, value: undefined });
     expect(() => session.push({ type: 'notice', level: 'warn', text: 'late' })).toThrow('stopped');
-    await expect(session.sendTurn({ text: 'late' })).rejects.toBeInstanceOf(TransportUnavailableError);
+    // As the real plugin: a turn on an ended session was certainly not sent.
+    await expect(session.sendTurn({ text: 'late' })).rejects.toBeInstanceOf(NotSentError);
+  });
+
+  it('fails a closed session with the error types of the real plugin', async () => {
+    const { instance } = newInstance();
+    const session = await instance.start(OPEN);
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await session.close('shutdown');
+
+    // Nothing is written to an ended session, so a turn or a steer can be queued and tried again.
+    const turn = await session.sendTurn({ text: 'late' }).catch((error: unknown) => error);
+    expect(turn).toBeInstanceOf(NotSentError);
+    expect(turn).toMatchObject({ code: 'not_sent' });
+    const steer = await session.steer(turnId, { text: 'late' }).catch((error: unknown) => error);
+    expect(steer).toBeInstanceOf(NotSentError);
+    // Stop needs the connection: the transport is unavailable, which is not a not-sent turn.
+    const stop = await session.interrupt(turnId).catch((error: unknown) => error);
+    expect(stop).toBeInstanceOf(TransportUnavailableError);
+    expect(stop).not.toBeInstanceOf(NotSentError);
+    expect(stop).toMatchObject({ code: 'transport_unavailable' });
+    // A loss after the write is whatever the test scripts: the real plugin throws TransportUnavailableError there.
+    const open = await instance.start(OPEN);
+    open.failNextSend = new TransportUnavailableError('The connection ended after the request was written.');
+    const lost = await open.sendTurn({ text: 'work' }).catch((error: unknown) => error);
+    expect(lost).toBeInstanceOf(TransportUnavailableError);
+    expect(lost).not.toBeInstanceOf(NotSentError);
+  });
+
+  it('ends the session and its event stream on unload, as the real plugin does', async () => {
+    const { instance } = newInstance();
+    const session = await instance.start(OPEN);
+    await session.unload();
+    expect(session.closed).toBe(true);
+    expect(await collect(session.events)).toEqual([{ type: 'session.state', state: 'stopped' }]);
+    await expect(session.sendTurn({ text: 'after unload' })).rejects.toBeInstanceOf(NotSentError);
   });
 
   it('records steer, interrupt, respond and unload and checks the steer target', async () => {

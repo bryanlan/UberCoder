@@ -140,6 +140,16 @@ export function steerLostRace(error: unknown): boolean {
   return /no active turn|expected active turn id/i.test(message);
 }
 
+/**
+ * `turn/interrupt` refused because the server holds no running turn of that id (it already ended, or the thread
+ * was unloaded): "no active turn", "expected active turn id", `thread not found: <id>` or `thread not loaded: <id>`.
+ * Any other refusal leaves it open whether the turn is still running.
+ */
+export function interruptTurnGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no active turn|expected active turn id|thread not (?:found|loaded)/i.test(message);
+}
+
 /** `thread/resume` refuses an archived thread with a message naming the archive. */
 export function isArchivedThreadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);

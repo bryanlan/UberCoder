@@ -26,6 +26,7 @@ import {
   StructuredSessionService,
   StructuredUnavailableError,
   StructuredUnsupportedError,
+  structuredStatusReason,
   type StructuredSessionsConfig,
   type StructuredSessionState,
   type StructuredTerminalStatus,
@@ -63,7 +64,7 @@ import {
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
-import { RunRecovery } from './run-recovery.js';
+import { RecoverySubmitDeferredError, RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
@@ -372,6 +373,8 @@ export class SessionManager {
         fs.mkdirSync(pluginRuntimeDir, { recursive: true });
         return {
           runtimeDir: pluginRuntimeDir,
+          // The same runtime and helper the tmux launch pins, minus a session id: one process serves every thread.
+          ...(this.coordinationEnabled ? { coordination: { runtimeDir: this.runtimeDir, helperPath: this.coordinationHelperPath() } } : {}),
           log: {
             info: (bindings, message) => this.logger?.info?.(bindings, message),
             warn: (bindings, message) => this.logger?.warn(bindings, message),
@@ -446,6 +449,8 @@ export class SessionManager {
         if (!ownsRecovery()) throw new Error('Recovery was cancelled or conversation ownership changed before submission.');
         if (session.transport === 'structured') {
           const delivery = await this.structured.deliverAutomatic(this.mustGetSession(session.id), text);
+          // Deferred means nothing was sent (not loaded, a turn running, or the transport's NotSentError): not an uncertain outcome.
+          if (delivery.status === 'deferred') throw new RecoverySubmitDeferredError(delivery.reason);
           if (delivery.status !== 'submitted') throw new Error(delivery.reason ?? 'The structured session did not accept the recovery prompt.');
         } else {
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Session ownership changed before recovery submission.');
@@ -1679,9 +1684,12 @@ export class SessionManager {
     return undefined;
   }
 
+  private coordinationHelperPath(): string {
+    return fileURLToPath(new URL('../../../../scripts/agent-coord.mjs', import.meta.url));
+  }
+
   private consoleIdentity(sessionId: string) {
-    return this.coordinationEnabled ? { sessionId, runtimeDir: this.runtimeDir,
-      helperPath: fileURLToPath(new URL('../../../../scripts/agent-coord.mjs', import.meta.url)) } : undefined;
+    return this.coordinationEnabled ? { sessionId, runtimeDir: this.runtimeDir, helperPath: this.coordinationHelperPath() } : undefined;
   }
 
   private async tryResolvePendingResumeSession(
@@ -3649,6 +3657,7 @@ export class SessionManager {
       if (session.transport === 'structured') {
         await this.structured.unload(session);
         this.structuredMonitors.delete(session.id);
+        this.publishStructuredScreen(session.id); // now reads "asleep"
       } else {
       await this.tmuxClient.killSession(session.tmuxSessionName);
       if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') {
@@ -4057,7 +4066,7 @@ export class SessionManager {
       this.publishStructuredScreen(resumed.id);
       return resumed;
     } catch (error) {
-      this.recordRestoreFailureIfOwned(restoring, `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`);
+      this.recordRestoreFailureIfOwned(restoring, `Failed to restore session: ${structuredStatusReason(error)}`);
       return undefined;
     }
   }
@@ -4149,6 +4158,7 @@ export class SessionManager {
     if (this.structured.alive(latest)) {
       await this.structured.unload(latest);
       this.appendEvent(latest, { type: 'status', text: 'Session suspended after extended idle; it will restore on next use.', timestamp: nowIso() });
+      this.publishStructuredScreen(latest.id); // now reads "asleep"
     }
     this.stopWatching(latest.id);
     this.runtimes.clearEphemeral(latest.id);
@@ -4429,7 +4439,7 @@ export class SessionManager {
       this.db.boundSessions.upsert(failed);
       this.appendEvent(failed, {
         type: 'status',
-        text: `Failed to bind session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+        text: `Failed to bind session: ${structuredStatusReason(error)}`,
         timestamp: nowIso(),
       });
       this.eventBus.emit({ type: 'session.updated', session: failed });

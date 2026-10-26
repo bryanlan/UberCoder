@@ -342,7 +342,8 @@ Run recovery ownership (requires explicit unattended permission):
   `structured-session-fixture.ts`, `codex-harness.ts`, `fake-app-server.mjs`, `replay-app-server.mjs`
   and `codex-fixtures/`.
 - `apps/server/test/structured-codex-process-lifetime.test.ts`: the `setpriv` launch (a fake `setpriv` script),
-  `/proc` start-ticks identity, and ending a stale app-server (small node processes stand in for it).
+  `/proc` start-ticks identity, ending a stale app-server (small node processes stand in for it), and the
+  process-group signals for a launcher with a native child (`test/helpers/fake-launcher.mjs`).
 - `apps/server/test/structured-session-restart.test.ts`: a turn cut by a backend restart, scheduled recovery
   and half-restored rows re-armed at boot, not-sent delivery, a turn id that runs again.
 - `apps/server/test/structured-session-env.test.ts`: the provider process environment (coordination

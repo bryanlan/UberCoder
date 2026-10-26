@@ -114,6 +114,18 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const STATUS_REASON_MAX = 200;
+
+/**
+ * The reason a bind or restore failed, as one short line for a conversation status line: the first line of the
+ * error message, at most 200 characters. The full error stays in the server log; the plugin keeps provider
+ * process output (stderr) out of its messages in the first place.
+ */
+export function structuredStatusReason(error: unknown): string {
+  const line = errorMessage(error).split('\n').map(part => part.replace(/\s+/g, ' ').trim()).find(Boolean) ?? 'Unknown error.';
+  return line.length > STATUS_REASON_MAX ? `${line.slice(0, STATUS_REASON_MAX - 3)}...` : line;
+}
+
 /**
  * Drives structured (protocol-based) provider sessions on behalf of SessionManager. It owns the transport
  * instances and sessions, the active-turn bookkeeping, the steer-versus-new-turn policy and the
@@ -189,7 +201,7 @@ export class StructuredSessionService {
         this.failures.delete(session.id);
         return 'loaded';
       } catch (error) {
-        this.failures.set(session.id, errorMessage(error));
+        this.failures.set(session.id, structuredStatusReason(error));
         this.logger?.warn({ err: error, sessionId: session.id }, 'Structured session could not be loaded.');
         return 'unavailable';
       }
@@ -345,7 +357,8 @@ export class StructuredSessionService {
     const profile = state?.profile ?? sessionProfile(session);
     const selected = profile ? profileTable(session.provider)[profile] : undefined;
     const model = selected ? `${selected.model} ${selected.reasoningEffort}` : session.launchContext?.model;
-    const status = `${providerLabel(session.provider)} ${state?.activeTurnId ? 'working' : 'idle'}`;
+    // `asleep`: the row is not loaded in the provider (manual or idle sleep, or not restored yet). Loading it again reads `idle`.
+    const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId ? 'working' : 'idle'}`;
     const used = state?.usage?.used, max = state?.usage?.max;
     return {
       content: '',

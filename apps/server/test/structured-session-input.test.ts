@@ -138,6 +138,30 @@ describe('Structured human input', () => {
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
   });
 
+  it('queues a steer the transport reports as never sent, then delivers it as a steer, instead of marking it unconfirmed', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'first');
+    await settle();
+    const thread = f.thread(session.conversationRef);
+    const steer = thread.steer.bind(thread);
+    let attempts = 0;
+    thread.steer = async (turnId, input) => {
+      attempts += 1;
+      if (attempts > 1) return steer(turnId, input);
+      thread.calls.push({ method: 'steer', args: [turnId, input] });
+      throw new NotSentError('The Codex session has ended.'); // refused before the frame was written
+    };
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'steer me later', requestId);
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'queued' });
+    expect(record(f, session.id, requestId)).toMatchObject({ state: 'queued', reason: 'Waiting for the session to accept the message.' });
+
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('submitted');
+    expect(record(f, session.id, requestId)).toMatchObject({ turnId: 'turn-1', deliveryMode: 'steer' });
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1); // the text was never sent as a second turn
+  });
+
   it('keeps a message queued while a provider that cannot steer is busy, then sends it after the turn', async () => {
     const f = fixture({ plugin: { capabilities: { steer: 'none' } } });
     const { session } = await f.bindNew();

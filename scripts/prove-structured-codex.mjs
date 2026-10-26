@@ -4,8 +4,9 @@
 // Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux
 // socket) with `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
 // API the web client uses: bind, send, coordination hook and MCP, steer, Stop, model profile, manual sleep and
-// restore, backend restart and release. Real Codex turns run with the host's ChatGPT login; every prompt is one
-// short fixed sentence.
+// restore, a graceful backend restart and release. The coordination MCP server is pinned to the proof's runtime by
+// the product itself (the app-server argv), not by this script; a backend crash is not exercised here. Real Codex
+// turns run with the host's ChatGPT login; every prompt is one short fixed sentence.
 //
 // Usage (build first):  env -u NODE_ENV npm run build
 //                       env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log
@@ -32,10 +33,13 @@ const { buildApp } = await import(new URL('../apps/server/dist/app.js', import.m
 const { CODEX_COST_PROFILES } = await import('@agent-console/shared');
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
+const RUN_TAG = randomBytes(4).toString('hex');
+/** A counting command that carries a unique marker, so its process can be found (and shown gone) on the host. */
+const countMarker = tag => `proof-${tag}-${RUN_TAG}`;
+const countPrompt = tag => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 30); do echo $i; sleep 1; done`;
 const PROMPTS = {
   first: 'Reply with exactly the single word PONG and nothing else.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
-  count: 'Run exactly this shell command and wait for it to finish before replying: for i in $(seq 1 30); do echo $i; sleep 1; done',
   steer: 'Stop counting now and reply with the single word STEERED.',
   model: 'Reply with the single word MODEL.',
   settle: 'Reply with the single word SETTLED.',
@@ -55,7 +59,6 @@ const configPath = path.join(root, 'config.json');
 const runtimeDir = path.join(root, 'runtime');
 const databasePath = path.join(root, 'fixture.sqlite');
 const tmuxSocket = `console-structured-proof-${randomUUID().slice(0, 8)}`;
-const coordHelper = path.join(repoRoot, 'scripts/agent-coord.mjs');
 
 const freePort = async () => {
   for (let port = 14390; port <= 14399; port += 1) {
@@ -80,13 +83,9 @@ Object.assign(config, {
   coordination: { enabled: true, pilotPaths: [project] },
   workerSummaries: { enabled: false },
   conversationTitles: { enabled: false, runtimeCommand: config.conversationTitles.runtimeCommand },
-  // The global coordination MCP entry pins AGENT_COORD_RUNTIME to the live runtime; override it for this process only.
-  structuredSessions: { codex: {
-    enabled: true, idleUnloadMinutes: 60, env: {},
-    command: ['codex', 'app-server',
-      '-c', `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(runtimeDir)}`,
-      '-c', `mcp_servers.agent_console_coordination.args=${JSON.stringify([coordHelper, 'mcp'])}`],
-  } },
+  // The global ~/.codex coordination MCP entry names the live runtime and checkout. Nothing here overrides it: the
+  // product adds the per-Console overrides to the app-server argv, and step b and f check that it did.
+  structuredSessions: { codex: { enabled: true, idleUnloadMinutes: 60, env: {}, command: ['codex', 'app-server'] } },
 });
 Object.assign(config.server, { host: '127.0.0.1', port, publicBaseUrl: `http://127.0.0.1:${port}`, webDistPath: path.join(repoRoot, 'apps/web/dist') });
 Object.assign(config.security, {
@@ -154,11 +153,29 @@ const wait = async (label, predicate, timeout = TURN_TIMEOUT_MS, interval = 500)
     await sleep(interval);
   }
 };
-const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const listProcesses = () => {
-  const found = spawnSync('pgrep', ['-f', root], { encoding: 'utf8' });
-  return found.stdout.split('\n').filter(Boolean).map(Number).filter(pid => pid !== process.pid);
+/** Running, not merely a zombie awaiting its parent. */
+const alive = pid => {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return !/^[ZX]/.test(stat.slice(stat.lastIndexOf(')') + 2));
+  } catch { return false; }
 };
+const pgrep = pattern => spawnSync('pgrep', ['-f', pattern], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).map(Number).filter(pid => pid !== process.pid);
+const procEntries = () => fs.readdirSync('/proc').filter(name => /^\d+$/.test(name)).map(Number);
+const environOf = pid => { try { return fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0'); } catch { return []; } };
+/** Every process carrying this proof's coordination runtime in its environment: the app-server, its native child, hooks, MCP servers and model commands. */
+const processesWithRuntime = () => procEntries().filter(pid => pid !== process.pid && environOf(pid).includes(`AGENT_COORD_RUNTIME=${runtimeDir}`));
+/** The coordination MCP servers (`agent-coord.mjs mcp`) Codex started for this Console's runtime. Their runtime is in the environment, not the command line. */
+const coordMcpProcesses = () => pgrep('agent-coord\\.mjs mcp').filter(pid => environOf(pid).includes(`AGENT_COORD_RUNTIME=${runtimeDir}`));
+/** Members of a process group, read from /proc (the launcher leads it; the native app-server is its child). */
+const groupMembers = pgid => procEntries().filter(pid => {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2]) === pgid;
+  } catch { return false; }
+});
+/** Processes of this proof: anything whose command line holds the temp root, plus anything started with this runtime. */
+const listProcesses = () => [...new Set([...pgrep(root), ...processesWithRuntime()])];
 
 // ---- session accessors -------------------------------------------------------------------------------------
 let sessionId;
@@ -180,6 +197,25 @@ const queueRecord = requestId => {
   return found ? JSON.parse(found.value) : undefined;
 };
 const idle = async () => (await sessionState()).isWorking !== true;
+const epoch = () => db.prepare('select value from meta where key = ?').get(`structured-epoch:${sessionId}`)?.value;
+/** Collects the `session.screen-updated` events of the session from the event stream the web client listens to. */
+const watchScreens = async () => {
+  const response = await app.inject({ method: 'GET', url: '/api/events', headers, payloadAsStream: true });
+  const statuses = [];
+  let buffer = '';
+  response.stream().on('data', chunk => {
+    buffer += chunk.toString();
+    for (let end = buffer.indexOf('\n\n'); end !== -1; end = buffer.indexOf('\n\n')) {
+      const data = buffer.slice(0, end).split('\n').find(line => line.startsWith('data: '));
+      buffer = buffer.slice(end + 2);
+      try {
+        const event = data ? JSON.parse(data.slice(6)) : undefined;
+        if (event?.type === 'session.screen-updated' && event.sessionId === sessionId) statuses.push(event.screen?.status);
+      } catch { /* not a JSON event */ }
+    }
+  });
+  return statuses;
+};
 
 /** Send one chat message the way the web client does and return the queue record it produced. */
 const send = async text => {
@@ -295,7 +331,21 @@ try {
     assert.equal(env('AGENT_COORD_RUNTIME'), runtimeDir, 'The app-server must point hooks at this Console runtime.');
     assert.equal(env('AGENT_CONSOLE_CONFIG'), configPath, 'The app-server must name this Console config.');
     assert.equal(env('AGENT_CONSOLE_SESSION_ID'), undefined, 'The shared process must not carry a session identity.');
-    Object.assign(values, { sessionId, threadId, pid: stored.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok' });
+    // The product, not this script, pins the coordination MCP server to this Console's runtime and helper.
+    const argv = fs.readFileSync(`/proc/${stored.pid}/cmdline`, 'utf8').split('\0');
+    const override = key => argv.includes(`mcp_servers.agent_console_coordination.${key}`);
+    assert.ok(override(`env.AGENT_COORD_RUNTIME=${JSON.stringify(runtimeDir)}`), 'The app-server argv must pin the MCP runtime to this Console.');
+    assert.ok(override(`args=${JSON.stringify([path.join(repoRoot, 'scripts/agent-coord.mjs'), 'mcp'])}`), 'The app-server argv must pin the MCP helper of this checkout.');
+    assert.ok(override('command="node"'), 'The app-server argv must pin the MCP command.');
+    assert.ok(argv.indexOf('check_for_update_on_startup=false') < argv.findIndex(arg => arg.startsWith('mcp_servers.agent_console_coordination.')), 'The overrides follow the update check override.');
+    assert.ok(!argv.some(arg => arg.includes('AGENT_CONSOLE_SESSION_ID')), 'No session id may be pinned into the shared process.');
+    // The recorded pid leads its own process group (the npm launcher and its native child share it), and the instance says so.
+    const recorded = JSON.parse(db.prepare('select value from meta where key = ?').get('structured-instance:codex').value);
+    assert.equal(recorded.processGroup, stored.pid, 'The instance record must name the process group the pid leads.');
+    const members = groupMembers(stored.pid);
+    assert.ok(members.includes(stored.pid), 'The app-server must lead its process group.');
+    evidence.pids.appServerGroup = members;
+    Object.assign(values, { sessionId, threadId, pid: stored.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok', mcpPinned: 'ok', processGroup: recorded.processGroup, groupMembers: members.length });
   }, { fatal: true });
 
   // The default (medium) profile's model is rate limited on this host at times: Codex then waits out a long 429
@@ -348,7 +398,15 @@ try {
     await sleep(1100);
     const { record } = await send(PROMPTS.coordination);
     assert.equal(record.state, 'submitted');
-    await waitForReply('REGISTERED');
+    // The MCP server of the thread must be this Console's: it runs with the proof's runtime in its environment.
+    let mcpPids = [];
+    await wait('assistant reply containing REGISTERED', async () => {
+      const seen = coordMcpProcesses();
+      if (seen.length) mcpPids = [...new Set([...mcpPids, ...seen])];
+      return (await idle()) && (await assistantHas('REGISTERED'));
+    });
+    assert.ok(mcpPids.length > 0, 'No agent-coord.mjs mcp process with this proof\'s runtime was seen: the MCP server is not pinned to this Console.');
+    values.mcpProcesses = mcpPids.length;
     const after = assignment();
     assert.ok(after.last_seen_at > before, 'The assignment must have been seen again during the turn.');
     const calls = toolCallsSince(skip, 'agent_coordination');
@@ -358,7 +416,7 @@ try {
 
   await step('g', 'steer: a message sent mid-turn is delivered as a steer', async values => {
     const skip = rolloutRecords().length;
-    const first = await send(PROMPTS.count);
+    const first = await send(countPrompt('g'));
     assert.equal(first.record.deliveryMode, 'turn');
     await countingStarted(skip, values);
     const steered = await send(PROMPTS.steer);
@@ -371,12 +429,18 @@ try {
 
   await step('h', 'Stop: Escape interrupts a running turn', async values => {
     const skip = rolloutRecords().length;
-    await send(PROMPTS.count);
+    await send(countPrompt('h'));
     await countingStarted(skip, values);
+    // The counting command carries a marker: it must be running now and gone after Stop.
+    const marker = countMarker('h');
+    const commandPids = await wait('the counting command to be running', () => { const found = pgrep(marker); return found.length ? found : undefined; }, 30_000, 250);
+    values.commandPids = commandPids.length;
     const stopped = Date.now();
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
+    await wait('the counting command to end after Stop', () => commandPids.every(pid => !alive(pid)) && pgrep(marker).length === 0, 20_000, 250);
+    values.commandGoneAfterMs = Date.now() - stopped;
     const abortRecord = await wait('the rollout to record the interrupted turn', () =>
       rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);
     assert.equal(abortRecord.payload.reason, 'interrupted');
@@ -385,8 +449,12 @@ try {
   });
 
 
-  await step('i', 'manual sleep unloads the thread and restore reloads it', async values => {
+  await step('i', 'manual sleep unloads the thread (screen reads asleep) and restore reloads it (new epoch)', async values => {
     const pidBefore = row().pid;
+    const screens = await watchScreens();
+    assert.equal((await api('GET', `/api/sessions/${sessionId}/screen`)).screen.status, 'Codex (app-server) idle', 'A loaded thread reads idle.');
+    const epochBefore = epoch();
+    assert.ok(epochBefore, 'The loaded thread must have an epoch.');
     // An interrupted turn runs no Stop hook, so the assignment stays `active`, and Console refuses a manual sleep
     // while an assignment is active (the same rule as for tmux sessions). A completed turn marks it `waiting`.
     values.assignmentBefore = assignment()?.status ?? 'none';
@@ -402,13 +470,21 @@ try {
     assert.ok(suspended.session.manualSuspendedAt, 'manualSuspendedAt must be set.');
     assert.ok(row().manual_suspended_at);
     values.manualSuspendedAt = suspended.session.manualSuspendedAt;
+    // Unloaded: the synthesized screen says asleep (published to the event stream; the poll has no screen for a suspended row).
+    await wait('the asleep screen to be published', () => screens.at(-1) === 'Codex (app-server) asleep', 10_000, 100);
+    assert.equal((await call('GET', `/api/sessions/${sessionId}/screen`)).status, 404, 'A suspended row has no screen to poll.');
     const resumed = await api('POST', `/api/sessions/${sessionId}/resume`);
     assert.equal(resumed.session.manualSuspendedAt, undefined, 'manualSuspendedAt must be cleared.');
     assert.equal(row().manual_suspended_at, null);
+    // Loaded again: a new epoch, and the screen reads idle after the asleep line.
+    await wait('the restored screen to be published', () => screens.length > 0 && screens.lastIndexOf('Codex (app-server) idle') > screens.lastIndexOf('Codex (app-server) asleep'), 30_000, 100);
+    assert.notEqual(epoch(), epochBefore, 'Restoring the thread must start a new epoch.');
     await send(PROMPTS.restored);
     await waitForReply('RESTORED');
     assert.equal(row().pid, pidBefore, 'Restoring a thread reuses the running app-server.');
     values.pid = row().pid;
+    values.screenSequence = screens.filter((status, index) => status !== screens[index - 1]).join(' > ');
+    values.epochChanged = true;
     values.manualSuspendedAfterResume = 'cleared';
   });
 
@@ -438,10 +514,14 @@ try {
     values.pid = pidBefore;
   });
 
-  await step('k', 'backend restart: the conversation resumes on a new app-server', async values => {
+  await step('k', 'graceful backend restart: the conversation resumes on a new app-server', async values => {
     const oldPid = row().pid;
+    const oldGroup = groupMembers(oldPid);
+    assert.ok(oldGroup.includes(oldPid));
     await shutdown();
     await wait('the old app-server to exit with the old backend', () => !alive(oldPid), 20_000, 250);
+    await wait('every process of the old app-server group to exit', () => oldGroup.every(pid => !alive(pid)), 20_000, 250);
+    values.oldGroupGone = oldGroup.length;
     await boot();
     const stored = row();
     assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
@@ -463,10 +543,13 @@ try {
     values.status = stored.status;
     assert.notEqual(spawnSync('tmux', ['-L', tmuxSocket, 'ls'], { encoding: 'utf8' }).status, 0, 'No tmux server may have been started during the whole run.');
     values.tmuxServer = 'none';
+    // The shared app-server stays up after its last thread is released; the check below must still see its MCP server.
     values.processesAfterRelease = listProcesses().length;
+    values.coordMcpAfterRelease = coordMcpProcesses().length;
     await shutdown();
     await wait('every process of this proof to exit after backend shutdown', () => listProcesses().length === 0, 20_000, 250);
     values.processesAfterShutdown = 0;
+    values.coordMcpAfterShutdown = coordMcpProcesses().length;
   });
 } finally {
   // Cleanup runs on every path: release the session, stop the backend, kill any child, remove the temp root.

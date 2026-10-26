@@ -3,18 +3,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCodexAppServerPlugin, type CodexStructuredConfig } from '../src/providers/transport/codex/index.js';
+import { JsonRpcClient } from '../src/providers/transport/codex/jsonrpc.js';
 import type { CodexAppServerInstance } from '../src/providers/transport/codex/app-server-instance.js';
 import type { CodexTimings } from '../src/providers/transport/codex/app-server-session.js';
 import {
   currentBootId,
   isRecordedProcessRunning,
   parseRecordedProcess,
+  processGroupId,
   processStartTicks,
   resolveExecutable,
   terminateRecordedProcess,
   withParentDeathSignal,
 } from '../src/providers/transport/codex/process-lifetime.js';
-import { FAKE_APP_SERVER, FAST_TIMINGS, OPEN_OPTIONS, baseHandlers, makeContext, makeTempDir, readLog, writeScenario } from './helpers/codex-harness.js';
+import { FAKE_APP_SERVER, FAST_TIMINGS, OPEN_OPTIONS, baseHandlers, makeContext, makeTempDir, readLog, sleep, waitUntil, writeScenario } from './helpers/codex-harness.js';
 
 vi.setConfig({ testTimeout: 20_000 });
 
@@ -24,6 +26,7 @@ afterEach(async () => {
 });
 
 const INSTANCE_KEY = 'structured-instance:codex';
+const FAKE_LAUNCHER = path.join(path.dirname(FAKE_APP_SERVER), 'fake-launcher.mjs');
 
 function scratchDir(): string {
   const dir = makeTempDir('codex-lifetime-');
@@ -60,6 +63,25 @@ async function untilRunning(pid: number): Promise<string> {
     if (Date.now() > deadline) throw new Error('The stranded process did not start.');
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+/**
+ * The shape of the npm `codex` install: a Node launcher whose child is the server. Both ignore stdin EOF and SIGTERM
+ * (the launcher only forwards the signal), so only SIGKILL ends them. `pid` is the launcher, `nativePid` its child.
+ */
+async function stubbornLauncher(options: { detached: boolean }): Promise<{ pid: number; nativePid: number; launcher: ChildProcess }> {
+  const dir = scratchDir();
+  const { scenarioPath, logFile } = writeScenario(dir, { ignoreStdinEof: true, ignoreSigterm: true, handlers: baseHandlers('thread-1') });
+  const launcher = spawn(process.execPath, [FAKE_LAUNCHER, FAKE_APP_SERVER, scenarioPath], { stdio: ['pipe', 'ignore', 'ignore'], detached: options.detached });
+  const pid = launcher.pid!;
+  const nativePid = await waitUntil(() => readLog(logFile).find((entry) => entry.event === 'start')?.pid as number | undefined, 5_000, 'the native server to start');
+  cleanups.push(() => {
+    for (const target of [pid, nativePid]) {
+      try { process.kill(target, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+  await sleep(200); // the server installs its SIGTERM handler right after it logs its start
+  return { pid, nativePid, launcher };
 }
 
 interface Rig {
@@ -102,6 +124,18 @@ describe('process identity helpers', () => {
     expect(currentBootId()).toMatch(/[0-9a-f-]{8,}/);
   });
 
+  it('reads the process group of a live process: its own pid for a group leader, the parent group otherwise', async () => {
+    const leader = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore', detached: true });
+    const follower = strandedProcess();
+    cleanups.push(() => { try { process.kill(leader.pid!, 'SIGKILL'); } catch { /* already gone */ } });
+    await untilRunning(leader.pid!);
+    await untilRunning(follower.pid!);
+    expect(processGroupId(leader.pid!)).toBe(leader.pid);
+    expect(processGroupId(follower.pid!)).not.toBe(follower.pid);
+    expect(processGroupId(follower.pid!)).toBe(processGroupId(process.pid));
+    expect(processGroupId(2_147_483_646)).toBeUndefined();
+  });
+
   it('only recognises a recorded process whose pid, start time and boot all match', () => {
     const ticks = processStartTicks(process.pid)!;
     expect(isRecordedProcessRunning({ pid: process.pid, startTicks: ticks, bootId: currentBootId() })).toBe(true);
@@ -113,6 +147,10 @@ describe('process identity helpers', () => {
   it('parses the stored instance record and refuses pids that must never be signalled', () => {
     expect(parseRecordedProcess(JSON.stringify({ pid: 4242, startTicks: '99', bootId: 'b', startedAt: 'x' }))).toEqual({ pid: 4242, startTicks: '99', bootId: 'b' });
     expect(parseRecordedProcess(JSON.stringify({ pid: 4242 }))).toEqual({ pid: 4242 });
+    // Only a group the process leads itself is kept; any other group id is dropped, so it can never be signalled.
+    expect(parseRecordedProcess(JSON.stringify({ pid: 4242, startTicks: '99', processGroup: 4242 }))).toEqual({ pid: 4242, startTicks: '99', processGroup: 4242 });
+    expect(parseRecordedProcess(JSON.stringify({ pid: 4242, startTicks: '99', processGroup: 17 }))).toEqual({ pid: 4242, startTicks: '99' });
+    expect(parseRecordedProcess(JSON.stringify({ pid: 4242, startTicks: '99', processGroup: true }))).toEqual({ pid: 4242, startTicks: '99' });
     for (const bad of ['not json', '{}', JSON.stringify({ pid: 1 }), JSON.stringify({ pid: 0 }), JSON.stringify({ pid: -5 }), JSON.stringify({ pid: '12' }), JSON.stringify({ pid: 1.5 })]) {
       expect(parseRecordedProcess(bad)).toBeUndefined();
     }
@@ -166,6 +204,14 @@ describe('codex app-server launch', () => {
     const recorded = JSON.parse(r.context.metaStore.get(INSTANCE_KEY)!) as { pid: number; startTicks: string; bootId?: string };
     expect(recorded).toMatchObject({ pid, startTicks: processStartTicks(pid!) });
     expect(recorded.bootId).toBe(currentBootId());
+  });
+
+  it('starts the process as the leader of its own process group and records that', async () => {
+    const r = rig();
+    await r.instance.start(OPEN_OPTIONS);
+    const { pid } = await r.instance.alive();
+    expect(processGroupId(pid!)).toBe(pid); // setpriv execs into the command, so the launcher leads the group
+    expect(JSON.parse(r.context.metaStore.get(INSTANCE_KEY)!)).toMatchObject({ pid, processGroup: pid });
   });
 });
 
@@ -239,5 +285,118 @@ describe('an app-server left running by an earlier backend', () => {
     expect(await terminateRecordedProcess({ pid: 2_147_483_646, startTicks: '1' }, 50)).toBe(true);
     expect(await terminateRecordedProcess({ pid: process.pid, startTicks: `${processStartTicks(process.pid)}0` }, 50)).toBe(true);
     expect(processStartTicks(process.pid)).toBeDefined(); // this test process is still here
+  });
+});
+
+describe('the app-server and its launcher are ended together', () => {
+  it('ends the launcher and its native child when the stale reap finds a recorded process group', async () => {
+    const { pid, nativePid } = await stubbornLauncher({ detached: true });
+    const r = rig({ timings: { staleTermGraceMs: 300 } });
+    r.context.metaStore.set(INSTANCE_KEY, JSON.stringify({ pid, startTicks: processStartTicks(pid), bootId: currentBootId(), processGroup: pid }));
+
+    await r.instance.start(OPEN_OPTIONS);
+
+    // The native child ignores SIGTERM, which the launcher only forwards; the group SIGKILL reaches both.
+    expect(await untilGone(nativePid)).toBe(true);
+    expect(await untilGone(pid)).toBe(true);
+    expect(r.context.logs.warn.some(([fields, message]) => /earlier backend/.test(message) && (fields as { pid?: number }).pid === pid)).toBe(true);
+  });
+
+  it('signals only the pid when the record names no group, so a stubborn native child outlives its launcher', async () => {
+    const { pid, nativePid } = await stubbornLauncher({ detached: true });
+    const r = rig({ timings: { staleTermGraceMs: 300 } });
+    r.context.metaStore.set(INSTANCE_KEY, JSON.stringify({ pid, startTicks: processStartTicks(pid), bootId: currentBootId() })); // a record from before the group start
+
+    await r.instance.start(OPEN_OPTIONS);
+
+    expect(await untilGone(pid)).toBe(true);
+    expect(processStartTicks(nativePid)).toBeDefined(); // the orphan the group signal exists to prevent
+  });
+
+  it('signals nothing when the pid or start time no longer match, group or not', async () => {
+    const { pid, nativePid } = await stubbornLauncher({ detached: true });
+    const ticks = processStartTicks(pid)!;
+    const r = rig({ timings: { staleTermGraceMs: 200 } });
+    r.context.metaStore.set(INSTANCE_KEY, JSON.stringify({ pid, startTicks: `${ticks}1`, bootId: currentBootId(), processGroup: pid })); // the pid was reused
+
+    await r.instance.start(OPEN_OPTIONS);
+
+    expect(processStartTicks(pid)).toBe(ticks);
+    expect(processStartTicks(nativePid)).toBeDefined();
+    expect(processGroupId(pid)).toBe(pid);
+    expect(r.context.logs.warn.some(([, message]) => /earlier backend/.test(message))).toBe(false);
+
+    // The same start time from another boot is just as foreign.
+    const other = rig({ timings: { staleTermGraceMs: 200 } });
+    other.context.metaStore.set(INSTANCE_KEY, JSON.stringify({ pid, startTicks: ticks, bootId: 'another-boot', processGroup: pid }));
+    await other.instance.start(OPEN_OPTIONS);
+    expect(processStartTicks(pid)).toBe(ticks);
+    expect(processStartTicks(nativePid)).toBeDefined();
+    expect(other.context.logs.warn.some(([, message]) => /earlier backend/.test(message))).toBe(false);
+  });
+
+  it('does not signal a group the recorded process does not lead', async () => {
+    const stranded = strandedProcess(); // shares the group of this test process, as an older record would describe
+    const ticks = await untilRunning(stranded.pid!);
+    const r = rig({ timings: { staleTermGraceMs: 300 } });
+    r.context.metaStore.set(INSTANCE_KEY, JSON.stringify({ pid: stranded.pid, startTicks: ticks, bootId: currentBootId(), processGroup: stranded.pid }));
+
+    await r.instance.start(OPEN_OPTIONS);
+
+    expect(await untilGone(stranded.pid!)).toBe(true); // the pid-only fallback ended it
+    expect(processStartTicks(process.pid)).toBeDefined(); // and this process, in the group the record did not lead, was never signalled
+  });
+
+  it('close() escalates to SIGKILL for the whole group', async () => {
+    const dir = scratchDir();
+    const { scenarioPath, logFile } = writeScenario(dir, { ignoreStdinEof: true, ignoreSigterm: true, handlers: baseHandlers('thread-1') });
+    const client = await JsonRpcClient.spawn({
+      command: [process.execPath, FAKE_LAUNCHER, FAKE_APP_SERVER, scenarioPath], cwd: dir, env: { PATH: process.env.PATH },
+      closeGraceMs: 200, termGraceMs: 200, ownProcessGroup: true,
+    });
+    const nativePid = await waitUntil(() => readLog(logFile).find((entry) => entry.event === 'start')?.pid as number | undefined, 5_000, 'the native server to start');
+    cleanups.push(() => { try { process.kill(nativePid, 'SIGKILL'); } catch { /* already gone */ } });
+    await sleep(200);
+    expect(client.processGroup).toBe(client.pid);
+
+    await client.close();
+
+    expect(client.exitInfo).toMatchObject({ signal: 'SIGKILL', expected: true });
+    expect(await untilGone(nativePid)).toBe(true);
+  });
+
+  it('close() without a process group reaches only the launcher, which is why the app-server gets one', async () => {
+    const dir = scratchDir();
+    const { scenarioPath, logFile } = writeScenario(dir, { ignoreStdinEof: true, ignoreSigterm: true, handlers: baseHandlers('thread-1') });
+    const client = await JsonRpcClient.spawn({
+      command: [process.execPath, FAKE_LAUNCHER, FAKE_APP_SERVER, scenarioPath], cwd: dir, env: { PATH: process.env.PATH },
+      closeGraceMs: 200, termGraceMs: 200,
+    });
+    const nativePid = await waitUntil(() => readLog(logFile).find((entry) => entry.event === 'start')?.pid as number | undefined, 5_000, 'the native server to start');
+    cleanups.push(() => { try { process.kill(nativePid, 'SIGKILL'); } catch { /* already gone */ } });
+    await sleep(200);
+    expect(client.processGroup).toBeUndefined();
+
+    await client.close();
+
+    expect(client.exitInfo).toMatchObject({ signal: 'SIGKILL' });
+    expect(processStartTicks(nativePid)).toBeDefined();
+  });
+
+  it('ends the native child of the launcher when the instance is disposed', async () => {
+    const dir = scratchDir();
+    const { scenarioPath, logFile } = writeScenario(dir, { ignoreStdinEof: true, ignoreSigterm: true, handlers: baseHandlers('thread-1') });
+    const r = rig({ command: [process.execPath, FAKE_LAUNCHER, FAKE_APP_SERVER, scenarioPath] });
+    await r.instance.start(OPEN_OPTIONS);
+    const { pid } = await r.instance.alive();
+    const nativePid = readLog(logFile).find((entry) => entry.event === 'start')!.pid as number;
+    cleanups.push(() => { try { process.kill(nativePid, 'SIGKILL'); } catch { /* already gone */ } });
+    expect(nativePid).not.toBe(pid);
+    await sleep(200);
+
+    await r.instance.dispose('shutdown');
+
+    expect(await untilGone(pid!)).toBe(true);
+    expect(await untilGone(nativePid)).toBe(true);
   });
 });

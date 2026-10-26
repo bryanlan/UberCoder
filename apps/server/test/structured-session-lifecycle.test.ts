@@ -329,6 +329,30 @@ describe('Structured sleep, restore and release', () => {
     expect(f.tmuxTouched()).toBe(0);
   });
 
+  it('reads asleep while the thread is unloaded (manual and idle sleep), and idle again once it is restored', async () => {
+    const statusesOf = (f: StructuredSessionFixture, sessionId: string) => f.events
+      .flatMap(event => event.type === 'session.screen-updated' && event.sessionId === sessionId ? [event.screen.status] : []);
+
+    const manual = await fixture();
+    const { session } = await manual.bindNew();
+    expect(statusesOf(manual, session.id).at(-1)).toBe('Codex (app-server) idle');
+    await manual.manager.suspendSession(session.id);
+    expect(statusesOf(manual, session.id).at(-1)).toBe('Codex (app-server) asleep'); // published after the unload
+    expect(await manual.manager.getSessionScreen(session.id)).toBeUndefined(); // a suspended row has no screen to poll
+    await manual.manager.resumeSession(session.id);
+    expect(statusesOf(manual, session.id).at(-1)).toBe('Codex (app-server) idle'); // published once the thread is back
+    expect(manual.plugin.instance!.sessions[0]!.calls.filter(call => call.method === 'unload')).toHaveLength(1);
+
+    const idle = await fixture();
+    const { session: sleeper } = await idle.bindNew();
+    backdate(idle, sleeper.id, 180);
+    await idle.manager.reconcileSessions();
+    expect(idle.row(sleeper.id).idleSuspendedAt).toBeTruthy();
+    expect(statusesOf(idle, sleeper.id).at(-1)).toBe('Codex (app-server) asleep');
+    await idle.manager.sendInput(sleeper.id, 'wake up');
+    expect(statusesOf(idle, sleeper.id).at(-1)).toMatch(/Codex \(app-server\) (idle|working)/);
+  });
+
   it('interrupts a running turn, unloads and ends the thread on release', async () => {
     const f = await fixture();
     const { session } = await f.bindNew();

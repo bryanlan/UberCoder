@@ -8,6 +8,18 @@ export const RECOVERY_PROMPT = 'Automatic recovery after a transient provider fa
 const cancellationKey = (id: string) => `run-recovery-cancelled:${id}`;
 const budgetKey = (id: string) => `run-recovery-budget:${id}`;
 
+/**
+ * `submit` throws this when it certainly sent nothing (the provider connection was not there, or a turn was running
+ * first). The attempt is not spent and the retry is scheduled again, unlike any other error, which leaves the
+ * outcome uncertain and stops recovery.
+ */
+export class RecoverySubmitDeferredError extends Error {
+  constructor(message = 'The recovery prompt was not sent.') {
+    super(message);
+    this.name = 'RecoverySubmitDeferredError';
+  }
+}
+
 interface RecoveryOptions {
   db: AppDatabase;
   runExclusive: (id: string, fn: () => Promise<void>) => Promise<void>;
@@ -290,6 +302,17 @@ export class RunRecovery {
       observation.timer.unref?.();
     } catch (error) {
       const current = this.options.db.boundSessions.getById(id)?.runFailure;
+      if (error instanceof RecoverySubmitDeferredError) {
+        // Nothing was sent, so the attempt is given back and the retry waits one more step of the backoff. The
+        // recovery window (`schedule`) still ends it. A Stop or new input in the meantime has already moved the state.
+        if (current?.status === 'retrying' && this.observations.get(id) === observation && observation.generation === generation) {
+          const delay = this.delays[Math.min(failure.attempts, this.delays.length - 1)]!;
+          const next: RunFailure = { ...current, attempts: failure.attempts, status: 'scheduled', retrySubmittedAt: undefined, nextRetryAt: new Date(this.now() + delay).toISOString() };
+          this.save(id, next);
+          this.schedule(id, observation, next);
+        }
+        return;
+      }
       if (current && current.status !== 'stopped') this.save(id, { ...current, status: 'stopped', stoppedReason: 'Retry submission failed or its outcome is uncertain. Review the conversation before continuing.' });
       this.options.onError(error);
     }

@@ -226,11 +226,15 @@ client applies the same `structured:` name guard as the real one, so a stray cal
 
 Review-fix suites: `NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-process-lifetime structured-session-restart structured-session-env tmux-client-structured-guard`.
 `structured-codex-process-lifetime` reads `/proc` (Linux only). It runs a shell script as a fake `setpriv`
-and starts small node processes as stand-ins for a stranded app-server, and kills them when it ends.
+and starts small node processes as stand-ins for a stranded app-server, and kills them when it ends. Its
+launcher tests use `test/helpers/fake-launcher.mjs`, a stand-in for the npm `codex` launcher that runs the fake
+app-server as a child and only forwards signals; they check that the stale reap and `close()` signal the whole
+process group, and that a record without a group, or a pid that no longer matches, is never given a group signal.
 `structured-session-restart` covers a turn cut by a backend restart (never working while unloaded, also after an
 idle sleep), scheduled recovery re-armed at boot, a half-restored `starting` row, not-sent delivery and a turn
 id that runs again. `tmux-client-structured-guard` checks every client method that takes a session name.
-`structured-session-env` checks the coordination variables and configured `env` that reach the provider process.
+`structured-session-env` checks the coordination variables and configured `env` that reach the provider process,
+and the coordination identity (`runtimeDir`, `helperPath`) the plugin pins into the app-server argv.
 
 Opt-in installed-binary check: `AGENT_CONSOLE_REAL_CODEX=1 NODE_ENV=test npm run test -w @agent-console/server -- structured-codex-plugin`
 also runs a handshake against the host `codex app-server` (initialize, model list, account read). It opens no
@@ -241,12 +245,16 @@ Opt-in real proof: after `npm run build`, run
 It starts an isolated backend (temp database, runtime and scratch git project, private tmux socket, free port
 in 14390-14399) with `structuredSessions.codex.enabled`, and drives one real structured Codex conversation
 through the HTTP API: bind, model profile, first reply, rollout and index path, hook registration and a
-coordination MCP call, mid-turn steer, Stop, manual sleep and restore, a medium-profile round trip, backend
-restart and resume, release (12 steps). It switches to the low profile before the first turn because the
+coordination MCP call, mid-turn steer, Stop, manual sleep and restore, a medium-profile round trip, graceful
+backend restart and resume, release (12 steps). Beyond the replies it checks, on the host: the app-server argv
+carries the coordination overrides and the app-server leads its own process group, an `agent-coord.mjs mcp`
+process of the proof's runtime exists during the coordination turn, the counting shell command is gone after Stop,
+the screen reads `asleep` while the thread is unloaded and the epoch changes on restore, and no process carrying
+the proof's runtime or temp root remains after release. It switches to the low profile before the first turn because the
 medium profile's model is sometimes rate limited (HTTP 429, Codex backs off for minutes); the evidence lists
 any such retries from Codex's own log.
-The coordination MCP entry in `~/.codex/config.toml` pins the live runtime, so the proof overrides it per
-process with `-c mcp_servers.agent_console_coordination.*`. It needs the host Codex login, runs about ten short
+The coordination MCP entry in `~/.codex/config.toml` pins the live runtime; the product overrides it in the
+app-server argv, and the proof relies on that (it adds no override of its own). It needs the host Codex login, runs about ten short
 real turns (about a minute when the provider is not rate limited), and removes its temp root and any app-server it started. Step results print to stderr as
 `PROOF` lines; the Fastify request log goes to stdout. Evidence JSON (step name, result, timing, thread id,
 model, pids; no message bodies) is written after every step to `test-results/structured-codex-proof/<timestamp>.json`.

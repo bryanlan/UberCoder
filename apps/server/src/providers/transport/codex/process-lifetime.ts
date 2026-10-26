@@ -5,6 +5,9 @@
 //   - the child is started through `setpriv --pdeathsig TERM`, so the kernel ends it when the backend dies;
 //   - the instance records the child's pid and start time, and the next backend ends a recorded process that
 //     is still running before it spawns a new one, so two writers never share a thread.
+// The recorded pid is the process `setpriv` execs into. With an npm install that is the `codex` Node launcher, and
+// the native app-server is its child. The child therefore starts as the leader of its own process group, and the
+// stale reap signals that group (identity checks still gate it), so the native child is ended with its launcher.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,6 +30,22 @@ export function processStartTicks(pid: number, procRoot = '/proc'): string | und
   }
 }
 
+/**
+ * The process group id of a live process (field 5 of `/proc/<pid>/stat`). Undefined when the process does not
+ * exist or is already dead.
+ */
+export function processGroupId(pid: number, procRoot = '/proc'): number | undefined {
+  try {
+    const stat = fs.readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (fields[0] === 'Z' || fields[0] === 'X') return undefined;
+    const group = Number(fields[2]);
+    return Number.isInteger(group) && group > 0 ? group : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Identifies this boot, so a start time from before a reboot is never taken for a process of this one. */
 export function currentBootId(procRoot = '/proc'): string | undefined {
   try {
@@ -41,17 +60,21 @@ export interface RecordedProcess {
   pid: number;
   startTicks?: string;
   bootId?: string;
+  /** The process group the process leads (equal to `pid`). Absent for a record of a process that did not start its own group. */
+  processGroup?: number;
 }
 
 /** Reads the stored instance record. Anything unusable gives undefined. */
 export function parseRecordedProcess(stored: string): RecordedProcess | undefined {
   try {
-    const value = JSON.parse(stored) as { pid?: unknown; startTicks?: unknown; bootId?: unknown };
+    const value = JSON.parse(stored) as { pid?: unknown; startTicks?: unknown; bootId?: unknown; processGroup?: unknown };
     if (typeof value.pid !== 'number' || !Number.isInteger(value.pid) || value.pid <= 1) return undefined;
     return {
       pid: value.pid,
       ...(typeof value.startTicks === 'string' ? { startTicks: value.startTicks } : {}),
       ...(typeof value.bootId === 'string' ? { bootId: value.bootId } : {}),
+      // Only the group the process itself leads is ever signalled; any other value is dropped.
+      ...(value.processGroup === value.pid ? { processGroup: value.pid } : {}),
     };
   } catch {
     return undefined;
@@ -78,22 +101,36 @@ async function waitUntilGone(record: RecordedProcess, ms: number): Promise<boole
   return true;
 }
 
-/** SIGTERM, wait `termGraceMs`, then SIGKILL. Returns whether the process is gone. */
+/**
+ * Signals a recorded process whose identity was just checked. When the record says it leads its own process group
+ * and `/proc` agrees, the whole group is signalled, so the launcher's native child gets the signal too; if that
+ * fails, or the process leads no group, only the pid is signalled. Returns whether a signal was delivered.
+ */
+function signalRecordedProcess(record: RecordedProcess, signal: NodeJS.Signals): boolean {
+  if (record.processGroup === record.pid && processGroupId(record.pid) === record.pid) {
+    try {
+      process.kill(-record.pid, signal);
+      return true;
+    } catch {
+      // No such group, or not permitted: signal the process alone.
+    }
+  }
+  try {
+    process.kill(record.pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** SIGTERM, wait `termGraceMs`, then SIGKILL, each to the process group when it leads one. Returns whether the process is gone. */
 export async function terminateRecordedProcess(record: RecordedProcess, termGraceMs: number): Promise<boolean> {
   if (!isRecordedProcessRunning(record)) return true;
-  try {
-    process.kill(record.pid, 'SIGTERM');
-  } catch {
-    return !isRecordedProcessRunning(record);
-  }
+  if (!signalRecordedProcess(record, 'SIGTERM')) return !isRecordedProcessRunning(record);
   if (await waitUntilGone(record, termGraceMs)) return true;
   // Re-check the identity right before the kill: the process may have ended and its pid been reused meanwhile.
   if (!isRecordedProcessRunning(record)) return true;
-  try {
-    process.kill(record.pid, 'SIGKILL');
-  } catch {
-    // Already gone, or not ours to signal; the wait below reports which.
-  }
+  signalRecordedProcess(record, 'SIGKILL'); // a failure means it is already gone or not ours; the wait below reports which
   return await waitUntilGone(record, KILL_WAIT_MS);
 }
 

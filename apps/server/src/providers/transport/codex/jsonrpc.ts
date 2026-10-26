@@ -80,6 +80,12 @@ export interface JsonRpcSpawnOptions {
   closeGraceMs?: number;
   /** How long `close()` waits after SIGTERM before SIGKILL. */
   termGraceMs?: number;
+  /**
+   * Start the process as the leader of its own process group, and send `close()`'s SIGTERM and SIGKILL to the whole
+   * group. A launcher (the npm `codex` is a Node script) runs the real server as its child; a signal to the launcher
+   * alone does not end a child that ignores the forwarded SIGTERM, but the group signal reaches both.
+   */
+  ownProcessGroup?: boolean;
 }
 
 /** The server answered a request with a JSON-RPC error. */
@@ -102,7 +108,9 @@ export class JsonRpcExitError extends Error {
   /** False when the request was refused before any byte was written, so it certainly did not reach the process. */
   readonly sent: boolean;
   constructor(exit: JsonRpcExit, message?: string, sent = true) {
-    super(message ?? describeExit(exit));
+    // The message can become a conversation status line, so it names only how the process ended; the redacted
+    // stderr tail stays on `exit.stderrTail` and in `describeExit` for the server log.
+    super(message ?? `The process ended (${exitReason(exit)}).`);
     this.name = 'JsonRpcExitError';
     this.exit = exit;
     this.sent = sent;
@@ -252,6 +260,7 @@ export class JsonRpcClient {
   private readonly defaultTimeoutMs: number;
   private readonly closeGraceMs: number;
   private readonly termGraceMs: number;
+  private readonly ownProcessGroup: boolean;
   private nextId = 1;
   private activeServerRequests = 0;
   private spawned = false;
@@ -273,6 +282,7 @@ export class JsonRpcClient {
     this.defaultTimeoutMs = options.defaultRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.closeGraceMs = options.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
     this.termGraceMs = options.termGraceMs ?? DEFAULT_CLOSE_GRACE_MS;
+    this.ownProcessGroup = options.ownProcessGroup === true;
     this.ready = new Promise<void>((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
@@ -316,7 +326,7 @@ export class JsonRpcClient {
   static async spawn(options: JsonRpcSpawnOptions): Promise<JsonRpcClient> {
     const [executable, ...args] = options.command;
     if (!executable) throw new JsonRpcSpawnError('', new Error('The command is empty.'));
-    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], detached: options.ownProcessGroup === true });
     const client = new JsonRpcClient(child, options);
     await client.ready;
     return client;
@@ -324,6 +334,11 @@ export class JsonRpcClient {
 
   get pid(): number | undefined {
     return this.child.pid;
+  }
+
+  /** The id of the process group the process leads (equal to its pid), when it was started with `ownProcessGroup`. */
+  get processGroup(): number | undefined {
+    return this.ownProcessGroup ? this.child.pid : undefined;
   }
 
   get exited(): boolean {
@@ -417,11 +432,33 @@ export class JsonRpcClient {
     }
     if (await this.waitFinished(this.closeGraceMs)) return;
     this.log.warn?.({ pid: this.pid }, 'codex app-server ignored stdin EOF; sending SIGTERM');
-    this.child.kill('SIGTERM');
+    this.signal('SIGTERM');
     if (await this.waitFinished(this.termGraceMs)) return;
     this.log.warn?.({ pid: this.pid }, 'codex app-server ignored SIGTERM; sending SIGKILL');
-    this.child.kill('SIGKILL');
+    this.signal('SIGKILL');
     await this.waitFinished(2_000);
+  }
+
+  /**
+   * Signals the process, or its whole process group when it leads one. The group is signalled only while the
+   * leader has not been reaped, because its pid is then still ours; if the group signal fails the process alone
+   * is signalled.
+   */
+  private signal(signal: NodeJS.Signals): void {
+    const group = this.processGroup;
+    if (group !== undefined && this.rawExit === undefined) {
+      try {
+        process.kill(-group, signal);
+        return;
+      } catch {
+        // No such group, or not permitted: fall back to the process itself.
+      }
+    }
+    try {
+      this.child.kill(signal);
+    } catch {
+      // Already gone.
+    }
   }
 
   private waitFinished(ms: number): Promise<boolean> {
@@ -469,11 +506,7 @@ export class JsonRpcClient {
     if (this.fatal) return;
     this.fatal = error;
     this.log.warn?.({ error: error.message, pid: this.pid }, 'codex app-server connection failed');
-    try {
-      this.child.kill('SIGKILL');
-    } catch {
-      // Already gone.
-    }
+    this.signal('SIGKILL');
     this.finish({ code: null, signal: 'SIGKILL', error });
   }
 

@@ -25,7 +25,7 @@ import {
   type TransportSession,
   type TurnInput,
 } from '../types.js';
-import { classifyCodexFailure, mergeTurnErrors, parseCodexRetryProgress, steerLostRace } from './errors.js';
+import { classifyCodexFailure, interruptTurnGone, mergeTurnErrors, parseCodexRetryProgress, steerLostRace } from './errors.js';
 import { JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, type JsonRpcClient } from './jsonrpc.js';
 import {
   callCodex,
@@ -425,6 +425,8 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   async steer(turnId: string, input: TurnInput): Promise<void> {
+    // Failures before the frame is written are certain, as for `sendTurn`: the caller may queue the text and try again.
+    if (this.ended) throw new NotSentError('The Codex session has ended.');
     const record = this.turns.get(turnId);
     if (!record || record.terminal) throw new TurnNotActiveError(turnId);
     const params = {
@@ -435,9 +437,17 @@ export class CodexAppServerSession implements TransportSession {
     };
     await this.awaitStarted(record, this.host.timings.queuedStartWaitMs);
     if (record.terminal) throw new TurnNotActiveError(turnId);
+    if (this.ended) throw new NotSentError('The Codex session ended while the steer waited for its turn to start.');
+    let client: JsonRpcClient;
     try {
-      await callCodex(this.host.client(), 'turn/steer', params, { timeoutMs: this.host.timings.requestTimeoutMs });
+      client = this.host.client();
     } catch (error) {
+      throw new NotSentError(error instanceof Error ? error.message : 'The Codex app-server is not running.');
+    }
+    try {
+      await callCodex(client, 'turn/steer', params, { timeoutMs: this.host.timings.requestTimeoutMs });
+    } catch (error) {
+      if (error instanceof JsonRpcExitError && !error.sent) throw new NotSentError(error.message);
       if (error instanceof JsonRpcRequestError && (record.terminal || steerLostRace(error))) {
         throw new TurnNotActiveError(turnId);
       }
@@ -462,6 +472,16 @@ export class CodexAppServerSession implements TransportSession {
         return;
       }
       record.interrupt = null;
+      if (error instanceof JsonRpcRequestError && interruptTurnGone(error)) {
+        // The server holds no such turn (it ended without a `turn/completed` this session saw, or the thread was
+        // unloaded), so no terminal will follow. Close it here, once, or Stop could never clear the turn.
+        this.host.log.warn({ threadId: this.nativeSessionId, turnId, error: error.message }, 'codex turn/interrupt refused for a turn that is not running; closing it locally');
+        this.notice('warn', 'Codex reports that this turn is no longer running; the turn was closed locally.');
+        this.terminateBackgroundCommands(record);
+        this.ensureStarted(record);
+        this.finalizeTurn(record, 'interrupted');
+        return;
+      }
       throw toTransportError(error);
     }
     // Whether `turn/completed` or this response arrived first, the user asked to stop: a command the turn

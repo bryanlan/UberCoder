@@ -590,9 +590,11 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   durable history is still the Codex rollout, so transcript parsing, search and live-output
   normalization are unchanged, and replayed events never move recency. The plugin starts the child through
   `setpriv --pdeathsig TERM --`, so a crashed backend does not leave an app-server running a turn (the
-  service keeps `KillMode=process`). It records the child's pid, start ticks and boot id in the instance
-  meta, and the next backend ends a matching stale process before its first spawn. Without `setpriv` it
-  spawns the command directly.
+  service keeps `KillMode=process`). The child leads its own process group, because the npm `codex` is a Node
+  launcher whose child is the native server: the plugin's SIGTERM and SIGKILL escalation and the stale reap
+  signal the group, so the native server dies with its launcher. The instance meta records the child's pid,
+  start ticks, boot id and process group, and the next backend ends a matching stale process (and its group)
+  before its first spawn. Without `setpriv` it spawns the command directly.
 - Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
   A server request that still arrives (approval, elicitation, user-input question) is declined and
   recorded as a status event. There is no approval UI.
@@ -602,8 +604,10 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   `CoordinationService.register` resolves the Console session from the structured binding. With
   coordination on, the Console gives the process `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`;
   `structuredSessions.<provider>.env` overrides them. The coordination MCP entry in
-  `~/.codex/config.toml` pins its own `AGENT_COORD_RUNTIME`, so an isolated Console must override that
-  per process (see `scripts/prove-structured-codex.mjs`).
+  `~/.codex/config.toml` names the live Console's runtime and helper, so with coordination on the plugin
+  appends the same `-c mcp_servers.agent_console_coordination.*` overrides the tmux launch uses (minus the
+  session id) to the app-server argv; an isolated Console needs no extra configuration
+  (`scripts/prove-structured-codex.mjs` checks it).
 - Coordination liveness: a structured assignment is alive while a restorable bound structured row exists
   for its thread, not while the shared process runs. A backend restart or an app-server exit therefore does
   not disconnect the assignment or page its supervisor, because the thread loads on demand.

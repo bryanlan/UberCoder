@@ -18,7 +18,7 @@ import {
   type TransportInstance,
 } from '../types.js';
 import { isArchivedThreadError } from './errors.js';
-import { describeExit, exitReason, JsonRpcClient, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
+import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
 import {
   callCodex,
   INITIALIZED_NOTIFICATION,
@@ -127,8 +127,22 @@ export function threadConfig(options: Pick<OpenOptions, 'effort'>): NonNullable<
   return { mcp_optional_startup_grace_ms: 10_000, ...(options.effort ? { model_reasoning_effort: options.effort } : {}) };
 }
 
-export function buildAppServerCommand(command: string[]): string[] {
-  return [...command, '-c', 'check_for_update_on_startup=false'];
+/**
+ * The app-server argv: the configured command, then the update check off, then (when coordination is on) this
+ * Console's coordination MCP server. Codex starts that server from `~/.codex/config.toml`, whose entry names one
+ * fixed runtime and checkout; the overrides point the agent's `agent_coordination` calls at this Console, as the
+ * tmux launch does. Unlike tmux there is no `AGENT_CONSOLE_SESSION_ID`: the process serves every thread.
+ */
+export function buildAppServerCommand(command: string[], coordination?: PluginContext['coordination']): string[] {
+  return [
+    ...command,
+    '-c', 'check_for_update_on_startup=false',
+    ...(coordination ? [
+      '-c', 'mcp_servers.agent_console_coordination.command="node"',
+      '-c', `mcp_servers.agent_console_coordination.args=${JSON.stringify([coordination.helperPath, 'mcp'])}`,
+      '-c', `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(coordination.runtimeDir)}`,
+    ] : []),
+  ];
 }
 
 function threadIdOf(method: string, params: unknown): string | undefined {
@@ -386,6 +400,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
         defaultRequestTimeoutMs: this.timings.requestTimeoutMs,
         closeGraceMs: this.timings.closeGraceMs,
         termGraceMs: this.timings.termGraceMs,
+        // The npm launcher runs the native app-server as its child; signalling the group reaches both.
+        ownProcessGroup: true,
       });
     } catch (error) {
       throw toTransportError(error);
@@ -408,9 +424,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       await this.initialize(client);
     } catch (error) {
       await client.close().catch(() => undefined);
+      this.logStartFailure(client, error);
       throw toTransportError(error);
     }
-    if (client.exited) throw new TransportUnavailableError(describeExit(client.exitInfo!));
+    if (client.exited) {
+      this.logStartFailure(client, undefined);
+      throw new TransportUnavailableError(`The Codex app-server ended while starting (${exitReason(client.exitInfo!)}).`);
+    }
     this.clientRef = client;
     this.respawnNeeded = false;
     const startTicks = client.pid !== undefined ? processStartTicks(client.pid) : undefined;
@@ -421,6 +441,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
         pid: client.pid,
         ...(startTicks ? { startTicks } : {}),
         ...(bootId ? { bootId } : {}),
+        // `pid` is the process `setpriv` execs into (the npm launcher); it leads this group, which holds the native child.
+        ...(client.processGroup !== undefined ? { processGroup: client.processGroup } : {}),
         startedAt: new Date().toISOString(),
         ...(this.cliVersion ? { version: this.cliVersion } : {}),
       }),
@@ -436,7 +458,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
    * configured binary cannot be found (so a missing `codex` still fails the plain way), it starts as it is.
    */
   private spawnCommand(env: NodeJS.ProcessEnv, cwd: string): string[] {
-    const command = buildAppServerCommand(this.config.command);
+    const command = buildAppServerCommand(this.config.command, this.context.coordination);
     if (this.setpriv === undefined) {
       this.setpriv = resolveExecutable('setpriv', env.PATH, cwd) ?? null;
       if (this.setpriv === null) {
@@ -478,6 +500,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       if (!(error instanceof JsonRpcRequestError) || !/already initialized/i.test(error.message)) throw error;
     }
     client.notify(INITIALIZED_NOTIFICATION);
+  }
+
+  /** A process that ended while starting: the error that reaches the conversation names only how it ended; the redacted stderr tail goes to the log. */
+  private logStartFailure(client: JsonRpcClient, error: unknown): void {
+    const exit = client.exitInfo ?? (error instanceof JsonRpcExitError ? error.exit : undefined);
+    if (!exit) return;
+    this.log.warn({ pid: client.pid, detail: describeExit(exit) }, 'codex app-server ended while starting');
   }
 
   /** Reads the account's limits once so a usage-limit failure can name the reset time. Best effort. */

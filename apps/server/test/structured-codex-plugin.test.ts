@@ -12,10 +12,13 @@ import {
 } from '../src/providers/transport/codex/app-server-instance.js';
 import {
   buildTurnStartParams,
+  CodexAppServerSession,
+  DEFAULT_TIMINGS,
   declinedServerRequest,
   itemKind,
   itemTitle,
   sandboxPolicyFor,
+  type CodexSessionHost,
 } from '../src/providers/transport/codex/app-server-session.js';
 import {
   classifyCodexFailure,
@@ -325,6 +328,19 @@ describe('codex request building', () => {
     expect(buildAppServerCommand(['codex', 'app-server'])).toEqual(['codex', 'app-server', '-c', 'check_for_update_on_startup=false']);
   });
 
+  it('pins the coordination MCP server to this Console after the configured command and the update override', () => {
+    const argv = buildAppServerCommand(['codex', 'app-server', '--flag'], { runtimeDir: '/runtime dir/with "quotes"', helperPath: '/repo/scripts/agent-coord.mjs' });
+    expect(argv).toEqual([
+      'codex', 'app-server', '--flag',
+      '-c', 'check_for_update_on_startup=false',
+      '-c', 'mcp_servers.agent_console_coordination.command="node"',
+      '-c', 'mcp_servers.agent_console_coordination.args=["/repo/scripts/agent-coord.mjs","mcp"]',
+      '-c', 'mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME="/runtime dir/with \\"quotes\\""',
+    ]);
+    // One process serves every thread, so no session id is pinned (the tmux launch adds AGENT_CONSOLE_SESSION_ID).
+    expect(argv.join(' ')).not.toContain('AGENT_CONSOLE_SESSION_ID');
+  });
+
   it('maps items to event kinds and answers every server request kind with a decline', () => {
     expect(itemKind({ type: 'agentMessage' } as never)).toBe('assistant');
     expect(itemKind({ type: 'reasoning' } as never)).toBe('reasoning');
@@ -542,6 +558,34 @@ describe('codex instance and session against a scripted app-server', () => {
     expect(recorded).toMatchObject({ pid: alive.pid, version: '0.164.0' });
     expect(Number.isNaN(Date.parse(recorded.startedAt))).toBe(false);
     expect(session.nativeSessionId).toBe(THREAD);
+  });
+
+  it('starts the process with the coordination MCP overrides when the host enabled coordination, and without them otherwise', async () => {
+    const pinned = track(setupFake({ handlers: baseHandlers(THREAD) }));
+    pinned.context.coordination = { runtimeDir: '/tmp/console-runtime', helperPath: '/repo/scripts/agent-coord.mjs' };
+    await pinned.instance.start(OPEN_OPTIONS);
+    const argv = (readLog(pinned.logFile).find((entry) => entry.event === 'start') as unknown as { argv: string[] }).argv;
+    expect(argv.slice(1)).toEqual([
+      '-c', 'check_for_update_on_startup=false',
+      '-c', 'mcp_servers.agent_console_coordination.command="node"',
+      '-c', 'mcp_servers.agent_console_coordination.args=["/repo/scripts/agent-coord.mjs","mcp"]',
+      '-c', 'mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME="/tmp/console-runtime"',
+    ]);
+
+    const plain = track(setupFake({ handlers: baseHandlers(THREAD) }));
+    await plain.instance.start(OPEN_OPTIONS);
+    const plainArgv = (readLog(plain.logFile).find((entry) => entry.event === 'start') as unknown as { argv: string[] }).argv;
+    expect(plainArgv.slice(1)).toEqual(['-c', 'check_for_update_on_startup=false']);
+  });
+
+  it('names how a process that ends while starting ended, never its stderr, and logs the redacted tail', async () => {
+    const fake = track(setupFake({ stderr: 'FATAL: panicked at /home/someone/secret-path/main.rs:12\n', exitAtStart: 3, handlers: baseHandlers(THREAD) }));
+    const failure = await fake.instance.start(OPEN_OPTIONS).catch((error: unknown) => error);
+    // The message reaches "Failed to bind session" and "Failed to restore session" status lines.
+    expect(failure).toBeInstanceOf(TransportUnavailableError);
+    expect((failure as Error).message).toMatch(/exit code 3/);
+    expect((failure as Error).message).not.toMatch(/panicked|secret-path|FATAL/);
+    expect(fake.context.logs.warn.some(([fields, message]) => /ended while starting/.test(message) && /panicked at/.test(String((fields as { detail?: string }).detail)))).toBe(true);
   });
 
   it('treats "Already initialized" as a successful handshake', async () => {
@@ -813,6 +857,48 @@ describe('codex instance and session against a scripted app-server', () => {
     await expect(session.steer!('unknown-turn', { text: 'x' })).rejects.toBeInstanceOf(TurnNotActiveError);
   });
 
+  describe('steer that fails before anything is written', () => {
+    /** A session over a stub host, with one turn the server started; `client` decides how the connection behaves. */
+    function stubSession(client: () => unknown) {
+      const log = { info: () => undefined, warn: () => undefined, debug: () => undefined };
+      const host = { log, timings: { ...DEFAULT_TIMINGS, queuedStartWaitMs: 50 }, client, rateLimits: () => undefined, release: () => undefined } as unknown as CodexSessionHost;
+      const session = new CodexAppServerSession({ threadId: THREAD, transcriptPath: null, cwd: '/work', policy: OPEN_OPTIONS.policy, host });
+      session.handleNotification('turn/started', { threadId: THREAD, turn: turnObject(TURN, 'inProgress', 1) });
+      return session;
+    }
+    const exit = { code: 1, signal: null, expected: false, stderrTail: '' };
+
+    it('throws NotSentError when the session has ended', async () => {
+      const fake = track(setupFake(turnScenario([turnStarted(THREAD, TURN)])));
+      const session = await fake.instance.start(OPEN_OPTIONS);
+      const log = new EventLog(session);
+      const { turnId } = await session.sendTurn({ text: 'first' });
+      await log.waitForType('turn.started');
+      await session.unload();
+      const error = await session.steer!(turnId, { text: 'too late' }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(NotSentError);
+      expect(error).toMatchObject({ code: 'not_sent' });
+      expect(receivedRequests(fake.logFile, 'turn/steer')).toHaveLength(0);
+    });
+
+    it('throws NotSentError when the connection is already gone', async () => {
+      const session = stubSession(() => { throw new TransportUnavailableError('The Codex app-server is not running.'); });
+      await expect(session.steer!(TURN, { text: 'x' })).rejects.toBeInstanceOf(NotSentError);
+    });
+
+    it('throws NotSentError when the request is refused before the frame is written', async () => {
+      const session = stubSession(() => ({ request: () => Promise.reject(new JsonRpcExitError(exit, undefined, false)) }));
+      await expect(session.steer!(TURN, { text: 'x' })).rejects.toBeInstanceOf(NotSentError);
+    });
+
+    it('keeps a loss after the frame was written uncertain: TransportUnavailableError, never NotSentError', async () => {
+      const session = stubSession(() => ({ request: () => Promise.reject(new JsonRpcExitError(exit, undefined, true)) }));
+      const error = await session.steer!(TURN, { text: 'x' }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(TransportUnavailableError);
+      expect(error).not.toBeInstanceOf(NotSentError);
+    });
+  });
+
   it('tracks a turn again when turn/start answers with an id this session already closed, and warns', async () => {
     const fake = track(
       setupFake({
@@ -1021,6 +1107,35 @@ describe('codex instance and session against a scripted app-server', () => {
       await waitUntil(() => receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').length === 2, 5000, 'two terminate calls');
       expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').map((frame) => frame.params.processId)).toEqual(['proc-1', 'proc-2']);
       expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+    });
+
+    it.each([
+      ['no active turn', 'no active turn to interrupt'],
+      ['an unloaded thread', `thread not loaded: ${THREAD}`],
+    ])('closes the turn locally as interrupted, once, when the server refuses with %s', async (_name, message) => {
+      const fake = track(
+        setupFake(
+          turnScenario([turnStarted(THREAD, TURN)], {
+            // A completion that shows up later must change nothing.
+            'turn/interrupt': { error: { code: -32600, message }, emitAfter: [turnCompleted(THREAD, TURN, 'completed', null, 300)] },
+          }),
+        ),
+      );
+      const session = await fake.instance.start(OPEN_OPTIONS);
+      const log = new EventLog(session);
+      const { turnId } = await session.sendTurn({ text: 'work' });
+      await log.waitForType('turn.started');
+
+      await expect(session.interrupt(turnId)).resolves.toBeUndefined(); // Stop is answered, not refused
+
+      expect(turnTerminals(log)).toEqual([expect.objectContaining({ turnId: TURN, status: 'interrupted' })]);
+      expect(log.of('notice').some((notice) => notice.level === 'warn' && /no longer running/.test(notice.text))).toBe(true);
+      expect(session.activeTurn).toBeNull();
+      await session.interrupt(turnId); // a second Stop for the finished turn is a no-op
+      await waitUntil(() => readLog(fake.logFile).some((entry) => entry.dir === 'out' && entry.frame?.method === 'turn/completed'), 5000, 'the late completion');
+      await sleep(100);
+      expect(turnTerminals(log)).toHaveLength(1);
+      expect(receivedRequests(fake.logFile, 'turn/interrupt')).toHaveLength(1);
     });
 
     it('surfaces a rejected interrupt and leaves the turn running', async () => {

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildAppServerEnv } from '../src/providers/transport/codex/app-server-instance.js';
 import { structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
@@ -33,6 +34,23 @@ describe('Structured provider process environment', () => {
   it('adds no Console variables when coordination is off, and still passes the configured env', async () => {
     expect((await pluginConfig({ structuredSessions: codex() })).env).toEqual({});
     expect((await pluginConfig({ structuredSessions: codex({ EXTRA: '1' }) })).env).toEqual({ EXTRA: '1' });
+  });
+
+  it('gives the plugin the coordination runtime and helper the tmux launch pins, with no session id, when coordination is on', async () => {
+    const f = structuredSessionFixture({ manager: { coordinationEnabled: true } });
+    open.push(f);
+    await f.bindNew();
+    const { coordination } = f.plugin.instance!.context;
+    expect(coordination).toEqual({ runtimeDir: f.root, helperPath: expect.stringMatching(/scripts\/agent-coord\.mjs$/) });
+    expect(fs.existsSync(coordination!.helperPath)).toBe(true);
+    expect(Object.keys(coordination!)).toEqual(['runtimeDir', 'helperPath']);
+  });
+
+  it('gives the plugin no coordination identity when coordination is off', async () => {
+    const f = structuredSessionFixture({ manager: { coordinationEnabled: false } });
+    open.push(f);
+    await f.bindNew();
+    expect(f.plugin.instance!.context.coordination).toBeUndefined();
   });
 
   it('applies the merged env to the child process: configured values win over the inherited environment', () => {

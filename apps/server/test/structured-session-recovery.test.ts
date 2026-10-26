@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentLaunchContext } from '@agent-console/shared';
 import { GRANTED_RESTART_PROMPT } from '../src/coordination/wake.js';
 import { RECOVERY_PROMPT } from '../src/sessions/run-recovery.js';
+import { NotSentError } from '../src/providers/transport/types.js';
 import { project, enableUnattendedRecovery } from './helpers/session-fixtures.js';
 import { settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
@@ -70,6 +71,40 @@ describe('Structured run failure and recovery', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(r.f.row(r.session.id)).toMatchObject({ isWorking: false });
     expect(r.f.row(r.session.id).lastResponseAt).toBeTruthy();
+  });
+
+  it('does not spend the attempt or call the outcome uncertain when the recovery prompt was certainly not sent', async () => {
+    const r = await recoveryFixture();
+    await r.fail(overloaded);
+    r.thread.failNextSend = new NotSentError('The Codex session has ended.'); // refused before anything was written
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    // The prompt reached sendTurn once and was refused: no attempt is used up and nothing is marked uncertain.
+    expect(r.turnTexts()).toHaveLength(2);
+    expect(r.failure()).toMatchObject({ status: 'scheduled', attempts: 0, code: 'server_overloaded' });
+    expect(r.failure()?.stoppedReason).toBeUndefined();
+    expect(r.failure()?.retrySubmittedAt).toBeUndefined();
+
+    // The next step of the backoff sends it, and it counts as the first attempt.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(r.turnTexts()).toHaveLength(3);
+    expect(r.turnTexts()[2]).toContain('Recovery attempt 1 of 3.');
+    expect(r.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
+  });
+
+  it('keeps retrying a not-sent recovery prompt only inside the recovery window', async () => {
+    const r = await recoveryFixture();
+    await r.fail(overloaded);
+    const refuse = () => { r.thread.failNextSend = new NotSentError('The Codex session has ended.'); };
+    // Every send is refused. The prompt keeps waiting, never spends its attempts, and the 10-minute window ends it.
+    const thread = r.thread;
+    const sendTurn = thread.sendTurn.bind(thread);
+    thread.sendTurn = async (input) => { refuse(); return sendTurn(input); };
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    expect(r.failure()).toMatchObject({ status: 'scheduled', attempts: 0 });
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(r.failure()).toMatchObject({ status: 'stopped', stoppedReason: expect.stringMatching(/recovery window/) });
+    expect(r.failure()?.attempts).toBe(0);
   });
 
   it('stops after the retry limit across repeated failures', async () => {

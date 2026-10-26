@@ -97,9 +97,12 @@ Rules:
   helper exists" keep working: worker roster, grant concurrency).
 - `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 19 in the same change.
 - Meta keys owned by the structured lane: `structured-instance:<provider>` =
-  `{ pid, startTicks, bootId, startedAt, version }` for the shared process. `startTicks` is the process start
-  time (field 22 of `/proc/<pid>/stat`) and `bootId` is the kernel boot id; both are left out when `/proc`
-  cannot be read, and `version` is left out when Codex reported none. The plugin deletes the key when the
+  `{ pid, startTicks, bootId, processGroup, startedAt, version }` for the shared process. `pid` is the process
+  `setpriv` execs into, which on an npm install is the `codex` Node launcher; the native app-server is its child.
+  `startTicks` is the process start time (field 22 of `/proc/<pid>/stat`) and `bootId` is the kernel boot id; both
+  are left out when `/proc` cannot be read. `processGroup` equals `pid` (the process leads its own process group,
+  which holds the native child) and is left out in records written before the group start. `version` is left out
+  when Codex reported none. The plugin deletes the key when the
   instance closes or the process exits. `structured-epoch:<sessionId>` = ISO time the thread was last loaded
   on the current connection (recency and run-epoch guard).
 
@@ -130,8 +133,9 @@ export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
 runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordination is enabled, mirroring what
 the tmux path gets from `providers.codex.commands.env`; `env` overrides them. Hooks inside a thread read
 `AGENT_COORD_RUNTIME` to find the Console. The coordination MCP entry in `~/.codex/config.toml` pins its own
-`AGENT_COORD_RUNTIME`, which suits the live Console; an isolated Console (the proof script) overrides it per
-process with `-c mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=...` in `command`.
+`AGENT_COORD_RUNTIME` and helper path (the live Console's), so the plugin overrides the entry in the app-server
+argv whenever coordination is enabled (see "Codex app-server plugin"); no configuration is needed, and an
+isolated Console (the proof script) gets its own runtime this way.
 
 - Absent block or `enabled: false` means the lane is off: no New Chat option, `/new/bind` with
   `transport: 'structured'` returns 400, and no app-server process is ever started.
@@ -274,22 +278,43 @@ the source of truth for field names):
   touching the protocol code. Console never uses the per-user daemon (`codex app-server daemon`).
 - Process lifetime: the service runs with `KillMode=process` (tmux must survive a restart), so a crashed
   backend would leave its app-server running, possibly in the middle of a turn. The restarted backend would
-  then start a second writer on the same thread. Two layers prevent this. First, the plugin starts the child
+  then start a second writer on the same thread. Three things prevent this. First, the plugin starts the child
   through `setpriv --pdeathsig TERM --` (`transport/codex/process-lifetime.ts`, `withParentDeathSignal`), so
   the kernel sends SIGTERM to the app-server when the backend dies. `setpriv` execs the command, so the
-  recorded pid is the Codex process. The plugin looks for `setpriv` on `PATH` at its first spawn. If it is
-  missing, the plugin logs one warning and spawns the command directly. It also spawns directly when the
-  configured binary cannot be found, so a missing `codex` fails in the usual way. Second, before the first
-  spawn of an instance, the plugin ends a recorded process that is still running. The pid, the start ticks
-  and the boot id must all match the instance meta. It sends SIGTERM and then SIGKILL after
-  `staleTermGraceMs` (5 s). A record without start ticks, or a reused pid, is left alone. If the process
-  does not end, the plugin logs a warning and starts the new one anyway. The plugin spawns the child itself;
-  there is no systemd scope.
+  recorded pid is the process `setpriv` became. On an npm install of Codex that is the `codex` Node launcher,
+  not the native app-server: the launcher runs the native binary as its child and only forwards SIGINT, SIGTERM
+  and SIGHUP to it. The pdeathsig therefore reaches the native server only through that forwarding. The plugin
+  looks for `setpriv` on `PATH` at its first spawn. If it is missing, the plugin logs one warning and spawns the
+  command directly. It also spawns directly when the configured binary cannot be found, so a missing `codex`
+  fails in the usual way. Second, the child starts as the leader of its own process group (`detached: true`,
+  stdio pipes kept; pdeathsig is unaffected). `JsonRpcClient.close()` sends its SIGTERM and SIGKILL to the whole
+  group (`process.kill(-pid, signal)`), so a native child that ignores the forwarded SIGTERM dies with its
+  launcher. The group is signalled only while the launcher has not been reaped, and if the group signal fails
+  the pid alone is signalled. Third, before the first spawn of an instance, the plugin ends a recorded process
+  that is still running. The pid, the start ticks and the boot id must all match the instance meta. It sends
+  SIGTERM and then SIGKILL after `staleTermGraceMs` (5 s), to the group when the record names one (`processGroup`
+  equals the pid and `/proc` shows the pid still leads that group) and to the pid alone otherwise. A record
+  without start ticks, or a reused pid, is left alone, so no unrelated process or group is signalled. If the
+  process does not end, the plugin logs a warning and starts the new one anyway. Known limit: when the
+  launcher itself is already dead (for example killed with SIGKILL) while its native child still runs, the
+  identity of the group cannot be checked and the reap leaves that orphan alone. The plugin spawns the child
+  itself; there is no systemd scope.
 - Instance = one app-server process per provider instance (CODEX_HOME), started with the configured
-  `command` plus `-c check_for_update_on_startup=false`, cwd fixed to the runtime directory. Its environment
-  is the Console's own, plus the host and configured `env` above, minus `AGENT_CONSOLE_SESSION_ID` and
-  `CODEX_THREAD_ID` (a shared process carries no session identity), with `CODEX_HOME` expanded. Meta
-  `structured-instance:codex` records `{ pid, startTicks, bootId, startedAt, version }` (see Schema version 19).
+  `command`, then `-c check_for_update_on_startup=false`, then (when coordination is enabled) the coordination
+  MCP overrides below, cwd fixed to the runtime directory. Its environment is the Console's own, plus the host
+  and configured `env` above, minus `AGENT_CONSOLE_SESSION_ID` and `CODEX_THREAD_ID` (a shared process carries no
+  session identity), with `CODEX_HOME` expanded. Meta `structured-instance:codex` records
+  `{ pid, startTicks, bootId, processGroup, startedAt, version }` (see Schema version 19).
+- Coordination MCP pinning: Codex starts `agent_console_coordination` from the `[mcp_servers]` table in
+  `~/.codex/config.toml`, whose entry names one runtime and one checkout (the live Console's). A Console with
+  another runtime (a worktree dev Console, the proof) would otherwise get hooks that register with itself and
+  an `agent_coordination` tool that talks to the live Console. When coordination is enabled the host puts
+  `coordination: { runtimeDir, helperPath }` on the `PluginContext` (the same runtime and `scripts/agent-coord.mjs`
+  the tmux launch pins, taken from `SessionManager`) and the plugin appends
+  `-c mcp_servers.agent_console_coordination.command="node"`, `.args=["<helperPath>","mcp"]` and
+  `.env.AGENT_COORD_RUNTIME="<runtimeDir>"`. These make the entry complete on their own, so they also work when
+  the global entry is missing. No `AGENT_CONSOLE_SESSION_ID` is pinned: the process serves every thread, and
+  the coordination server identifies a thread by `_meta.threadId`. With coordination off the plugin adds nothing.
 - Thread = Console conversation. `start` = `thread/start { cwd, model, approvalPolicy: 'never',
   sandbox: 'danger-full-access', approvalsReviewer: 'user', config: { mcp_optional_startup_grace_ms: 10000, model_reasoning_effort },
   ephemeral: false }`; the response carries `thread.id` (UUID, equals the rollout session id and the
@@ -305,10 +330,16 @@ the source of truth for field names):
   `turn/completed` would be dropped. `sendTurn` throws `NotSentError` when the session has ended or the
   app-server is not connected before anything is written. A failure after the write is a
   `TransportUnavailableError` and counts as uncertain. `steer` = `turn/steer { threadId, expectedTurnId,
-  input }`. The plugin throws `TurnNotActiveError` when the turn already ended locally, or when the server
+  input }`. `steer` throws `NotSentError`, like `sendTurn`, when the session has ended or the connection is gone
+  before the frame is written; the host then queues the text for human input like any other not-sent message.
+  The plugin throws `TurnNotActiveError` when the turn already ended locally, or when the server
   answers that it has no matching active turn. The host then sends the text as a new turn. Any other steer
   failure, such as a refusal or a timeout, is rethrown and never sent again. `interrupt` = `turn/interrupt
-  { threadId, turnId }`. It terminates the tracked background commands
+  { threadId, turnId }`. When the server refuses it because it holds no such running turn ("no active turn",
+  "expected active turn id", `thread not found`, `thread not loaded`) while the plugin still tracks the turn,
+  no `turn/completed` can follow: the plugin ends the turn locally as `interrupted` with a warning notice, once
+  (the terminal is emitted from one place that checks the record), and Stop returns normally. Any other
+  refusal leaves the turn running and is surfaced to the caller. It terminates the tracked background commands
   (`thread/backgroundTerminals/terminate`, experimental) whichever of `turn/completed` and the interrupt
   response arrives first, because a command the turn started never ends on its own. Then it waits up to 10 s for
   `turn/completed`, else finalizes locally as `interrupted`. `unload` = `thread/unsubscribe`. `thread/closed`
@@ -338,6 +369,10 @@ the source of truth for field names):
   the code `process_exited` and a message that names only how it ended (`exit code 1`, `signal SIGKILL`).
   The host writes the conversation status line "The provider connection ended (exit code 1). The session
   reconnects on next use." The redacted stderr tail goes to the server log only, never into the conversation.
+  The same holds for a process that ends while starting: `JsonRpcExitError` and the start error name only how
+  it ended ("The process ended (exit code 1)."), and the tail is logged. The bind and restore failure lines
+  ("Failed to bind session: ...", "Failed to restore session: ...") carry the first line of the reason, at most
+  200 characters (`structuredStatusReason`); the full error stays in the server log.
 - Reused from T3 (MIT; copied files carry the T3 copyright and license header and the repo gains
   `THIRD_PARTY_NOTICES.md`): the pure error-classification helpers (`parseCodexRetryProgress`,
   `codexErrorInfoCode`, `codexExhaustionHttpStatus`, `codexUsageLimitError`), protocol redaction
@@ -358,7 +393,8 @@ reads `_meta.threadId`. Hook processes inherit the shared app-server environment
 structured binding instead (see Coordination). MCP servers from config start per loaded thread, so
 idle threads are unsubscribed. Codex waits only about one second for optional MCP servers before the first
 model request, so every thread starts with `mcp_optional_startup_grace_ms: 10000` (the value T3 Code uses).
-The prove script verifies hook registration and an MCP coordination call from inside a structured turn.
+The prove script verifies hook registration and an MCP coordination call from inside a structured turn, and that the
+MCP server it ran is this Console's (pinned by the app-server argv, see "Coordination MCP pinning").
 
 ## SessionManager seams (slice 1)
 
@@ -370,10 +406,10 @@ Line numbers are from `main` at `af009e3`.
 |---|---|
 | `bindConversationInternal` (2015) | `transport` from the bind input. Start (new) or resume (history) through the plugin; write the row `bound` with `transport`, sentinel tmux name, app-server `pid`, event log path; for a new chat run `adoptPendingConversation` immediately with the thread id so `conversation_ref = resume_conversation_ref = threadId`; keep the `pending:` row as URL alias and title carrier; journal `user-input` for an initial prompt and send it as the first turn; emit `session.updated`. No `verifyStartupSurvived`, no tmux. |
 | `restoreSession` (1632), `refreshSessionState` (3654), `ensureSession` (3585) | `ensureLoaded(session)`: connect/launch the instance, `resume` the thread if not loaded, set the epoch, clear idle/pressure markers on explicit restore. Never `stopWatching` because of a dead tmux. |
-| `getSessionScreen` (3594) | Return a synthesized `SessionScreen`: `inputActive: true`, empty content, `status` from the thread state, `model` from the profile. No tmux. |
+| `getSessionScreen` (3594) | Return a synthesized `SessionScreen`: `inputActive: true`, empty content, `status` from the thread state (`Codex (app-server) working`, `idle`, or `asleep` while the thread is not loaded), `model` from the profile. No tmux. A manual or idle sleep publishes the screen after the unload, so the event stream shows `asleep` (the poll has no screen for a suspended row), and the restore publishes `idle` again. |
 | `drainQueuedInputInternal` (2357), `sendInputInternal` (2151), `sendKeystrokesInternal` (2582) | Human text plus Enter: if no turn is running, `sendTurn`; if a turn is running and the plugin can steer, `steer`; journal `queued -> submitting -> submitted` with `turnId`. Escape: `interrupt` the active turn. Other keys, Text Bypass text-only and literal selection tokens: 409 with a clear message. `allowsLiteralSelectionKeystroke` (3568) returns false. See Input and delivery rules below. |
 | `drainAssignments` (648-846) | Replace the tmux liveness/owner/screen/submit block with `deliverAutomatic(session, prompt)` returning `submitted | deferred | failed`; keep attempt records, follow-ups, continuation bookkeeping and `status` events in SM. Guard order unchanged: working, queued input, manual pause, run failure. `deferred` means nothing was sent; `failed` means the outcome is uncertain (see Input and delivery rules). |
-| RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
+| RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `deferred` delivery (nothing was sent: the transport's `NotSentError`, a turn that started first, an unloaded thread) throws `RecoverySubmitDeferredError`; RunRecovery then gives the attempt back and schedules the retry one backoff step later, inside the same 10-minute recovery window, instead of stopping as "outcome uncertain". Only a `failed` delivery or another error stops recovery as uncertain. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
 | `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `alive ? turnActive : false`: a thread that is not loaded runs nothing, so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
 | `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot. Boot settles lost work only: a row still marked working loses its turn with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
 | `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skip structured rows in slice 1 (a shared process cannot be suspended per thread). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `queued_input`. |
@@ -487,7 +523,10 @@ The service subscribes to each session's event stream and calls SM-provided call
   `structured-codex-process-lifetime` (the `setpriv` launch, start-ticks identity, stale process reaping),
   `structured-session-restart` (a turn cut by a backend restart, scheduled recovery re-armed, a half-restored
   row, not-sent delivery, a turn id that runs again), `tmux-client-structured-guard` and
-  `structured-session-env`, and extended the plugin, input, recovery, coordination and wake suites.
+  `structured-session-env`, and extended the plugin, input, recovery, coordination and wake suites. The round-2
+  fixes added launcher-shaped process-group tests (`test/helpers/fake-launcher.mjs`), the MCP argv and context
+  tests, not-sent steer and recovery tests, the refused-interrupt tests, the one-line status reason tests (the
+  fake app-server gained `exitAtStart`), the asleep screen test and fake-plugin error-type tests.
 - Web tests: New Chat option, hidden controls, badge.
 - `npm run typecheck && npm run build` and the full `npm test`. The full server runs on `be43958` and on
   `ca41634` each had the same three failures, identical on untouched `main` on this host
@@ -499,14 +538,22 @@ The service subscribes to each session's event stream and calls SM-provided call
   through the HTTP API, recording each step into `test-results/structured-codex-proof/<timestamp>.json`:
   a. the tree advertises the provider; b. structured bind (thread-id `conversation_ref`, `structured:`
   sentinel name, app-server `pid`, no tmux server, the child has the isolated `AGENT_COORD_RUNTIME` and no
-  session identity); c. model profile `low` before the first turn, with no restart; d. first message and
-  reply; e. rollout file, index transcript path and the first turn's `turn_context` carrying the low model;
-  f. hook registration with the thread id and an MCP `status` call from inside a turn; g. a message sent
-  mid-turn is delivered as a steer; h. Escape interrupts a running turn (`turn_aborted`); i. manual sleep
-  (refused while the assignment is `active`, allowed after a completed turn) and restore; j. profile
-  `medium` reaches the provider on the next turn, then back to `low`; k. backend restart (the stdio
-  app-server dies with the backend) and a reply from a new app-server on the same conversation; l. release,
-  then no process of the proof remains after backend shutdown. The profile switch runs before the first turn
+  session identity, its argv carries the coordination MCP overrides that the product adds, and the pid leads a
+  process group that the instance record names); c. model profile `low` before the first turn, with no restart;
+  d. first message and reply; e. rollout file, index transcript path and the first turn's `turn_context`
+  carrying the low model; f. hook registration with the thread id and an MCP `status` call from inside a turn,
+  with an `agent-coord.mjs mcp` process of the isolated runtime seen during that turn (the MCP server is this
+  Console's, not the live one's); g. a message sent mid-turn is delivered as a steer; h. Escape interrupts a
+  running turn (`turn_aborted`), and the counting shell command, found by a unique marker in its command line, is
+  running before Stop and gone after it; i. manual sleep (refused while the assignment is `active`, allowed
+  after a completed turn): the screen is `idle` while loaded, `asleep` on the event stream after the unload
+  (the poll then has no screen), and `idle` again with a new `structured-epoch` after the restore, then a reply
+  on the same app-server pid; j. profile `medium` reaches the provider on the next turn, then back to `low`;
+  k. graceful backend restart (the stdio app-server and every process of its group die with the backend) and a
+  reply from a new app-server on the same conversation; l. release, then no process of the proof remains after
+  backend shutdown: nothing whose command line holds the temp root and nothing whose environment carries the
+  isolated `AGENT_COORD_RUNTIME` (app-server, native child, hooks, MCP servers, model commands). The profile
+  switch runs before the first turn
   because the medium profile's model is rate limited on this host at times: Codex then waits out a 429
   backoff of minutes and the turn only looks hung (the evidence lists such retries from Codex's own log).
   Step j therefore waits for the medium turn to start, not to answer.
@@ -514,32 +561,38 @@ The service subscribes to each session's event stream and calls SM-provided call
 ## Verification evidence
 
 Real Codex proof, 2026-10-26, `codex-cli 0.164.0`. `node scripts/prove-structured-codex.mjs --run` passed
-12 of 12 steps on the fixed build (`ca41634`, 75 seconds; evidence copied to
-`docs/research/codex-app-server-2026-10-26/proof-run-2026-10-26T08-22-18Z.json`) and, before the fixes, on
-`be43958` plus the env plumbing in two consecutive runs (57 and 64 seconds; one copied to
-`docs/research/codex-app-server-2026-10-26/proof-run-2026-10-26T07-51-45Z.json`). Each run also writes an
-untracked copy under `test-results/structured-codex-proof/`. The table shows the first passing run; the
-fixed-build run reported the same values with new ids and pids.
+12 of 12 steps on the round-2 fixes (the working tree on top of `4f62494`, 78 seconds; evidence copied to
+`docs/research/codex-app-server-2026-10-26/proof-run-2026-10-26T08-56-32Z.json`), on the round-1 fixed build
+(`ca41634`, 75 seconds; `proof-run-2026-10-26T08-22-18Z.json`) and, before the fixes, on `be43958` plus the env
+plumbing in two consecutive runs (57 and 64 seconds; one copied to `proof-run-2026-10-26T07-51-45Z.json`). Each run
+also writes an untracked copy under `test-results/structured-codex-proof/`. The table shows the round-2 run; the
+earlier runs reported the same values for steps that did not change, with other ids and pids. After the run no
+`codex app-server` process was left. This host's Codex is the npm launcher: the recorded pid led a process group
+of two (launcher and native server).
 
-Automated suites on `ca41634` (`env -u NODE_ENV`): server `vitest run` 1931 passed, 2 skipped (the opt-in
-real-Codex handshake tests), 3 failed; the three failures are the same timing-sensitive Claude tmux tests
+Automated suites on the round-2 working tree (`env -u NODE_ENV`, targeted files only, `--testTimeout 10000
+--maxWorkers=2`; the full suite was not rerun for round 2): the 12 structured files (`structured-*.test.ts` and
+`tmux-client-structured-guard`) 259 passed, 2 skipped (the opt-in real-Codex handshake tests); the tmux suites
+`session-lifecycle`, `run-recovery`, `peer-message-wake`, `coordination` and `agent-session-launches` 322 passed.
+`npm run typecheck` and `npm run build` clean. The last full-suite run was on `ca41634` (`env -u NODE_ENV`): server
+`vitest run` 1931 passed, 2 skipped, 3 failed; the three failures are the same timing-sensitive Claude tmux tests
 that fail on untouched `main` on this host (`claude-ready-lifecycle` twice, `claude-run-state` once). Web
-`vitest run` 198 passed. `npm run typecheck && npm run build` clean.
+`vitest run` 198 passed.
 
 | Step | Result and key values |
 |---|---|
 | a. tree | `structuredProviders: ['codex']` |
-| b. bind | `transport: structured`; `conversation_ref` is the thread UUID; `tmux_session_name` `structured:<id>`; `raw_log_path` null; `pid` is the app-server; no tmux server on the private socket; child environment has the isolated `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`, no `AGENT_CONSOLE_SESSION_ID` |
+| b. bind | `transport: structured`; `conversation_ref` is the thread UUID; `tmux_session_name` `structured:<id>`; `raw_log_path` null; `pid` is the app-server (the launcher); no tmux server on the private socket; child environment has the isolated `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`, no `AGENT_CONSOLE_SESSION_ID`; its argv holds the three `mcp_servers.agent_console_coordination` overrides after the update-check override and no session id; the instance record names `processGroup` = pid and the group has 2 members |
 | c. profile before first turn | `low` applied with the same pid, request cleared, screen shows `gpt-6-luna xhigh` |
 | d. first message | queue record `submitted`, `deliveryMode: turn`, reply `PONG`, `lastResponseAt` set |
 | e. rollout | file under `~/.codex/sessions`, session id matches, index `transcript_path` set, first `turn_context.model` is `gpt-6-luna` |
-| f. coordination | the SessionStart hook registered `native_session_id` = thread id in the isolated runtime; the agent called the `agent_coordination` MCP tool (rollout shows the call) and replied `REGISTERED`; `last_seen_at` advanced |
+| f. coordination | the SessionStart hook registered `native_session_id` = thread id in the isolated runtime; the agent called the `agent_coordination` MCP tool (rollout shows the call) and replied `REGISTERED`; `last_seen_at` advanced; one `agent-coord.mjs mcp` process with the isolated runtime in its environment ran during the turn |
 | g. steer | message sent mid-turn: `deliveryMode: steer`, same `turnId`; reply `STEERED` |
-| h. Stop | Escape: idle within 0.3 s, rollout `turn_aborted` with reason `interrupted` |
-| i. sleep | manual suspend refused (HTTP 409) while the assignment was `active` after the interrupted turn; allowed after a completed turn; `manualSuspendedAt` set then cleared; `RESTORED` reply on the same app-server pid |
+| h. Stop | Escape: idle within 0.3 s, rollout `turn_aborted` with reason `interrupted`; the counting command (one process, found by its marker) was running before Stop and gone 0.3 s after |
+| i. sleep | manual suspend refused (HTTP 409) while the assignment was `active` after the interrupted turn; allowed after a completed turn; `manualSuspendedAt` set then cleared; the event stream showed the screen `working > idle > asleep > idle > working > idle`, the screen poll answered 404 while suspended, `structured-epoch` changed on restore; `RESTORED` reply on the same app-server pid |
 | j. medium round trip | `medium` applied; the next turn's `turn_context.model` is `gpt-6.1-sol`; turn stopped; back to `low`; same pid |
-| k. backend restart | old app-server gone after shutdown; row still restorable; `RESUMED` reply from a new app-server pid |
-| l. release | row `ended`; no tmux server; after backend shutdown no process of the proof remains |
+| k. graceful backend restart | old app-server and both members of its process group gone after shutdown; row still restorable; `RESUMED` reply from a new app-server pid |
+| l. release | row `ended`; no tmux server; 3 processes of the proof alive after release (launcher, native server and 1 coordination MCP server), 0 after backend shutdown, found by command line and by `AGENT_COORD_RUNTIME` in the environment |
 
 What shaped the proof (earlier runs on the same code, same day):
 
@@ -555,12 +608,12 @@ What shaped the proof (earlier runs on the same code, same day):
 Not covered by the proof: automatic idle sleep after `idleUnloadMinutes` (unit tests only; the proof sleeps
 manually), pressure suspension (skipped for structured rows by design), RunRecovery and peer-wake delivery
 against real Codex (fake-plugin tests only), a backend crash with a running turn (the proof restarts
-gracefully), the image, approval and streaming paths (not in slice 1).
+gracefully; the process-group crash protection is covered by unit tests with a launcher-shaped stand-in), the image, approval and streaming paths (not in slice 1).
 
 ## Review and fixes
 
 An independent review of the first implementation (`main..be43958`) is in
-`docs/research/codex-app-server-2026-10-26/review-round-1.md`. Commit `ca41634` fixed its findings:
+`docs/research/codex-app-server-2026-10-26/review-round-1.md`. Commit `ca41634` fixed its findings (round 1):
 
 - An unloaded structured row never reads as working from a stale rollout. Boot settles a lost turn.
 - Scheduled recovery and half-restored `starting` rows re-arm after a backend restart.
@@ -577,14 +630,51 @@ An independent review of the first implementation (`main..be43958`) is in
 - `PluginContext.spawnScoped` and the host's `spawnDetached` were removed. The structured config type is
   defined once, from the zod schema (`StructuredProviderConfig`).
 
+A second review (`be43958..ca41634`, `docs/research/codex-app-server-2026-10-26/review-round-2.md`) found no
+regression in tmux rows, coordination for tmux, restored `starting` rows, monitor churn, exactly-once terminals or
+the env merge order, and eight new problems. The round-2 fixes:
+
+- The coordination MCP server of a structured thread is pinned to this Console. The host puts
+  `coordination: { runtimeDir, helperPath }` on the `PluginContext` and the plugin appends the
+  `mcp_servers.agent_console_coordination` overrides to the app-server argv (see "Coordination MCP pinning").
+  Before, the agent's `agent_coordination` calls followed `~/.codex/config.toml` and reached the live Console
+  whenever the runtime differed. The proof script lost its own hand-added override and now checks the argv and
+  that an MCP process with the isolated runtime ran.
+- The crash protection reaches the native server. On an npm install the recorded pid is the `codex` Node
+  launcher; the native app-server is its child, and SIGKILL to the launcher left that child running. The child
+  now leads its own process group; `close()` escalation and the stale reap signal the group (the reap only when
+  pid, start ticks and boot id match and the record names the group). The doc sentence "the recorded pid is the
+  Codex process" was wrong and is corrected.
+- A recovery prompt that was certainly not sent (`deferred` delivery, including the transport's `NotSentError`)
+  no longer stops unattended recovery as "outcome uncertain" and no longer spends the attempt: RunRecovery gets
+  `RecoverySubmitDeferredError` and schedules the retry one backoff step later, inside the 10-minute window.
+- `steer()` throws `NotSentError` for failures before the frame is written (ended session, no connection, request
+  refused before the write), like `sendTurn`, so the human message is queued and sent again.
+- A refused `turn/interrupt` for a turn the server does not hold ("no active turn", `thread not found/loaded`)
+  closes the turn locally as `interrupted`, once, so Stop clears the row.
+- Bind and restore failure lines carry a one-line reason (first line, 200 characters). `JsonRpcExitError`
+  and the start error name only how the process ended; the redacted stderr tail goes to the server log.
+- The synthesized screen reads `asleep` while the thread is not loaded; the manual and idle sleep publish it.
+- The fake transport session throws `NotSentError` for `sendTurn` and `steer` on a closed session, and
+  `TransportUnavailableError` for `interrupt`; `unload()` ends its stream as the real plugin does.
+- Proof script: the sleep step shows the unload and reload (asleep screen on the event stream, new epoch), Stop
+  shows the counting command gone (unique marker), the leftover check also sees processes that only carry the
+  runtime in their environment (MCP servers, hooks, model commands), the group of the app-server dies with the
+  backend, and the restart step is named "graceful backend restart".
+
 Left open on purpose:
 
 - Granted launches always create tmux sessions. `launch_session` has no `transport` field.
 - RunRecovery ignores the `retryable` flag on the `thread_closed` failure. It retries only `server_overloaded`,
   `server_unavailable` and `process_exited`.
 - A steer the server refused for a reason other than losing the race shows "Submission could not be confirmed".
-- Whether `codex app-server` exits on stdin EOF while a turn runs is unverified. The `--pdeathsig` launch
-  covers a crashed backend, so the proof script has no step for it.
+- Whether `codex app-server` exits on stdin EOF while a turn runs is unverified. A crashed backend is covered
+  by `--pdeathsig` and the group-wide stale reap, which unit tests show with a launcher-shaped stand-in
+  (`structured-codex-process-lifetime`), but the proof script still only restarts gracefully. A proof step that
+  runs the backend as a child process, SIGKILLs it during the counting command and asserts that the launcher and
+  the native binary both exit with no later rollout writes is a follow-up.
+- When the launcher itself is already dead and its native child still runs (for example the launcher was killed
+  with SIGKILL), the stale reap cannot check the group's identity and leaves that child alone.
 - The shared app-server stays alive after the last thread is released, until backend shutdown.
 
 ## Work breakdown (slice 1)

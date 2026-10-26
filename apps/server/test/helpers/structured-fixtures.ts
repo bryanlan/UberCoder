@@ -1,4 +1,5 @@
 import {
+  NotSentError,
   PreviousTurnActiveError,
   ResumeFailedError,
   TransportUnavailableError,
@@ -116,7 +117,7 @@ export class FakeTransportSession implements TransportSession {
 
   async sendTurn(input: TurnInput): Promise<{ turnId: string }> {
     this.calls.push({ method: 'sendTurn', args: [input] });
-    this.assertOpen();
+    this.assertOpenBeforeWrite();
     if (this.activeTurnId) throw new PreviousTurnActiveError();
     if (this.failNextSend) {
       const error = this.failNextSend;
@@ -131,21 +132,24 @@ export class FakeTransportSession implements TransportSession {
 
   async steer(turnId: string, input: TurnInput): Promise<void> {
     this.calls.push({ method: 'steer', args: [turnId, input] });
-    this.assertOpen();
+    this.assertOpenBeforeWrite();
     if (this.capabilities.steer === 'none') throw new Error('This fake session does not support steer.');
     if (turnId !== this.activeTurnId) throw new TurnNotActiveError(turnId, `Cannot steer turn ${turnId}: it is not the active turn.`);
   }
 
   async interrupt(turnId: string): Promise<void> {
     this.calls.push({ method: 'interrupt', args: [turnId] });
+    this.assertOpen();
   }
 
   async respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void> {
     this.calls.push({ method: 'respond', args: [requestId, decision] });
   }
 
+  /** As the real plugin: the thread leaves memory, so the session ends and its event stream with it. */
   async unload(): Promise<void> {
     this.calls.push({ method: 'unload', args: [] });
+    this.stop();
   }
 
   async close(reason: 'release' | 'shutdown' | 'error'): Promise<void> {
@@ -160,6 +164,16 @@ export class FakeTransportSession implements TransportSession {
     if (!this.channel.isEnded) this.channel.push({ type: 'session.state', state: 'stopped' });
   }
 
+  /**
+   * What the real plugin throws for a request on an ended session: nothing was written, so the caller may queue the
+   * request and try again (`NotSentError`). A request that was already written when the connection ended fails with
+   * `TransportUnavailableError` instead; tests produce that with `failNextSend`.
+   */
+  private assertOpenBeforeWrite(): void {
+    if (this.closed) throw new NotSentError('The fake session is closed.');
+  }
+
+  /** Requests that need the connection after the session ended: the transport is unavailable. */
   private assertOpen(): void {
     if (this.closed) throw new TransportUnavailableError('The fake session is closed.');
   }

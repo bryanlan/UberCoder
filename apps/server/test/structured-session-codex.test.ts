@@ -26,11 +26,11 @@ function completedTurn(turnId: string, text: string) {
   };
 }
 
-async function codexFixture(turns: unknown[]) {
+async function codexFixture(turns: unknown[], scenario: Record<string, unknown> = {}, options: { bind?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'structured-codex-'));
   const rollout = path.join(root, 'rollout.jsonl');
   fs.writeFileSync(rollout, '{}\n');
-  const { scenarioPath, logFile } = writeScenario(root, { handlers: { ...baseHandlers(THREAD, rollout), 'turn/start': turns } });
+  const { scenarioPath, logFile } = writeScenario(root, { ...scenario, handlers: { ...baseHandlers(THREAD, rollout), 'turn/start': turns } });
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
   const tmux = new FakeTmux();
   const registry = new TransportPluginRegistry();
@@ -47,10 +47,11 @@ async function codexFixture(turns: unknown[]) {
     createdAt: now, updatedAt: now, isBound: false, degraded: false, rawMetadata: { pending: true },
   };
   db.pendingConversations.put(pending);
-  const session = await manager.bindConversation({
+  const bind = () => manager.bindConversation({
     project, provider, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured',
   });
-  return { root, rollout, db, tmux, manager, session, logFile, pendingRef };
+  const session = options.bind === false ? undefined as never : await bind();
+  return { root, rollout, scenarioPath, db, tmux, manager, session, logFile, pendingRef, bind };
 }
 
 describe('Structured sessions on the Codex plugin', () => {
@@ -117,6 +118,32 @@ describe('Structured sessions on the Codex plugin', () => {
     const log = fs.readFileSync(f.db.boundSessions.getById(f.session.id)!.eventLogPath!, 'utf8');
     expect(log).toContain('The provider connection ended (exit code 1). The session reconnects on next use.');
     expect(log).not.toMatch(/panicked|private\/path/);
+  });
+
+  it('records a one-line reason, never the provider stderr, when a bind or a restore fails because the process ends', async () => {
+    const stderr = 'FATAL: panicked at /home/someone/private/path/main.rs:12\nsecond line of the tail\n';
+    // Bind: the app-server dies while starting.
+    const failing = await codexFixture([], { stderr, exitAtStart: 3 }, { bind: false });
+    await expect(failing.bind()).rejects.toThrow(/exit code 3/);
+    const failed = failing.db.boundSessions.list()[0]!;
+    expect(failed).toMatchObject({ status: 'error', shouldRestore: false });
+    const bindLine = fs.readFileSync(failed.eventLogPath!, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as { text: string })
+      .find(entry => /^Failed to bind session/.test(entry.text))!;
+    expect(bindLine.text).toBe('Failed to bind session: The Codex app-server is not available: The process ended (exit code 3).');
+    expect(bindLine.text).not.toMatch(/panicked|private\/path|second line|FATAL/);
+
+    // Restore: the thread is loaded, its process is killed, and the next process dies while starting.
+    const f = await codexFixture([completedTurn('turn-1', 'one')]);
+    await f.manager.sendInput(f.session.id, 'first');
+    await waitUntil(() => f.db.boundSessions.getById(f.session.id)?.lastResponseAt, 5_000, 'the first turn');
+    writeScenario(f.root, { stderr, exitAtStart: 3, handlers: baseHandlers(THREAD, f.rollout) });
+    process.kill(f.db.boundSessions.getById(f.session.id)!.pid!, 'SIGKILL');
+    await waitUntil(() => fs.readFileSync(f.db.boundSessions.getById(f.session.id)!.eventLogPath!, 'utf8').includes('connection ended'), 5_000, 'the connection loss');
+    await expect(f.manager.sendInput(f.session.id, 'second')).rejects.toThrow();
+    const lines = fs.readFileSync(f.db.boundSessions.getById(f.session.id)!.eventLogPath!, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as { text: string });
+    const restoreLine = lines.find(entry => /^Failed to restore session/.test(entry.text))!;
+    expect(restoreLine.text).toBe('Failed to restore session: The Codex app-server is not available: The process ended (exit code 3).');
+    expect(lines.map(entry => entry.text).join('\n')).not.toMatch(/panicked|private\/path|second line|FATAL/);
   });
 
   it('does not count the echo of the user\'s own message as agent output', async () => {

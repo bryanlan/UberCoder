@@ -81,6 +81,12 @@ export interface TransportPlugin<Config = unknown> {
 
 export interface PluginContext {
   runtimeDir: string; // <runtimeDir>/structured/<plugin>/
+  /**
+   * Present when Console coordination is enabled: this Console's runtime directory and the MCP helper script that
+   * serves its coordination tools. A plugin points the provider's coordination MCP server at them so the agent's
+   * tool calls reach this Console and not whichever one the provider's own config names (the tmux launch does the same).
+   */
+  coordination?: { runtimeDir: string; helperPath: string };
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
   meta: { get(key: string): string | undefined; set(key: string, value: string): void; delete(key: string): void };
 }
