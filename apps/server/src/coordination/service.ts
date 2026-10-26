@@ -105,6 +105,40 @@ export class CoordinationService {
       conversationRef, title: summary?.title ?? session.title ?? pending?.title ?? conversationRef };
   }
 
+  /**
+   * A structured thread shares its provider process with other threads, so its hook cannot carry a per-thread
+   * Console session id. The binding is found from the thread id instead; only a unique match counts.
+   */
+  private structuredSessionForThread(provider: string, nativeSessionId: string): string | undefined {
+    const rows = this.db.sqlite.prepare(`select id from bound_sessions where transport='structured' and provider=?
+      and (conversation_ref=? or resume_conversation_ref=?) and should_restore=1 limit 2`)
+      .all(provider, nativeSessionId, nativeSessionId) as Array<{ id: string }>;
+    return rows.length === 1 ? rows[0]!.id : undefined;
+  }
+
+  /** The Console binding of a structured assignment: restorable, not yet released, and unique for its thread. */
+  private structuredBinding(provider: string, nativeSessionId: string): { id: string } | undefined {
+    const rows = this.db.sqlite.prepare(`select id from bound_sessions where transport='structured' and provider=?
+      and (conversation_ref=? or resume_conversation_ref=?) and should_restore=1 and status in ('starting','bound') limit 2`)
+      .all(provider, nativeSessionId, nativeSessionId) as Array<{ id: string }>;
+    return rows.length === 1 ? rows[0] : undefined;
+  }
+
+  /** The shared structured process for a provider is running (its pid is recorded by the transport plugin). */
+  private structuredInstanceAlive(provider: string): boolean {
+    const stored = this.db.meta.get(`structured-instance:${provider}`);
+    if (!stored) return false;
+    try {
+      const pid = (JSON.parse(stored) as { pid?: unknown }).pid;
+      return typeof pid === 'number' && processStart(pid) !== '';
+    } catch { return false; }
+  }
+
+  /** Liveness of a structured assignment is its binding and the shared process, not the pid of whichever hook last ran. */
+  private structuredAssignmentAlive(provider: string, nativeSessionId: string): boolean | undefined {
+    return this.structuredBinding(provider, nativeSessionId) ? this.structuredInstanceAlive(provider) : undefined;
+  }
+
   register(input: { provider: string; nativeSessionId: string; token: string; pid: number; cwd: string; consoleSessionId?: string; acceptsMessages?: boolean }): { enabled: boolean; assignmentId?: string } {
     // Assignment identity is independent of its launch directory. Announced scope
     // determines the repository activity views; it never grants editing permission.
@@ -133,7 +167,10 @@ export class CoordinationService {
           .run(id, input.provider, input.nativeSessionId, tokenHash, 'Assignment not yet described', 'active', input.pid, start, now, now);
       }
       if (input.acceptsMessages !== undefined) this.db.meta.set(sendOnlyKey(id), String(!input.acceptsMessages));
-      this.grants?.bindAssignment(id, input.consoleSessionId, input.cwd);
+      const restorable = input.consoleSessionId
+        ? this.db.sqlite.prepare('select 1 from bound_sessions where id=? and provider=? and should_restore=1').get(input.consoleSessionId, input.provider)
+        : undefined;
+      this.grants?.bindAssignment(id, restorable ? input.consoleSessionId : this.structuredSessionForThread(input.provider, input.nativeSessionId) ?? input.consoleSessionId, input.cwd);
       this.event(id, null, existing ? 'resumed' : 'started', existing ? 'Resumed; refresh current scope and unfinished changes.' : 'Session registered; awaiting assignment scope.');
       return { enabled: true, assignmentId: id };
     }).immediate();
@@ -155,6 +192,9 @@ export class CoordinationService {
     this.db.sqlite.transaction(() => {
       for (const row of rows) {
         if (processStart(row.pid) === row.process_start) continue;
+        const assignment = this.db.sqlite.prepare('select provider, native_session_id as nativeSessionId from coordination_assignments where id=?')
+          .get(row.id) as { provider: string; nativeSessionId: string };
+        if (this.structuredAssignmentAlive(assignment.provider, assignment.nativeSessionId) === true) continue;
         this.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(row.id);
         this.event(row.id, null, 'disconnected', 'Process ended. Activity history remains available; inspect unfinished files before continuing work.');
         if (this.hasUnfinishedWork(row.id)) this.notifySupervisor(row.id, 'An unattended supervised worker disconnected.');
@@ -259,7 +299,8 @@ export class CoordinationService {
     const assignment = this.assignment(message.recipientId);
     const owner = this.db.sqlite.prepare('select pid, process_start from coordination_assignments where id=?')
       .get(message.recipientId) as { pid: number; process_start: string };
-    const alive = Boolean(owner.process_start) && processStart(owner.pid) === owner.process_start;
+    const structuredAlive = this.structuredAssignmentAlive(assignment.provider, assignment.nativeSessionId);
+    const alive = structuredAlive ?? (Boolean(owner.process_start) && processStart(owner.pid) === owner.process_start);
     // Native conversation IDs are the providers' authoritative Console refs.
     // A pending Console row can already carry its resumable native ref.
     const sessions = this.db.sqlite.prepare(`select is_working, manual_suspended_at, pressure_suspended_at from bound_sessions

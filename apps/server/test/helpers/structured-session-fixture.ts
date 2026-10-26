@@ -1,0 +1,107 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { BoundSession, ConversationSummary, SessionEvent } from '@agent-console/shared';
+import { AppDatabase } from '../../src/db/database.js';
+import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
+import { TransportPluginRegistry } from '../../src/providers/transport/registry.js';
+import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
+import { FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
+
+export const structuredSessionsConfig = {
+  codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60 },
+};
+
+export interface StructuredSessionFixtureOptions {
+  plugin?: FakeTransportPluginOptions;
+  manager?: Parameters<typeof createRecoveryManager>[6];
+  /** Leave the structured lane off to prove binds are refused. */
+  disabled?: boolean;
+}
+
+/** Everything a structured-session test needs: a database, a FakeTmux that must stay untouched, and a fake plugin. */
+export function structuredSessionFixture(options: StructuredSessionFixtureOptions = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'structured-session-'));
+  const db = new AppDatabase(path.join(root, 'state.sqlite'));
+  const tmux = new FakeTmux();
+  const plugin = new FakeTransportPlugin(options.plugin);
+  const registry = new TransportPluginRegistry();
+  registry.register(plugin);
+  const bus = new RealtimeEventBus();
+  const events: SessionEvent[] = [];
+  bus.subscribe((event) => { events.push(event); });
+  const manager = createRecoveryManager(db, tmux, root, bus, provider, providerSettings, {
+    transportPlugins: registry,
+    structuredSessions: options.disabled ? undefined : structuredSessionsConfig,
+    ...options.manager,
+  });
+
+  /** New chat the way the route does it: the pending alias row exists before the bind. */
+  const bindNew = async (extra: Partial<Parameters<typeof manager.bindConversation>[0]> = {}) => {
+    const pendingRef = `pending:${randomUUID()}`;
+    const now = new Date().toISOString();
+    const pending: ConversationSummary = {
+      ref: pendingRef, kind: 'pending', projectSlug: project.slug, provider: 'codex', title: 'New Codex conversation',
+      createdAt: now, updatedAt: now, isBound: false, degraded: false, rawMetadata: { pending: true },
+    };
+    db.pendingConversations.put(pending);
+    const session = await manager.bindConversation({
+      project, provider, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured', ...extra,
+    });
+    return { session, pendingRef };
+  };
+
+  const bindHistory = (conversationRef: string, extra: Partial<Parameters<typeof manager.bindConversation>[0]> = {}) =>
+    manager.bindConversation({
+      project, provider, providerSettings, conversationRef, title: 'History', kind: 'history', transport: 'structured', ...extra,
+    });
+
+  const row = (id: string): BoundSession => db.boundSessions.getById(id)!;
+  /** The FakeTransportSession currently serving a bound row. */
+  const thread = (nativeSessionId: string): FakeTransportSession =>
+    [...plugin.instances.flatMap(instance => instance.sessions)].reverse().find(session => session.nativeSessionId === nativeSessionId)!;
+  const calls = (nativeSessionId: string, method?: string) =>
+    thread(nativeSessionId).calls.filter(call => !method || call.method === method);
+  const eventTypes = () => events.map(event => event.type);
+
+  const tmuxTouched = () => tmux.created.length + tmux.sent.length + tmux.pasted.length + tmux.sentKeys.length
+    + tmux.options.length + tmux.pipedToFiles.length + tmux.captureStartLines.length + tmux.windowSizeChecks.length;
+
+  const restarted: Array<{ manager: typeof manager; plugin: FakeTransportPlugin; tmux: FakeTmux }> = [];
+  /** A new backend process over the same database: fresh plugin instances, fresh tmux fake, no loaded threads. */
+  const restartBackend = async () => {
+    await manager.stop();
+    const nextPlugin = new FakeTransportPlugin(options.plugin);
+    const nextRegistry = new TransportPluginRegistry();
+    nextRegistry.register(nextPlugin);
+    const nextTmux = new FakeTmux();
+    const nextManager = createRecoveryManager(db, nextTmux, root, bus, provider, providerSettings, {
+      transportPlugins: nextRegistry, structuredSessions: structuredSessionsConfig, ...options.manager,
+    });
+    const next = { manager: nextManager, plugin: nextPlugin, tmux: nextTmux };
+    restarted.push(next);
+    return next;
+  };
+
+  const cleanup = async () => {
+    await manager.stop();
+    for (const next of restarted) await next.manager.stop();
+    db.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  };
+
+  return { root, db, tmux, plugin, registry, bus, events, manager, restartBackend, bindNew, bindHistory, row, thread, calls, eventTypes, tmuxTouched, cleanup };
+}
+
+export type StructuredSessionFixture = ReturnType<typeof structuredSessionFixture>;
+
+/** Let queued microtasks and the plugin event loop run. */
+export async function settle(times = 4): Promise<void> {
+  for (let index = 0; index < times; index += 1) await new Promise<void>(resolve => setImmediate(resolve));
+}
+
+export function eventLogLines(session: BoundSession): Array<{ type: string; text: string }> {
+  if (!session.eventLogPath || !fs.existsSync(session.eventLogPath)) return [];
+  return fs.readFileSync(session.eventLogPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as { type: string; text: string });
+}

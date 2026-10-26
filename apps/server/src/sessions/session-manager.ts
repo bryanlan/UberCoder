@@ -1,5 +1,6 @@
 import { assignmentTask, dispatchEligible } from '../coordination/tasks.js';
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,18 @@ import { normalizeRawOutputLines } from './live-output/filters.js';
 import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
+import { TransportPluginRegistry } from '../providers/transport/registry.js';
+import { PreviousTurnActiveError, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
+import {
+  StructuredBusyError,
+  StructuredSessionService,
+  StructuredUnavailableError,
+  StructuredUnsupportedError,
+  type StructuredSessionsConfig,
+  type StructuredSessionState,
+  type StructuredTerminalStatus,
+} from './structured/structured-session-service.js';
+import { StructuredRunMonitor } from './structured/structured-run-monitor.js';
 import {
   adoptPendingConversation,
   clearPendingRestoreBinding as clearPendingConversationRestoreBinding,
@@ -105,6 +118,8 @@ const DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS = 60 * 60 * 1000;
 const WORK_SESSION_RELEASE_MS = (48 + 7 * 24) * 60 * 60 * 1000;
 const SESSION_NOT_RUNNING_INPUT_MESSAGE = 'Session is no longer running. Rebind or restore the conversation before sending input.';
 const RESTORE_FAILURE_STATUS_TAIL_BYTES = 64 * 1024;
+const STRUCTURED_INTERRUPT_WAIT_MS = 10_000;
+const STRUCTURED_SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(?:\s|$)/;
 interface SessionRecoveryDependencies {
   projectService: Pick<ProjectService, 'getProjectBySlug' | 'getMergedProviderSettings'>;
   providerRegistry: Pick<ProviderRegistry, 'get'>;
@@ -121,6 +136,10 @@ interface SessionManagerOptions {
   queueCodexNotice?: typeof queueCodexNotice;
   hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
+  /** Transport plugins for structured (protocol-driven) sessions; none are registered by default. */
+  transportPlugins?: TransportPluginRegistry;
+  /** Per-provider structured-session settings. A provider without an enabled entry cannot bind new structured sessions. */
+  structuredSessions?: StructuredSessionsConfig;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -147,6 +166,33 @@ export class SessionKeystrokeRejectedError extends SessionInputRejectedError {
     super(message);
     this.name = 'SessionKeystrokeRejectedError';
   }
+}
+
+/** A structured bind was requested for a provider whose structured lane is off. Routes answer 400. */
+export class StructuredSessionDisabledError extends Error {
+  readonly statusCode = 400;
+
+  constructor(provider: ProviderId) {
+    super(`Structured sessions are not enabled for ${provider}.`);
+    this.name = 'StructuredSessionDisabledError';
+  }
+}
+
+function spawnDetached(argv: string[], options: { cwd: string; env: Record<string, string>; unit: string }): Promise<{ pid: number }> {
+  return new Promise((resolve, reject) => {
+    const [command, ...args] = argv;
+    if (!command) {
+      reject(new Error('Cannot spawn an empty command.'));
+      return;
+    }
+    const child = spawn(command, args, { cwd: options.cwd, env: { ...process.env, ...options.env }, detached: true, stdio: 'ignore' });
+    child.once('error', reject);
+    child.once('spawn', () => {
+      child.unref();
+      if (child.pid === undefined) reject(new Error(`Failed to start ${command}.`));
+      else resolve({ pid: child.pid });
+    });
+  });
 }
 
 function readTextTailSync(filePath: string | undefined, maxBytes: number): string {
@@ -246,6 +292,7 @@ function splitLiteralTextForTmux(text: string): string[] {
 
 interface SessionManagerLogger {
   warn(bindings: unknown, message?: string): void;
+  info?(bindings: unknown, message?: string): void;
 }
 
 export interface AutoTrackConversationsResult {
@@ -265,6 +312,8 @@ export class SessionManager {
   private readonly runRecovery: RunRecovery;
   private readonly unsubscribeRealtimeEvents: () => void;
   private readonly runtimes: SessionRuntimeRegistry;
+  private readonly structured: StructuredSessionService;
+  private readonly structuredMonitors = new Map<string, StructuredRunMonitor>();
   private readonly inputQueue: InputQueue;
   private readonly inputDrainTimers = new Map<string, NodeJS.Timeout>();
   private readonly activeInputCommands = new Set<Promise<unknown>>();
@@ -323,6 +372,38 @@ export class SessionManager {
         );
       },
     });
+    const structuredMeta: PluginContext['meta'] = {
+      get: (key) => this.db.meta.get(key) || undefined,
+      set: (key, value) => this.db.meta.set(key, value),
+      delete: (key) => { this.db.sqlite.prepare('delete from meta where key = ?').run(key); },
+    };
+    this.structured = new StructuredSessionService({
+      registry: options.transportPlugins ?? new TransportPluginRegistry(),
+      config: options.structuredSessions ?? {},
+      meta: structuredMeta,
+      logger: this.logger ? { warn: (bindings, message) => this.logger?.warn(bindings, message) } : undefined,
+      createContext: (pluginId) => {
+        const pluginRuntimeDir = path.join(this.runtimeDir, 'structured', pluginId);
+        fs.mkdirSync(pluginRuntimeDir, { recursive: true });
+        return {
+          runtimeDir: pluginRuntimeDir,
+          log: {
+            info: (bindings, message) => this.logger?.info?.(bindings, message),
+            warn: (bindings, message) => this.logger?.warn(bindings, message),
+          },
+          spawnScoped: spawnDetached,
+          meta: structuredMeta,
+        };
+      },
+      callbacks: {
+        onTurnStarted: (sessionId, turnId, origin, replay) => this.handleStructuredTurnStarted(sessionId, turnId, origin, replay),
+        onItemCompleted: (sessionId, at, replay) => this.handleStructuredItemCompleted(sessionId, at, replay),
+        onTurnTerminal: (sessionId, turnId, status, failure, replay) => this.handleStructuredTurnTerminal(sessionId, turnId, status, failure, replay),
+        onRequest: (sessionId, summary) => this.appendStructuredStatus(sessionId, `Declined a provider request: ${summary}`),
+        onSessionState: (sessionId, state, failure) => this.handleStructuredSessionState(sessionId, state, failure),
+        appendStatus: (sessionId, text) => this.appendStructuredStatus(sessionId, text),
+      },
+    });
     this.runRecovery = new RunRecovery({
       db: this.db,
       runExclusive: (id, fn) => this.runtimes.run(id, 'runRecovery', fn),
@@ -340,6 +421,12 @@ export class SessionManager {
           && (available === undefined || available < this.pressureSuspendAvailableBytes)) return 'Recovery is stopped while available memory is below the configured threshold.';
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(session.projectSlug);
         if (!project || !this.recoveryDependencies?.projectService.getMergedProviderSettings(project, session.provider).enabled) return 'This provider or project is no longer enabled.';
+        if (session.transport === 'structured') {
+          // The thread must be loaded on a live connection with no turn running; reload it after an exit.
+          if (!this.structured.alive(session) && !await this.restoreSession(session)) return 'The original provider conversation could not be restored.';
+          if (this.structured.turnActive(session)) return 'The provider is busy, has an unsent draft, or needs your input.';
+          return this.hasUnattendedWork(session) ? undefined : 'Unattended recovery requires unfinished work.';
+        }
         const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
         if (liveness === 'unknown') return 'Provider liveness could not be confirmed.';
         if (liveness === 'dead') {
@@ -373,6 +460,10 @@ export class SessionManager {
             && (this.pressureSuspendAvailableBytes === undefined || (available !== undefined && available >= this.pressureSuspendAvailableBytes));
         };
         if (!ownsRecovery()) throw new Error('Recovery was cancelled or conversation ownership changed before submission.');
+        if (session.transport === 'structured') {
+          const delivery = await this.structured.deliverAutomatic(this.mustGetSession(session.id), text);
+          if (delivery.status !== 'submitted') throw new Error(delivery.reason ?? 'The structured session did not accept the recovery prompt.');
+        } else {
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Session ownership changed before recovery submission.');
         this.runtimeState(session.id).submittedTurnAt = nowIso();
         try {
@@ -398,6 +489,7 @@ export class SessionManager {
           this.runtimeState(session.id).submittedTurnAt = undefined;
           throw error;
         }
+        }
         const timestamp = nowIso();
         const updated = this.updateBoundSessionFields(session.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
         this.appendEvent(updated, { type: 'status', text: 'Submitted automatic recovery for the interrupted turn.', timestamp });
@@ -410,6 +502,10 @@ export class SessionManager {
             `Provider recovery ${failure.status} (${failure.attempts}/${failure.maxAttempts}): ${failure.stoppedReason ?? failure.message}` });
         }
         this.eventBus.emit({ type: 'session.updated', session });
+        // A cleared failure no longer holds the working state down, and no screen poll will notice for a structured row.
+        if (session.transport === 'structured' && session.status === 'bound') {
+          this.syncSessionWorkingState(session, { screenShowsWorking: false, capturedAt: nowIso() });
+        }
       },
       onRunState: (id, run) => {
         const session = this.db.boundSessions.getById(id);
@@ -487,7 +583,9 @@ export class SessionManager {
     const assignment = current && this.assignmentForSession(current);
     if (!current?.shouldRestore || current.status === 'ended' || current.pid !== session.pid || current.startedAt !== session.startedAt
       || assignment?.status !== 'finished'
-      || (assignment.processStart && processStart(assignment.pid) === assignment.processStart)) return;
+      // A tmux provider may live on outside this binding; a structured thread lives only while it is loaded.
+      || (current.transport === 'structured' ? this.structured.alive(current)
+        : (assignment.processStart && processStart(assignment.pid) === assignment.processStart))) return;
     this.stopWatching(current.id);
     this.runtimes.clearEphemeral(current.id);
     this.runRecovery.cancel(current.id);
@@ -645,13 +743,15 @@ export class SessionManager {
         const available = this.availableMemoryBytes();
         if (this.pressureSuspendAvailableBytes !== undefined
           && (available === undefined || available < this.pressureSuspendAvailableBytes)) return;
-        const liveness = await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
+        // A structured thread is the only writer of its conversation, so there is no outside owner to defer to.
+        const structured = current.transport === 'structured';
+        const liveness = structured ? (this.structured.alive(current) ? 'alive' : 'dead') : await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
         if (liveness === 'unknown') return;
         if (liveness === 'dead') {
           // A surviving provider outside this tmux binding must never get a second writer.
-          if (recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
+          if (!structured && recipient.processStart && processStart(recipient.pid) === recipient.processStart) return;
           if (!allowed()) return;
-          if (current.pid !== undefined && !this.isFinishedSession(current)) {
+          if (!structured && current.pid !== undefined && !this.isFinishedSession(current)) {
             await this.runRecovery.processExited(current.id);
             return;
           }
@@ -676,7 +776,7 @@ export class SessionManager {
           current = restored;
           this.db.meta.set(peerWakeRestoreKey(current.id), JSON.stringify({ pid: current.pid, restoredAt: nowIso() }));
         }
-        if (!allowed() || await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id) return;
+        if (!allowed() || (!structured && await this.tmuxClient.getOption(current.tmuxSessionName, '@agent_console_session_id') !== current.id)) return;
         await this.runRecovery.refresh(current.id);
         let screen = await this.captureSessionScreen(current, false);
         if (this.stopped) return;
@@ -709,9 +809,10 @@ export class SessionManager {
           || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt || current.pressureSuspendedAt
           || composer?.status === 'retiring'
           || (composer?.status === 'staged' && !ownsStagedNotice)
-          || !screen.inputActive || (screen.inputText.trim() && !ownsStagedNotice) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
-          || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
-          || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))) return;
+          || (structured ? (!this.structured.alive(current) || this.structured.turnActive(current))
+            : (!screen.inputActive || (screen.inputText.trim() && !ownsStagedNotice) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
+              || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
+              || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))))) return;
         const submissionBlock = (): WakeBlock | undefined => {
           const latest = this.db.boundSessions.getById(session.id);
           expireMessages(this.db);
@@ -779,13 +880,23 @@ export class SessionManager {
         let submissionInvoked = false, pasteStarted = false, composerConfirmed = ownsStagedNotice;
         let block: WakeBlock | undefined;
         const requireSubmissionGuard = async () => {
-          const owner = await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id');
+          const owner = structured ? current!.id : await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id');
           block = owner !== current!.id ? { code: 'ownership_changed', reason: 'The tmux session no longer belongs to this Console binding.' } : submissionBlock();
           if (block) throw new Error(block.reason);
         };
         try {
           await requireSubmissionGuard();
-          if (current.provider === 'codex') {
+          if (structured) {
+            // The transport reports whether the notice was sent: only a refusal before sending may be retried.
+            submissionInvoked = true;
+            const delivery = await this.structured.deliverAutomatic(current, prompt);
+            if (delivery.status === 'deferred') {
+              submissionInvoked = false;
+              throw new Error(delivery.reason ?? 'The structured session is busy.');
+            }
+            if (delivery.status === 'failed') throw new Error(delivery.reason ?? 'The structured session did not accept the notice.');
+          }
+          else if (current.provider === 'codex') {
             submissionInvoked = true;
             await this.queueCodexNotice(recipient.nativeSessionId, providerSettings, project.path, prompt);
           }
@@ -887,6 +998,8 @@ export class SessionManager {
       this.reconciliationTimer = undefined;
     }
     this.unsubscribeRealtimeEvents();
+    await this.structured.shutdown();
+    this.structuredMonitors.clear();
     await this.closeRawLogPipes(sessionsToDetach);
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
@@ -968,6 +1081,12 @@ export class SessionManager {
 
   private async verifyNativeProcessEpoch(session: BoundSession): Promise<void> {
     const state = this.runtimeState(session.id);
+    if (session.transport === 'structured') {
+      // The epoch is when the thread was last loaded on the current connection; older runs cannot own it.
+      const epoch = this.structured.epoch(session.id);
+      if (session.pid && epoch) state.nativeProcess = { pid: session.pid, startedAt: epoch };
+      return;
+    }
     if (!session.pid || state.nativeProcess?.pid === session.pid) return;
     const [owner, pid, startedAt] = await Promise.all([
       this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id'),
@@ -986,6 +1105,8 @@ export class SessionManager {
   }
 
   private providerTurnIsWorking(sessionId: string): boolean | undefined {
+    // A structured turn can only run while its thread is loaded, so the transport's own state is authoritative.
+    if (this.structured.alive({ id: sessionId })) return this.structured.turnActive({ id: sessionId });
     const run = this.runRecovery.getRunState(sessionId);
     const state = this.runtimeState(sessionId);
     if (!run) return undefined;
@@ -1155,9 +1276,9 @@ export class SessionManager {
         if (!session.shouldRestore) continue;
       }
       if (this.isFinishedSession(session)) {
-        const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
-        if (liveness !== 'alive') {
-          if (liveness === 'dead') this.retainFinishedInbox(session);
+        const alive = await this.providerAlive(session);
+        if (alive !== true) {
+          if (alive === false) this.retainFinishedInbox(session);
           continue;
         }
       }
@@ -1167,9 +1288,11 @@ export class SessionManager {
             const current = this.db.boundSessions.getById(session.id);
             if (!current || !this.isWorkReleaseDue(current)) return;
             if (!current.conversationRef.startsWith('pending:') && !(await this.hasReadableIndexedTranscript(current))) return;
-            const liveness = await checkTmuxLiveness(this.tmuxClient, current.tmuxSessionName);
-            if (liveness === 'unknown') return;
-            if (liveness === 'alive') {
+            const alive = await this.providerAlive(current);
+            if (alive === undefined) return;
+            if (alive && current.transport === 'structured') {
+              if (this.structured.turnActive(current)) return;
+            } else if (alive) {
               const screen = await this.captureSessionScreen(current, false);
               const hasProviderFooter = /^gpt-\d/i.test(screen.status) || /bypass permissions on/i.test(screen.status);
               if (sessionScreenShowsWorking(screen) || (screenIsStartingUp(screen) && !hasProviderFooter)
@@ -1209,7 +1332,10 @@ export class SessionManager {
         && !this.hasActiveCoordinationAssignment(session)
         && this.providerTurnIsWorking(session.id) !== true
         && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') continue;
-      await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session, { restoreMissing: true, resumeIdle: true }));
+      // A structured thread loads on first use, not at boot: only its lost-turn bookkeeping runs here.
+      // A failed restore is retried, as it is for tmux.
+      await this.runtimes.run(session.id, 'reconcileSession', () => this.refreshSessionState(session,
+        { restoreMissing: session.transport !== 'structured' || session.status === 'error', resumeIdle: true }));
     }
   }
 
@@ -1247,7 +1373,8 @@ export class SessionManager {
   }
 
   private isPressureSuspendable(session: BoundSession): boolean {
-    if (!session.shouldRestore || session.status !== 'bound' || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest
+    // A shared structured process cannot be suspended per thread, so memory pressure leaves these rows alone.
+    if (session.transport === 'structured' || !session.shouldRestore || session.status !== 'bound' || session.isWorking || session.queuedInputs?.length || session.modelProfileRequest
       || session.manualSuspendedAt || session.pressureSuspendedAt || session.conversationRef.startsWith('pending:')) {
       return false;
     }
@@ -1337,7 +1464,10 @@ export class SessionManager {
       return false;
     }
     const idleSinceMs = this.sessionIdleTimestampMs(session);
-    return idleSinceMs > 0 && Date.now() - idleSinceMs >= this.eagerRestoreWindowMs;
+    const windowMs = session.transport === 'structured'
+      ? this.structured.configFor(session.provider).idleUnloadMinutes * 60_000
+      : this.eagerRestoreWindowMs;
+    return idleSinceMs > 0 && Date.now() - idleSinceMs >= windowMs;
   }
 
   private async suspendIdleSession(staleSession: BoundSession): Promise<void> {
@@ -1350,6 +1480,10 @@ export class SessionManager {
       return;
     }
     if (session.idleSuspendedAt) {
+      return;
+    }
+    if (session.transport === 'structured') {
+      await this.suspendStructuredIdleSession(session);
       return;
     }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
@@ -1516,10 +1650,11 @@ export class SessionManager {
 
   private ensureSessionLogPaths(session: BoundSession): BoundSession {
     const sessionDir = path.join(this.runtimeDir, session.id);
-    const rawLogPath = session.rawLogPath ?? path.join(sessionDir, 'raw.log');
+    // A structured session has no terminal, so it never gets a raw log.
+    const rawLogPath = session.transport === 'structured' ? undefined : session.rawLogPath ?? path.join(sessionDir, 'raw.log');
     const eventLogPath = session.eventLogPath ?? path.join(sessionDir, 'events.jsonl');
     fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(rawLogPath, '', { flag: 'a' });
+    if (rawLogPath) fs.writeFileSync(rawLogPath, '', { flag: 'a' });
     fs.writeFileSync(eventLogPath, '', { flag: 'a' });
     if (rawLogPath === session.rawLogPath && eventLogPath === session.eventLogPath) {
       return session;
@@ -1658,6 +1793,10 @@ export class SessionManager {
     if (!providerSettings.enabled) {
       this.recordRestoreFailureIfOwned(session, 'Failed to restore session: provider is disabled.');
       return undefined;
+    }
+
+    if (session.transport === 'structured') {
+      return await this.restoreStructuredSession(session, initialPrompt, beforeStart);
     }
 
     const resolvedSession = await this.tryResolvePendingResumeSession(session, project, provider, providerSettings);
@@ -1844,6 +1983,18 @@ export class SessionManager {
           throw new SessionInputRejectedError('Restart is waiting for human input or a session pause to clear.');
       };
       requireRestartAuthority();
+      if (session.transport === 'structured') {
+        // Stop any running turn, then drop the thread so the reload below starts a fresh epoch.
+        if (this.structured.turnActive(session)) {
+          await this.structured.interrupt(session);
+          if (!await this.structured.waitForIdle(session, STRUCTURED_INTERRUPT_WAIT_MS)) {
+            throw new SessionInputRejectedError('Restart is waiting for the running turn to stop.');
+          }
+        }
+        requireRestartAuthority();
+        await this.structured.unload(session);
+        this.structuredMonitors.delete(session.id);
+      } else {
       const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
       if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
       if (liveness === 'dead' && assignment && processStart(assignment.pid) === assignment.processStart)
@@ -1857,6 +2008,7 @@ export class SessionManager {
           || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen))
           throw new SessionInputRejectedError('Restart is waiting for the current work, draft or native choice to finish.');
         await this.tmuxClient.killSession(session.tmuxSessionName);
+      }
       }
       requireRestartAuthority();
       this.runRecovery.stopWatching(sessionId);
@@ -1889,10 +2041,12 @@ export class SessionManager {
       if (!(await this.hasReadableIndexedTranscript(session))) {
         throw new SessionInputRejectedError('Close is waiting for the native transcript to be indexed and readable.');
       }
-      const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
-      if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
-      if (liveness === 'alive' && await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) {
-        throw new Error('Session ownership changed before close.');
+      if (session.transport !== 'structured') {
+        const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+        if (liveness === 'unknown') throw new SessionInputRejectedError('Provider liveness could not be confirmed.');
+        if (liveness === 'alive' && await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id) {
+          throw new Error('Session ownership changed before close.');
+        }
       }
       const current = this.mustGetSession(sessionId);
       if (current.launchContext?.launchedBy !== launchedBy || current.projectSlug !== session.projectSlug || !authorized()) {
@@ -2028,14 +2182,21 @@ export class SessionManager {
     codexProfile?: CodexCostProfileKey;
     claudeProfile?: ClaudeCostProfileKey;
     autoTrackedAt?: string;
+    transport?: SessionTransport;
   }, sessionId: string): Promise<SessionCommandResult> {
     const existing = this.db.boundSessions.getRestorableByConversation(input.project.slug, input.provider.id, input.conversationRef);
     if (existing) {
+      if (input.transport === 'structured' && existing.transport !== 'structured') {
+        throw new SessionInputRejectedError(`Conversation ${input.conversationRef} is already bound with the ${existing.transport} transport. Release it before binding it as a structured session.`);
+      }
       const liveSession = await this.refreshSessionState(existing, { resumeIdle: true });
       if (liveSession) {
         return sessionCommandResult(liveSession);
       }
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
+    }
+    if (input.transport === 'structured') {
+      return await this.bindStructuredConversation(input, sessionId);
     }
 
     const tmuxSessionName = this.buildTmuxSessionName(input.project.slug, input.provider.id, input.conversationRef);
@@ -2165,6 +2326,9 @@ export class SessionManager {
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
+    if (liveSession.transport === 'structured') {
+      return await this.submitStructuredText(liveSession, text);
+    }
     if (liveSession.provider === 'claude') {
       const screen = await this.captureSessionScreen(liveSession);
       const prepared = await this.acceptClaudeFolderTrust(liveSession, screen);
@@ -2207,6 +2371,8 @@ export class SessionManager {
 
   async sendKeystrokes(sessionId: string, payload: KeystrokeSendPayload,
     revision = this.inputQueue.revision(sessionId)): Promise<SessionCommandResult> {
+    // Reject unsupported structured input before it pauses automatic work or cancels recovery.
+    if (this.db.boundSessions.getById(sessionId)?.transport === 'structured') this.assertStructuredKeystrokes(payload);
     const interrupt = payload.keys?.some(key => key === 'Escape' || key === 'C-c');
     const cancelledBeforeAdmission = revision !== this.inputQueue.revision(sessionId) && !interrupt;
     if (cancelledBeforeAdmission && !payload.submissionId) {
@@ -2281,6 +2447,10 @@ export class SessionManager {
     const remnant = this.inputQueue.remnant(sessionId);
     const session = this.db.boundSessions.getById(sessionId);
     if (!remnant || !session || this.stopped) return false;
+    if (session.transport === 'structured') {
+      // There is no composer to clear on a structured session.
+      this.inputQueue.setRemnant(sessionId, undefined); return false;
+    }
     if (session.pid !== remnant.panePid) {
       this.inputQueue.setRemnant(sessionId, undefined); return false;
     }
@@ -2315,6 +2485,10 @@ export class SessionManager {
     const text = payload.submittedText?.trim();
     if (!text || payload.keys?.length !== 1 || payload.keys[0] !== 'Enter') {
       throw new SessionInputRejectedError('Queued submission requires a complete message and a single Enter.');
+    }
+    if (session.transport === 'structured') {
+      const rejection = this.structuredTextRejection(text);
+      if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     }
     let record = this.inputQueue.get(sessionId, payload.submissionId!);
     if (record && record.text !== text) throw new SessionInputRejectedError('This submission ID already belongs to another message.');
@@ -2386,6 +2560,10 @@ export class SessionManager {
     }
     if (this.stopped || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest?.state === 'applying') {
       defer('Waiting for the session to resume.'); return;
+    }
+    if (session.transport === 'structured') {
+      await this.drainStructuredQueuedInput(session, record, attemptRevision, defer);
+      return;
     }
     const stillOwned = async (): Promise<boolean> => {
       if (this.stopped || !this.db.isOpen()) return false;
@@ -2584,6 +2762,9 @@ export class SessionManager {
 
   private async sendKeystrokesInternal(sessionId: string, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     const session = this.mustGetSession(sessionId);
+    if (session.transport === 'structured') {
+      return await this.sendStructuredKeystrokes(session, payload);
+    }
     const liveSession = await this.refreshSessionState(session, { resumeIdle: true });
     if (!liveSession) {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
@@ -3055,6 +3236,11 @@ export class SessionManager {
     session: BoundSession,
     request: Extract<ModelProfileRequest, { state: 'applying' }>,
   ): Promise<void> {
+    if (session.transport === 'structured') {
+      // There is nothing to relaunch: an interrupted switch only needs its recorded choice completed.
+      await this.completeStructuredModelProfile(session, request);
+      return;
+    }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     const owner = liveness === 'alive'
       ? await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id').catch(() => undefined)
@@ -3095,7 +3281,8 @@ export class SessionManager {
     let session = this.db.boundSessions.getById(sessionId);
     let request = session?.modelProfileRequest;
     if (!session || !request || request.state === 'failed') return;
-    if (session.idleSuspendedAt) {
+    // A sleeping structured session keeps its choice in the row; the next load reads it.
+    if (session.idleSuspendedAt && session.transport !== 'structured') {
       session = await this.refreshSessionState(session, { resumeIdle: true });
       if (!session) return;
       request = session.modelProfileRequest;
@@ -3131,6 +3318,10 @@ export class SessionManager {
     if (pendingInputs.some(input => input.state !== 'queued')
       || (pendingInputs.length && stagedInput && stagedInput.panePid === session.pid && stagedInput.text.trim())) {
       this.deferModelProfileRequest(session, request, 'unsent_input');
+      return;
+    }
+    if (session.transport === 'structured') {
+      await this.applyStructuredModelProfile(session, request);
       return;
     }
     if (session.conversationRef.startsWith('pending:')) {
@@ -3384,7 +3575,17 @@ export class SessionManager {
       && screenInputMatchesText(screen, notice.notice === 'unattended' ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT);
   }
 
-  private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | undefined> {
+  private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | 'turn_running' | 'queued_input' | undefined> {
+    if (session.transport === 'structured') {
+      const current = this.db.boundSessions.getById(session.id);
+      if (!current || !current.shouldRestore || current.status !== 'bound' || current.modelProfileRequest
+        || current.manualSuspendedAt || current.pressureSuspendedAt || current.conversationRef.startsWith('pending:')) return 'busy';
+      if (mode !== 'idle' && this.hasActiveCoordinationAssignment(session)) return 'assignment';
+      if (this.structured.turnActive(session)) return 'turn_running';
+      // Manual suspension cancels queued input itself; sleeping on its own must not strand it.
+      if (mode !== 'manual' && current.queuedInputs?.length) return 'queued_input';
+      return undefined;
+    }
     // An assignment can remain active after SessionStart without a running
     // turn. Ordinary idle sleep uses native activity. Manual suspension can
     // also pause a turn waiting at a native selection without answering it.
@@ -3439,7 +3640,7 @@ export class SessionManager {
     return await this.runtimes.run(sessionId, 'suspendSession', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.manualSuspendedAt || session.pressureSuspendedAt) return session;
-      if (session.idleSuspendedAt && await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) === 'dead') {
+      if (session.idleSuspendedAt && await this.providerAlive(session) === false) {
         this.db.boundSessions.setManualSuspendedAt(session.id, nowIso());
         const suspended = this.db.boundSessions.setIdleSuspendedAt(session.id, undefined)!;
         this.cancelQueuedInputs(session.id);
@@ -3461,9 +3662,16 @@ export class SessionManager {
       if (blockReason === 'busy') {
         throw new SessionInputRejectedError('The provider is busy or has an unsent draft or queued input.');
       }
+      if (blockReason === 'turn_running') throw new SessionInputRejectedError('A turn is running. Stop it or wait for it to finish before suspending.');
+      if (blockReason === 'queued_input') throw new SessionInputRejectedError('A message is queued for this session.');
+      if (session.transport === 'structured') {
+        await this.structured.unload(session);
+        this.structuredMonitors.delete(session.id);
+      } else {
       await this.tmuxClient.killSession(session.tmuxSessionName);
       if (await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName) !== 'dead') {
         throw new Error('Session did not stop cleanly.');
+      }
       }
       this.stopWatching(session.id);
       this.runtimes.clearEphemeral(session.id);
@@ -3517,6 +3725,15 @@ export class SessionManager {
     this.eventBus.emit({ type: 'session.updated', session: releasing });
     this.appendEvent(releasing, { type: 'status', text: 'Releasing session.', timestamp: nowIso() });
 
+    if (session.transport === 'structured') {
+      try {
+        if (this.structured.turnActive(session)) await this.structured.interrupt(session).catch(() => undefined);
+        await this.structured.release(session);
+      } catch (error) {
+        retainBindingAfterFailure('Failed to release the structured session cleanly. The conversation remains available.');
+        throw error;
+      }
+    } else {
     const initialLiveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (initialLiveness === 'unknown') {
       retainBindingAfterFailure('Failed to verify tmux session before release. The conversation remains available.');
@@ -3547,9 +3764,11 @@ export class SessionManager {
           : 'Failed to release tmux session cleanly. The conversation remains available.');
       throw new Error(`Failed to release tmux session ${session.tmuxSessionName}`);
     }
+    }
 
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
+    this.structuredMonitors.delete(session.id);
     let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false, pid: undefined };
     this.db.boundSessions.upsert(ended);
     if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
@@ -3583,7 +3802,8 @@ export class SessionManager {
 
   async allowsLiteralSelectionKeystroke(sessionId: string, text: string): Promise<boolean> {
     const session = this.db.boundSessions.getById(sessionId);
-    if (!session) {
+    // A structured session has no selection prompts: every submitted message is ordinary text.
+    if (!session || session.transport === 'structured') {
       return false;
     }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
@@ -3619,6 +3839,9 @@ export class SessionManager {
         await this.adoptRegisteredSession(sessionId, session.provider, registered.nativeSessionId);
       session = this.mustGetSession(sessionId);
     }
+    if (session.transport === 'structured') {
+      return await this.getStructuredSessionScreen(sessionId, session);
+    }
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     const liveSession = liveness === 'dead'
       ? await this.runtimes.run(sessionId, 'restoreSessionForScreen', async () => {
@@ -3643,6 +3866,588 @@ export class SessionManager {
       session: this.mustGetSession(liveSession.id),
       screen,
     };
+  }
+
+  // ---- Structured transport ---------------------------------------------------------------------------
+  // A structured row has no tmux session. Every tmux-dependent entry point above branches here first, and
+  // captureSessionScreen answers with a synthesized screen, so a structured row cannot reach a tmux call.
+
+  /** Whether the provider that owns this binding is running; undefined when that cannot be told. */
+  private async providerAlive(session: BoundSession): Promise<boolean | undefined> {
+    if (session.transport === 'structured') return this.structured.alive(session);
+    const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
+    return liveness === 'unknown' ? undefined : liveness === 'alive';
+  }
+
+  private structuredEventsLive(): boolean {
+    return !this.stopped && this.db.isOpen();
+  }
+
+  /** The row for a structured event, or undefined when the session ended, is releasing or never was structured. */
+  private structuredRow(sessionId: string): BoundSession | undefined {
+    if (!this.structuredEventsLive()) return undefined;
+    const session = this.db.boundSessions.getById(sessionId);
+    return session?.transport === 'structured' && session.shouldRestore && session.status !== 'ended' && session.status !== 'releasing'
+      ? session : undefined;
+  }
+
+  private structuredMonitor(sessionId: string): StructuredRunMonitor {
+    let monitor = this.structuredMonitors.get(sessionId);
+    if (!monitor) {
+      monitor = new StructuredRunMonitor();
+      this.structuredMonitors.set(sessionId, monitor);
+    }
+    return monitor;
+  }
+
+  /** RunRecovery watches one stable key per structured session; the transcript monitor joins when its path is known. */
+  private attachStructuredRunMonitor(session: BoundSession): StructuredRunMonitor {
+    const monitor = this.structuredMonitor(session.id);
+    this.runRecovery.watch(session.id, `structured:${session.id}`, () => monitor);
+    return monitor;
+  }
+
+  private publishStructuredScreen(sessionId: string): void {
+    const session = this.structuredRow(sessionId);
+    if (!session) return;
+    const screen = this.structured.screen(session);
+    this.eventBus.emit({
+      type: 'session.screen-updated',
+      sessionId: session.id,
+      projectSlug: session.projectSlug,
+      provider: session.provider,
+      conversationRef: session.conversationRef,
+      screen,
+      timestamp: screen.capturedAt,
+    });
+  }
+
+  private appendStructuredStatus(sessionId: string, text: string): void {
+    const session = this.structuredRow(sessionId);
+    if (session) this.appendEvent(session, { type: 'status', text, timestamp: nowIso() });
+  }
+
+  private structuredTextRejection(text: string): string | undefined {
+    if (imagePromptDisplay(text).images?.length) {
+      return 'Image attachments are not available on structured sessions yet. Nothing was sent.';
+    }
+    if (STRUCTURED_SLASH_COMMAND.test(text.trim())) {
+      return 'Slash commands are terminal controls and are not available on structured sessions. Send the request as a normal message. Nothing was sent.';
+    }
+    return undefined;
+  }
+
+  /** A structured session accepts complete messages and Stop. Everything else is a terminal control it does not have. */
+  private assertStructuredKeystrokes(payload: KeystrokeSendPayload): void {
+    const keys = payload.keys ?? [];
+    const stop = keys.length === 1 && keys[0] === 'Escape' && !payload.text;
+    const message = keys.length === 1 && keys[0] === 'Enter' && Boolean((payload.submittedText ?? payload.text)?.trim());
+    if (stop || message) return;
+    throw new SessionKeystrokeRejectedError('This structured session takes complete messages and Stop (Escape) only. Terminal keys, per-keystroke text and selection input are not available. Nothing was sent.');
+  }
+
+  private structuredInputError(error: unknown): unknown {
+    if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError
+      || error instanceof StructuredUnavailableError || error instanceof StructuredUnsupportedError) {
+      return new SessionInputRejectedError(`${error.message} Nothing was sent.`);
+    }
+    return error;
+  }
+
+  private async submitStructuredText(session: BoundSession, text: string): Promise<SessionCommandResult> {
+    const rejection = this.structuredTextRejection(text);
+    if (rejection) throw new SessionKeystrokeRejectedError(rejection);
+    try {
+      await this.structured.submitHuman(session, { requestId: randomUUID(), text });
+    } catch (error) {
+      throw this.structuredInputError(error);
+    }
+    const inputAt = nowIso();
+    const updated = this.updateBoundSessionFields(session.id, { updatedAt: inputAt, lastActivityAt: inputAt });
+    const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text, timestamp: inputAt }));
+    return sessionCommandResult(updated, recordedUserInput);
+  }
+
+  private async sendStructuredKeystrokes(session: BoundSession, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
+    this.assertStructuredKeystrokes(payload);
+    if (payload.keys?.[0] === 'Escape') {
+      try {
+        await this.structured.interrupt(session);
+      } catch (error) {
+        throw new SessionInputRejectedError(`Stop could not be delivered: ${error instanceof Error ? error.message : 'unknown error'}.`);
+      }
+      this.inputQueue.stage(session.id, undefined);
+      const activityAt = nowIso();
+      return sessionCommandResult(this.updateBoundSessionFields(session.id, { updatedAt: activityAt, lastActivityAt: activityAt }));
+    }
+    const live = await this.refreshSessionState(session, { resumeIdle: true });
+    if (!live) throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
+    return await this.submitStructuredText(live, (payload.submittedText ?? payload.text)!.trim());
+  }
+
+  /** The journal replaces the terminal's paste-and-confirm steps: queued, submitting (request sent), submitted. */
+  private async drainStructuredQueuedInput(
+    staleSession: BoundSession,
+    record: QueuedInputRecord,
+    attemptRevision: number,
+    defer: (reason: string) => void,
+  ): Promise<void> {
+    const sessionId = staleSession.id;
+    let session = staleSession;
+    if (!this.structured.alive(session)) {
+      const loaded = await this.refreshSessionState(session, { resumeIdle: true });
+      if (!loaded || !this.structured.alive(loaded)) { defer('Waiting for the session to resume.'); return; }
+      session = loaded;
+    }
+    const stillOwned = (): boolean => {
+      if (this.stopped || !this.db.isOpen() || this.inputQueue.revision(sessionId) !== attemptRevision) return false;
+      const current = this.db.boundSessions.getById(sessionId);
+      return !!current && current.status === 'bound' && !current.manualSuspendedAt && !current.pressureSuspendedAt
+        && this.getCurrentRestorableSession(current)?.id === sessionId
+        && this.inputQueue.get(sessionId, record.requestId)?.state === record.state;
+    };
+    if (!stillOwned()) { defer('Waiting to verify the original live session.'); return; }
+    const sending: QueuedInputRecord = { ...record, state: 'submitting', nativeRevision: attemptRevision, reason: 'Sending the message.' };
+    this.saveQueuedInput(sessionId, sending);
+    try {
+      const sent = await this.structured.submitHuman(session, record);
+      const inputAt = nowIso();
+      const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
+      const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));
+      this.inputQueue.stage(sessionId, undefined);
+      this.saveQueuedInput(sessionId, { ...sending, state: 'submitted', turnId: sent.turnId, deliveryMode: sent.mode, recordedUserInput });
+    } catch (error) {
+      if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
+      if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof StructuredUnavailableError) {
+        // The transport refused before sending anything, so the message can wait for the next attempt.
+        this.saveQueuedInput(sessionId, { ...record, reason: error instanceof StructuredBusyError
+          ? 'Waiting for the running turn to finish.' : 'Waiting for the session to accept the message.' });
+        return;
+      }
+      this.saveQueuedInput(sessionId, { ...sending, state: 'failed', reason: error instanceof StructuredUnsupportedError
+        ? error.message : 'Submission could not be confirmed. Check the conversation before sending again.' });
+    }
+  }
+
+  private async ensureStructuredLoaded(session: BoundSession): Promise<{ loaded: boolean; reason?: string }> {
+    const project = await this.recoveryDependencies?.projectService.getProjectBySlug(session.projectSlug);
+    if (!project) return { loaded: false, reason: 'The project is not available.' };
+    return await this.structured.ensureLoaded(session, project.path) === 'loaded'
+      ? { loaded: true }
+      : { loaded: false, reason: this.structured.unavailableReason(session.id) };
+  }
+
+  /** The structured counterpart of restoreSession: reload the thread, then clear the sleep markers a reload ends. */
+  private async restoreStructuredSession(
+    session: BoundSession,
+    initialPrompt?: string,
+    beforeStart?: () => void,
+  ): Promise<BoundSession | undefined> {
+    beforeStart?.();
+    const prepared = this.ensureSessionLogPaths(session);
+    const shouldEmitRestoreAttempt = prepared.status !== 'error';
+    const restoring: BoundSession = { ...prepared, status: 'starting', updatedAt: nowIso(), isWorking: false, pid: undefined };
+    if (shouldEmitRestoreAttempt) {
+      this.db.boundSessions.upsert(restoring);
+      this.eventBus.emit({ type: 'session.updated', session: restoring });
+      this.appendEvent(restoring, { type: 'status', text: 'Restoring bound session.', timestamp: nowIso() });
+    }
+    try {
+      const loaded = await this.ensureStructuredLoaded(restoring);
+      if (!loaded.loaded) throw new Error(loaded.reason ?? 'The provider session could not be resumed.');
+      const current = this.getCurrentRestorableSession(restoring);
+      if (!current) throw new Error('Session restore was superseded during startup.');
+      this.db.boundSessions.upsert({ ...current, status: 'bound', updatedAt: nowIso(), pid: this.structured.loadedPid(current.id) });
+      let resumed = this.mustGetSession(current.id);
+      if (resumed.manualSuspendedAt) resumed = this.db.boundSessions.setManualSuspendedAt(resumed.id, undefined) ?? resumed;
+      if (resumed.pressureSuspendedAt) resumed = this.db.boundSessions.setPressureSuspendedAt(resumed.id, undefined) ?? resumed;
+      if (resumed.idleSuspendedAt) resumed = this.db.boundSessions.setIdleSuspendedAt(resumed.id, undefined) ?? resumed;
+      await this.verifyNativeProcessEpoch(resumed);
+      if (initialPrompt) {
+        const delivery = await this.structured.deliverAutomatic(resumed, initialPrompt);
+        if (delivery.status !== 'submitted') throw new Error(delivery.reason ?? 'The restored session did not accept its opening prompt.');
+      }
+      resumed = this.mustGetSession(resumed.id);
+      this.appendEvent(resumed, { type: 'status', text: 'Restored bound session.', timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: resumed });
+      this.watchSessionOutput(resumed);
+      this.publishStructuredScreen(resumed.id);
+      return resumed;
+    } catch (error) {
+      this.recordRestoreFailureIfOwned(restoring, `Failed to restore session: ${error instanceof Error ? error.message : 'Unknown error.'}`);
+      return undefined;
+    }
+  }
+
+  private async refreshStructuredSessionState(
+    session: BoundSession,
+    options: { restoreMissing?: boolean; resumeSuspension?: boolean; resumeIdle?: boolean },
+  ): Promise<BoundSession | undefined> {
+    if (!this.getCurrentRestorableSession(session)) return undefined;
+    if (session.conversationRef.startsWith('pending:') && !session.resumeConversationRef) {
+      // A bind that never reached thread start (a crash): there is no native session to reattach.
+      const ended = clearPendingConversationRestoreBinding({ db: this.db, session });
+      this.eventBus.emit({ type: 'session.updated', session: ended });
+      return undefined;
+    }
+    if (!this.structured.alive(session)) {
+      await this.settleLostStructuredTurn(session);
+      const current = this.db.boundSessions.getById(session.id);
+      if (!current || current.status === 'releasing') return undefined;
+      // Finished work keeps its restorable inbox; only an explicit selection or the guarded inbox wake reloads it.
+      if (!options.resumeSuspension && this.isFinishedSession(current)) {
+        this.retainFinishedInbox(current);
+        return this.db.boundSessions.getById(current.id);
+      }
+      if (!(options.restoreMissing ?? true) && !options.resumeSuspension) return undefined;
+      return await this.restoreSession(current, options.resumeSuspension === true);
+    }
+    let loaded = session;
+    if (options.resumeSuspension) {
+      if (loaded.manualSuspendedAt) loaded = this.db.boundSessions.setManualSuspendedAt(loaded.id, undefined) ?? loaded;
+      if (loaded.pressureSuspendedAt) loaded = this.db.boundSessions.setPressureSuspendedAt(loaded.id, undefined) ?? loaded;
+    }
+    if ((options.resumeSuspension || options.resumeIdle) && loaded.idleSuspendedAt) {
+      loaded = this.db.boundSessions.setIdleSuspendedAt(loaded.id, undefined) ?? loaded;
+      this.suspensionGraceUntilMs.set(loaded.id, Date.now() + this.restoreGraceMs);
+    }
+    if (loaded.status !== 'bound') {
+      loaded = { ...loaded, status: 'bound', updatedAt: nowIso() };
+      this.db.boundSessions.upsert(loaded);
+      this.eventBus.emit({ type: 'session.updated', session: loaded });
+    }
+    this.watchSessionOutput(loaded);
+    return loaded;
+  }
+
+  /** Nothing runs without a loaded thread: a row still marked working lost its turn with the connection. */
+  private async settleLostStructuredTurn(session: BoundSession): Promise<void> {
+    if (session.isWorking) await this.handleStructuredConnectionLoss(session, 'the previous connection ended while a turn was running');
+  }
+
+  private async handleStructuredConnectionLoss(session: BoundSession, reason?: string): Promise<void> {
+    const wasWorking = session.isWorking;
+    this.clearWorkingExpiry(session.id);
+    this.structuredMonitor(session.id).reset();
+    const lost = this.updateBoundSessionFields(session.id, { isWorking: false, updatedAt: nowIso() });
+    this.appendEvent(lost, { type: 'status', text: `The provider connection ended${reason ? ` (${reason})` : ''}. The session reconnects on next use.`, timestamp: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: lost });
+    this.publishStructuredScreen(session.id);
+    // Unfinished unattended work recovers through the same backed-off controller a dead tmux process uses.
+    if (wasWorking && this.unattendedAssignment(lost)) await this.runRecovery.processExited(session.id);
+  }
+
+  private async getStructuredSessionScreen(
+    sessionId: string,
+    session: BoundSession,
+  ): Promise<{ session: BoundSession; screen: SessionScreen } | undefined> {
+    let current = session;
+    if (!this.structured.alive(session)) {
+      const live = await this.runtimes.run(sessionId, 'restoreSessionForScreen', async () => {
+        const latest = this.mustGetSession(sessionId);
+        if (latest.status === 'error' || latest.manualSuspendedAt || latest.pressureSuspendedAt || latest.idleSuspendedAt) return undefined;
+        return await this.refreshSessionState(latest, { restoreMissing: true });
+      });
+      if (!live) return undefined;
+      current = live;
+    }
+    const latest = this.mustGetSession(current.id);
+    return { session: latest, screen: this.structured.screen(latest) };
+  }
+
+  private async suspendStructuredIdleSession(session: BoundSession): Promise<void> {
+    if (await this.suspensionBlockReason(session, 'idle')) return;
+    const latest = this.db.boundSessions.getById(session.id);
+    if (!latest || !this.isIdleSuspendable(latest)) return;
+    if (this.structured.alive(latest)) {
+      await this.structured.unload(latest);
+      this.appendEvent(latest, { type: 'status', text: 'Session suspended after extended idle; it will restore on next use.', timestamp: nowIso() });
+    }
+    this.stopWatching(latest.id);
+    this.runtimes.clearEphemeral(latest.id);
+    this.structuredMonitors.delete(latest.id);
+    this.runRecovery.cancel(latest.id);
+    this.db.meta.set(peerWakeComposerKey(latest.id), '');
+    const suspended = this.db.boundSessions.setIdleSuspendedAt(latest.id, nowIso());
+    if (suspended) this.eventBus.emit({ type: 'session.updated', session: suspended });
+  }
+
+  private async applyStructuredModelProfile(session: BoundSession, request: Extract<ModelProfileRequest, { state: 'queued' }>): Promise<void> {
+    if (this.structured.turnActive(session)) {
+      this.deferModelProfileRequest(session, request, 'turn_running');
+      return;
+    }
+    const startedAt = nowIso();
+    const applying: Extract<ModelProfileRequest, { state: 'applying' }> = {
+      ...request,
+      state: 'applying',
+      startedAt,
+      previousProfile: activeModelProfile(session),
+      resumeConversationRef: session.resumeConversationRef ?? session.conversationRef,
+    };
+    const transitioned = this.db.boundSessions.compareAndSetModelProfileRequest({
+      id: session.id, requestId: request.requestId, expectedState: 'queued', next: applying, updatedAt: startedAt,
+    });
+    if (!transitioned) return;
+    await this.completeStructuredModelProfile(transitioned, applying);
+  }
+
+  /** No restart: the profile rides on the next turn, so a switch completes as soon as no turn is running. */
+  private async completeStructuredModelProfile(session: BoundSession, request: Extract<ModelProfileRequest, { state: 'applying' }>): Promise<void> {
+    if (await this.structured.setProfile(session, request.profile) === 'deferred') {
+      // A turn started after the check; the next terminal re-runs this switch.
+      this.db.boundSessions.compareAndSetModelProfileRequest({
+        id: session.id,
+        requestId: request.requestId,
+        expectedState: 'applying',
+        next: { requestId: request.requestId, profile: request.profile, requestedAt: request.requestedAt, state: 'queued', deferredReason: 'turn_running' },
+        updatedAt: nowIso(),
+      });
+      return;
+    }
+    const completed = this.db.boundSessions.completeModelProfileRequest({
+      id: session.id, requestId: request.requestId, profile: request.profile, updatedAt: nowIso(),
+    });
+    if (!completed) return;
+    const selected = selectedModelProfile(session.provider, request.profile);
+    this.runtimeState(completed.id).liveSessionModel = `${selected.model} ${selected.reasoningEffort}`;
+    this.appendEvent(completed, { type: 'status', text: `${session.provider} session now uses ${request.profile} (${selected.model}, ${selected.reasoningEffort}).`, timestamp: completed.updatedAt });
+    this.eventBus.emit({ type: 'session.updated', session: completed });
+    this.publishStructuredScreen(completed.id);
+  }
+
+  private handleStructuredTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay = false): void {
+    const session = replay ? undefined : this.structuredRow(sessionId);
+    if (!session) return;
+    const at = nowIso();
+    this.structuredMonitor(sessionId).turnStarted(turnId, at);
+    // A turn the provider began on its own is agent activity; one Console submitted already moved recency.
+    const current = origin === 'provider' ? this.updateBoundSessionFields(sessionId, { lastActivityAt: at, updatedAt: at }) : session;
+    this.syncSessionWorkingState(current, { screenShowsWorking: false, capturedAt: at });
+    this.runRecovery.changed(sessionId);
+    this.publishStructuredScreen(sessionId);
+  }
+
+  private handleStructuredItemCompleted(sessionId: string, at: string, replay = false): void {
+    const session = replay ? undefined : this.structuredRow(sessionId);
+    if (!session) return;
+    this.structuredMonitor(sessionId).itemCompleted(at);
+    // Output from a failed turn that is stopped does not move recency, as with terminal output.
+    if (!(session.runFailure && session.runFailure.status !== 'retrying')) {
+      this.updateBoundSessionFields(sessionId, {
+        updatedAt: at, lastActivityAt: at, lastOutputAt: at, isWorking: this.structured.turnActive(session),
+      });
+      this.scheduleWorkingExpiry(sessionId, at);
+    }
+    if (session.runFailure) this.runRecovery.changed(sessionId);
+  }
+
+  private handleStructuredTurnTerminal(
+    sessionId: string,
+    turnId: string,
+    status: StructuredTerminalStatus,
+    failure?: ProviderFailure,
+    replay = false,
+  ): void {
+    const session = replay ? undefined : this.structuredRow(sessionId);
+    if (!session) return;
+    const at = nowIso();
+    this.structuredMonitor(sessionId).turnTerminal(turnId, status, failure, at);
+    // Only a completed turn is provider-confirmed output; a Stop or failure is not a response.
+    if (status === 'completed') this.updateBoundSessionFields(sessionId, { lastResponseAt: at, updatedAt: at });
+    this.syncSessionWorkingState(this.mustGetSession(sessionId), { screenShowsWorking: false, capturedAt: at });
+    this.eventBus.emit({ type: 'session.updated', session: this.mustGetSession(sessionId) });
+    void this.fillStructuredTranscriptPath(sessionId).catch((error: unknown) => {
+      if (this.structuredEventsLive()) this.logger?.warn({ err: error, sessionId }, 'Indexing the structured transcript failed.');
+    });
+    // RunRecovery turns a failed terminal into the persisted RunFailure and its retry schedule.
+    this.runRecovery.changed(sessionId);
+    this.scheduleModelProfileDrain(sessionId);
+    this.requestAssignmentWake();
+    this.publishStructuredScreen(sessionId);
+  }
+
+  private handleStructuredSessionState(sessionId: string, state: StructuredSessionState, failure?: ProviderFailure): void {
+    if (state !== 'error' || !this.structuredEventsLive()) return;
+    void this.runtimes.run(sessionId, 'structuredConnectionLost', async () => {
+      const session = this.structuredRow(sessionId);
+      if (session) await this.handleStructuredConnectionLoss(session, failure?.message);
+    }).catch((error: unknown) => {
+      if (this.structuredEventsLive()) this.logger?.warn({ err: error, sessionId }, 'Structured connection loss handling failed.');
+    });
+  }
+
+  /** Index the transcript once the provider reports it, so search and the transcript watcher can find the thread. */
+  private async fillStructuredTranscriptPath(sessionId: string): Promise<void> {
+    let session = this.structuredRow(sessionId);
+    if (!session || session.conversationRef.startsWith('pending:')) return;
+    if (this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef)?.transcriptPath) return;
+    const transcriptPath = this.structured.transcriptPath(sessionId) ?? await this.structured.refreshTranscriptPath(sessionId);
+    session = this.structuredRow(sessionId);
+    if (!session || !transcriptPath) return;
+    const indexed = this.db.conversationIndex.get(session.projectSlug, session.provider, session.conversationRef);
+    if (indexed?.transcriptPath) return;
+    try {
+      if (!fs.statSync(transcriptPath).isFile()) return;
+    } catch {
+      return;
+    }
+    const now = nowIso();
+    this.db.conversationIndex.upsert({
+      ref: session.conversationRef,
+      kind: 'history',
+      projectSlug: session.projectSlug,
+      provider: session.provider,
+      title: session.title ?? 'Live session',
+      createdAt: session.startedAt,
+      updatedAt: now,
+      providerConversationId: session.conversationRef,
+      isBound: true,
+      boundSessionId: session.id,
+      degraded: false,
+      ...indexed,
+      transcriptPath,
+    });
+    this.eventBus.emit({
+      type: 'conversation.index-updated',
+      projectSlug: session.projectSlug,
+      provider: session.provider,
+      conversationRef: session.conversationRef,
+      timestamp: now,
+    });
+  }
+
+  /**
+   * Bind a conversation to a structured provider session. A new chat gets its native id at thread start, so
+   * its pending alias is adopted immediately; transcript matching is never needed.
+   */
+  private async bindStructuredConversation(input: BindConversationInput, sessionId: string): Promise<SessionCommandResult> {
+    const providerId = input.provider.id;
+    if (!this.structured.isEnabled(providerId)) throw new StructuredSessionDisabledError(providerId);
+    const pendingRef = input.kind === 'pending' ? input.conversationRef : undefined;
+    if (pendingRef) {
+      const pending = this.db.pendingConversations.get(pendingRef);
+      if (!pending) throw new Error(`Pending conversation ${pendingRef} must exist before a structured session can adopt it.`);
+      const adopted = pending.rawMetadata?.adoptedConversationRef;
+      if (typeof adopted === 'string') {
+        // A retried bind finds the alias already adopted: return the session that owns the thread.
+        const owner = this.db.boundSessions.getRestorableByConversation(input.project.slug, providerId, adopted);
+        if (owner?.transport !== 'structured') throw new Error(`Pending conversation ${pendingRef} was adopted by a session that is no longer bound.`);
+        const live = await this.refreshSessionState(owner, { resumeIdle: true });
+        if (!live) throw new Error(`Conversation ${adopted} is still bound but could not be restored.`);
+        return sessionCommandResult(live);
+      }
+    }
+
+    const now = nowIso();
+    const sessionDir = path.join(this.runtimeDir, sessionId);
+    const eventLogPath = path.join(sessionDir, 'events.jsonl');
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(eventLogPath, '', { flag: 'a' });
+    const initialPrompt = input.initialPrompt?.trim();
+    const defaultProfile = input.kind === 'pending' && !input.launchContext?.model && !input.launchContext?.effort;
+    const session: BoundSession = {
+      launchContext: input.launchContext,
+      id: sessionId,
+      provider: providerId,
+      codexProfile: providerId === 'codex' ? input.codexProfile ?? (defaultProfile ? 'medium' : undefined) : undefined,
+      claudeProfile: providerId === 'claude' ? input.claudeProfile ?? (defaultProfile ? 'medium' : undefined) : undefined,
+      projectSlug: input.project.slug,
+      conversationRef: input.conversationRef,
+      resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
+      // tmux rejects names containing a colon, so a stray tmux call on this row fails instead of touching a session.
+      tmuxSessionName: `structured:${sessionId}`,
+      transport: 'structured',
+      status: 'starting',
+      shouldRestore: true,
+      title: input.title,
+      startedAt: now,
+      updatedAt: now,
+      lastActivityAt: initialPrompt ? now : undefined,
+      autoTrackedAt: input.autoTrackedAt,
+      isWorking: false,
+      eventLogPath,
+    };
+    this.db.boundSessions.upsert(session);
+    if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
+
+    try {
+      let nativeRef = input.conversationRef;
+      let started: { transcriptPath?: string; pid?: number };
+      if (pendingRef) {
+        const created = await this.structured.start({
+          sessionId,
+          provider: providerId,
+          cwd: input.project.path,
+          profile: providerId === 'codex' ? session.codexProfile : session.claudeProfile,
+          model: input.launchContext?.model,
+          effort: input.launchContext?.effort,
+        });
+        nativeRef = created.nativeSessionId;
+        started = created;
+      } else {
+        started = await this.structured.resume(session, input.project.path);
+      }
+      const bound: BoundSession = { ...session, status: 'bound', updatedAt: nowIso(), pid: started.pid };
+      this.db.boundSessions.upsert(bound);
+      await this.verifyNativeProcessEpoch(bound);
+      let current = bound;
+      if (pendingRef) {
+        if (initialPrompt) {
+          recordPendingUserInput({ db: this.db, pendingRef, boundSessionId: sessionId, text: initialPrompt, inputAt: now });
+        }
+        const adoption = adoptPendingConversation({
+          db: this.db,
+          projectSlug: input.project.slug,
+          providerId,
+          pendingRef,
+          matchedConversation: {
+            ref: nativeRef,
+            kind: 'history',
+            projectSlug: input.project.slug,
+            provider: providerId,
+            title: input.title,
+            createdAt: now,
+            updatedAt: now,
+            ...(started.transcriptPath ? { transcriptPath: started.transcriptPath } : {}),
+            providerConversationId: nativeRef,
+            isBound: true,
+            boundSessionId: sessionId,
+            degraded: false,
+          },
+        });
+        if (!adoption.adopted) throw new Error(`The new ${providerId} thread ${nativeRef} could not be adopted by ${pendingRef}.`);
+        current = adoption.reboundSession ?? this.mustGetSession(sessionId);
+      }
+      let recordedInitialUserInput: RecordedUserInput | undefined;
+      if (initialPrompt) {
+        await this.structured.submitHuman(current, { requestId: randomUUID(), text: initialPrompt });
+        recordedInitialUserInput = recordedUserInputFromEvent(this.appendEvent(current, {
+          type: input.initialPromptIsHuman === false ? 'agent-input' : 'user-input',
+          text: initialPrompt,
+          timestamp: nowIso(),
+        }));
+      }
+      current = this.mustGetSession(sessionId);
+      this.appendEvent(current, { type: 'status', text: `Bound ${providerId} session in ${input.project.displayName} (structured).`, timestamp: nowIso() });
+      this.eventBus.emit({ type: 'session.updated', session: current });
+      this.watchSessionOutput(current);
+      this.publishStructuredScreen(sessionId);
+      return sessionCommandResult(current, recordedInitialUserInput);
+    } catch (error) {
+      await this.structured.release(session).catch(() => undefined);
+      this.structuredMonitors.delete(sessionId);
+      const latest = this.db.boundSessions.getById(sessionId) ?? session;
+      const failed: BoundSession = { ...latest, status: 'error', shouldRestore: false, updatedAt: nowIso(), isWorking: false, pid: undefined };
+      this.db.boundSessions.upsert(failed);
+      this.appendEvent(failed, {
+        type: 'status',
+        text: `Failed to bind session: ${error instanceof Error ? error.message : 'Unknown error.'}`,
+        timestamp: nowIso(),
+      });
+      this.eventBus.emit({ type: 'session.updated', session: failed });
+      throw error;
+    }
   }
 
   private buildTmuxSessionName(projectSlug: string, provider: ProviderId, conversationRef: string): string {
@@ -3675,6 +4480,9 @@ export class SessionManager {
     if (!session || session.status === 'ended' || ((session.manualSuspendedAt || session.pressureSuspendedAt) && !options.resumeSuspension)
       || (session.idleSuspendedAt && !options.resumeSuspension && !options.resumeIdle)) {
       return undefined;
+    }
+    if (session.transport === 'structured') {
+      return await this.refreshStructuredSessionState(session, options);
     }
     const restoreMissing = options.restoreMissing ?? true;
     const checkedSession = session;
@@ -3892,6 +4700,7 @@ export class SessionManager {
   }
 
   private watchSessionTranscript(session: BoundSession): void {
+    const structuredMonitor = session.transport === 'structured' ? this.attachStructuredRunMonitor(session) : undefined;
     if (session.conversationRef.startsWith('pending:')) {
       this.transcriptWatchers.stop(session.id);
       return;
@@ -3908,7 +4717,9 @@ export class SessionManager {
     }
 
     const provider = this.recoveryDependencies?.providerRegistry.get(session.provider);
-    if (provider?.createRunMonitor) this.runRecovery.watch(session.id, transcriptPath, () => provider.createRunMonitor!());
+    if (structuredMonitor) {
+      if (structuredMonitor.attachTranscript(transcriptPath, provider?.createRunMonitor?.bind(provider))) this.runRecovery.changed(session.id);
+    } else if (provider?.createRunMonitor) this.runRecovery.watch(session.id, transcriptPath, () => provider.createRunMonitor!());
 
     this.transcriptWatchers.watch({
       sessionId: session.id,
@@ -4154,6 +4965,8 @@ export class SessionManager {
   }
 
   private async captureSessionScreen(session: BoundSession, decorate = true): Promise<SessionScreen> {
+    // A structured session has no pane; its screen is synthesized from the transport's state.
+    if (session.transport === 'structured') return this.structured.screen(session);
     const snapshot = await this.tmuxClient.capturePane(session.tmuxSessionName).catch(() => '');
     const screen = parseSessionScreenSnapshot(snapshot, nowIso());
     return decorate ? this.decorateScreenForSession(session, screen) : screen;
@@ -4554,3 +5367,5 @@ export class SessionManager {
       ?? extractLastClaudeModelFromText(readTextTailSync(session.eventLogPath, SESSION_MODEL_LOG_TAIL_BYTES));
   }
 }
+
+type BindConversationInput = Parameters<SessionManager['bindConversation']>[0];

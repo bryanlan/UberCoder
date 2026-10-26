@@ -14,6 +14,9 @@ export interface QueuedInputRecord {
   panePid?: number;
   nativeRevision?: number;
   recordedUserInput?: RecordedUserInput;
+  /** Structured sessions: the provider turn that received the message, and whether it started or steered one. */
+  turnId?: string;
+  deliveryMode?: 'turn' | 'steer';
 }
 
 /** The same delta is used for transport and native paste confirmation. */

@@ -13,6 +13,8 @@ interface LaunchInput {
   projectSlug?: string; provider?: ProviderId; model?: string; effort?: string; flags?: string[];
   prompt?: string; title?: string; supervisorId?: string; grantId?: string; sessionId?: string; targetAssignmentId?: string; requestId?: string;
   previousPid?: number;
+  /** A structured session shares its provider process, so a restart is proven by a new load epoch instead of a new pid. */
+  previousEpoch?: string;
 }
 interface RequestRow { id: string; assignment_id: string; grant_id: string; action: AgentGrantAction;
   status: 'queued' | 'starting' | 'completed' | 'failed' | 'cancelled'; session_id: string;
@@ -119,6 +121,7 @@ export class AgentSessionLaunches {
       if (!target?.shouldRestore || target.status === 'ended') throw new Error('This session is released or finished.');
       input.projectSlug = target.projectSlug; input.provider = target.provider;
       input.previousPid = target.pid ?? undefined;
+      if (target.transport === 'structured') input.previousEpoch = this.db.meta.get(`structured-epoch:${target.id}`) || undefined;
     }
     if (!input.projectSlug || !input.provider || (action === 'launch_session' && !input.prompt)) throw new Error('projectSlug, provider and an opening prompt are required for launch.');
     const project = await this.projects.getProjectBySlug(input.projectSlug);
@@ -196,8 +199,10 @@ export class AgentSessionLaunches {
     }
     if (row.status === 'starting') {
       const prior = this.db.boundSessions.getById(row.session_id);
-      if (prior?.shouldRestore && prior.status === 'bound'
-        && (row.action === 'launch_session' || (prior.pid && prior.pid !== input.previousPid))) {
+      const restarted = prior?.transport === 'structured'
+        ? (this.db.meta.get(`structured-epoch:${prior.id}`) || undefined) !== input.previousEpoch
+        : Boolean(prior?.pid && prior.pid !== input.previousPid);
+      if (prior?.shouldRestore && prior.status === 'bound' && (row.action === 'launch_session' || restarted)) {
         this.update(row, 'completed'); return;
       }
       if (prior?.status === 'starting') {

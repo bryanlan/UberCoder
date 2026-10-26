@@ -5,11 +5,14 @@ import fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
+import { PROVIDERS, type ProviderId } from '@agent-console/shared';
 import { ConfigService } from './config/service.js';
 import { AppDatabase } from './db/database.js';
 import { IndexingService } from './indexing/indexing-service.js';
 import { ProjectService } from './projects/project-service.js';
 import { ProviderRegistry } from './providers/registry.js';
+import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
+import { TransportPluginRegistry } from './providers/transport/registry.js';
 import { LocalhostProxyService } from './proxy/localhost-proxy.js';
 import { RealtimeEventBus } from './realtime/event-bus.js';
 import { registerAuthRoutes } from './routes/auth.js';
@@ -48,6 +51,8 @@ import { ConversationTitleService } from './titles/service.js';
 
 export interface AppOptions {
   configPath?: string;
+  /** Replaces the structured transport plugins; tests inject fakes here. */
+  transportPlugins?: TransportPluginRegistry;
 }
 
 export async function buildApp(options: AppOptions = {}) {
@@ -68,6 +73,8 @@ export async function buildApp(options: AppOptions = {}) {
     config.coordination.enabled ? (measurement) => { recordCoordinationTelemetry(config.runtimeDir, measurement); } : undefined);
   const search = new ConversationSearchService(db, projectService, liveOutputReader);
   let grants: GrantService;
+  const transportPlugins = options.transportPlugins ?? new TransportPluginRegistry();
+  if (!options.transportPlugins) transportPlugins.register(createCodexAppServerPlugin());
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -77,6 +84,8 @@ export async function buildApp(options: AppOptions = {}) {
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
+    transportPlugins,
+    structuredSessions: config.structuredSessions,
     hasActiveLaunchAuthority: session => {
       const assignment = db.sqlite.prepare('select id from coordination_assignments where provider=? and native_session_id=?')
         .get(session.provider, session.resumeConversationRef ?? session.conversationRef) as { id: string } | undefined;
@@ -146,9 +155,12 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
-  await registerProjectRoutes(app, authService, indexing, sessions);
+  // Structured lanes are fixed for the life of the process, like the rest of the session configuration.
+  const structuredConfig: Partial<Record<ProviderId, { enabled: boolean }>> = config.structuredSessions;
+  const structuredProviders = PROVIDERS.filter((provider) => structuredConfig[provider]?.enabled === true);
+  await registerProjectRoutes(app, authService, indexing, sessions, structuredProviders);
   await registerSearchRoutes(app, authService, search);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders);
   await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions, images);
   registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);
