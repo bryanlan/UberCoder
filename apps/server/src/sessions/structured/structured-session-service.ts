@@ -531,7 +531,7 @@ export class StructuredSessionService {
       case 'request.opened': {
         state.pendingRequests.add(event.requestId);
         // Slice 1 has no approval or question UI: decline, then record it.
-        void state.transport.respond(event.requestId, 'decline').catch((error: unknown) => {
+        void state.transport.respond(event.requestId, { decision: 'decline' }).catch((error: unknown) => {
           this.logger?.warn({ err: error, sessionId: id, requestId: event.requestId }, 'Declining a provider request failed.');
         });
         this.safely(() => this.callbacks.onRequest(id, event.summary), state);

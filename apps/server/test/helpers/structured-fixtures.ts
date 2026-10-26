@@ -12,6 +12,7 @@ import {
   type TransportPlugin,
   type TransportSession,
   type TurnInput,
+  type RequestResponse,
 } from '../../src/providers/transport/types.js';
 
 /** Capability shape of the Codex app-server plugin. */
@@ -142,8 +143,8 @@ export class FakeTransportSession implements TransportSession {
     this.assertOpen();
   }
 
-  async respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void> {
-    this.calls.push({ method: 'respond', args: [requestId, decision] });
+  async respond(requestId: string, response: RequestResponse): Promise<void> {
+    this.calls.push({ method: 'respond', args: [requestId, response] });
   }
 
   /** As the real plugin: the thread leaves memory, so the session ends and its event stream with it. */

@@ -23,12 +23,27 @@ export interface ProviderFailure {
   resetAt?: string;
 }
 
+/** One question an agent asks the person (Claude AskUserQuestion, Codex requestUserInput). */
+export interface PendingQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+  allowCustom?: boolean;
+}
+
+/** The host's answer to a request.opened event. */
+export type RequestResponse =
+  | { decision: 'decline' | 'cancel' }
+  | { decision: 'answer'; answers: Record<string, string[]>; text?: string };
+
 export type TransportEvent =
   | { type: 'session.state'; state: 'starting' | 'ready' | 'running' | 'stopped' | 'error'; failure?: ProviderFailure }
   | { type: 'session.native'; nativeSessionId: string; transcriptPath?: string; title?: string }
   | { type: 'turn.started'; turnId: string; origin: 'user' | 'provider'; replay: boolean }
   | { type: 'item.completed'; turnId: string; itemId: string; kind: 'assistant' | 'reasoning' | 'command' | 'file_change' | 'mcp' | 'search' | 'other'; replay: boolean; title?: string }
-  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string }
+  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string; turnId?: string; questions?: PendingQuestion[] }
   | { type: 'request.closed'; requestId: string; outcome: 'resolved' | 'declined' | 'cancelled' }
   | { type: 'usage.updated'; contextUsedTokens?: number; contextMaxTokens?: number; windows?: Array<{ id: string; usedPercent: number; resetsAt?: string }> }
   | { type: 'notice'; level: 'info' | 'warn'; text: string }
@@ -50,10 +65,32 @@ export interface TransportSession {
   sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
   steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
   interrupt(turnId: string): Promise<void>; // resolves when the request is accepted; terminal follows as an event
-  respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void>;
+  respond(requestId: string, response: RequestResponse): Promise<void>; // answers a pending request; unknown ids resolve without effect
   unload(): Promise<void>; // shared process: drop the thread from memory; per-session: no-op
   close(reason: 'release' | 'shutdown' | 'error'): Promise<void>;
 }
+
+/**
+ * A line-oriented duplex channel to a provider process: a stdio child, or a session host relay that outlives
+ * the Console backend. Plugins speak their protocol over it and never spawn directly in production.
+ */
+export interface LineTransport {
+  readonly pid?: number;
+  write(line: string): Promise<void>; // rejects when the channel is closed; nothing is written then
+  onLine(listener: (line: string) => void): () => void;
+  onExit(listener: (info: { code: number | null; signal: string | null; reason: 'exited' | 'disconnected' }) => void): () => void;
+  close(options?: { terminate?: boolean }): Promise<void>; // terminate: end the provider process, not only the channel
+}
+
+export interface LineTransportSpawn {
+  argv: string[];
+  cwd: string;
+  env: Record<string, string>;
+  /** Stable identity for reconnecting to a host relay after a backend restart. */
+  hostId?: string;
+}
+
+export type LineTransportFactory = (spawn: LineTransportSpawn) => Promise<LineTransport>;
 
 export interface OpenOptions {
   conversationId: string; // Console bound-session id

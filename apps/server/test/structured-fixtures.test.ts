@@ -160,10 +160,10 @@ describe('FakeTransportPlugin', () => {
     await session.steer(turnId, { text: 'also this' });
     await expect(session.steer('turn-99', { text: 'wrong turn' })).rejects.toThrow('not the active turn');
     await session.interrupt(turnId);
-    await session.respond('req-1', 'decline');
+    await session.respond('req-1', { decision: 'decline' });
     await session.unload();
     expect(session.calls.map((call) => call.method)).toEqual(['sendTurn', 'steer', 'steer', 'interrupt', 'respond', 'unload']);
-    expect(session.calls[4]).toEqual({ method: 'respond', args: ['req-1', 'decline'] });
+    expect(session.calls[4]).toEqual({ method: 'respond', args: ['req-1', { decision: 'decline' }] });
   });
 
   it('fails resume with ResumeFailedError when configured and resumes the same id otherwise', async () => {

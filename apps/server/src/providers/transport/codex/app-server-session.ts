@@ -24,6 +24,7 @@ import {
   type TransportEvent,
   type TransportSession,
   type TurnInput,
+  type RequestResponse,
 } from '../types.js';
 import { classifyCodexFailure, interruptTurnGone, mergeTurnErrors, parseCodexRetryProgress, steerLostRace } from './errors.js';
 import { JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, type JsonRpcClient } from './jsonrpc.js';
@@ -492,8 +493,8 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   /** Every server request is answered the moment it arrives (slice 1 has no approval UI), so nothing stays open. */
-  async respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void> {
-    this.host.log.debug?.({ requestId, decision, threadId: this.nativeSessionId }, 'codex request already answered');
+  async respond(requestId: string, response: RequestResponse): Promise<void> {
+    this.host.log.debug?.({ requestId, decision: response.decision, threadId: this.nativeSessionId }, 'codex request already answered');
   }
 
   async unload(): Promise<void> {

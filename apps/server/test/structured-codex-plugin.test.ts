@@ -1310,7 +1310,7 @@ describe('codex instance and session against a scripted app-server', () => {
     expect(opened[0]?.summary).toBe('Pick one: Strict or flexible?');
     expect(log.of('request.closed')).toEqual(['0', '1', '2', '3', '4'].map((requestId) => ({ type: 'request.closed', requestId, outcome: 'declined' })));
     // respond() after the fact is accepted and changes nothing.
-    await expect(session.respond('0', 'cancel')).resolves.toBeUndefined();
+    await expect(session.respond('0', { decision: 'cancel' })).resolves.toBeUndefined();
   });
 
   it('keeps subagent threads out of the parent session and still answers their requests', async () => {

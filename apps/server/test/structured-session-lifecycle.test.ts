@@ -461,7 +461,7 @@ describe('Structured startup and connection loss', () => {
     const thread = f.plugin.instance!.sessions[0]!;
     thread.push({ type: 'request.opened', requestId: 'r1', kind: 'command', summary: 'run rm -rf' });
     await settle();
-    expect(thread.calls.find(call => call.method === 'respond')?.args).toEqual(['r1', 'decline']);
+    expect(thread.calls.find(call => call.method === 'respond')?.args).toEqual(['r1', { decision: 'decline' }]);
     expect(eventLogLines(f.row(session.id)).some(line => line.type === 'status' && line.text.includes('run rm -rf'))).toBe(true);
   });
 });
