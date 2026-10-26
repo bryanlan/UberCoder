@@ -14,6 +14,7 @@ async function fixture() {
   const file = path.join(root, 'events.jsonl');
   const session: BoundSession = { id: root, provider: 'claude', projectSlug: 'demo', conversationRef: 'pending:append',
     tmuxSessionName: 'fixture-only', status: 'bound', eventLogPath: file,
+    transport: 'tmux',
     startedAt: '2026-10-11T10:00:00.000Z', updatedAt: '2026-10-11T10:00:00.000Z' };
   return { file, session, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }

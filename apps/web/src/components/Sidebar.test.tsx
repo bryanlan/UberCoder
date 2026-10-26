@@ -89,6 +89,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
   const session: BoundSession = {
     id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
     tmuxSessionName: 'ac-codex-demo', status: 'bound', shouldRestore: true,
+    transport: 'tmux',
     startedAt: responseAt, updatedAt: new Date(now).toISOString(),
     lastResponseAt: responseAt, lastActivityAt: responseAt, isWorking: false,
     [marker]: new Date(now).toISOString(),

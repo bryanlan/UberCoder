@@ -78,6 +78,10 @@ export type MessageLifecycle = 'durable' | 'pending' | 'status';
 export const SESSION_STATUSES = ['starting', 'bound', 'releasing', 'ended', 'error'] as const;
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
 
+/** Which runtime owns a bound session: a hidden tmux terminal or a structured provider protocol. */
+export const SESSION_TRANSPORTS = ['tmux', 'structured'] as const;
+export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
+
 export type ConversationKind = 'history' | 'pending';
 
 export const CONVERSATION_SEARCH_RECENCY_BUCKETS = [
@@ -235,6 +239,8 @@ export interface BoundSession {
   conversationRef: string;
   resumeConversationRef?: string;
   tmuxSessionName: string;
+  /** Chosen at bind time and persisted; existing rows keep their transport when a config flag changes. */
+  transport: SessionTransport;
   status: BoundSessionStatus;
   title?: string;
   shouldRestore?: boolean;
@@ -269,6 +275,14 @@ export interface SessionInputRequest {
 
 export interface RefreshTreeRequest {
   autoTrackRecent?: boolean;
+}
+
+/** Body of `POST /api/conversations/:projectSlug/:provider/new/bind` and `.../:conversationRef/bind`. */
+export interface BindConversationRequest {
+  transport?: SessionTransport;
+  force?: boolean;
+  initialPrompt?: string;
+  confirmExternalHandoff?: true;
 }
 
 export interface RecordedUserInput {
@@ -335,6 +349,8 @@ export interface EditableProjectSettings {
 export interface TreeResponse {
   projects: ProjectSummary[];
   boundSessions: BoundSession[];
+  /** Providers whose structured (non-tmux) lane is enabled in config. */
+  structuredProviders?: ProviderId[];
   lastIndexedAt?: string;
 }
 

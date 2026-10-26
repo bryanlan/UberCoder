@@ -15,6 +15,7 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
     conversationRef: input.conversationRef,
     resumeConversationRef: input.resumeConversationRef ?? input.conversationRef,
     tmuxSessionName: input.tmuxSessionName ?? `ac-codex-demo-${input.id}`,
+    transport: input.transport ?? 'tmux',
     status: input.status ?? 'bound',
     shouldRestore: input.shouldRestore ?? true,
     title: input.title ?? 'Bound conversation',
@@ -115,6 +116,45 @@ describe('AppDatabase', () => {
     const after = new AppDatabase(databasePath);
     expect(after.boundSessions.getById('completed-session')?.lastResponseAt).toBe(completedAt);
     after.close();
+  });
+
+  it('upgrades a version 18 database so existing rows read as tmux sessions', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v18-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const before = new AppDatabase(databasePath);
+    before.boundSessions.upsert(boundSession({ id: 'older-session', conversationRef: 'older-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
+    before.sqlite.exec('alter table bound_sessions drop column transport; delete from schema_version where version = 19');
+    expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 18 });
+    before.close();
+
+    const after = new AppDatabase(databasePath);
+    const column = (after.sqlite.prepare('pragma table_info(bound_sessions)').all() as Array<{ name: string; notnull: number; dflt_value: string | null }>)
+      .find((row) => row.name === 'transport');
+    expect(column).toMatchObject({ notnull: 1, dflt_value: "'tmux'" });
+    expect(after.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: CURRENT_SCHEMA_VERSION });
+    expect(after.sqlite.prepare('select name from schema_version where version = 19').get()).toEqual({ name: 'session-transport' });
+    expect(after.boundSessions.getById('older-session')).toMatchObject({ transport: 'tmux', tmuxSessionName: 'ac-codex-demo-older-session' });
+    expect(after.boundSessions.getRestorableByConversation('demo', 'codex', 'older-ref')?.transport).toBe('tmux');
+    after.close();
+  });
+
+  it('stores the session transport, defaults to tmux, and keeps it when an update omits it', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-transport-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const { transport: _omitted, ...withoutTransport } = boundSession({ id: 'plain', conversationRef: 'plain-ref', updatedAt: '2026-10-02T00:00:00.000Z' });
+    db.boundSessions.upsert(withoutTransport);
+    db.boundSessions.upsert(boundSession({
+      id: 'structured', conversationRef: 'thread-1', updatedAt: '2026-10-02T00:00:00.000Z',
+      transport: 'structured', tmuxSessionName: 'structured:structured',
+    }));
+    expect(db.boundSessions.getById('plain')?.transport).toBe('tmux');
+    expect(db.boundSessions.getById('structured')).toMatchObject({ transport: 'structured', tmuxSessionName: 'structured:structured' });
+
+    const { transport: _dropped, ...structuredWithoutTransport } = db.boundSessions.getById('structured')!;
+    db.boundSessions.upsert({ ...structuredWithoutTransport, title: 'Renamed', updatedAt: '2026-10-02T00:00:01.000Z' });
+    expect(db.boundSessions.getById('structured')).toMatchObject({ transport: 'structured', title: 'Renamed' });
+    expect(db.boundSessions.getRestorableByConversation('demo', 'codex', 'thread-1')?.transport).toBe('structured');
+    db.close();
   });
 
   it('round-trips auto-tracked session provenance separately from activity recency', async () => {

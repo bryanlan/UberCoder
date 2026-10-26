@@ -100,6 +100,7 @@ function seedPendingAdoption(db: AppDatabase): void {
     projectSlug: 'demo',
     conversationRef: 'pending:adopt-me',
     tmuxSessionName: 'ac-codex-demo-adopt-me',
+    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     title: 'Pending session',

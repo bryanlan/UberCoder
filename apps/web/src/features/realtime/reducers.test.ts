@@ -42,6 +42,7 @@ function session(overrides: Partial<BoundSession> = {}): BoundSession {
     projectSlug: 'demo',
     conversationRef: 'pending:one',
     tmuxSessionName: 'ac-codex-demo-one',
+    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     title: 'Live pending',

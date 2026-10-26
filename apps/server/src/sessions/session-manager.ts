@@ -4,7 +4,7 @@ import { imagePromptDisplay } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
@@ -1767,6 +1767,8 @@ export class SessionManager {
     codexProfile?: CodexCostProfileKey;
     claudeProfile?: ClaudeCostProfileKey;
     autoTrackedAt?: string;
+    /** Session transport; defaults to 'tmux'. 'structured' drives the provider through a transport plugin. */
+    transport?: SessionTransport;
   }): Promise<BoundSession> {
     const bindKey = `${input.project.slug}:${input.provider.id}:${input.conversationRef}`;
     const activeRun = this.conversationBindRuns.get(bindKey);
@@ -2069,6 +2071,7 @@ export class SessionManager {
       conversationRef: input.conversationRef,
       resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
       tmuxSessionName,
+      transport: 'tmux',
       status: 'starting',
       shouldRestore: true,
       title: input.title,

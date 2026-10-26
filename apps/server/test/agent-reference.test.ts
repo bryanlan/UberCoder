@@ -26,7 +26,7 @@ function bind(provider: ProviderId, overrides: Partial<BoundSession> = {}) {
   const nativeSessionId = randomUUID();
   const session: BoundSession = {
     id: randomUUID(), projectSlug: 'other-project', provider, conversationRef: nativeSessionId,
-    title: 'Review the console', tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true,
+    title: 'Review the console', tmuxSessionName: 'fixture-only', transport: 'tmux', status: 'bound', shouldRestore: true,
     startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...overrides,
   };
   db.boundSessions.upsert(session);

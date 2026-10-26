@@ -24,6 +24,7 @@ async function fixture(provider: ProviderId = 'codex', pending = false) {
   const session: BoundSession = {
     id: 'session-1', projectSlug: 'demo', provider, conversationRef: pending ? 'pending:image' : 'history-1',
     tmuxSessionName: 'fixture', status: 'bound', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    transport: 'tmux',
   };
   if (pending) db.pendingConversations.put({
     ref: session.conversationRef, projectSlug: 'demo', provider, kind: 'pending', title: 'New chat',

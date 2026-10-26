@@ -34,7 +34,7 @@ async function fixture(options: { runner?: TitleRunner['title']; newConsoleChat?
       ...(options.newConsoleChat === false ? {} : { titleGeneration: TITLE_GENERATION_AWAITING_MESSAGE }) },
   });
   db.boundSessions.upsert({
-    id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'pending:new', tmuxSessionName: 'ac-codex-demo-new',
+    id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'pending:new', tmuxSessionName: 'ac-codex-demo-new', transport: 'tmux',
     status: 'bound', shouldRestore: true, title: placeholder, startedAt: '2026-10-19T10:00:00.000Z', updatedAt: '2026-10-19T10:00:00.000Z',
   } satisfies BoundSession);
   const title = vi.fn<TitleRunner['title']>(options.runner ?? (async () => ({ title: 'Fix Login Redirect', usage: null })));
@@ -132,7 +132,7 @@ describe('native registration titles', () => {
     const db = new AppDatabase(path.join(directory, 'agent-console.sqlite'));
     db.boundSessions.upsert({
       id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'native-1', resumeConversationRef: 'native-1',
-      tmuxSessionName: 'ac-codex-demo-native', status: 'bound', shouldRestore: true, title: placeholder,
+      tmuxSessionName: 'ac-codex-demo-native', transport: 'tmux', status: 'bound', shouldRestore: true, title: placeholder,
       startedAt: '2026-10-19T10:00:00.000Z', updatedAt: '2026-10-19T10:00:00.000Z', ...session,
     } satisfies BoundSession);
     const manager = createRecoveryManager(db, new FakeTmux(), directory, new RealtimeEventBus(),

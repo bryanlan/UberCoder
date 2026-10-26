@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 19;
 
 interface Migration {
   version: number;
@@ -301,6 +301,10 @@ const MIGRATIONS: Migration[] = [
   } },
   { version: 18, name: 'idle-session-suspension', up(sqlite) {
     if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'idle_suspended_at', 'idle_suspended_at text');
+  } },
+  { version: 19, name: 'session-transport', up(sqlite) {
+    // Which runtime owns the row: 'tmux' (hidden terminal) or 'structured' (provider protocol).
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'transport', "transport text not null default 'tmux'");
   } },
 ];
 

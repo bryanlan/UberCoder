@@ -37,7 +37,7 @@ describe('Codex first-turn transcript linking', () => {
       ].map((row) => JSON.stringify(row)).join('\n'));
       const session: BoundSession = {
         id: 'existing-session', provider: 'codex', projectSlug: project.slug,
-        conversationRef: 'pending:first-turn', tmuxSessionName: 'existing-writer',
+        conversationRef: 'pending:first-turn', tmuxSessionName: 'existing-writer', transport: 'tmux',
         status: 'bound', shouldRestore: true, isWorking: true, pid: 12345,
         startedAt: promptAt, updatedAt: promptAt, eventLogPath,
       };

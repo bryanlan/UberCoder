@@ -477,4 +477,68 @@ describe('ConfigService', () => {
     expect(reloaded.getConfig().projectsRoot).toBe('/srv/new-projects');
     expect(reloaded.getConfig().server.port).toBe(9001);
   });
+
+  describe('structuredSessions', () => {
+    const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
+    const defaults = { codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 } };
+
+    it('defaults to disabled when the block is absent or partial', async () => {
+      const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      const emptyCodex = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: {} } });
+      const emptyBlock = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: {} });
+      try {
+        for (const configPath of [absent, emptyCodex, emptyBlock]) {
+          expect(new ConfigService(configPath).getConfig().structuredSessions).toEqual(defaults);
+        }
+      } finally {
+        for (const configPath of [absent, emptyCodex, emptyBlock]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('parses an enabled block and fills the fields it omits', async () => {
+      const full = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
+        structuredSessions: { codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15 } } });
+      const enabledOnly = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: true } } });
+      const invalid = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { command: [] } } });
+      const invalidIdle = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { idleUnloadMinutes: 0 } } });
+      try {
+        expect(new ConfigService(full).getConfig().structuredSessions)
+          .toEqual({ codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15 } });
+        expect(new ConfigService(enabledOnly).getConfig().structuredSessions)
+          .toEqual({ codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60 } });
+        expect(() => new ConfigService(invalid)).toThrow();
+        expect(() => new ConfigService(invalidIdle)).toThrow();
+      } finally {
+        for (const configPath of [full, enabledOnly, invalid, invalidIdle]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('survives every persist path without loss', async () => {
+      const block = { codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5 } };
+      const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
+      try {
+        const service = new ConfigService(configPath);
+        service.setWorkerTracking(false);
+        service.updateGlobalSettings({ projectsRoot: '/tmp/projects', serverHost: '127.0.0.1', serverPort: 4317,
+          sessionTtlHours: 24, cookieSecure: false, trustTailscaleHeaders: false });
+        service.createProjectConfig({ path: '/tmp/projects/demo' });
+        expect(JSON.parse(await fs.readFile(configPath, 'utf8')).structuredSessions).toEqual(block);
+        expect(new ConfigService(configPath).getConfig().structuredSessions).toEqual(block);
+        expect(service.getStoredConfig().structuredSessions).toEqual(block);
+      } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
+    });
+
+    it('writes the disabled defaults when an older config without the block is persisted', async () => {
+      const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      try {
+        new ConfigService(configPath).setWorkerTracking(true);
+        expect(JSON.parse(await fs.readFile(configPath, 'utf8')).structuredSessions).toEqual(defaults);
+      } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
+    });
+
+    it('ships the disabled lane in the example config', async () => {
+      const example = JSON.parse(await fs.readFile(new URL('../../../config/agent-console.example.json', import.meta.url), 'utf8'));
+      expect(example.structuredSessions).toEqual(defaults);
+    });
+  });
 });

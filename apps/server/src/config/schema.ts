@@ -63,12 +63,26 @@ const sessionsConfigSchema = z.object({
   pressureSuspendIdleMinutes: 60,
 });
 
+// Structured (protocol-driven, non-tmux) sessions per provider. Off unless a provider is enabled explicitly.
+const structuredProviderSchema = z.object({
+  enabled: z.boolean().default(false),
+  command: z.array(z.string()).min(1).default(['codex', 'app-server']),
+  idleUnloadMinutes: z.number().positive().default(60),
+});
+
+const structuredSessionsConfigSchema = z.object({
+  codex: structuredProviderSchema.default({ enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 }),
+}).default({
+  codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60 },
+});
+
 export const appConfigSchema = z.object({
   server: serverConfigSchema,
   projectsRoot: z.string(),
   runtimeDir: z.string().default('~/.local/share/agent-console/runtime'),
   databasePath: z.string().default('~/.local/share/agent-console/agent-console.sqlite'),
   sessions: sessionsConfigSchema,
+  structuredSessions: structuredSessionsConfigSchema,
   workerSummaries: z.object({
     enabled: z.boolean().default(true),
     runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),

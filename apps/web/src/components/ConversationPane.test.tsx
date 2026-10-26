@@ -127,6 +127,7 @@ function boundSession(overrides: Partial<BoundSession> = {}): BoundSession {
     projectSlug: 'demo',
     conversationRef: 'conversation-1',
     tmuxSessionName: 'ac-codex-demo',
+    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     title: 'Demo conversation',

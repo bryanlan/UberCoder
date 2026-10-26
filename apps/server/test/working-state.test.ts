@@ -9,6 +9,7 @@ function session(input: Partial<BoundSession> = {}): BoundSession {
     projectSlug: 'demo',
     conversationRef: 'conversation-1',
     tmuxSessionName: 'ac-codex-demo-working',
+    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     startedAt: '2026-03-01T00:00:00.000Z',

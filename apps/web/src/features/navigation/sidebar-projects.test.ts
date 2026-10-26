@@ -71,6 +71,7 @@ function boundSession({
     projectSlug,
     conversationRef,
     tmuxSessionName: `ac-${projectSlug}-${provider}`,
+    transport: 'tmux',
     status: 'bound',
     startedAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',

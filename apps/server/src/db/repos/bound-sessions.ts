@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { BoundSession, ModelProfileKey, ModelProfileRequest } from '@agent-console/shared';
+import type { BoundSession, ModelProfileKey, ModelProfileRequest, SessionTransport } from '@agent-console/shared';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 import { InputQueue } from '../../sessions/input-queue.js';
 
@@ -14,6 +14,9 @@ function nextUpdatedAt(current: string, candidate: string): string {
   return new Date(currentMs + 1).toISOString();
 }
 
+/** Rows written by callers that do not choose a transport are tmux rows; an existing row keeps its transport. */
+export type BoundSessionInput = Omit<BoundSession, 'transport'> & { transport?: SessionTransport };
+
 export class BoundSessionsRepo {
   constructor(private readonly sqlite: Database.Database) {}
 
@@ -23,17 +26,17 @@ export class BoundSessionsRepo {
     return queuedInputs.length ? { ...session, queuedInputs } : session;
   }
 
-  upsert(session: BoundSession): void {
+  upsert(session: BoundSessionInput): void {
     const shouldRestore = session.shouldRestore ?? ['starting', 'bound', 'releasing'].includes(session.status);
     const resumeConversationRef = session.resumeConversationRef
       ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
     const tx = this.sqlite.transaction(() => {
       this.sqlite.prepare(`
         insert into bound_sessions (
-          id, provider, codex_profile, claude_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, status, should_restore, title,
+          id, provider, codex_profile, claude_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
           started_at, updated_at, last_activity_at, last_output_at, last_completed_at, last_response_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
-          @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, @status, @should_restore, @title,
+          @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, coalesce(@transport, 'tmux'), @status, @should_restore, @title,
           @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, @raw_log_path, @event_log_path
         )
         on conflict(id) do update set
@@ -48,6 +51,7 @@ export class BoundSessionsRepo {
           end,
           resume_conversation_ref = excluded.resume_conversation_ref,
           tmux_session_name = excluded.tmux_session_name,
+          transport = coalesce(@transport, bound_sessions.transport),
           status = excluded.status,
           should_restore = excluded.should_restore,
           title = excluded.title,
@@ -73,6 +77,7 @@ export class BoundSessionsRepo {
         conversation_ref: session.conversationRef,
         resume_conversation_ref: resumeConversationRef ?? null,
         tmux_session_name: session.tmuxSessionName,
+        transport: session.transport ?? null,
         status: session.status,
         should_restore: boolAsInt(shouldRestore),
         title: session.title ?? null,
@@ -298,6 +303,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     conversationRef: String(row.conversation_ref),
     resumeConversationRef: optionalString(row.resume_conversation_ref),
     tmuxSessionName: String(row.tmux_session_name),
+    transport: String(row.transport) as SessionTransport,
     status: String(row.status) as BoundSession['status'],
     shouldRestore: Boolean(row.should_restore),
     title: optionalString(row.title),
