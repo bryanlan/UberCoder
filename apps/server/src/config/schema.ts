@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { SESSION_TRANSPORTS } from '@agent-console/shared';
+import type { SessionTransport } from '@agent-console/shared';
+
+// Runtime values must not come from '@agent-console/shared' here: the engineering summary CLI loads this
+// module through tsx, whose tsconfig path maps that package to its type declarations, so a value import
+// arrives undefined. The tuple mirrors SESSION_TRANSPORTS in packages/shared and is type-checked against it.
+const SESSION_TRANSPORT_VALUES = ['tmux', 'structured'] as const satisfies readonly SessionTransport[];
 
 const portSchema = z.number().int().min(1).max(65535);
 
@@ -90,7 +95,7 @@ export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURE
 const structuredSessionsConfigSchema = z.object({
   // The transport a new conversation gets when the request does not name one (new chats, binds, granted launches), and
   // the transport the backend moves existing tmux conversations to. Only effective for a provider whose lane is enabled.
-  defaultTransport: z.enum(SESSION_TRANSPORTS).default('tmux'),
+  defaultTransport: z.enum(SESSION_TRANSPORT_VALUES).default('tmux'),
   codex: codexStructuredSchema.default(() => defaultStructuredProviderConfig('codex')),
   claude: claudeStructuredSchema.default(() => defaultStructuredProviderConfig('claude')),
 }).default(() => ({
