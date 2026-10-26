@@ -22,6 +22,7 @@ import path from 'node:path';
 import {
   NotSentError,
   PreviousTurnActiveError,
+  RequestNotPendingError,
   TurnNotActiveError,
   type ProviderFailure,
   type RequestResponse,
@@ -33,6 +34,7 @@ import {
 import { redactFreeText } from '../codex/redact.js';
 import { assistantRateLimitEvidence, classifyResult, failureFromApiRetry, newTurnEvidence, processExitFailure, type TurnEvidence } from './errors.js';
 import { EventChannel } from './event-channel.js';
+import { fitImage } from './image-fit.js';
 import {
   asString,
   asStringArray,
@@ -99,6 +101,8 @@ export interface ClaudeTimings {
   /** `session_state_changed idle` with a turn still open and no `result`: the turn is closed after this long. */
   idleResultGraceMs: number;
   contextUsageTimeoutMs: number;
+  /** A process found again waits this long after its `initialize` reply for the snapshot of its background tasks. */
+  backgroundSnapshotGraceMs: number;
 }
 
 export const DEFAULT_TIMINGS: ClaudeTimings = {
@@ -112,6 +116,7 @@ export const DEFAULT_TIMINGS: ClaudeTimings = {
   cancelSettleMs: 1_500,
   idleResultGraceMs: 1_000,
   contextUsageTimeoutMs: 5_000,
+  backgroundSnapshotGraceMs: 1_000,
 };
 
 export interface ClaudeLogger {
@@ -232,6 +237,8 @@ interface TurnRecord {
   evidence: TurnEvidence;
   /** Every uuid this record is registered under in `byUuid`, for pruning. */
   uuids: string[];
+  /** Created for a turn that was already running when this session attached: its start, and possibly its result, went to the earlier backend. */
+  adopted: boolean;
 }
 
 /** A send we wrote, by its uuid. `record` moves to a new turn when a steer ends up running as its own turn. */
@@ -241,6 +248,8 @@ interface SendEntry {
   record: TurnRecord;
   /** Sent with `priority: 'now'`. */
   preempts: boolean;
+  /** Steers: the id the caller gave, so a steer the CLI drops can be named to the host. */
+  clientMessageId?: string;
 }
 
 interface OpenTool {
@@ -287,6 +296,9 @@ export class ClaudeSession implements TransportSession {
   /** Live background tasks the CLI reported, by task id, with the run id each was last seen under. */
   private readonly backgroundTasks = new Map<string, string | undefined>();
   private readonly exitWaiters = new Set<() => void>();
+  private backgroundSnapshots = 0;
+  private readonly snapshotWaiters = new Set<(seen: boolean) => void>();
+  private adoptingRequests = false;
   private readonly unsubscribe: Array<() => void> = [];
   private path: string | undefined;
   private model: string | undefined;
@@ -355,6 +367,37 @@ export class ClaudeSession implements TransportSession {
     this.channel.push({ type: 'session.state', state: 'ready' });
   }
 
+  /**
+   * The process was found in the middle of a turn this session object did not see begin (a reattach after a backend
+   * restart, with `session_state` not idle). Starts a provider-origin turn for it, so that {@link activeTurn} names it
+   * at once, Stop sends an interrupt, a suspend is refused as a running turn, and the `result` that ends it (or an idle
+   * state change, when that result went to the earlier backend) is reported once. Returns the turn id.
+   */
+  adoptRunningTurn(): string | undefined {
+    if (this.ended || this.closing) return undefined;
+    if (this.active && !this.active.terminal) return this.active.id;
+    return this.ensureProviderTurn(true)?.id;
+  }
+
+  /**
+   * The requests a process found again still had open (`pending_permission_requests` of the repeated `initialize`), put
+   * through the same path as live ones. They describe what was already there, so they are announced as `replay` and a
+   * turn started for them is `adopted`: the host shows them without counting them as new activity.
+   */
+  adoptRequests(frames: unknown): void {
+    this.adoptingRequests = true;
+    try {
+      this.client.adoptServerRequests(frames);
+    } finally {
+      this.adoptingRequests = false;
+    }
+  }
+
+  /** A conversation that had no transcript was started again under its id: say so, because the model starts without history. */
+  noteNoHistory(): void {
+    this.notice('info', 'Claude had no saved conversation for this chat, so it started a new one under the same id and does not remember earlier messages.');
+  }
+
   // -------------------------------------------------------------------------------------------------------
   // TransportSession
 
@@ -366,8 +409,10 @@ export class ClaudeSession implements TransportSession {
     let record: TurnRecord | undefined;
     try {
       const uuid = this.newUuid(input.clientMessageId);
-      await this.applySettings(input);
-      const frame = await this.buildUserFrame(uuid, input);
+      const frame = await this.beforeWrite(async () => {
+        await this.applySettings(input);
+        return this.buildUserFrame(uuid, input);
+      });
       // Registered before the write: the CLI can answer before the write callback runs.
       record = this.newRecord(uuid, 'user');
       record.sent = false;
@@ -398,7 +443,7 @@ export class ClaudeSession implements TransportSession {
     await this.sendSteer(turnId, input, true);
   }
 
-  async interrupt(turnId: string): Promise<void> {
+  async interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }> {
     const record = this.recordById(turnId);
     if (!record || record.terminal || record.interrupt) return;
     // Mark first: a `result` that races the request still means the person stopped it.
@@ -414,13 +459,37 @@ export class ClaudeSession implements TransportSession {
       if (error instanceof ClaudeExitError) return; // the exit handler closes the turn
       throw error;
     }
-    if (record.terminal) return;
+    // A steer the person typed mid-turn and the CLI still held is gone with the rest of the queue: say so.
+    const cancelledSteerIds = this.forgetCancelledSteers(cancelled);
+    const report = cancelledSteerIds.length > 0 ? { cancelledSteerIds } : undefined;
+    if (record.terminal) return report;
     if (!record.started && cancelled.includes(record.id)) {
       // The CLI dropped it before it ran: no `result` will come.
       this.finalize(record, 'interrupted');
-      return;
+      return report;
     }
     record.interrupt.timer = setTimeout(() => this.interruptTimedOut(record), this.timings.interruptGraceMs);
+    return report;
+  }
+
+  /**
+   * The steers among the sends the CLI dropped at a Stop: forgotten here (they will never run) and named, by the id the
+   * caller gave, in a notice and in the return value of {@link interrupt}.
+   */
+  private forgetCancelledSteers(cancelled: string[]): string[] {
+    const ids: string[] = [];
+    for (const uuid of cancelled) {
+      const entry = this.byUuid.get(uuid);
+      if (!entry || entry.kind !== 'steer') continue;
+      this.byUuid.delete(uuid);
+      entry.record.uuids = entry.record.uuids.filter((known) => known !== uuid);
+      ids.push(entry.clientMessageId ?? uuid);
+    }
+    if (ids.length > 0) {
+      const shown = ids.slice(0, 3).join(', ');
+      this.notice('warn', `Stopping the turn discarded ${ids.length} message${ids.length === 1 ? '' : 's'} that had not reached Claude yet (${shown}${ids.length > 3 ? ', ...' : ''}).`);
+    }
+    return ids;
   }
 
   /**
@@ -430,8 +499,9 @@ export class ClaudeSession implements TransportSession {
   async respond(requestId: string, response: RequestResponse): Promise<void> {
     const request = this.requests.get(requestId);
     if (!request) {
+      // Withdrawn, closed with its turn, or answered already: the answer would reach nobody, and the caller must not say it did.
       this.log.debug?.({ requestId, decision: response.decision }, 'claude request is not open');
-      return;
+      throw new RequestNotPendingError(requestId);
     }
     this.requests.delete(requestId);
     try {
@@ -549,6 +619,7 @@ export class ClaudeSession implements TransportSession {
       idleTimer: undefined,
       evidence: newTurnEvidence(),
       uuids: [id],
+      adopted: false,
     };
   }
 
@@ -556,6 +627,23 @@ export class ClaudeSession implements TransportSession {
     if (this.active?.id === turnId) return this.active;
     if (this.pending?.id === turnId) return this.pending;
     return undefined;
+  }
+
+  /**
+   * Runs what comes before the user frame is written (the settings changes, reading and fitting the images). Nothing has
+   * reached the process when it fails (a refused or timed-out `set_model`, an unreadable image), so every failure is
+   * {@link NotSentError} and the caller may send again.
+   */
+  private async beforeWrite<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (error) {
+      if (error instanceof NotSentError) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      const notSent = new NotSentError(`The message was not sent: ${redactFreeText(reason, 300)}`);
+      notSent.cause = error;
+      throw notSent;
+    }
   }
 
   private async applySettings(input: TurnInput): Promise<void> {
@@ -569,12 +657,12 @@ export class ClaudeSession implements TransportSession {
     }
   }
 
-  /** Images first, then the text: slash-command text still expands that way. */
+  /** Images first, then the text: slash-command text still expands that way. Each image is fitted to what the API accepts first. */
   private async buildUserFrame(uuid: string, input: TurnInput, priority?: 'now'): Promise<ClaudeUserMessageFrame> {
     const content: ClaudeUserContentBlock[] = [];
     for (const image of input.images ?? []) {
-      const data = (await fs.promises.readFile(image.path)).toString('base64');
-      content.push({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data } });
+      const fitted = await fitImage(await fs.promises.readFile(image.path), image.mimeType);
+      content.push({ type: 'image', source: { type: 'base64', media_type: fitted.mimeType, data: fitted.data.toString('base64') } });
     }
     content.push({ type: 'text', text: input.text });
     return {
@@ -603,9 +691,9 @@ export class ClaudeSession implements TransportSession {
     const record = this.recordById(turnId);
     if (!record || record.terminal) throw new TurnNotActiveError(turnId);
     const uuid = this.newUuid(input.clientMessageId);
-    const frame = await this.buildUserFrame(uuid, input, now ? 'now' : undefined);
+    const frame = await this.beforeWrite(() => this.buildUserFrame(uuid, input, now ? 'now' : undefined));
     // Registered before the write: the CLI can answer before the write callback runs.
-    this.byUuid.set(uuid, { uuid, kind: 'steer', record, preempts: now });
+    this.byUuid.set(uuid, { uuid, kind: 'steer', record, preempts: now, ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}) });
     record.uuids.push(uuid);
     try {
       await this.write(frame);
@@ -802,6 +890,25 @@ export class ClaudeSession implements TransportSession {
   }
 
   /**
+   * Resolves true once a full snapshot of the background tasks has arrived (`background_tasks_changed` replaces the set), or
+   * false after `timeoutMs`. The instance waits for it after the repeated `initialize` of a process it found again, so that
+   * {@link hasBackgroundWork} is not read before the CLI has said what runs. A CLI that predates the snapshot sends none.
+   */
+  awaitBackgroundSnapshot(timeoutMs: number): Promise<boolean> {
+    if (this.backgroundSnapshots > 0) return Promise.resolve(true);
+    if (this.ended) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const done = (seen: boolean): void => {
+        clearTimeout(timer);
+        this.snapshotWaiters.delete(done);
+        resolve(seen);
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      this.snapshotWaiters.add(done);
+    });
+  }
+
+  /**
    * `background_tasks_changed` is the level signal: it carries every live task and replaces the set, so a missed edge
    * cannot leave a stale indicator behind. `task_started` and the end frames (`task_notification`, a terminal
    * `task_updated`) move one task between those snapshots. Ambient tasks (watchers, housekeeping) are not activity.
@@ -817,6 +924,8 @@ export class ClaudeSession implements TransportSession {
           const id = isRecord(task) ? asString(task.task_id) : undefined;
           if (id && !task.ambient) this.backgroundTasks.set(id, asString(task.run_id));
         }
+        this.backgroundSnapshots += 1;
+        for (const done of [...this.snapshotWaiters]) done(true);
         return;
       }
       case 'task_started':
@@ -868,6 +977,11 @@ export class ClaudeSession implements TransportSession {
     record.idleTimer = setTimeout(() => {
       record.idleTimer = undefined;
       if (record.terminal || this.ended) return;
+      if (record.adopted) {
+        // The turn began before this session attached, and its result most likely went to the earlier backend: it ended.
+        this.finalize(record, 'completed');
+        return;
+      }
       this.notice('warn', 'Claude went idle without reporting the result of the turn; the turn was closed locally.');
       this.finalize(record, 'failed', { class: 'transport_error', code: 'result_missing', message: 'Claude finished the turn without reporting a result.', retryable: false });
     }, this.timings.idleResultGraceMs);
@@ -1005,7 +1119,9 @@ export class ClaudeSession implements TransportSession {
     const targets = new Set<TurnRecord>();
     if (this.active && !this.active.terminal) targets.add(this.active);
     for (const record of live) targets.add(record);
-    if (targets.size === 0 && matched.size === 0 && this.pending && !this.pending.terminal && this.pending.sent) targets.add(this.pending);
+    // A result that names no uuid at all (an older CLI) ends the send in flight. One that names uuids of turns this session
+    // never sent belongs to a turn the CLI ran on its own; it is not the send's result.
+    if (targets.size === 0 && uuids.length === 0 && this.pending && !this.pending.terminal && this.pending.sent) targets.add(this.pending);
     if (targets.size === 0) {
       this.noteIgnored('result (no turn)');
       return;
@@ -1039,9 +1155,15 @@ export class ClaudeSession implements TransportSession {
     return this.active ?? this.pending;
   }
 
-  /** The record a turn-scoped frame belongs to, started if it was not yet; undefined for a late frame of a turn that ended. */
+  /**
+   * The record a turn-scoped frame belongs to, started if it was not yet; undefined for a late frame of a turn that ended.
+   * A frame that names uuids belongs to the turn one of them belongs to. One that names only uuids this session never sent
+   * is a turn the CLI is running on its own (or one that began before this session attached): it never belongs to the send
+   * in flight, which the CLI has queued behind it.
+   */
   private attachTurnFrame(frame: { user_message_uuids?: unknown; user_message_uuid?: unknown }): TurnRecord | undefined {
-    for (const uuid of messageUuidsOf(frame)) {
+    const uuids = messageUuidsOf(frame);
+    for (const uuid of uuids) {
       const entry = this.byUuid.get(uuid);
       if (!entry) continue;
       if (entry.record.terminal) return undefined;
@@ -1049,17 +1171,19 @@ export class ClaudeSession implements TransportSession {
       return entry.record;
     }
     if (this.active && !this.active.terminal) return this.active;
-    if (this.pending && !this.pending.terminal) {
+    const pending = this.pending;
+    if (uuids.length === 0 && pending && !pending.terminal) {
       // No uuid names the turn (an older CLI): with a send in flight, this is its turn.
-      this.markStarted(this.pending);
-      return this.pending;
+      this.markStarted(pending);
+      return pending;
     }
     return this.ensureProviderTurn();
   }
 
-  private ensureProviderTurn(): TurnRecord | undefined {
+  private ensureProviderTurn(adopted = false): TurnRecord | undefined {
     if (this.active && !this.active.terminal) return this.active;
     const record = this.newRecord(randomUUID(), 'provider');
+    record.adopted = adopted;
     this.byUuid.set(record.id, { uuid: record.id, kind: 'turn', record, preempts: false });
     this.markStarted(record);
     return record;
@@ -1075,7 +1199,7 @@ export class ClaudeSession implements TransportSession {
     if (this.pending === record) this.pending = undefined;
     this.active = record;
     record.evidence = newTurnEvidence(this.rateLimits.blocked());
-    this.channel.push({ type: 'turn.started', turnId: record.id, origin: record.origin, replay: false });
+    this.channel.push({ type: 'turn.started', turnId: record.id, origin: record.origin, replay: false, ...(record.adopted ? { adopted: true } : {}) });
   }
 
   /** A new turn starts while another is open without a result: the older one was preempted or lost its result. */
@@ -1157,7 +1281,8 @@ export class ClaudeSession implements TransportSession {
     }
     // A request always belongs to a turn: the host drops a request that names none when any turn ends. One that arrives
     // before the turn's start was seen means the CLI is running a turn of its own.
-    const turnId = (this.currentRecord() ?? this.ensureProviderTurn())?.id;
+    const turnId = (this.currentRecord() ?? this.ensureProviderTurn(this.adoptingRequests))?.id;
+    const replay = this.adoptingRequests ? { replay: true as const } : {};
     if (request.subtype === 'elicitation') {
       const form = request as ElicitationRequest;
       this.requests.set(open.requestId, { subtype: 'elicitation', ...(turnId ? { turnId } : {}) });
@@ -1167,6 +1292,7 @@ export class ClaudeSession implements TransportSession {
         kind: 'mcp',
         summary: shorten(`${form.mcp_server_name || 'An MCP server'}: ${form.message || 'elicitation'}`),
         ...(turnId ? { turnId } : {}),
+        ...replay,
       });
       return;
     }
@@ -1198,6 +1324,7 @@ export class ClaudeSession implements TransportSession {
         summary: shorten([first?.header, first?.question].filter(Boolean).join(': ') || 'Claude asked a question.'),
         ...(turnId ? { turnId } : {}),
         questions,
+        ...replay,
       });
       return;
     }
@@ -1211,6 +1338,7 @@ export class ClaudeSession implements TransportSession {
       kind,
       summary: shorten(`${tool.display_name ?? tool.tool_name}${detail ? `: ${detail}` : ''}`),
       ...(turnId ? { turnId } : {}),
+      ...replay,
     });
   }
 
@@ -1325,6 +1453,7 @@ export class ClaudeSession implements TransportSession {
 
   private wakeExitWaiters(): void {
     for (const wake of [...this.exitWaiters]) wake();
+    for (const done of [...this.snapshotWaiters]) done(false); // nothing more will arrive
   }
 
   private clearTimers(): void {

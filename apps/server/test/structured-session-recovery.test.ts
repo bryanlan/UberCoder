@@ -180,8 +180,9 @@ describe('Structured run failure and recovery', () => {
     await backend.manager.reconcileSessions();
     await vi.waitFor(() => expect(r.f.row(r.session.id).runFailure).toMatchObject({ code: 'process_exited', status: 'scheduled' }));
     expect(r.f.row(r.session.id).isWorking).toBe(false);
-    // Nothing is loaded and the provider was asked for nothing (the pass may create the instance object to read its process model).
-    expect(backend.plugin.instances.every(instance => instance.sessions.length === 0 && instance.calls.length === 0)).toBe(true);
+    // Nothing is loaded and the provider was asked only whether a process survived, which it did not (the pass may create the instance
+    // object to read its process model). Nothing was started or resumed.
+    expect(backend.plugin.instances.every(instance => instance.sessions.length === 0 && instance.calls.every(call => call.method === 'reattach'))).toBe(true);
 
     await vi.advanceTimersByTimeAsync(15_000);
     // The new backend resumes the thread only now, to hand it the recovery prompt.

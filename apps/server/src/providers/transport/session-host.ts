@@ -188,6 +188,32 @@ export function processStartTicks(pid: number): string | undefined {
   }
 }
 
+/**
+ * True while some live process is a member of process group `group` (field 5 of `/proc/<pid>/stat`). Linux keeps a pid
+ * number allocated for as long as it names a process group that has members, so a group that still has members is the
+ * one that was created for that pid, and a signal to it reaches only that group.
+ */
+export function processGroupHasMembers(group: number, procRoot = '/proc'): boolean {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(procRoot);
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!/^[0-9]+$/.test(entry)) continue;
+    try {
+      const stat = fs.readFileSync(`${procRoot}/${entry}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      if (fields[0] === 'Z' || fields[0] === 'X') continue;
+      if (Number(fields[2]) === group) return true;
+    } catch {
+      // Gone while we looked.
+    }
+  }
+  return false;
+}
+
 export function currentBootId(): string | undefined {
   try {
     return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() || undefined;
@@ -577,6 +603,10 @@ export class SessionHost {
     const raw = this.rawExit ?? { code: null, signal: null };
     this.childExit = { code: raw.code, signal: raw.signal, stderrTail: this.stderrTail(), ...(this.fatalError ? { error: this.fatalError } : {}) };
     this.log('info', 'provider child ended', { code: raw.code, signal: raw.signal, error: this.fatalError?.message ?? null });
+    // The child is gone, however it went (it exited on its own, crashed, or was ended): what it started in its group
+    // (MCP servers, background shells) must not outlive it. This runs after the flush wait, so a launcher's own child
+    // that still held the output pipe is covered too.
+    this.sweepGroup();
     for (const wake of this.exitWaiters.splice(0)) wake();
     if (this.client) this.send(this.client, this.exitMessage());
     for (const watcher of this.exitWatchers) {
@@ -621,6 +651,7 @@ export class SessionHost {
 
   private async terminateChild(closeGraceMs: number, termGraceMs: number): Promise<void> {
     if (this.childExit || !this.child) {
+      this.sweepGroup(); // the child ended on its own; make sure nothing it started is left (a no-op when the group is empty)
       this.scheduleStop(0);
       return;
     }
@@ -635,9 +666,22 @@ export class SessionHost {
     if (!this.childExit) this.onChildEnded(); // unkillable (uninterruptible sleep): report and stop anyway
   }
 
-  /** A launcher can leave its own child behind in the group; an ended terminate leaves nothing running. */
+  /**
+   * SIGKILL to what is left of the child's process group once the child itself is gone: a launcher's own child, MCP
+   * servers, background shells. Only the group is signalled, never the pid alone, because the child has been reaped and
+   * its pid may belong to another process by now. The group is signalled only while it still has live members, which also
+   * proves the pid number still names the group the child led (see {@link processGroupHasMembers}). Safe to call twice.
+   */
   private sweepGroup(): void {
-    this.signalGroup('SIGKILL');
+    const pid = this.childPid;
+    if (pid === undefined || pid <= 1 || !this.child) return;
+    if (!processGroupHasMembers(pid)) return;
+    this.log('warn', 'ending what the provider left running in its process group');
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      // Gone between the check and the signal.
+    }
   }
 
   private endStdin(): void {

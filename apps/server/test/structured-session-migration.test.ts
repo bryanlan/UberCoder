@@ -312,6 +312,42 @@ describe('Moving tmux conversations to the structured transport', () => {
   });
 });
 
+describe('Moving a row whose failed run is being recovered', () => {
+  const failure = (status: 'scheduled' | 'retrying' | 'stopped') => ({
+    turnId: 'turn-1', failedAt: new Date().toISOString(), code: 'server_overloaded', message: 'Selected model is at capacity.', attempts: 1, maxAttempts: 3,
+    status, ...(status === 'scheduled' ? { nextRetryAt: new Date(Date.now() + 10 * 60_000).toISOString() } : {}),
+    ...(status === 'retrying' ? { retrySubmittedAt: new Date().toISOString() } : {}),
+  });
+
+  it.each(['scheduled', 'retrying'] as const)('waits while a %s recovery is pending, never cancels it, and moves once it has stopped', async status => {
+    const f = fixture();
+    const idle = await bindTmux(f, 'native-recovering-idle');
+    const dead = await bindTmux(f, 'native-recovering-dead');
+    f.tmux.alive.delete(f.row(dead.id).tmuxSessionName);
+    for (const id of [idle.id, dead.id]) f.db.boundSessions.setRunFailure(id, failure(status));
+    const spies = spyTmux(f);
+
+    // The dry run says why, and the pass leaves both rows exactly as they were.
+    const report = await f.manager.structuredMigrationReport();
+    expect(Object.fromEntries(report.rows.map(row => [row.id, row.outcome]))).toEqual({ [idle.id]: 'recovering', [dead.id]: 'recovering' });
+    expect(report.outcomes.recovering).toBe(2);
+    await f.manager.reconcileSessions();
+    for (const id of [idle.id, dead.id]) {
+      expect(f.row(id)).toMatchObject({ transport: 'tmux', runFailure: { status, attempts: 1, maxAttempts: 3 } });
+      expect(f.row(id).runFailure?.stoppedReason).toBeUndefined();
+    }
+    expect(spies.kill).not.toHaveBeenCalled();
+    expect(f.tmux.alive.has(f.row(idle.id).tmuxSessionName)).toBe(true);
+    expect(eventLogLines(f.row(idle.id)).some(line => /Moved to the structured transport/.test(line.text))).toBe(false);
+    expect(eventLogLines(f.row(idle.id)).some(line => /cancelled by user input or Stop/i.test(line.text))).toBe(false);
+
+    // Once recovery has resolved (here: it stopped for good) the row is no different from any other, and moves.
+    for (const id of [idle.id, dead.id]) f.db.boundSessions.setRunFailure(id, failure('stopped'));
+    await f.manager.reconcileSessions();
+    for (const id of [idle.id, dead.id]) expect(f.row(id)).toMatchObject({ transport: 'structured' });
+  });
+});
+
 describe('The migration dry run', () => {
   it('counts what the next pass would do, and changes nothing', async () => {
     const f = fixture();

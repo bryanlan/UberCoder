@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import {
   NotSentError,
   PreviousTurnActiveError,
+  RequestNotPendingError,
   TransportUnavailableError,
   TurnNotActiveError,
   type OpenOptions,
@@ -28,7 +29,7 @@ import {
   type RequestResponse,
 } from '../types.js';
 import { classifyCodexFailure, interruptTurnGone, mergeTurnErrors, parseCodexRetryProgress, steerLostRace } from './errors.js';
-import { JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, type JsonRpcClient } from './jsonrpc.js';
+import { JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, type JsonRpcClient, type JsonRpcId } from './jsonrpc.js';
 import {
   callCodex,
   type CodexApprovalPolicy,
@@ -37,6 +38,7 @@ import {
   type CodexSandboxPolicy,
   type CodexServerRequestMap,
   type CodexThreadItem,
+  type CodexThreadStatus,
   type CodexTurn,
   type CodexTurnError,
   type CodexTurnStatus,
@@ -45,6 +47,7 @@ import {
   type TurnStartParams,
 } from './protocol.js';
 import { redactFreeText } from './redact.js';
+import type { HeldQuestionRecord } from './restart-state.js';
 import {
   accumulateTurnTokenUsage,
   completeTurnTokenUsage,
@@ -80,6 +83,8 @@ export interface CodexTimings {
   termGraceMs: number;
   /** Before the first spawn, a process left by a crashed backend gets SIGTERM and this long to end before SIGKILL. */
   staleTermGraceMs: number;
+  /** How often the position in the session host's output is written down while it moves (it is also written at every turn boundary). */
+  cursorSaveMs: number;
 }
 
 export const DEFAULT_TIMINGS: CodexTimings = {
@@ -91,6 +96,7 @@ export const DEFAULT_TIMINGS: CodexTimings = {
   closeGraceMs: 5_000,
   termGraceMs: 5_000,
   staleTermGraceMs: 5_000,
+  cursorSaveMs: 5_000,
 };
 
 export interface CodexLogger {
@@ -108,6 +114,16 @@ export interface CodexSessionHost {
   rateLimits(): CodexRateLimitSnapshot | undefined;
   /** The session ended: drop it from the routing table. */
   release(session: CodexAppServerSession): void;
+  /**
+   * The thread started or stopped running a turn. The instance writes it down so a later backend can find a turn that
+   * outlives this one (and report one that ended while nobody listened). Also a point at which the host's replay cursor is saved.
+   */
+  noteTurn(threadId: string, turnId: string | undefined): void;
+  /** Questions held open for the person survive a backend restart: the instance keeps them in the Console database. */
+  readonly questions: {
+    save(record: HeldQuestionRecord): void;
+    remove(requestId: string): void;
+  };
 }
 
 export interface CodexSessionInit {
@@ -116,6 +132,16 @@ export interface CodexSessionInit {
   cwd: string;
   policy: OpenOptions['policy'];
   host: CodexSessionHost;
+  /** What `thread/start` or `thread/resume` said the thread is doing. Absent means idle. */
+  status?: CodexThreadStatus;
+}
+
+/** What an instance hands a session it just resumed, so the session can pick up where the previous backend left off. */
+export interface CodexAdoption {
+  /** The turn the previous backend was following on this thread when it went away, if it had not ended. */
+  trackedTurnId?: string;
+  /** The questions the previous backend held open on this thread. */
+  held: HeldQuestionRecord[];
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -290,7 +316,15 @@ interface OpenQuestion {
   turnId: string | undefined;
   questionIds: string[];
   settle: (result: unknown) => void;
+  /**
+   * Set for a question adopted from an earlier backend: no handler of this client holds it, so the answer is a reply frame
+   * written by id. A question this client's handler holds is answered through `settle`.
+   */
+  rawId?: JsonRpcId;
 }
+
+/** The most questions held open on one thread. A server that asks more is declined, so a loop cannot fill the database. */
+const MAX_OPEN_QUESTIONS = 64;
 
 /** What Codex gets for a question nobody answered: no answers. */
 const NO_ANSWERS = { answers: {} };
@@ -362,6 +396,8 @@ class EventChannel {
 interface TurnRecord {
   id: string;
   origin: 'user' | 'provider';
+  /** The turn was already running (or had just ended) when this session attached: a backend restart left it behind. */
+  adopted: boolean;
   /** `turn.started` has been emitted. */
   started: boolean;
   /** The `turn/start` response said the turn is queued (`startedAt === null`). */
@@ -377,6 +413,11 @@ interface TurnRecord {
 }
 
 const MAX_FINISHED_TURNS = 256;
+/** How many of a thread's newest turns an adopting session reads to find the running one and the one it was following. */
+const ADOPTION_TURN_WINDOW = 8;
+const MAX_MESSAGE_QUESTIONS = 256;
+/** Notifications kept while a resumed session works out which turn its thread is running. */
+const MAX_ADOPTION_FRAMES = 4096;
 const MAX_EARLY_EVENTS_PER_TURN = 512;
 const MAX_EARLY_TURNS = 16;
 
@@ -424,6 +465,14 @@ export class CodexAppServerSession implements TransportSession {
   private threadStatus: string = 'idle';
   private firstTerminalSeen = false;
   private pathRefresh: Promise<string | undefined> | undefined;
+  /** While the session adopts what the previous backend left running, thread notifications wait here so they are applied in order afterwards. */
+  private adopting = false;
+  private readonly heldFrames: Array<{ method: string; params: unknown }> = [];
+  private activeFlags: string[];
+  /** The thread was running a turn when this session attached and no listing named it: the first event of an unknown turn is that turn. */
+  private adoptUnknownTurn = false;
+  /** Questions the model asked in a message (`request_user_input_async`), already announced. Bounded. */
+  private readonly messageQuestions = new Set<string>();
 
   constructor(init: CodexSessionInit) {
     this.nativeSessionId = init.threadId;
@@ -431,6 +480,8 @@ export class CodexAppServerSession implements TransportSession {
     this.cwd = init.cwd;
     this.policy = init.policy;
     this.host = init.host;
+    this.threadStatus = init.status?.type ?? 'idle';
+    this.activeFlags = init.status?.type === 'active' ? [...(init.status.activeFlags ?? [])] : [];
     this.events = this.channel.iterable();
   }
 
@@ -439,8 +490,8 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   /** The id of the turn that has not reached its terminal event, if any. */
-  get activeTurn(): string | null {
-    return this.activeTurnId;
+  get activeTurn(): string | undefined {
+    return this.activeTurnId ?? undefined;
   }
 
   /** Called once by the instance after it registers the session: announces the native id and readiness. */
@@ -556,11 +607,22 @@ export class CodexAppServerSession implements TransportSession {
   async respond(requestId: string, response: RequestResponse): Promise<void> {
     const open = this.openQuestions.get(requestId);
     if (!open) {
+      // Withdrawn, answered or ended with its turn: the answer would reach nobody, so the caller must not report it as delivered.
       this.host.log.debug?.({ requestId, decision: response.decision, threadId: this.nativeSessionId }, 'codex request is not open');
-      return;
+      throw new RequestNotPendingError(requestId);
     }
-    this.closeQuestion(requestId, open, questionAnswerResult(open.questionIds, response),
-      response.decision === 'answer' ? 'resolved' : response.decision === 'decline' ? 'declined' : 'cancelled');
+    const result = questionAnswerResult(open.questionIds, response);
+    // A question adopted from an earlier backend is answered by id over the connection. The reply is written first: a channel
+    // that is gone leaves the question open and the caller sees the failure.
+    if (open.rawId !== undefined) {
+      try {
+        await this.host.client().replyToServerRequest(open.rawId, result);
+      } catch (error) {
+        throw toTransportError(error);
+      }
+      if (this.openQuestions.get(requestId) !== open) return; // closed while the reply was being written
+    }
+    this.closeQuestion(requestId, open, result, response.decision === 'answer' ? 'resolved' : response.decision === 'decline' ? 'declined' : 'cancelled');
   }
 
   async unload(): Promise<void> {
@@ -614,6 +676,16 @@ export class CodexAppServerSession implements TransportSession {
   // Called by the instance
 
   handleNotification(method: string, params: unknown): void {
+    if (this.ended) return;
+    if (this.adopting) {
+      // The turn this thread is running is not known yet: apply the notification once it is, in the order it arrived.
+      if (this.heldFrames.length < MAX_ADOPTION_FRAMES) this.heldFrames.push({ method, params });
+      return;
+    }
+    this.dispatchNotification(method, params);
+  }
+
+  private dispatchNotification(method: string, params: unknown): void {
     if (this.ended) return;
     switch (method) {
       case 'thread/started':
@@ -670,11 +742,15 @@ export class CodexAppServerSession implements TransportSession {
    * Answers a server request for this thread. A question the person can see is held open (the reply is a promise
    * that `respond()` settles); everything else is declined at once, because there is no approval UI.
    */
-  handleServerRequest(method: string, params: unknown, rpcId: string | number): unknown {
+  handleServerRequest(method: string, params: unknown, rpcId: string | number, hold?: () => void): unknown {
     const requestId = String(rpcId);
     if (method === 'item/tool/requestUserInput' && !this.ended) {
       const questions = pendingQuestions(params);
-      if (questions) return this.openQuestion(requestId, params, questions);
+      if (questions && this.openQuestions.size < MAX_OPEN_QUESTIONS) {
+        // The reply waits for a person: it must not count against the client's limit on requests being handled.
+        hold?.();
+        return this.openQuestion(rpcId, params, questions);
+      }
     }
     const answer = declinedServerRequest(method, params);
     this.channel.push({ type: 'request.opened', requestId, kind: answer.kind, summary: answer.summary });
@@ -682,19 +758,36 @@ export class CodexAppServerSession implements TransportSession {
     return answer.result;
   }
 
-  private openQuestion(requestId: string, params: unknown, questions: PendingQuestion[]): Promise<unknown> {
+  private openQuestion(rpcId: JsonRpcId, params: unknown, questions: PendingQuestion[]): Promise<unknown> {
+    const requestId = String(rpcId);
     const turnId = asString((params as { turnId?: unknown }).turnId);
     const summary = declinedServerRequest('item/tool/requestUserInput', params).summary;
     const reply = new Promise<unknown>((settle) => {
       this.openQuestions.set(requestId, { turnId, questionIds: questions.map((question) => question.id), settle });
     });
+    // Written down so a backend that replaces this one can show the question and answer it by id: the server keeps waiting.
+    this.host.questions.save({ id: rpcId, threadId: this.nativeSessionId, ...(turnId ? { turnId } : {}), params });
     this.channel.push({ type: 'request.opened', requestId, kind: 'question', summary, ...(turnId ? { turnId } : {}), questions });
     return reply;
+  }
+
+  /**
+   * A question an earlier backend held open and the server is still waiting on. No handler of this client holds it, so it is
+   * answered by id (`respond`); it ends like any other: answered, withdrawn by the server, or with its turn.
+   */
+  private adoptQuestion(record: HeldQuestionRecord, questions: PendingQuestion[]): void {
+    const requestId = String(record.id);
+    if (this.openQuestions.has(requestId)) return;
+    const turnId = record.turnId ?? asString((record.params as { turnId?: unknown } | undefined)?.turnId);
+    const summary = declinedServerRequest('item/tool/requestUserInput', record.params).summary;
+    this.openQuestions.set(requestId, { turnId, questionIds: questions.map((question) => question.id), settle: () => undefined, rawId: record.id });
+    this.channel.push({ type: 'request.opened', requestId, kind: 'question', summary, ...(turnId ? { turnId } : {}), questions, replay: true });
   }
 
   /** Removes the question, sends its reply and tells the consumer. The only way a held question ends. */
   private closeQuestion(requestId: string, open: OpenQuestion, result: unknown, outcome: 'resolved' | 'declined' | 'cancelled'): void {
     this.openQuestions.delete(requestId);
+    this.host.questions.remove(requestId);
     open.settle(result);
     this.channel.push({ type: 'request.closed', requestId, outcome });
   }
@@ -704,6 +797,16 @@ export class CodexAppServerSession implements TransportSession {
     for (const [requestId, open] of [...this.openQuestions]) {
       if (turnId === undefined || open.turnId === undefined || open.turnId === turnId) this.closeQuestion(requestId, open, NO_ANSWERS, 'cancelled');
     }
+  }
+
+  /**
+   * The connection to the server is going away while the server keeps running (a backend restart or a lost session host
+   * connection). A question stays held: the server still waits for its answer, the instance has it written down, and the next
+   * backend answers it by id. Answering it with nothing here would end the turn's wait for the wrong reason, and the reply
+   * could not be sent anyway once the socket closes.
+   */
+  private leaveQuestionsHeld(): void {
+    this.openQuestions.clear();
   }
 
   /** The server withdrew a request (a timeout, or another client answered it): it must not keep waiting here. */
@@ -722,10 +825,11 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   /** The process ended. The consumer sees `error` then `stopped`; what to do about a running turn is its call. */
-  handleProcessExit(failure: ProviderFailure): void {
+  handleProcessExit(failure: ProviderFailure, options: { keepQuestions?: boolean } = {}): void {
     if (this.ended) return;
     this.ended = true;
-    this.cancelQuestions();
+    if (options.keepQuestions) this.leaveQuestionsHeld();
+    else this.cancelQuestions();
     this.clearTimers();
     this.channel.push({ type: 'session.state', state: 'error', failure });
     this.channel.push({ type: 'session.state', state: 'stopped' });
@@ -733,13 +837,107 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   /** The instance is going away or the session was unloaded: end the event stream. */
-  endLocal(): void {
+  endLocal(options: { keepQuestions?: boolean } = {}): void {
     if (this.ended) return;
     this.ended = true;
-    this.cancelQuestions();
+    if (options.keepQuestions) this.leaveQuestionsHeld();
+    else this.cancelQuestions();
     this.clearTimers();
     this.channel.push({ type: 'session.state', state: 'stopped' });
     this.host.release(this);
+  }
+
+  // -------------------------------------------------------------------------------------------------------
+  // Adopting what a previous backend left
+
+  /**
+   * Called by the instance once, right after `thread/resume` registered this session and before the session is handed out.
+   * A backend restart does not stop the shared app-server (it runs behind its session host), so the thread may be running a
+   * turn this session never saw start, may have finished one while no backend listened, and may be waiting for an answer to a
+   * question an earlier backend showed. This reads the thread's own state (its status, its newest turns) and the records the
+   * instance kept, and turns what it finds into the events a session that had been there all along would have produced:
+   * a running turn becomes an adopted provider turn (events and its terminal are then accepted), a turn that ended meanwhile
+   * is reported once, and a question that is still pending is held open again.
+   */
+  async adopt(adoption: CodexAdoption): Promise<void> {
+    this.adopting = true;
+    try {
+      await this.adoptTurns(adoption.trackedTurnId);
+      this.adoptHeldQuestions(adoption.held);
+    } catch (error) {
+      this.host.log.warn({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex could not adopt what the previous backend left on the thread');
+    } finally {
+      this.adopting = false;
+      for (const frame of this.heldFrames.splice(0)) this.dispatchNotification(frame.method, frame.params);
+    }
+  }
+
+  private async adoptTurns(trackedTurnId: string | undefined): Promise<void> {
+    const active = this.threadStatus === 'active';
+    if (!active && !trackedTurnId) return;
+    const turns = await this.listRecentTurns();
+    const tracked = trackedTurnId ? turns.find((turn) => turn.id === trackedTurnId) : undefined;
+    // The turn the previous backend followed ended while nobody listened: its terminal has not been reported.
+    if (tracked && tracked.status !== 'inProgress') this.adoptEndedTurn(tracked);
+    const running = turns.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
+    if (running) this.adoptRunningTurn(running);
+    else if (active && this.activeTurnId === null) this.adoptUnknownTurn = true;
+    // A marker that names a turn the server no longer lists, or one that is not running: nothing is left to follow.
+    if (trackedTurnId && this.activeTurnId === null) this.host.noteTurn(this.nativeSessionId, undefined);
+  }
+
+  /** The newest turns of the thread, newest first. A server that cannot list them (or an error) gives none. */
+  private async listRecentTurns(): Promise<CodexTurn[]> {
+    try {
+      const response = await callCodex(
+        this.host.client(),
+        'thread/turns/list',
+        { threadId: this.nativeSessionId, limit: ADOPTION_TURN_WINDOW, sortDirection: 'desc', itemsView: 'notLoaded' },
+        { timeoutMs: this.host.timings.requestTimeoutMs },
+      );
+      return Array.isArray(response?.data) ? response.data.filter((turn) => typeof turn?.id === 'string') : [];
+    } catch (error) {
+      this.host.log.debug?.({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/turns/list failed');
+      return [];
+    }
+  }
+
+  private adoptRunningTurn(turn: CodexTurn): void {
+    const record = this.newTurn(turn.id, 'provider', true);
+    this.markStarted(record);
+  }
+
+  private adoptEndedTurn(turn: CodexTurn): void {
+    if (this.finishedTurnIds.has(turn.id) || this.turns.has(turn.id)) return;
+    const record = this.newTurn(turn.id, 'provider', true);
+    this.markStarted(record);
+    const status = this.terminalStatus(turn.status, record) ?? 'completed';
+    const failure = status === 'failed' ? classifyCodexFailure(mergeTurnErrors(turn.error, null), this.host.rateLimits()) : undefined;
+    this.finalizeTurn(record, status, failure);
+  }
+
+  /**
+   * Questions the previous backend held open. The thread's own status says whether the server still waits for an answer
+   * (`waitingOnUserInput`): a question is held again only then, and one that is not waiting any more is forgotten. A wait that
+   * no record explains (the question arrived while no backend listened and the replay no longer has it) cannot be answered; the
+   * person is told, and Stop ends it.
+   */
+  private adoptHeldQuestions(held: HeldQuestionRecord[]): void {
+    const waiting = this.threadStatus === 'active' && this.activeFlags.includes('waitingOnUserInput');
+    let adopted = 0;
+    let expired = 0;
+    for (const record of held) {
+      const questions = waiting ? pendingQuestions(record.params) : undefined;
+      if (!questions) {
+        this.host.questions.remove(String(record.id));
+        expired += 1;
+        continue;
+      }
+      this.adoptQuestion(record, questions);
+      adopted += 1;
+    }
+    if (expired > 0) this.notice('warn', 'A question the agent asked can no longer be answered; it ended while the Console was restarting.');
+    else if (waiting && adopted === 0) this.notice('warn', 'The agent is waiting for an answer the Console could not recover after the restart. Stop the turn to continue.');
   }
 
   // -------------------------------------------------------------------------------------------------------
@@ -752,6 +950,9 @@ export class CodexAppServerSession implements TransportSession {
   private onThreadStatus(params: CodexNotificationMap['thread/status/changed']): void {
     // Informational: `turn/completed` is the authoritative end of a turn and can arrive after `idle`.
     this.threadStatus = params?.status?.type ?? this.threadStatus;
+    const status = params?.status;
+    this.activeFlags = status?.type === 'active' ? [...(status.activeFlags ?? [])] : [];
+    if (this.threadStatus !== 'active') this.adoptUnknownTurn = false;
   }
 
   private onThreadClosed(): void {
@@ -781,10 +982,11 @@ export class CodexAppServerSession implements TransportSession {
   // -------------------------------------------------------------------------------------------------------
   // Turn lifecycle
 
-  private newTurn(id: string, origin: 'user' | 'provider'): TurnRecord {
+  private newTurn(id: string, origin: 'user' | 'provider', adopted = false): TurnRecord {
     const record: TurnRecord = {
       id,
       origin,
+      adopted,
       started: false,
       queued: false,
       terminal: false,
@@ -803,7 +1005,8 @@ export class CodexAppServerSession implements TransportSession {
     record.started = true;
     record.queued = false;
     this.tokenUsage.activeTurnId = record.id;
-    this.channel.push({ type: 'turn.started', turnId: record.id, origin: record.origin, replay: false });
+    this.host.noteTurn(this.nativeSessionId, record.id);
+    this.channel.push({ type: 'turn.started', turnId: record.id, origin: record.origin, replay: false, ...(record.adopted ? { adopted: true } : {}) });
     for (const wake of record.startedWaiters.splice(0)) wake();
   }
 
@@ -894,6 +1097,7 @@ export class CodexAppServerSession implements TransportSession {
     for (const wake of record.startedWaiters.splice(0)) wake();
     if (this.activeTurnId === record.id) this.activeTurnId = null;
     this.turns.delete(record.id);
+    if (this.activeTurnId === null) this.host.noteTurn(this.nativeSessionId, undefined);
     this.finishedTurnIds.add(record.id);
     if (this.finishedTurnIds.size > MAX_FINISHED_TURNS) {
       const oldest = this.finishedTurnIds.values().next().value;
@@ -993,6 +1197,13 @@ export class CodexAppServerSession implements TransportSession {
   private recordFor(turnId: string, method: string, params: unknown): TurnRecord | undefined {
     const record = this.turns.get(turnId);
     if (record) return record;
+    if (this.adoptUnknownTurn && this.pendingStart === null && this.activeTurnId === null && !this.finishedTurnIds.has(turnId)) {
+      // The thread was running a turn when this session attached, no listing named it, and this is the first thing it did.
+      this.adoptUnknownTurn = false;
+      const adopted = this.newTurn(turnId, 'provider', true);
+      this.markStarted(adopted);
+      return adopted;
+    }
     if (this.pendingStart !== null && !this.finishedTurnIds.has(turnId)) {
       this.bufferEarly(turnId, method, params);
     } else {
@@ -1053,6 +1264,24 @@ export class CodexAppServerSession implements TransportSession {
       replay: false,
       ...(title ? { title } : {}),
     });
+    if (item.type === 'agentMessage' && item.delivery === 'async' && Array.isArray(item.questions)) this.openMessageQuestion(turnId, item.id, item.questions);
+  }
+
+  /**
+   * On codex-cli 0.164 the model asks through `request_user_input_async`: the tool answers `{accepted: true}` at once, no server
+   * request is raised, and the question arrives as an assistant message item (`delivery: 'async'`, `questions`). Nothing waits
+   * for it, so there is nothing to hold; the person's answer goes back as a normal message (`responseMode: 'message'`).
+   */
+  private openMessageQuestion(turnId: string, itemId: string, raw: unknown[]): void {
+    const requestId = `item:${itemId}`;
+    if (this.messageQuestions.has(requestId)) return;
+    // A question without an id of its own gets its position, so the answer can name it.
+    const questions = pendingQuestions({ questions: raw.map((question, index) => (isRecord(question) && typeof question.id !== 'string' ? { ...question, id: `q${index + 1}` } : question)) });
+    if (!questions) return;
+    if (this.messageQuestions.size >= MAX_MESSAGE_QUESTIONS) this.messageQuestions.delete(this.messageQuestions.values().next().value as string);
+    this.messageQuestions.add(requestId);
+    const summary = declinedServerRequest('item/tool/requestUserInput', { questions: raw }).summary;
+    this.channel.push({ type: 'request.opened', requestId, kind: 'question', summary, turnId, questions, responseMode: 'message' });
   }
 
   private onTokenUsage(params: CodexNotificationMap['thread/tokenUsage/updated']): void {

@@ -55,6 +55,12 @@ export interface JsonRpcRequestOptions<T = unknown> {
 export interface JsonRpcServerRequestContext {
   id: JsonRpcId;
   method: string;
+  /**
+   * The handler is going to hold this request open for a long time (a question waiting for a person). A held request stops
+   * counting against {@link MAX_CONCURRENT_SERVER_REQUEST_HANDLERS}, so questions nobody has answered yet can never make the
+   * client refuse the approvals that must be declined. Idempotent.
+   */
+  hold(): void;
 }
 
 /** Handlers answer by returning a value (the `result`) or throwing {@link JsonRpcReplyError} / any error. */
@@ -441,8 +447,14 @@ export class JsonRpcClient {
       this.replyError(id, JSON_RPC_OVERLOADED, 'Too many server requests are being handled.');
       return;
     }
-    const settle = (outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): void => {
+    let counted = true;
+    const release = (): void => {
+      if (!counted) return;
+      counted = false;
       this.activeServerRequests -= 1;
+    };
+    const settle = (outcome: { ok: true; value: unknown } | { ok: false; error: unknown }): void => {
+      release();
       if (outcome.ok) {
         this.reply(id, outcome.value ?? null);
       } else if (outcome.error instanceof JsonRpcReplyError) {
@@ -456,7 +468,7 @@ export class JsonRpcClient {
     this.activeServerRequests += 1;
     let result: unknown;
     try {
-      result = handler(params, { id, method });
+      result = handler(params, { id, method, hold: release });
     } catch (error) {
       settle({ ok: false, error });
       return;
@@ -469,6 +481,18 @@ export class JsonRpcClient {
     } else {
       settle({ ok: true, value: result });
     }
+  }
+
+  /**
+   * Answers a server request that no handler of this client is holding: one the server raised before this client existed
+   * (a question held across a backend restart; the process kept waiting for the earlier client's reply). Rejects with
+   * {@link JsonRpcExitError} when the channel is gone, so the caller can tell the answer reached nobody.
+   */
+  replyToServerRequest(id: JsonRpcId, result: unknown): Promise<void> {
+    if (this.finished) return Promise.reject(this.exitError(false));
+    return this.writeFrame({ id, result: result ?? null }).catch((error: unknown) => {
+      throw error instanceof NotSentError ? this.exitError(false) : error;
+    });
   }
 
   private reply(id: JsonRpcId, result: unknown): void {

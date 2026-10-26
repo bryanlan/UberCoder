@@ -296,24 +296,28 @@ describe('Per-session processes: sleep, pressure, release', () => {
   });
 });
 
-describe('Per-session processes: the default cost profile', () => {
-  const MEDIUM = { model: 'claude-opus-5-5', effort: 'xhigh' };
+describe('Per-session processes: a row with no cost profile', () => {
+  // What the tmux resume template runs: effort medium, and no model of its own. No profile is stored on the row.
+  const TEMPLATE = { effort: 'medium' };
 
-  it('starts a history-bound conversation on the default profile, names it on every turn and keeps it on the row', async () => {
+  it('starts a history-bound conversation on the template effort, names it on every turn and stores no profile', async () => {
     const f = fixture({ plugin: PER_SESSION });
     const session = await f.bindHistory('native-history-1');
 
-    expect(f.row(session.id).claudeProfile).toBe('medium');
-    expect(startOptions(f)).toMatchObject(MEDIUM);
+    expect(f.row(session.id).claudeProfile).toBeUndefined();
+    expect(startOptions(f)).toMatchObject(TEMPLATE);
+    expect(startOptions(f).model).toBeUndefined();
     await f.manager.sendInput(session.id, 'hello');
     const sent = f.calls('native-history-1', 'sendTurn').map(call => call.args[0] as TurnInput);
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject(MEDIUM);
-    // The row is what the person sees, so the UI shows the profile too.
-    expect(f.events.some(event => event.type === 'session.updated' && event.session.id === session.id && event.session.claudeProfile === 'medium')).toBe(true);
+    expect(sent[0]).toMatchObject(TEMPLATE);
+    expect(sent[0]!.model).toBeUndefined();
+    // The row never carries a profile the person did not choose.
+    expect(f.events.some(event => event.type === 'session.updated' && event.session.id === session.id && event.session.claudeProfile !== undefined)).toBe(false);
+    expect(f.row(session.id).claudeProfile).toBeUndefined();
   });
 
-  it('gives a migrated row with no profile the default when it wakes, and stores it', async () => {
+  it('gives a migrated row with no profile the template effort when it wakes, and still stores nothing', async () => {
     const f = fixture({ plugin: PER_SESSION });
     const { session } = await f.bindNew();
     f.db.sqlite.prepare('update bound_sessions set claude_profile=null where id=?').run(session.id);
@@ -321,10 +325,13 @@ describe('Per-session processes: the default cost profile', () => {
 
     await f.manager.suspendSession(session.id);
     await f.manager.resumeSession(session.id);
-    expect(startOptions(f, 1)).toMatchObject(MEDIUM);
-    expect(f.row(session.id).claudeProfile).toBe('medium');
+    expect(startOptions(f, 1)).toMatchObject(TEMPLATE);
+    expect(startOptions(f, 1).model).toBeUndefined();
+    expect(f.row(session.id).claudeProfile).toBeUndefined();
     await f.manager.sendInput(session.id, 'hello');
-    expect(f.calls(session.conversationRef, 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject(MEDIUM);
+    const turn = f.calls(session.conversationRef, 'sendTurn').map(call => call.args[0] as TurnInput)[0]!;
+    expect(turn).toMatchObject(TEMPLATE);
+    expect(turn.model).toBeUndefined();
   });
 
   it('leaves a row that has a profile on it, and a granted launch on the model it named', async () => {
@@ -342,12 +349,12 @@ describe('Per-session processes: the default cost profile', () => {
     expect(f.row(granted.session.id).claudeProfile).toBeUndefined();
   });
 
-  it('switches off the default when the person picks a profile', async () => {
+  it('uses the profile the person picks from then on', async () => {
     const f = fixture({ plugin: PER_SESSION });
     const session = await f.bindHistory('native-history-2');
-    expect(f.row(session.id).claudeProfile).toBe('medium');
+    expect(f.row(session.id).claudeProfile).toBeUndefined();
     await f.manager.requestModelProfile(session.id, 'low');
-    await settle();
+    await settle(10);
     await f.manager.sendInput(session.id, 'hello');
     expect(f.row(session.id).claudeProfile).toBe('low');
     expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });

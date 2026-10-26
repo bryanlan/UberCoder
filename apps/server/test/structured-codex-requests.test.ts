@@ -5,7 +5,7 @@ import {
   CODEX_CAPABILITIES,
   pendingQuestions,
 } from '../src/providers/transport/codex/app-server-session.js';
-import type { RequestResponse, TransportEvent, TransportSession } from '../src/providers/transport/types.js';
+import { RequestNotPendingError, type RequestResponse, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
 import {
   baseHandlers,
   EventLog,
@@ -152,8 +152,11 @@ describe('Codex questions', () => {
     await log.waitForType('request.opened');
     const first: RequestResponse = { decision: 'answer', answers: { schema_preference: ['UI flexibility'] } };
 
-    await Promise.all([session.respond('0', first), session.respond('0', { decision: 'answer', answers: { schema_preference: ['Strict schemas (Recommended)'] } })]);
-    await session.respond('0', { decision: 'cancel' });
+    // The first answer settles the question; every later one finds it closed and says so.
+    const results = await Promise.allSettled([session.respond('0', first), session.respond('0', { decision: 'answer', answers: { schema_preference: ['Strict schemas (Recommended)'] } })]);
+    expect(results.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+    expect((results[1] as PromiseRejectedResult).reason).toBeInstanceOf(RequestNotPendingError);
+    await expect(session.respond('0', { decision: 'cancel' })).rejects.toBeInstanceOf(RequestNotPendingError);
     await sleep(600);
 
     expect(answers(fake)).toEqual([{ id: 0, result: { answers: { schema_preference: { answers: ['UI flexibility'] } } } }]);
@@ -202,8 +205,8 @@ describe('Codex questions', () => {
     expect(log.of('request.closed')).toEqual([{ type: 'request.closed', requestId: '0', outcome: 'cancelled' }]);
     await waitUntil(() => answers(fake).length === 1, 5000, 'the settling reply');
     expect(answers(fake)).toEqual([{ id: 0, result: { answers: {} } }]);
-    // The person's late answer finds nothing to answer.
-    await session.respond('0', { decision: 'answer', answers: { schema_preference: ['UI flexibility'] } });
+    // The person's late answer finds nothing to answer, and the caller is told so (it must not report the answer as delivered).
+    await expect(session.respond('0', { decision: 'answer', answers: { schema_preference: ['UI flexibility'] } })).rejects.toBeInstanceOf(RequestNotPendingError);
     await sleep(100);
     expect(answers(fake)).toHaveLength(1);
     expect(log.of('request.closed')).toHaveLength(1);

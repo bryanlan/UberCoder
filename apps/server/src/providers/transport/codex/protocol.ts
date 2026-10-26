@@ -251,6 +251,20 @@ export interface ThreadReadResponse {
   thread: CodexThread;
 }
 
+/** The turns of a thread, newest first with `sortDirection: 'desc'`. Items are left out (`itemsView: 'notLoaded'`). */
+export interface ThreadTurnsListParams {
+  threadId: string;
+  cursor?: string | null;
+  limit?: number | null;
+  sortDirection?: 'asc' | 'desc';
+  itemsView?: 'notLoaded' | 'summary' | 'full';
+}
+export interface ThreadTurnsListResponse {
+  data: CodexTurn[];
+  nextCursor: string | null;
+  backwardsCursor?: string | null;
+}
+
 export interface ThreadUnarchiveParams {
   threadId: string;
 }
@@ -392,6 +406,7 @@ export interface CodexRequestMap {
   'thread/start': { params: ThreadStartParams; result: ThreadStartResponse };
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse };
   'thread/read': { params: ThreadReadParams; result: ThreadReadResponse };
+  'thread/turns/list': { params: ThreadTurnsListParams; result: ThreadTurnsListResponse };
   'thread/unarchive': { params: ThreadUnarchiveParams; result: ThreadUnarchiveResponse };
   'thread/unsubscribe': { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
   'thread/backgroundTerminals/list': { params: ThreadBackgroundTerminalsListParams; result: ThreadBackgroundTerminalsListResponse };

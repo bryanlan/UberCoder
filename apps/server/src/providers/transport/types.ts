@@ -41,9 +41,19 @@ export type RequestResponse =
 export type TransportEvent =
   | { type: 'session.state'; state: 'starting' | 'ready' | 'running' | 'stopped' | 'error'; failure?: ProviderFailure }
   | { type: 'session.native'; nativeSessionId: string; transcriptPath?: string; title?: string }
-  | { type: 'turn.started'; turnId: string; origin: 'user' | 'provider'; replay: boolean }
+  /**
+   * `adopted`: the turn was already running when this session attached (a backend restart left it running behind its
+   * session host). It is not new activity: the host marks the conversation working but does not move recency.
+   */
+  | { type: 'turn.started'; turnId: string; origin: 'user' | 'provider'; replay: boolean; adopted?: boolean }
   | { type: 'item.completed'; turnId: string; itemId: string; kind: 'assistant' | 'reasoning' | 'command' | 'file_change' | 'mcp' | 'search' | 'other'; replay: boolean; title?: string }
-  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string; turnId?: string; questions?: PendingQuestion[] }
+  /**
+   * `replay`: the request was already open before this session attached (adopted after a reattach or reconnect, or read back
+   * from the host's replay). The host does not move recency for it and does not announce it again when it announced the id before.
+   * `responseMode`: `live` (default) is answered through `respond()` while the provider waits; `message` is a question the provider
+   * already moved on from (it asked in a message), so the answer is sent to it as a normal user message and then closed.
+   */
+  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string; turnId?: string; questions?: PendingQuestion[]; replay?: boolean; responseMode?: 'live' | 'message' }
   | { type: 'request.closed'; requestId: string; outcome: 'resolved' | 'declined' | 'cancelled' }
   | { type: 'usage.updated'; contextUsedTokens?: number; contextMaxTokens?: number; windows?: Array<{ id: string; usedPercent: number; resetsAt?: string }> }
   | { type: 'notice'; level: 'info' | 'warn'; text: string }
@@ -64,10 +74,23 @@ export interface TransportSession {
   readonly transcriptPath?: string; // when the provider reports it
   /** Per-session plugins: the pid of this conversation's own process. Shared plugins leave it out (the instance reports the shared pid). */
   readonly pid?: number;
+  /**
+   * The turn the provider is running right now, when the transport knows one. A plugin that attaches to a process that was
+   * already running (`reattach`, or a `resume` that finds its thread mid-turn) sets it before the call resolves, so the host
+   * can mark the conversation working without waiting for the first event, and does not count the turn as new activity.
+   * Omitted by plugins that do not say.
+   */
+  readonly activeTurn?: string;
   sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
   steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
-  interrupt(turnId: string): Promise<void>; // resolves when the request is accepted; terminal follows as an event
-  respond(requestId: string, response: RequestResponse): Promise<void>; // answers a pending request; unknown ids resolve without effect
+  /**
+   * Resolves when the request is accepted; the terminal follows as an event. A plugin whose stop also drops sends that were
+   * queued behind the turn reports the steers among them (`cancelledSteerIds`: the `clientMessageId` the host passed to
+   * `steer`, or the message uuid when it passed none), so the host can show them as not delivered or send them again.
+   */
+  interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }>;
+  /** Answers a pending request. Rejects with {@link RequestNotPendingError} when the id is not open (never seen, withdrawn, or its turn ended). */
+  respond(requestId: string, response: RequestResponse): Promise<void>;
   /**
    * Idle sleep and manual suspend. Shared process: drop the thread from memory (the process keeps serving other threads).
    * Per-session: end this conversation's own process; the conversation stays resumable by its native id.
@@ -221,12 +244,36 @@ export class ResumeFailedError extends Error {
   }
 }
 
+/**
+ * `respond` named a request that is not open: the CLI withdrew it, its turn ended, or it was answered already. The answer
+ * reached nobody, so the caller must not report it as delivered.
+ */
+export class RequestNotPendingError extends Error {
+  readonly code = 'request_not_pending';
+  readonly requestId?: string;
+  constructor(requestId?: string, message = 'That request is no longer waiting for an answer.') {
+    super(message);
+    this.name = 'RequestNotPendingError';
+    this.requestId = requestId;
+  }
+}
+
+/**
+ * Why `attachOnly` found nothing: no host record, no running host, or one that serves nobody because it refuses connections
+ * (`absent`); a host whose provider ended (`ended`); a host that runs another command line (`other_command`); or a running host
+ * that did not answer in time (`unreachable`, possibly only stalled, so its provider may well run).
+ */
+export type LineTransportNotRunningReason = 'absent' | 'ended' | 'other_command' | 'unreachable';
+
 /** `attachOnly` found no live process for the host id and command line. Nothing was started or ended. */
 export class LineTransportNotRunningError extends Error {
   readonly code = 'transport_not_running';
-  constructor(message = 'No live provider process answers for this session host.') {
+  /** `absent` and `ended` mean no provider process is reachable for this host id, so a launch record that names it is stale. The others say nothing about that. */
+  readonly reason?: LineTransportNotRunningReason;
+  constructor(message = 'No live provider process answers for this session host.', reason?: LineTransportNotRunningReason) {
     super(message);
     this.name = 'LineTransportNotRunningError';
+    this.reason = reason;
   }
 }
 

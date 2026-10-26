@@ -86,6 +86,7 @@ export async function buildApp(options: AppOptions = {}) {
     log: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
     hostProgramPath: fileURLToPath(new URL('./providers/transport/session-host.js', import.meta.url)),
   });
+  const imageStoreDir = path.join(path.dirname(config.databasePath), 'images');
   const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -99,6 +100,8 @@ export async function buildApp(options: AppOptions = {}) {
     structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude },
     defaultTransport: config.structuredSessions.defaultTransport,
     lineTransport,
+    // A structured session attaches only the pasted images the image store holds, found directly in this directory.
+    imageStoreDir,
     // Hooks and the coordination MCP inside a structured thread find this Console the way tmux sessions do.
     structuredEnv: config.coordination.enabled ? { AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_CONFIG: configService.getConfigPath() } : undefined,
     hasActiveLaunchAuthority: session => {
@@ -111,7 +114,7 @@ export async function buildApp(options: AppOptions = {}) {
     notifyStructuredQuestion: notice => grantPush.question(notice),
   });
   const authService = new AuthService(config, db);
-  const images = new ImageStore(path.join(path.dirname(config.databasePath), 'images'));
+  const images = new ImageStore(imageStoreDir);
   const wakeAssignments = () => { void sessions.wakePendingAssignments().catch((error: unknown) => app.log.warn({ err: error }, 'Assignment continuation failed.')); };
   const grantPush = new GrantPushService(db, config.server.publicBaseUrl ?? `http://127.0.0.1:${config.server.port}`);
   const wakeAlerts = new WakeAlerts(db, (warning, delivered) => grantPush.wakeWarning(warning, delivered));

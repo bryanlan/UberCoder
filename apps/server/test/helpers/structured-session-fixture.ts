@@ -83,11 +83,16 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   const restarted: Array<{ manager: typeof manager; plugin: FakeTransportPlugin; tmux: FakeTmux }> = [];
   /**
    * A new backend process over the same database: fresh plugin instances, fresh tmux fake, no loaded threads. `survivors`
-   * names the provider processes that outlived the old backend behind their session hosts (native id -> pid).
+   * names the provider processes that outlived the old backend behind their session hosts (native id -> pid), and `survivorTurns`
+   * the turn each of them is running (native id -> turn id).
    */
-  const restartBackend = async (restart: { survivors?: Record<string, number> } = {}) => {
+  const restartBackend = async (restart: { survivors?: Record<string, number>; survivorTurns?: Record<string, string> } = {}) => {
     await manager.stop();
-    const nextPlugin = new FakeTransportPlugin({ ...options.plugin, ...(restart.survivors ? { survivors: restart.survivors } : {}) });
+    const nextPlugin = new FakeTransportPlugin({
+      ...options.plugin,
+      ...(restart.survivors ? { survivors: restart.survivors } : {}),
+      ...(restart.survivorTurns ? { survivorTurns: restart.survivorTurns } : {}),
+    });
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);
     for (const extra of options.extraPlugins ?? []) nextRegistry.register(new FakeTransportPlugin(extra));

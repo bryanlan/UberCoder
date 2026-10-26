@@ -796,7 +796,7 @@ describe('session routes', () => {
         expect(sendKeystrokes).toHaveBeenCalledOnce();
         const [, payload] = sendKeystrokes.mock.calls[0] as unknown as [string, { text: string; submittedText: string; imageIds?: string[] }];
         // The envelope names the stored file; SessionManager turns it into a native attachment.
-        expect(imagePromptFiles(payload.text)).toEqual([{ path: image.path, mimeType: 'image/png' }]);
+        expect(imagePromptFiles(payload.text, '/data/images')).toEqual([{ path: image.path, mimeType: 'image/png' }]);
         expect(payload.submittedText).toBe(`look at this${imagePromptSuffix([image], 'codex')}`);
         expect(payload.imageIds).toBeUndefined();
       } finally {

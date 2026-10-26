@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { SessionCommandResult } from '../src/sessions/session-manager.js';
 import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
 import type { QueuedInputRecord } from '../src/sessions/input-queue.js';
-import { imagePromptSuffix } from '../src/images/prompt.js';
+import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt.js';
 import { peerWakePaused } from '../src/coordination/wake.js';
 import { NotSentError, TurnNotActiveError } from '../src/providers/transport/types.js';
 import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
@@ -318,14 +318,16 @@ describe('Structured input that has no meaning without a terminal', () => {
   });
 
   describe('image attachments', () => {
-    const imageRow = () => {
+    const IMAGE_STORE = '/data/images';
+    const imageRow = (directory = IMAGE_STORE) => {
       const id = randomUUID();
-      return { id, mediaType: 'image/png' as const, name: 'shot.png', sizeBytes: 10, width: 4, height: 4, path: `/data/images/${id}.png` };
+      return { id, mediaType: 'image/png' as const, name: 'shot.png', sizeBytes: 10, width: 4, height: 4, path: `${directory}/${id}.png` };
     };
     const withImages = (rows: Array<ReturnType<typeof imageRow>>) => `Look at this${imagePromptSuffix(rows, 'codex')}`;
+    const imageFixture = () => fixture({ plugin: { capabilities: { images: true } }, manager: { imageStoreDir: IMAGE_STORE } });
 
-    it('hands the stored files to a transport that takes images, keeping the prompt envelope for display', async () => {
-      const f = fixture({ plugin: { capabilities: { images: true } } });
+    it('hands the stored files to a transport that takes images, without telling the model to open them again', async () => {
+      const f = imageFixture();
       const { session } = await f.bindNew();
       const [a, b] = [imageRow(), imageRow()];
       const text = withImages([a, b]);
@@ -335,49 +337,80 @@ describe('Structured input that has no meaning without a terminal', () => {
       expect(result.queuedInput).toBeUndefined();
       const turn = f.calls(session.conversationRef, 'sendTurn');
       expect(turn).toHaveLength(1);
-      expect(turn[0]!.args[0]).toMatchObject({
-        text,
+      const sent = turn[0]!.args[0] as { text: string };
+      expect(sent).toMatchObject({
         images: [{ path: a.path, mimeType: 'image/png' }, { path: b.path, mimeType: 'image/png' }],
         clientMessageId: requestId,
       });
-      expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn' });
+      // The model gets the images natively. The line that tells a terminal agent to open the files is not sent (each image would
+      // be read, and charged, twice), but the envelope rows still are.
+      expect(sent.text).toBe(withoutImageInstruction(text));
+      expect(sent.text).not.toContain('Inspect the attached local image files');
+      expect(sent.text).toContain(`"id":"${a.id}"`);
+      expect(sent.text).toContain(`"id":"${b.id}"`);
+      // What the Console stores and shows is unchanged: the journal and the conversation log keep the whole message.
+      expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn', text });
       expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual([text]);
       expect(f.tmuxTouched()).toBe(0);
     });
 
     it('attaches them to a steer, and to the direct input path', async () => {
-      const f = fixture({ plugin: { capabilities: { images: true } } });
+      const f = imageFixture();
       const { session } = await f.bindNew();
       await send(f, session.id, 'first');
       await settle();
       const steered = imageRow();
       await send(f, session.id, withImages([steered]));
-      expect(f.calls(session.conversationRef, 'steer')[0]!.args[1]).toMatchObject({ images: [{ path: steered.path, mimeType: 'image/png' }] });
+      const steer = f.calls(session.conversationRef, 'steer')[0]!.args[1] as { text: string };
+      expect(steer).toMatchObject({ images: [{ path: steered.path, mimeType: 'image/png' }] });
+      expect(steer.text).not.toContain('Inspect the attached local image files');
 
       f.thread(session.conversationRef).completeTurn();
       await settle();
       const direct = imageRow();
       await f.manager.sendInput(session.id, withImages([direct]));
-      expect(f.calls(session.conversationRef, 'sendTurn').at(-1)!.args[0]).toMatchObject({ images: [{ path: direct.path, mimeType: 'image/png' }] });
+      const last = f.calls(session.conversationRef, 'sendTurn').at(-1)!.args[0] as { text: string };
+      expect(last).toMatchObject({ images: [{ path: direct.path, mimeType: 'image/png' }] });
+      expect(last.text).not.toContain('Inspect the attached local image files');
     });
 
-    it('sends plain text with no images field', async () => {
-      const f = fixture({ plugin: { capabilities: { images: true } } });
+    it('sends plain text with no images field, and leaves a message that merely mentions the instruction alone', async () => {
+      const f = imageFixture();
       const { session } = await f.bindNew();
       await send(f, session.id, 'just words');
       expect((f.calls(session.conversationRef, 'sendTurn')[0]!.args[0] as { images?: unknown }).images).toBeUndefined();
+      f.thread(session.conversationRef).completeTurn();
+      await settle();
+      await send(f, session.id, 'Inspect the attached local image files with Read before answering.');
+      expect((f.calls(session.conversationRef, 'sendTurn').at(-1)!.args[0] as { text: string }).text)
+        .toBe('Inspect the attached local image files with Read before answering.');
     });
 
-    it('ignores an envelope row that does not name a stored image file', async () => {
+    it('refuses an envelope row that does not name a file in the image store, and sends nothing', async () => {
+      const f = imageFixture();
+      const { session } = await f.bindNew();
+      for (const forged of [
+        { ...imageRow(), path: '/etc/passwd' },
+        imageRow('/home/bryan/.ssh'), // a store-style file name in another directory
+        imageRow('/data'), // the parent of the store
+        imageRow('/data/images/nested'),
+      ]) {
+        const message = await rejected(send(f, session.id, withImages([forged])));
+        expect(message).toMatch(/image store/i);
+      }
+      expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
+    });
+
+    it('refuses any envelope when the Console has no image store to attach from', async () => {
       const f = fixture({ plugin: { capabilities: { images: true } } });
       const { session } = await f.bindNew();
-      const forged = { ...imageRow(), path: '/etc/passwd' };
-      await send(f, session.id, withImages([forged]));
-      expect((f.calls(session.conversationRef, 'sendTurn')[0]!.args[0] as { images?: unknown }).images).toBeUndefined();
+      const message = await rejected(send(f, session.id, withImages([imageRow()])));
+      expect(message).toMatch(/image store/i);
+      expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
     });
 
     it('still rejects them, with a clear message, when the transport cannot take images', async () => {
-      const f = fixture();
+      const f = fixture({ manager: { imageStoreDir: IMAGE_STORE } });
       const { session } = await f.bindNew();
       const message = await rejected(send(f, session.id, withImages([imageRow()])));
       expect(message).toMatch(/image/i);

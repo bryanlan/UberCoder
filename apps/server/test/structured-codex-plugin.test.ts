@@ -48,7 +48,7 @@ import {
   rateLimitsToWindows,
   usageLimitResetAt,
 } from '../src/providers/transport/codex/usage.js';
-import { NotSentError, PreviousTurnActiveError, ResumeFailedError, TransportUnavailableError, TurnNotActiveError, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError, RequestNotPendingError, ResumeFailedError, TransportUnavailableError, TurnNotActiveError, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
 import {
   agentMessageItem,
   baseHandlers,
@@ -884,7 +884,7 @@ describe('codex instance and session against a scripted app-server', () => {
     /** A session over a stub host, with one turn the server started; `client` decides how the connection behaves. */
     function stubSession(client: () => unknown) {
       const log = { info: () => undefined, warn: () => undefined, debug: () => undefined };
-      const host = { log, timings: { ...DEFAULT_TIMINGS, queuedStartWaitMs: 50 }, client, rateLimits: () => undefined, release: () => undefined } as unknown as CodexSessionHost;
+      const host = { log, timings: { ...DEFAULT_TIMINGS, queuedStartWaitMs: 50 }, client, rateLimits: () => undefined, release: () => undefined, noteTurn: () => undefined, questions: { save: () => undefined, remove: () => undefined } } as unknown as CodexSessionHost;
       const session = new CodexAppServerSession({ threadId: THREAD, transcriptPath: null, cwd: '/work', policy: OPEN_OPTIONS.policy, host });
       session.handleNotification('turn/started', { threadId: THREAD, turn: turnObject(TURN, 'inProgress', 1) });
       return session;
@@ -945,7 +945,7 @@ describe('codex instance and session against a scripted app-server', () => {
     expect(turnTerminals(log).map((event) => event.status)).toEqual(['interrupted', 'completed']);
     expect(log.of('item.completed').map((event) => event.itemId)).toEqual(['late-a']);
     expect(fake.context.logs.warn.some(([fields, message]) => /already finished/.test(message) && (fields as { turnId?: string }).turnId === TURN)).toBe(true);
-    expect((session as unknown as { activeTurn: string | null }).activeTurn).toBeNull();
+    expect((session as unknown as { activeTurn?: string }).activeTurn).toBeUndefined();
   });
 
   it('does not track a finished turn again when its own response arrives after the turn ended', async () => {
@@ -964,7 +964,7 @@ describe('codex instance and session against a scripted app-server', () => {
     await sleep(50);
     expect(log.of('turn.started')).toHaveLength(1);
     expect(turnTerminals(log)).toHaveLength(1);
-    expect((session as unknown as { activeTurn: string | null }).activeTurn).toBeNull();
+    expect((session as unknown as { activeTurn?: string }).activeTurn).toBeUndefined();
     expect(fake.context.logs.warn.some(([, message]) => /already finished/.test(message))).toBe(false);
   });
 
@@ -1153,7 +1153,7 @@ describe('codex instance and session against a scripted app-server', () => {
 
       expect(turnTerminals(log)).toEqual([expect.objectContaining({ turnId: TURN, status: 'interrupted' })]);
       expect(log.of('notice').some((notice) => notice.level === 'warn' && /no longer running/.test(notice.text))).toBe(true);
-      expect(session.activeTurn).toBeNull();
+      expect(session.activeTurn).toBeUndefined();
       await session.interrupt(turnId); // a second Stop for the finished turn is a no-op
       await waitUntil(() => readLog(fake.logFile).some((entry) => entry.dir === 'out' && entry.frame?.method === 'turn/completed'), 5000, 'the late completion');
       await sleep(100);
@@ -1332,8 +1332,8 @@ describe('codex instance and session against a scripted app-server', () => {
     expect(opened.map((event) => [event.requestId, event.kind])).toEqual([['0', 'question'], ['1', 'mcp'], ['2', 'command'], ['3', 'file_change'], ['4', 'permission']]);
     expect(opened[0]?.summary).toBe('Pick one: Strict or flexible?');
     expect(log.of('request.closed')).toEqual(['0', '1', '2', '3', '4'].map((requestId) => ({ type: 'request.closed', requestId, outcome: 'declined' })));
-    // respond() after the fact is accepted and changes nothing.
-    await expect(session.respond('0', { decision: 'cancel' })).resolves.toBeUndefined();
+    // respond() after the fact reaches nobody, and says so.
+    await expect(session.respond('0', { decision: 'cancel' })).rejects.toBeInstanceOf(RequestNotPendingError);
   });
 
   it('keeps subagent threads out of the parent session and still answers their requests', async () => {

@@ -44,9 +44,13 @@ function writeRollout(f: StructuredSessionFixture, sessionId: string, native: st
 }
 
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-/** No thread is loaded and the provider was asked for nothing. The reconcile pass may create the instance object to read its process model. */
-const nothingLoaded = (plugin: { instances: Array<{ sessions: unknown[]; calls: unknown[] }> }) =>
-  plugin.instances.every(instance => instance.sessions.length === 0 && instance.calls.length === 0);
+/**
+ * No thread is loaded and the provider was asked for nothing but whether a process survived: a row that says it was working
+ * is looked up (`reattach`, which never starts or resumes anything), and the answer here is none. The reconcile pass may create
+ * the instance object to read its process model.
+ */
+const nothingLoaded = (plugin: { instances: Array<{ sessions: unknown[]; calls: Array<{ method: string }> }> }) =>
+  plugin.instances.every(instance => instance.sessions.length === 0 && instance.calls.every(call => call.method === 'reattach'));
 const lossLines = (f: StructuredSessionFixture, sessionId: string) =>
   eventLogLines(f.row(sessionId)).filter(line => /connection ended/.test(line.text));
 const runState = (manager: StructuredSessionFixture['manager'], sessionId: string) =>

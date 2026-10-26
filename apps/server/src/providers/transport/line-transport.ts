@@ -28,7 +28,7 @@ import {
   type HostProcessIdentity,
   type HostRecord,
 } from './session-host.js';
-import { LineTransportNotRunningError, NotSentError } from './types.js';
+import { LineTransportNotRunningError, NotSentError, TransportUnavailableError } from './types.js';
 import type { LineTransport, LineTransportFactory, LineTransportSpawn } from './types.js';
 
 /** After the child's `exit`, wait this long for its stdout pipe to drain before the exit is final. */
@@ -55,6 +55,12 @@ export interface LineTransportExit {
 export interface ManagedLineTransport extends LineTransport {
   /** True when the provider process keeps running after `close()` without `terminate` (a session host holds it). */
   readonly outlivesClose: boolean;
+  /**
+   * True when the factory call that returned this channel started the provider process (a stdio child always; a session
+   * host only when this call started it). False for a channel to a host that was already running: its output so far
+   * belongs to whoever started it, so it is never replayed to this client unless the host was never written to.
+   */
+  readonly started: boolean;
   /** Last bytes of the provider's stderr with ANSI colour codes removed. Diagnostics only; never parse it. */
   stderrTail(): string;
   onExit(listener: (info: LineTransportExit) => void): () => void;
@@ -97,6 +103,11 @@ export function transportOutlivesClose(transport: LineTransport): boolean {
 /** False when the provider process already received lines from an earlier client (a reconnect to a host that has been used). */
 export function transportStartedFresh(transport: LineTransport): boolean {
   return transport instanceof HostLineTransport ? !transport.info.everWrote : true;
+}
+
+/** True when the factory call that returned this channel started the provider process (see {@link ManagedLineTransport.started}). */
+export function transportWasStarted(transport: LineTransport): boolean {
+  return (transport as Partial<ManagedLineTransport>).started !== false;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -191,6 +202,7 @@ export interface StdioLineTransportOptions {
 
 export class StdioLineTransport extends LineChannel implements ManagedLineTransport {
   readonly outlivesClose = false;
+  readonly started = true;
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly log: NonNullable<StdioLineTransportOptions['log']>;
@@ -243,7 +255,7 @@ export class StdioLineTransport extends LineChannel implements ManagedLineTransp
    */
   static async spawn(request: Pick<LineTransportRequest, 'argv' | 'cwd' | 'env' | 'closeGraceMs' | 'termGraceMs' | 'attachOnly'>, options: StdioLineTransportOptions = {}): Promise<StdioLineTransport> {
     // A child of this process is gone with it: there is never a running one to attach to.
-    if (request.attachOnly) throw new LineTransportNotRunningError('A stdio provider process does not outlive its parent, so there is none to attach to.');
+    if (request.attachOnly) throw new LineTransportNotRunningError('A stdio provider process does not outlive its parent, so there is none to attach to.', 'absent');
     const [executable, ...args] = request.argv;
     if (!executable) throw new LineTransportSpawnError('', new Error('The command is empty.'));
     const child = spawn(executable, args, { cwd: request.cwd, env: request.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
@@ -395,12 +407,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A session host accepted no connection, or sent no welcome, within the time allowed. The host may be alive and only
+ * slow (a stalled machine, heavy swap), so this is not evidence that it is gone. A refused or missing socket is.
+ */
+export class HostUnresponsiveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HostUnresponsiveError';
+  }
+}
+
 function connectSocket(socketPath: string, timeoutMs: number): Promise<net.Socket> {
   return new Promise<net.Socket>((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error(`Connecting to ${socketPath} timed out.`));
+      reject(new HostUnresponsiveError(`Connecting to ${socketPath} timed out.`));
     }, timeoutMs);
     socket.on('error', () => undefined); // later errors surface as the socket's close
     socket.once('connect', () => {
@@ -416,6 +439,8 @@ function connectSocket(socketPath: string, timeoutMs: number): Promise<net.Socke
 
 export class HostLineTransport extends LineChannel implements ManagedLineTransport {
   readonly outlivesClose = true;
+  /** Set by the factory when it started the host behind this channel (see {@link ManagedLineTransport.started}). A bare `connect` reaches a host somebody else started. */
+  started = false;
   /** Set when the host could no longer replay everything after `sinceSeq`: the newest line it still held was this one. */
   gap: { firstSeq: number } | undefined;
 
@@ -478,7 +503,7 @@ export class HostLineTransport extends LineChannel implements ManagedLineTranspo
     const socket = await connectSocket(options.socketPath, options.connectTimeoutMs ?? HOST_CONNECT_TIMEOUT_MS);
     const transport = new HostLineTransport(socket, options);
     socket.write(`${JSON.stringify({ type: 'hello', ...(options.sinceSeq !== undefined ? { sinceSeq: options.sinceSeq } : {}) })}\n`);
-    const timer = setTimeout(() => transport.rejectWelcome(new Error('The session host did not answer hello.')), options.welcomeTimeoutMs ?? HOST_WELCOME_TIMEOUT_MS);
+    const timer = setTimeout(() => transport.rejectWelcome(new HostUnresponsiveError('The session host did not answer hello.')), options.welcomeTimeoutMs ?? HOST_WELCOME_TIMEOUT_MS);
     try {
       await transport.welcomed;
     } catch (error) {
@@ -700,6 +725,9 @@ export interface LineTransportFactoryOptions {
   /** `session-host.js` next to this module in a build. Running from source (`tsx`) there is no `.js`; the `.ts` file next to it is run instead (Node strips its types). */
   hostProgramPath: string;
   hostStartTimeoutMs?: number;
+  /** How long a connection to a running host may take, and how long its welcome may take. Defaults 3 s and 5 s. For tests. */
+  hostConnectTimeoutMs?: number;
+  hostWelcomeTimeoutMs?: number;
 }
 
 export interface HostGraces {
@@ -820,6 +848,7 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
             log.info({ hostId: request.hostId, hostPid: transport.info.hostPid, childPid: transport.info.childPid }, 'session host started');
             host.removeAllListeners('exit');
             host.unref();
+            transport.started = true;
             return transport;
           } catch (error) {
             if (error instanceof LineTransportSpawnError) throw error;
@@ -848,6 +877,8 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
       ...(request.sinceSeq !== undefined ? { sinceSeq: request.sinceSeq } : {}),
       ...(request.closeGraceMs !== undefined ? { closeGraceMs: request.closeGraceMs } : {}),
       ...(request.termGraceMs !== undefined ? { termGraceMs: request.termGraceMs } : {}),
+      ...(options.hostConnectTimeoutMs !== undefined ? { connectTimeoutMs: options.hostConnectTimeoutMs } : {}),
+      ...(options.hostWelcomeTimeoutMs !== undefined ? { welcomeTimeoutMs: options.hostWelcomeTimeoutMs } : {}),
       log: { warn: (fields, message) => log.warn(fields, message) },
     };
   }
@@ -856,18 +887,23 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
   async function attachHost(request: LineTransportRequest, hostId: string): Promise<LineTransport> {
     const paths = hostPaths(options.runtimeDir, hostId);
     const record = readHostRecord(paths.record);
-    if (!record || !identityRunning(record.host)) throw new LineTransportNotRunningError(`No session host is running for ${hostId}.`);
+    if (!record || !identityRunning(record.host)) throw new LineTransportNotRunningError(`No session host is running for ${hostId}.`, 'absent');
     // The host is keyed by its command line; another one is not this conversation's process and is left alone.
-    if (record.argvHash !== argvHash(request.argv)) throw new LineTransportNotRunningError(`The session host for ${hostId} runs another command line.`);
+    if (record.argvHash !== argvHash(request.argv)) throw new LineTransportNotRunningError(`The session host for ${hostId} runs another command line.`, 'other_command');
     let transport: HostLineTransport;
     try {
       transport = await HostLineTransport.connect(hostConnectOptions(request, paths.socket));
     } catch (error) {
-      throw new LineTransportNotRunningError(`The session host for ${hostId} did not answer: ${error instanceof Error ? error.message : String(error)}`);
+      // Slow is not gone: a host that accepted no connection or sent no welcome in time may be stalled and still run its
+      // provider. One that refuses connections or closes at once serves nobody, whatever its pid says.
+      throw new LineTransportNotRunningError(
+        `The session host for ${hostId} did not answer: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof HostUnresponsiveError ? 'unreachable' : 'absent',
+      );
     }
     if (!transport.info.alive) {
       await transport.close().catch(() => undefined); // disconnect only; the lingering host is not ours to end here
-      throw new LineTransportNotRunningError(`The provider process of the session host for ${hostId} has ended.`);
+      throw new LineTransportNotRunningError(`The provider process of the session host for ${hostId} has ended.`, 'ended');
     }
     log.info({ hostId, hostPid: transport.info.hostPid, childPid: transport.info.childPid, seq: transport.info.seq, fresh: transportStartedFresh(transport) }, 'attached to a running session host');
     return transport;
@@ -883,7 +919,14 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
     if (record && identityRunning(record.host)) {
       if (record.argvHash === hash) {
         try {
-          const transport = await HostLineTransport.connect(hostConnectOptions(request, paths.socket));
+          // Live output only: whatever a used host printed before now belongs to the client that was there.
+          const { sinceSeq: _replay, ...liveOnly } = request;
+          let transport = await HostLineTransport.connect(hostConnectOptions(liveOnly, paths.socket));
+          if (transport.info.alive && request.sinceSeq !== undefined && !transport.info.everWrote) {
+            // Never written to: everything it printed is startup output (hook frames) that nobody has seen. Ask for it.
+            await transport.close().catch(() => undefined);
+            transport = await HostLineTransport.connect(hostConnectOptions(request, paths.socket));
+          }
           if (transport.info.alive) {
             log.info({ hostId, hostPid: transport.info.hostPid, childPid: transport.info.childPid, seq: transport.info.seq, fresh: transportStartedFresh(transport) }, 'reconnected to a running session host');
             return transport;
@@ -891,6 +934,13 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
           log.info({ hostId, hostPid: transport.info.hostPid }, 'the provider process of the recorded session host had ended; starting a new host');
           await transport.close().catch(() => undefined);
         } catch (error) {
+          if (error instanceof HostUnresponsiveError) {
+            // The host runs (its recorded pid, start time and boot match) and has the right command line; it only did not
+            // answer in time. Retiring it would end its provider, and with it any turn that is running, so leave it alone
+            // and let the next use try again.
+            log.warn({ hostId, hostPid: record.host.pid, error: error.message }, 'the recorded session host is running but did not answer in time; leaving it alone');
+            throw new TransportUnavailableError(`The session host for ${hostId} is running but did not answer in time. Try again in a moment.`);
+          }
           log.warn({ hostId, error: error instanceof Error ? error.message : String(error) }, 'the recorded session host did not answer; replacing it');
         }
       } else {

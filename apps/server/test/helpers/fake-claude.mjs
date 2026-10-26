@@ -20,6 +20,10 @@
 //   initializeDelayMs, noInitializeReply, initializeError
 //   backgroundTasksOnReinitialize   the `tasks` of a `system/background_tasks_changed` snapshot the CLI sends right behind
 //                           the reply to every `initialize` after the first (a host that re-initializes a running process)
+//   exitAfterReinitializeMs   exit with code 1 this long after answering an `initialize` after the first
+//   reinitializeError       answer every `initialize` after the first with this error instead of a reply
+//   reinitializeStateOverride   the `session_state` every `initialize` after the first reports instead of the real one
+//   (the `session_state` of an `initialize` reply is `running` while a turn runs, `idle` otherwise)
 //   startupFailure          {errors, reason?, exitCode?}: write the zeroed error result a failed startup writes, exit
 //   exitAtStart             exit with this code right after startup
 //   ignoreStdinEof, ignoreSigterm
@@ -353,6 +357,11 @@ async function handleControl(frame) {
         replyError(requestId, scenario.initializeError);
         return;
       }
+      if (initializeCount >= 1 && scenario.reinitializeError) {
+        initializeCount += 1;
+        replyError(requestId, scenario.reinitializeError);
+        return;
+      }
       reply(
         requestId,
         {
@@ -367,12 +376,13 @@ async function handleControl(frame) {
           claude_code_version: scenario.version ?? '2.1.310',
           current_permission_mode: 'bypassPermissions',
           hooks_applied: true,
-          session_state: 'idle',
+          session_state: initializeCount >= 1 && scenario.reinitializeStateOverride ? scenario.reinitializeStateOverride : running && !running.ended ? 'running' : 'idle',
           capabilities: ['interrupt_receipt_v1'],
         },
         { pending_permission_requests: [...(scenario.pendingPermissionRequests ?? []), ...openRequests.values()], pending_user_dialog_requests: [] },
       );
       initializeCount += 1;
+      if (initializeCount > 1 && scenario.exitAfterReinitializeMs !== undefined) setTimeout(() => finish(1), scenario.exitAfterReinitializeMs);
       if (initializeCount > 1 && scenario.backgroundTasksOnReinitialize) {
         write({ type: 'system', subtype: 'background_tasks_changed', tasks: scenario.backgroundTasksOnReinitialize, uuid: randomUUID(), session_id: sessionId });
       }

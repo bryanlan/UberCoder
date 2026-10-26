@@ -154,6 +154,11 @@ interface SessionManagerOptions {
   lineTransport?: LineTransportFactory;
   /** Called when a structured agent asks a question, so the person can be told even with the browser closed. */
   notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
+  /**
+   * The directory pasted images are stored in. A structured session attaches only files that sit directly in it; without it no
+   * structured message can carry an image.
+   */
+  imageStoreDir?: string;
 }
 
 type SessionEventLogEntry = { type: 'user-input' | 'agent-input' | 'raw-output' | 'status'; text: string; timestamp: string };
@@ -192,9 +197,12 @@ export class StructuredRequestNotFoundError extends Error {
   }
 }
 
-/** The stored image files a prompt names, as a structured transport takes them; none when the prompt has no images. */
-function structuredImages(text: string): Array<{ path: string; mimeType: string }> | undefined {
-  const files = imagePromptFiles(text);
+/**
+ * The stored image files a prompt names, as a structured transport takes them; none when the prompt has no images. Only files
+ * directly in the image store count, so a path typed into a message cannot become an attachment.
+ */
+function structuredImages(text: string, storeDir: string | undefined): Array<{ path: string; mimeType: string }> | undefined {
+  const files = storeDir ? imagePromptFiles(text, storeDir) : [];
   return files.length ? files : undefined;
 }
 
@@ -319,6 +327,10 @@ export type StructuredMigrationOutcome =
   | 'pending'
   /** A Claude conversation whose transcript file is missing cannot be resumed. */
   | 'noTranscript'
+  /** A failed run has an automatic recovery scheduled or running: the row waits until it resolves, and the move never cancels it. */
+  | 'recovering'
+  /** A granted launch carries command-line flags the structured transport does not apply: it stays on tmux. */
+  | 'launchFlags'
   /** The row is starting or in an error state. */
   | 'notBound'
   /** The tmux session could not be checked. */
@@ -329,7 +341,7 @@ export type StructuredMigrationOutcome =
   | 'providerOff';
 
 const STRUCTURED_MIGRATION_OUTCOMES: readonly StructuredMigrationOutcome[] = [
-  'dead', 'idle', 'working', 'queuedInput', 'modelRequest', 'pending', 'noTranscript', 'notBound', 'unverified', 'externalOwner', 'providerOff',
+  'dead', 'idle', 'working', 'queuedInput', 'modelRequest', 'pending', 'noTranscript', 'recovering', 'launchFlags', 'notBound', 'unverified', 'externalOwner', 'providerOff',
 ];
 
 export interface StructuredMigrationReport {
@@ -395,6 +407,7 @@ export class SessionManager {
   private readonly launchAuthorityContext?: (context: AgentLaunchContext) => string | undefined;
   private readonly notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
   private readonly defaultTransport: SessionTransport;
+  private readonly imageStoreDir?: string;
   /** Provider-and-reason pairs already logged, so a standing condition is reported once and not on every pass. */
   private readonly loggedOnce = new Set<string>();
   private stopped = false;
@@ -416,6 +429,7 @@ export class SessionManager {
     this.launchAuthorityContext = options.launchAuthorityContext;
     this.notifyStructuredQuestion = options.notifyStructuredQuestion;
     this.defaultTransport = options.defaultTransport ?? 'tmux';
+    this.imageStoreDir = options.imageStoreDir;
     this.eagerRestoreWindowMs = options.eagerRestoreWindowMs ?? DEFAULT_SESSION_EAGER_RESTORE_MS;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -447,6 +461,10 @@ export class SessionManager {
       authorityContext: options.launchAuthorityContext,
       meta: structuredMeta,
       logger: this.logger ? { warn: (bindings, message) => this.logger?.warn(bindings, message) } : undefined,
+      hosts: {
+        runtimeDir: this.runtimeDir,
+        log: { info: (bindings, message) => this.logger?.info?.(bindings, message), warn: (bindings, message) => this.logger?.warn(bindings, message) },
+      },
       createContext: (pluginId) => {
         const pluginRuntimeDir = path.join(this.runtimeDir, 'structured', pluginId);
         fs.mkdirSync(pluginRuntimeDir, { recursive: true });
@@ -464,15 +482,16 @@ export class SessionManager {
         };
       },
       callbacks: {
-        onTurnStarted: (sessionId, turnId, origin, replay) => this.handleStructuredTurnStarted(sessionId, turnId, origin, replay),
+        onTurnStarted: (sessionId, turnId, origin, replay, adopted) => this.handleStructuredTurnStarted(sessionId, turnId, origin, replay, adopted),
         onItemCompleted: (sessionId, at, replay) => this.handleStructuredItemCompleted(sessionId, at, replay),
         onTurnTerminal: (sessionId, turnId, status, failure, replay) => this.handleStructuredTurnTerminal(sessionId, turnId, status, failure, replay),
-        onRequest: (sessionId, summary) => this.appendStructuredStatus(sessionId, `Declined a provider request: ${summary}`),
-        onQuestion: (sessionId, request) => this.handleStructuredQuestion(sessionId, request),
+        onRequest: (sessionId, kind, summary) => this.appendStructuredStatus(sessionId, kind === 'question'
+          // A question that cannot be shown can hold something secret, and a question's text stays out of the log; the server log has the details.
+          ? 'Declined a question the Console cannot show' : `Declined a provider request: ${summary}`),
+        onQuestion: (sessionId, request, options) => this.handleStructuredQuestion(sessionId, request, options),
         onRequestsChanged: (sessionId) => this.publishStructuredRequests(sessionId),
         onSessionState: (sessionId, state, failure) => this.handleStructuredSessionState(sessionId, state, failure),
         appendStatus: (sessionId, text) => this.appendStructuredStatus(sessionId, text),
-        onProfileDefaulted: (sessionId, profile) => this.storeDefaultedStructuredProfile(sessionId, profile),
       },
     });
     this.runRecovery = new RunRecovery({
@@ -2290,7 +2309,17 @@ export class SessionManager {
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
     // A bind that names no transport gets the configured default (tmux unless the structured lane is the default).
-    if ((input.transport ?? this.defaultTransportFor(input.provider.id)) === 'structured') {
+    const transport = input.transport ?? this.defaultTransportFor(input.provider.id);
+    // The structured transport sends no command-line flags (`--add-dir`, `--permission-mode` and the like). A granted launch that
+    // carries some must not run without them in silence: asked for structured it is refused, and under the default it keeps tmux.
+    const unappliedFlags = transport === 'structured' && input.launchContext?.flags?.length ? input.launchContext.flags : undefined;
+    if (unappliedFlags && input.transport === 'structured') {
+      throw new SessionInputRejectedError('Structured sessions do not apply launch flags. Start this session on the tmux transport. Nothing was started.');
+    }
+    if (unappliedFlags) {
+      this.logger?.warn({ provider: input.provider.id, sessionId, flagCount: unappliedFlags.length },
+        'A granted launch carries command-line flags the structured transport does not apply; it starts on tmux.');
+    } else if (transport === 'structured') {
       return await this.bindStructuredConversation(input, sessionId);
     }
 
@@ -2343,6 +2372,9 @@ export class SessionManager {
     };
     this.db.boundSessions.upsert(session);
     if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
+    if (unappliedFlags) {
+      this.appendEvent(session, { type: 'status', text: 'Started on tmux: the structured transport does not apply the launch flags this session was given.', timestamp: nowIso() });
+    }
     launch.env = { ...launch.env, AGENT_CONSOLE_SESSION_ID: sessionId };
 
     let tmuxCreated = false;
@@ -4017,6 +4049,11 @@ export class SessionManager {
   private async classifyForStructuredMigration(session: BoundSession): Promise<StructuredMigrationOutcome> {
     if (!this.migratesToStructured(session.provider)) return 'providerOff';
     if (session.conversationRef.startsWith('pending:')) return 'pending';
+    // Unattended recovery of a failed run is waiting or running. Moving the row would cancel it, blaming the person; it moves once
+    // the recovery has resolved (succeeded, or stopped for good).
+    if (session.runFailure?.status === 'scheduled' || session.runFailure?.status === 'retrying') return 'recovering';
+    // The structured transport sends no command-line flags: a granted launch that was started with some keeps the tmux path.
+    if (session.launchContext?.flags?.length) return 'launchFlags';
     if (session.status !== 'bound') return 'notBound';
     if (session.modelProfileRequest) return 'modelRequest';
     if (session.queuedInputs?.length) return 'queuedInput';
@@ -4091,7 +4128,8 @@ export class SessionManager {
     }
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
-    this.runRecovery.cancel(session.id);
+    // Recovery is not cancelled here: a scheduled or running one made `classifyForStructuredMigration` refuse the row, and
+    // recovery runs under this same command lock, so none can have started since.
     this.db.meta.set(peerWakeComposerKey(session.id), '');
     const at = nowIso();
     const converted = this.db.boundSessions.setTransport(session.id, {
@@ -4150,52 +4188,85 @@ export class SessionManager {
   }
 
   /**
-   * A row with no cost profile was loaded on the provider's default (see the service). Keep it on the row, so the person
-   * sees which model the conversation runs and a later load starts on the same one.
+   * A row whose provider process may have outlived the last backend and is worth adopting. A per-session process (one Claude CLI
+   * per conversation) is worth adopting whatever it is doing, so idle sleep, memory pressure and release can end it. A shared
+   * process (the Codex app-server) keeps serving every thread, and resuming a thread loads it into that process, so only a thread
+   * that may be running a turn is adopted: a row still marked working, whose turn the process may still be running.
    */
-  private storeDefaultedStructuredProfile(sessionId: string, profile: ModelProfileKey): void {
-    const session = this.structuredRow(sessionId);
-    if (!session || activeModelProfile(session)) return;
-    const updated = this.updateBoundSessionFields(sessionId, { ...launchModelProfile(session.provider, profile), updatedAt: nowIso() });
-    this.eventBus.emit({ type: 'session.updated', session: updated });
+  private isSurvivorCandidate(row: BoundSession | undefined): row is BoundSession {
+    if (!row || row.transport !== 'structured' || !row.shouldRestore || row.status !== 'bound'
+      || row.manualSuspendedAt || row.pressureSuspendedAt || row.idleSuspendedAt) return false;
+    const model = this.structured.processModel(row.provider);
+    if (model === 'per-session') return true;
+    return model === 'shared' && row.isWorking === true;
   }
 
   /**
-   * First reconcile pass only. A per-session provider process (one Claude CLI per conversation) can outlive a backend
-   * restart behind its session host, and nothing owns it until its conversation is used, so idle sleep, memory pressure and
-   * release could not end it. This asks the plugin to adopt each established, awake conversation's own process. A row with
-   * no survivor stays unloaded and resumes on its next use; nothing is started here. Rows that are suspended, not yet
-   * established or served by one shared process are skipped.
+   * Adopts the provider process that survived for one row (the caller holds the row's command lock) and returns whether the row
+   * is loaded afterwards. A turn the process is running becomes the row's turn (working, recency untouched); one that ended while
+   * no backend listened is reported by the plugin as the terminal it was. Nothing is started and nothing ends a process here.
+   */
+  private async adoptStructuredSurvivor(row: BoundSession): Promise<boolean> {
+    const projects = this.recoveryDependencies?.projectService;
+    if (!projects || this.stopped) return false;
+    const current = this.db.boundSessions.getById(row.id);
+    if (!this.isSurvivorCandidate(current)) return false;
+    const project = await projects.getProjectBySlug(current.projectSlug);
+    if (!project || this.stopped) return false;
+    const [adopted] = await this.structured.reattachSurvivors([{ session: current, cwd: project.path }]);
+    if (!adopted) return false;
+    let session = this.updateBoundSessionFields(row.id, { pid: this.structured.loadedPid(row.id) });
+    await this.verifyNativeProcessEpoch(session);
+    // The plugin's first events (an adopted turn, a terminal it found) are handled within this turn of the event loop.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    session = this.mustGetSession(row.id);
+    if (session.isWorking && !this.structured.turnActive(session)) {
+      if (this.structured.processModel(session.provider) === 'per-session') {
+        // The turn the row says is running may have ended while no backend was listening, and nothing announces that. The
+        // working-state expiry clears the flag after an idle window unless the process reports a turn by then.
+        this.scheduleWorkingExpiry(session.id, nowIso());
+      } else {
+        // The shared process was asked about the thread and has no turn for it: the turn is lost the way a dead connection loses it.
+        await this.settleLostStructuredTurn(session);
+        session = this.mustGetSession(row.id);
+      }
+    }
+    this.watchSessionOutput(session);
+    session = this.mustGetSession(row.id);
+    this.eventBus.emit({ type: 'session.updated', session });
+    this.publishStructuredScreen(session.id);
+    return true;
+  }
+
+  /**
+   * First reconcile pass only. A provider process can outlive a backend restart behind its session host, and nothing owns it until
+   * its conversation is used: idle sleep, memory pressure and release could not end it, and a turn it is running would be declared
+   * lost. This ends the hosts no conversation owns any more, then asks the plugin to adopt each candidate row's process (see
+   * `isSurvivorCandidate`). A row with no survivor stays unloaded and resumes on its next use; nothing is started here.
    */
   private async reattachStructuredSurvivors(): Promise<void> {
     const projects = this.recoveryDependencies?.projectService;
     // Without project paths there is no working directory to hand the plugin; the next pass tries again.
     if (this.survivorsReattached || !projects) return;
     this.survivorsReattached = true;
-    const awake = (row: BoundSession | undefined): row is BoundSession => row !== undefined && row.transport === 'structured' && row.shouldRestore === true
-      && row.status === 'bound' && !row.manualSuspendedAt && !row.pressureSuspendedAt && !row.idleSuspendedAt;
+    const restorable = this.listRestorableSessions();
+    try {
+      // Asked again for each host, against the database as it is then: a conversation bound while the sweep runs owns its host.
+      const ended = await this.structured.sweepOrphanHosts(id => {
+        const row = this.db.boundSessions.getById(id);
+        return !!row && row.transport === 'structured' && row.shouldRestore === true && row.status !== 'ended';
+      });
+      if (ended.length > 0) this.logger?.info?.({ hosts: ended }, 'Ended provider session hosts that no conversation owns.');
+    } catch (error) {
+      this.logger?.warn({ err: error }, 'Sweeping provider session hosts that no conversation owns failed.');
+    }
     let adoptedAny = false;
-    for (const row of this.listRestorableSessions()) {
+    for (const row of restorable) {
       if (this.stopped) return;
-      if (!awake(row) || this.structured.processModel(row.provider) !== 'per-session') continue;
+      if (!this.isSurvivorCandidate(row)) continue;
       try {
-        const project = await projects.getProjectBySlug(row.projectSlug);
-        if (!project) continue;
         await this.runtimes.run(row.id, 'reattachSurvivor', async () => {
-          const current = this.db.boundSessions.getById(row.id);
-          if (this.stopped || !awake(current)) return;
-          const [adopted] = await this.structured.reattachSurvivors([{ session: current, cwd: project.path }]);
-          if (!adopted) return;
-          adoptedAny = true;
-          let session = this.updateBoundSessionFields(row.id, { pid: this.structured.loadedPid(row.id) });
-          await this.verifyNativeProcessEpoch(session);
-          // The turn the row says is running may have ended while no backend was listening, and nothing announces that.
-          // The working-state expiry clears the flag after an idle window unless the process reports a turn by then.
-          if (session.isWorking) this.scheduleWorkingExpiry(session.id, nowIso());
-          this.watchSessionOutput(session);
-          session = this.mustGetSession(row.id);
-          this.eventBus.emit({ type: 'session.updated', session });
-          this.publishStructuredScreen(session.id);
+          if (await this.adoptStructuredSurvivor(row)) adoptedAny = true;
         });
       } catch (error) {
         this.logger?.warn({ err: error, sessionId: row.id }, 'Reattaching a surviving provider process failed.');
@@ -4211,14 +4282,17 @@ export class SessionManager {
     if (session) this.appendEvent(session, { type: 'status', text, timestamp: nowIso() });
   }
 
-  /** A question is waiting: show it on the row, note it in the log (without its text) and push it to the browser. */
-  private handleStructuredQuestion(sessionId: string, request: PendingRequestSummary): void {
+  /**
+   * A question is waiting: show it on the row, note it in the log (without its text) and push it to the browser. One that was
+   * already announced (an earlier backend told the person) is shown again without the status line and the push.
+   */
+  private handleStructuredQuestion(sessionId: string, request: PendingRequestSummary, options: { announced: boolean }): void {
     const session = this.structuredRow(sessionId);
     if (!session) return;
-    this.appendStructuredStatus(sessionId, 'The agent asked a question');
+    if (!options.announced) this.appendStructuredStatus(sessionId, 'The agent asked a question');
     this.publishStructuredRequests(sessionId);
     const notify = this.notifyStructuredQuestion;
-    if (!notify) return;
+    if (!notify || options.announced) return;
     const notice: StructuredQuestionNotice = {
       sessionId, projectSlug: session.projectSlug, provider: session.provider, conversationRef: session.conversationRef,
       requestId: request.requestId, summary: request.summary,
@@ -4242,22 +4316,30 @@ export class SessionManager {
     return await this.runtimes.run(sessionId, 'answerStructuredRequest', async () => {
       const session = this.mustGetSession(sessionId);
       if (session.transport !== 'structured') throw new SessionInputRejectedError('Only app-server sessions have questions to answer.');
+      let sent: { message?: string };
       try {
-        await this.structured.respond(session, requestId, response.decision === 'answer'
+        sent = await this.structured.respond(session, requestId, response.decision === 'answer'
           ? { decision: 'answer', answers: response.answers, ...(response.text ? { text: response.text } : {}) }
           : { decision: 'decline' });
       } catch (error) {
         if (error instanceof StructuredRequestNotPendingError) throw new StructuredRequestNotFoundError(error.message);
-        throw error;
+        throw this.structuredInputError(error);
       }
+      // A question the agent asked in a message is answered with a message of the person's: it counts as their input.
+      if (sent.message) this.recordStructuredHumanInput(session, sent.message);
       return this.mustGetSession(sessionId);
     });
   }
 
   private structuredTextRejection(text: string, provider: ProviderId): string | undefined {
     // Refuse at admission, before the message is queued, rather than leave it failed in the journal.
-    if (structuredImages(text) && !this.structured.supportsImages(provider)) {
+    const files = structuredImages(text, this.imageStoreDir);
+    if (files && !this.structured.supportsImages(provider)) {
       return 'Image attachments are not available for this provider in app-server sessions. Nothing was sent.';
+    }
+    // An envelope that names images the store does not hold would reach the model as text pointing at files it cannot open.
+    if (!files && imagePromptDisplay(text).images?.length) {
+      return 'The attached image is not in the image store. Paste it again. Nothing was sent.';
     }
     if (STRUCTURED_SLASH_COMMAND.test(text.trim())) {
       return 'Slash commands are terminal controls and are not available on structured sessions. Send the request as a normal message. Nothing was sent.';
@@ -4286,10 +4368,15 @@ export class SessionManager {
     const rejection = this.structuredTextRejection(text, session.provider);
     if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     try {
-      await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text));
+      await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text, this.imageStoreDir));
     } catch (error) {
       throw this.structuredInputError(error);
     }
+    return this.recordStructuredHumanInput(session, text);
+  }
+
+  /** A message the person sent reached the provider: it is their activity, and the conversation log records it. */
+  private recordStructuredHumanInput(session: BoundSession, text: string): SessionCommandResult {
     const inputAt = nowIso();
     const updated = this.updateBoundSessionFields(session.id, { updatedAt: inputAt, lastActivityAt: inputAt });
     const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text, timestamp: inputAt }));
@@ -4299,11 +4386,13 @@ export class SessionManager {
   private async sendStructuredKeystrokes(session: BoundSession, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     this.assertStructuredKeystrokes(payload);
     if (payload.keys?.[0] === 'Escape') {
+      let cancelledSteerIds: string[];
       try {
-        await this.structured.interrupt(session);
+        ({ cancelledSteerIds } = await this.structured.interrupt(session));
       } catch (error) {
         throw new SessionInputRejectedError(`Stop could not be delivered: ${error instanceof Error ? error.message : 'unknown error'}.`);
       }
+      this.markCancelledSteers(session, cancelledSteerIds);
       this.inputQueue.stage(session.id, undefined);
       const activityAt = nowIso();
       return sessionCommandResult(this.updateBoundSessionFields(session.id, { updatedAt: activityAt, lastActivityAt: activityAt }));
@@ -4311,6 +4400,23 @@ export class SessionManager {
     const live = await this.refreshSessionState(session, { resumeIdle: true });
     if (!live) throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     return await this.submitStructuredText(live, (payload.submittedText ?? payload.text)!.trim());
+  }
+
+  /**
+   * Stop made the provider drop messages that were queued behind the running turn (steers that had not been folded in yet). The
+   * journal still says `submitted`, so each one is marked as not delivered, and the person is told once if one had no journal entry.
+   */
+  private markCancelledSteers(session: BoundSession, requestIds: string[]): void {
+    let untracked = 0;
+    for (const requestId of requestIds) {
+      const record = this.inputQueue.get(session.id, requestId);
+      if (!record) {
+        untracked += 1;
+        continue;
+      }
+      this.saveQueuedInput(session.id, { ...record, state: 'failed', reason: 'cancelled by Stop' });
+    }
+    if (untracked > 0) this.appendStructuredStatus(session.id, 'A message sent while the turn ran was cancelled by Stop and was not delivered.');
   }
 
   /** The journal replaces the terminal's paste-and-confirm steps: queued, submitting (request sent), submitted. */
@@ -4338,7 +4444,7 @@ export class SessionManager {
     const sending: QueuedInputRecord = { ...record, state: 'submitting', nativeRevision: attemptRevision, reason: 'Sending the message.' };
     this.saveQueuedInput(sessionId, sending);
     try {
-      const sent = await this.structured.submitHuman(session, record, structuredImages(record.text));
+      const sent = await this.structured.submitHuman(session, record, structuredImages(record.text, this.imageStoreDir));
       const inputAt = nowIso();
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
       const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));
@@ -4419,7 +4525,19 @@ export class SessionManager {
       this.eventBus.emit({ type: 'session.updated', session: ended });
       return undefined;
     }
-    if (!this.structured.alive(session)) {
+    let alive = this.structured.alive(session);
+    if (!alive && session.isWorking && this.isSurvivorCandidate(session)) {
+      // The backend restarted under this row's turn. Its provider process may still be running it, and a load of the row (the
+      // screen poll, a queued message, a wake) can come before the first reconcile looks for survivors: ask before declaring
+      // the turn lost, on every path that loads the row.
+      try {
+        alive = await this.adoptStructuredSurvivor(session);
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: session.id }, 'Reattaching a surviving provider process failed.');
+      }
+      session = this.db.boundSessions.getById(session.id) ?? session;
+    }
+    if (!alive) {
       await this.settleLostStructuredTurn(session);
       const current = this.db.boundSessions.getById(session.id);
       if (!current || current.status === 'releasing') return undefined;
@@ -4496,6 +4614,9 @@ export class SessionManager {
       await this.structured.unload(latest);
       this.appendEvent(latest, { type: 'status', text: 'Session suspended after extended idle; it will restore on next use.', timestamp: nowIso() });
       this.publishStructuredScreen(latest.id); // now reads "asleep"
+    } else {
+      // Not loaded here, but a provider process nobody adopted may still run for it: asleep means no process.
+      await this.structured.unload(latest);
     }
     this.stopWatching(latest.id);
     this.runtimes.clearEphemeral(latest.id);
@@ -4573,13 +4694,14 @@ export class SessionManager {
     this.publishStructuredScreen(completed.id);
   }
 
-  private handleStructuredTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay = false): void {
+  private handleStructuredTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay = false, adopted = false): void {
     const session = replay ? undefined : this.structuredRow(sessionId);
     if (!session) return;
     const at = nowIso();
     this.structuredMonitor(sessionId).turnStarted(turnId, at);
-    // A turn the provider began on its own is agent activity; one Console submitted already moved recency.
-    const current = origin === 'provider' ? this.updateBoundSessionFields(sessionId, { lastActivityAt: at, updatedAt: at }) : session;
+    // A turn the provider began on its own is agent activity; one Console submitted already moved recency. A turn found running
+    // when the session attached (a backend restart left it behind) is neither: the row is working again, and recency stays.
+    const current = origin === 'provider' && !adopted ? this.updateBoundSessionFields(sessionId, { lastActivityAt: at, updatedAt: at }) : session;
     this.syncSessionWorkingState(current, { screenShowsWorking: false, capturedAt: at });
     this.runRecovery.changed(sessionId);
     this.publishStructuredScreen(sessionId);

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import {
   CLAUDE_COST_PROFILES,
   CODEX_COST_PROFILES,
@@ -11,9 +13,12 @@ import {
 import { defaultStructuredProviderConfig, type StructuredProviderConfig } from '../../config/schema.js';
 import { nowIso } from '../../lib/time.js';
 import type { TransportPluginRegistry } from '../../providers/transport/registry.js';
+import { hostIdFor as claudeHostId } from '../../providers/transport/claude/claude-instance.js';
+import { hostPaths, terminateHost } from '../../providers/transport/line-transport.js';
 import {
   NotSentError,
   PreviousTurnActiveError,
+  RequestNotPendingError,
   TurnNotActiveError,
   type OpenOptions,
   type PluginContext,
@@ -27,6 +32,7 @@ import {
 } from '../../providers/transport/types.js';
 import type { QueuedInputRecord } from '../input-queue.js';
 import { structuredRequestsKey } from './pending-requests.js';
+import { withoutImageInstruction } from '../../images/prompt.js';
 
 export type StructuredSessionsConfig = Partial<Record<string, StructuredProviderConfig>>;
 
@@ -35,23 +41,29 @@ export type StructuredSessionState = Extract<TransportEvent, { type: 'session.st
 
 /** The session manager's side of the contract. The service never touches rows, queues or recency itself. */
 export interface StructuredCallbacks {
-  onTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay?: boolean): void;
+  /**
+   * `adopted`: the turn was already running when the session attached (a backend restart left it running). It is not new
+   * activity, so the owner marks the conversation working without moving recency.
+   */
+  onTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay?: boolean, adopted?: boolean): void;
   /** `replay` events come from resume backfill; the owner must not let them move recency. */
   onItemCompleted(sessionId: string, at: string, replay?: boolean): void;
   onTurnTerminal(sessionId: string, turnId: string, status: StructuredTerminalStatus, failure?: ProviderFailure, replay?: boolean): void;
-  /** A request the service declined at once (an approval or an elicitation). */
-  onRequest(sessionId: string, summary: string): void;
-  /** A question is waiting for the person. It is already stored, so the session row projects it. */
-  onQuestion(sessionId: string, request: PendingRequestSummary): void;
+  /**
+   * A request the service declined at once (an approval, an elicitation, or a question the Console cannot show). The summary can
+   * carry a command or question text: the owner keeps it out of the conversation's event log.
+   */
+  onRequest(sessionId: string, kind: Extract<TransportEvent, { type: 'request.opened' }>['kind'], summary: string): void;
+  /**
+   * A question is waiting for the person. It is already stored, so the session row projects it. `announced`: the person was told
+   * about this request id before (an earlier backend did, and the question outlived it): the owner shows it again without
+   * repeating the status line and the push.
+   */
+  onQuestion(sessionId: string, request: PendingRequestSummary, options: { announced: boolean }): void;
   /** The open questions changed: one was answered or withdrawn, or the session ended. The row projects the new list. */
   onRequestsChanged(sessionId: string): void;
   onSessionState(sessionId: string, state: StructuredSessionState, failure?: ProviderFailure): void;
   appendStatus(sessionId: string, text: string): void;
-  /**
-   * The service gave a row with no cost profile the provider's default for this load (see `DEFAULT_PROFILES`). The owner
-   * stores it on the row so the person sees which model the conversation runs.
-   */
-  onProfileDefaulted?(sessionId: string, profile: ModelProfileKey): void;
 }
 
 /** A row the host hands over at startup to look for a surviving provider process, with the directory it runs in. */
@@ -77,6 +89,11 @@ export interface StructuredSessionServiceOptions {
    */
   authorityContext?: (context: AgentLaunchContext) => string | undefined;
   logger?: { warn(bindings: object, message: string): void };
+  /**
+   * The Console runtime directory the provider session hosts live in. With it the service can end a per-session provider
+   * process whose conversation is not loaded (a survivor nobody adopted) and sweep hosts no conversation owns.
+   */
+  hosts?: { runtimeDir: string; log: { info(bindings: object, message: string): void; warn(bindings: object, message: string): void } };
 }
 
 /** A request that was never sent: the session cannot be reached. Safe to retry later. */
@@ -115,12 +132,15 @@ const TERMINAL_MEMORY = 64;
 export const BACKGROUND_WORK_STALE_MS = 4 * 3_600_000;
 
 /**
- * The cost profile a conversation gets when its row has none (a migrated tmux row, a history bind) and it was not launched
- * with a model of its own. It is the profile new Claude chats get (`claude-provider.ts` and the bind code default to
- * `medium`), so a resumed headless process does not start on the CLI's defaults. Codex has none: its shared process keeps
- * the model it was configured with.
+ * What a per-session Claude conversation with no cost profile runs on: the effort the tmux resume template names, with no model
+ * of its own (the CLI picks it, as it does for a tmux resume). No profile is stored on the row.
  */
-const DEFAULT_PROFILES: Partial<Record<ProviderId, ModelProfileKey>> = { claude: 'medium' };
+const UNPROFILED_CLAUDE_EFFORT = 'medium';
+
+/** Where a per-session provider keeps its session host and launch record, by provider. The service ends both when it ends a conversation. */
+const PER_SESSION_HOSTS: Partial<Record<ProviderId, { hostId(sessionId: string): string; launchKey(sessionId: string): string; hostPrefix: string }>> = {
+  claude: { hostId: claudeHostId, launchKey: sessionId => `claude-launch:${sessionId}`, hostPrefix: 'claude-' },
+};
 
 interface LoadedSession {
   readonly sessionId: string;
@@ -136,6 +156,13 @@ interface LoadedSession {
   /** When the transport last reported anything (or when the session was registered). Bounds the background-work flag. */
   lastEventAt: number;
   activeTurnId?: string;
+  /** Turns that were already running when the session attached; their start is not new activity. */
+  adoptedTurns: Set<string>;
+  /**
+   * True from registration until the transport's first burst of events was read: what the plugin queued while it opened or
+   * reattached the session (an adopted turn, requests it re-adopted) describes what was already there, not what just happened.
+   */
+  initialBurst: boolean;
   pendingInterrupt?: { turnId: string; at: string };
   profile?: ModelProfileKey;
   fallbackModel?: { model?: string; effort?: string };
@@ -166,6 +193,19 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The message a person's answer to a question the provider asked in a message becomes: one line per question, naming the
+ * question so the model can match it. Typed text joins the first question's answers.
+ */
+function answerMessage(question: PendingRequestSummary, response: Extract<RequestResponse, { decision: 'answer' }>): string {
+  const text = response.text?.trim();
+  return question.questions.map((item, index) => {
+    const answers = (response.answers[item.id] ?? []).filter(answer => typeof answer === 'string' && answer.length > 0);
+    if (index === 0 && text) answers.push(text);
+    return `Answer to your question: ${item.question}: ${answers.join(', ')}`;
+  }).join('\n');
+}
+
 const STATUS_REASON_MAX = 200;
 
 /**
@@ -192,6 +232,7 @@ export class StructuredSessionService {
   private readonly hostEnv: Record<string, string>;
   private readonly authorityContext?: (context: AgentLaunchContext) => string | undefined;
   private readonly logger?: { warn(bindings: object, message: string): void };
+  private readonly hosts?: StructuredSessionServiceOptions['hosts'];
   private readonly instances = new Map<string, TransportInstance>();
   /** The context each instance was created with: a per-session conversation reads the coordination identity from it. */
   private readonly contexts = new Map<string, PluginContext>();
@@ -210,6 +251,7 @@ export class StructuredSessionService {
     this.hostEnv = options.hostEnv ?? {};
     this.authorityContext = options.authorityContext;
     this.logger = options.logger;
+    this.hosts = options.hosts;
   }
 
   /** Whether new structured sessions may be bound for this provider. Existing rows do not depend on it. */
@@ -271,16 +313,25 @@ export class StructuredSessionService {
   }
 
   /**
-   * Startup, once: a per-session provider process can outlive a backend restart behind its session host, and nothing
-   * owns it until its conversation is used. For each candidate row of a per-session plugin this asks the plugin to adopt
-   * the conversation's own process. A survivor becomes a loaded session (new epoch, "Reconnected" status line), so idle
-   * sleep, memory pressure and release can end it like any other. A row with no survivor stays unloaded and resumes on its
-   * next use; nothing is started here. Shared-process plugins are skipped: their one process is reconnected on first use.
-   * Returns the ids now loaded. A failure on one row is logged and never stops the others.
+   * A provider process can outlive a backend restart behind its session host, and nothing owns it until its conversation is
+   * used. For each candidate row this asks the plugin to adopt what survived: a per-session plugin its conversation's own
+   * process, a shared plugin (Codex) the running app-server and the thread's turn in it. A survivor becomes a loaded session
+   * (new epoch, "Reconnected" status line), so idle sleep, memory pressure and release can end it like any other, and a turn it
+   * is running is the session's active turn. A row with no survivor stays unloaded and resumes on its next use; nothing is
+   * started here. The caller passes the rows worth adopting: a shared process keeps every thread loaded in memory once it is
+   * resumed, so only a thread that may be running a turn needs it. Returns the ids now loaded. A failure on one row is logged
+   * and never stops the others.
    */
   async reattachSurvivors(candidates: SurvivorCandidate[]): Promise<string[]> {
     const adopted: string[] = [];
     for (const candidate of candidates) {
+      // A lookup for this conversation is already running: a second resume of the same thread must never start beside it.
+      const running = this.reattaching.get(candidate.session.id);
+      if (running) {
+        await running.catch(() => undefined);
+        if (this.alive(candidate.session)) adopted.push(candidate.session.id);
+        continue;
+      }
       const lookup = this.reattachSurvivor(candidate).finally(() => { this.reattaching.delete(candidate.session.id); });
       this.reattaching.set(candidate.session.id, lookup);
       try {
@@ -296,15 +347,14 @@ export class StructuredSessionService {
     if (this.alive(session) || this.loading.has(session.id)) return false; // a use of the conversation got there first
     const nativeSessionId = session.resumeConversationRef ?? session.conversationRef;
     if (nativeSessionId.startsWith('pending:')) return false;
-    const instance = this.perSessionInstance(session.provider);
+    const instance = this.reattachingInstance(session.provider);
     if (!instance?.reattach) return false;
-    const fallback = { model: session.launchContext?.model, effort: session.launchContext?.effort };
-    const resolved = this.resolveProfile(session.provider, instance, sessionProfile(session), fallback);
-    const options = this.openOptions(session.id, session.provider, instance, cwd, true, resolved.profile, fallback, session.launchContext);
+    const profile = sessionProfile(session);
+    const fallback = this.fallbackModel(session.provider, instance, profile, { model: session.launchContext?.model, effort: session.launchContext?.effort });
+    const options = this.openOptions(session.id, session.provider, instance, cwd, true, profile, fallback, session.launchContext);
     const transport = await instance.reattach(nativeSessionId, options);
     if (!transport) return false;
-    const state = await this.register(session.id, session.provider, instance, transport, resolved.profile, fallback);
-    if (resolved.defaulted) this.defaulted(state);
+    const state = await this.register(session.id, session.provider, instance, transport, profile, fallback, true);
     this.safely(() => this.callbacks.appendStatus(session.id, 'Reconnected to the running agent process'), state);
     return true;
   }
@@ -391,11 +441,17 @@ export class StructuredSessionService {
   }
 
   /** Drop the thread from memory (idle sleep, manual suspend). The row and the epoch stay. */
-  async unload(session: Pick<BoundSession, 'id'>): Promise<void> {
+  async unload(session: Pick<BoundSession, 'id'> & Partial<Pick<BoundSession, 'provider'>>): Promise<void> {
     const state = this.sessions.get(session.id);
-    if (!state) return;
-    // The host asked for this end, so the stopped state that follows is not a lost connection.
+    if (!state) {
+      // Not loaded here, but a per-session provider process may still run for it (a survivor nobody adopted): sleeping ends it too.
+      await this.endConversation(session);
+      return;
+    }
+    // The host asked for this end, so the stopped state that follows is not a lost connection. The thread leaves the provider, and
+    // its questions with it.
     state.closing = true;
+    this.clearAnnounced(session.id);
     this.forget(state);
     // Shared process: the thread leaves memory and the process keeps serving other threads. Per-session: the process is this
     // conversation's alone, so unloading ends it (the transport confirms the exit) and the next load resumes by native id.
@@ -404,11 +460,15 @@ export class StructuredSessionService {
   }
 
   /** End the native session for good (release). */
-  async release(session: Pick<BoundSession, 'id'>): Promise<void> {
+  async release(session: Pick<BoundSession, 'id'> & Partial<Pick<BoundSession, 'provider'>>): Promise<void> {
     const state = this.sessions.get(session.id);
     this.failures.delete(session.id);
     this.meta.delete(`structured-epoch:${session.id}`);
-    if (!state) return;
+    this.clearAnnounced(session.id);
+    if (!state) {
+      await this.endConversation(session);
+      return;
+    }
     state.closing = true;
     this.forget(state);
     // A per-session process ends with the release itself; a shared one drops the thread first and keeps running.
@@ -416,6 +476,62 @@ export class StructuredSessionService {
       try { await state.transport.unload(); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured unload failed.'); }
     }
     await state.transport.close('release');
+  }
+
+  /**
+   * Ends whatever runs for this conversation without loading it: its provider process behind a session host, and the record of
+   * the command line it was launched with. For a conversation that is not loaded here (released or put to sleep while its
+   * process had not been adopted since a backend restart, or after an adoption that failed) nothing else would ever end it. A
+   * provider with one shared process has nothing of its own to end. The `provider` is read from the row when the caller has it;
+   * otherwise every per-session provider is tried (a host that does not exist is a no-op).
+   */
+  async endConversation(session: Pick<BoundSession, 'id'> & Partial<Pick<BoundSession, 'provider'>>): Promise<void> {
+    if (!this.hosts) return;
+    for (const [provider, naming] of Object.entries(PER_SESSION_HOSTS) as Array<[ProviderId, NonNullable<(typeof PER_SESSION_HOSTS)[ProviderId]>]>) {
+      if (session.provider && session.provider !== provider) continue;
+      const hostId = naming.hostId(session.id);
+      try {
+        await terminateHost(this.hosts.runtimeDir, hostId, this.hosts.log);
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: session.id, hostId }, 'Ending the provider process of a conversation failed.');
+      }
+      this.meta.delete(naming.launchKey(session.id));
+    }
+  }
+
+  /**
+   * Startup: ends the session hosts of per-session providers whose conversation has no restorable row (a row that was released,
+   * deleted or never committed). Each would otherwise run for ever with nothing to ever use or end it. `owned` says whether a
+   * conversation id still has a restorable structured row. Hosts of conversations that have one are left to the adoption pass.
+   * Returns the host ids it ended.
+   */
+  async sweepOrphanHosts(owned: (sessionId: string) => boolean): Promise<string[]> {
+    if (!this.hosts) return [];
+    let names: string[];
+    try {
+      names = fs.readdirSync(hostPaths(this.hosts.runtimeDir, 'sweep').dir).filter(name => name.endsWith('.json'));
+    } catch {
+      return []; // no hosts directory yet
+    }
+    const ended: string[] = [];
+    for (const name of names) {
+      const hostId = name.slice(0, -'.json'.length);
+      for (const naming of Object.values(PER_SESSION_HOSTS)) {
+        if (!naming || !hostId.startsWith(naming.hostPrefix)) continue;
+        const sessionId = hostId.slice(naming.hostPrefix.length);
+        // The id in the file name is the conversation id with unusual characters replaced; a row matches when it maps to this host.
+        if (owned(sessionId) && naming.hostId(sessionId) === hostId) break;
+        try {
+          await terminateHost(this.hosts.runtimeDir, hostId, this.hosts.log);
+          this.meta.delete(naming.launchKey(sessionId));
+          ended.push(hostId);
+        } catch (error) {
+          this.logger?.warn({ err: error, hostId }, 'Ending a provider process that no conversation owns failed.');
+        }
+        break;
+      }
+    }
+    return ended;
   }
 
   async shutdown(): Promise<void> {
@@ -430,7 +546,7 @@ export class StructuredSessionService {
 
   /** Human text: a new turn when idle, a steer while a turn runs (falling back to a new turn if it just ended). */
   async submitHuman(
-    session: BoundSession,
+    session: Pick<BoundSession, 'id'>,
     record: Pick<QueuedInputRecord, 'requestId' | 'text'>,
     images?: TurnInput['images'],
   ): Promise<{ turnId: string; mode: 'turn' | 'steer' }> {
@@ -438,7 +554,10 @@ export class StructuredSessionService {
     if (images?.length && !state.transport.capabilities.images) {
       throw new StructuredUnsupportedError('This structured session cannot take image attachments.');
     }
-    const input: TurnInput = { text: record.text, images, clientMessageId: record.requestId, ...this.modelFor(state) };
+    // The envelope in the stored message tells a terminal agent to open the files itself. A transport that attaches the images
+    // natively would pay for each image twice, so the instruction is dropped from what it sends (the rows stay).
+    const text = images?.length ? withoutImageInstruction(record.text) : record.text;
+    const input: TurnInput = { text, images, clientMessageId: record.requestId, ...this.modelFor(state) };
     const activeTurnId = state.activeTurnId;
     if (activeTurnId) {
       const steer = state.transport.steer?.bind(state.transport);
@@ -455,18 +574,24 @@ export class StructuredSessionService {
     return { turnId: await this.startTurn(state, input), mode: 'turn' };
   }
 
-  async interrupt(session: Pick<BoundSession, 'id'>): Promise<'interrupted' | 'idle'> {
+  /**
+   * Stop. `cancelledSteerIds` are the steers that were queued behind the turn and that the provider dropped with it (the
+   * `requestId` of the message that was sent as a steer): they were never delivered, and the owner marks them so.
+   */
+  async interrupt(session: Pick<BoundSession, 'id'>): Promise<{ outcome: 'interrupted' | 'idle'; cancelledSteerIds: string[] }> {
     const state = this.sessions.get(session.id);
     const turnId = state?.activeTurnId;
-    if (!state || !turnId) return 'idle';
+    if (!state || !turnId) return { outcome: 'idle', cancelledSteerIds: [] };
     state.pendingInterrupt = { turnId, at: nowIso() };
+    let result: Awaited<ReturnType<TransportSession['interrupt']>>;
     try {
-      await state.transport.interrupt(turnId);
+      result = await state.transport.interrupt(turnId);
     } catch (error) {
       if (state.pendingInterrupt?.turnId === turnId) state.pendingInterrupt = undefined;
       throw error;
     }
-    return 'interrupted';
+    const cancelled = result && typeof result === 'object' && Array.isArray(result.cancelledSteerIds) ? result.cancelledSteerIds : [];
+    return { outcome: 'interrupted', cancelledSteerIds: cancelled.filter((id): id is string => typeof id === 'string') };
   }
 
   /** Coordination wake, recovery and restart prompts. Never steers a running turn; never replays. */
@@ -488,17 +613,40 @@ export class StructuredSessionService {
    * Forwards the person's answer to a question held open, once. The question leaves the list as soon as the
    * transport has taken the answer, so a second attempt (a double click, another browser) finds nothing.
    */
-  async respond(session: Pick<BoundSession, 'id'>, requestId: string, response: RequestResponse): Promise<void> {
+  async respond(session: Pick<BoundSession, 'id'>, requestId: string, response: RequestResponse): Promise<{ message?: string }> {
     const state = this.sessions.get(session.id);
-    if (!state?.loaded || !state.questions.has(requestId) || state.answering.has(requestId)) throw new StructuredRequestNotPendingError();
+    const question = state?.questions.get(requestId);
+    if (!state?.loaded || !question || state.answering.has(requestId)) throw new StructuredRequestNotPendingError();
     state.answering.add(requestId);
+    // A question the provider asked in a message is not waiting on anything: the answer is a normal message from the person.
+    if (question.responseMode === 'message') {
+      try {
+        if (response.decision !== 'answer') {
+          this.closeRequest(state, requestId);
+          return {};
+        }
+        const message = answerMessage(question, response);
+        await this.submitHuman(session, { requestId: randomUUID(), text: message });
+        this.closeRequest(state, requestId);
+        return { message };
+      } catch (error) {
+        state.answering.delete(requestId);
+        throw error;
+      }
+    }
     try {
       await state.transport.respond(requestId, response);
     } catch (error) {
       state.answering.delete(requestId);
+      if (error instanceof RequestNotPendingError) {
+        // The provider says it is not open (withdrawn, or its turn ended): it must not stay on the card either.
+        this.closeRequest(state, requestId);
+        throw new StructuredRequestNotPendingError(error.message);
+      }
       throw error;
     }
     this.closeRequest(state, requestId);
+    return {};
   }
 
   /** Switch the profile used by the next turn. A running turn keeps its model, so the switch is deferred. */
@@ -580,8 +728,8 @@ export class StructuredSessionService {
     launchContext: AgentLaunchContext | undefined,
   ): Promise<LoadedSession> {
     const instance = this.instanceFor(provider);
-    const resolved = this.resolveProfile(provider, instance, profile, fallbackModel);
-    const options = this.openOptions(sessionId, provider, instance, cwd, nativeSessionId !== undefined, resolved.profile, fallbackModel, launchContext);
+    fallbackModel = this.fallbackModel(provider, instance, profile, fallbackModel);
+    const options = this.openOptions(sessionId, provider, instance, cwd, nativeSessionId !== undefined, profile, fallbackModel, launchContext);
     // One process per conversation: a second open while the first is loaded would put two writers on one transcript.
     if (instance.capabilities.processModel === 'per-session' && this.sessions.get(sessionId)?.loaded) {
       throw new StructuredUnavailableError('This conversation already has a running provider process.');
@@ -593,9 +741,7 @@ export class StructuredSessionService {
       await this.dropInstanceIfDisconnected(provider, instance);
       throw error;
     }
-    const state = await this.register(sessionId, provider, instance, transport, resolved.profile, fallbackModel);
-    if (resolved.defaulted) this.defaulted(state);
-    return state;
+    return await this.register(sessionId, provider, instance, transport, profile, fallbackModel, nativeSessionId !== undefined);
   }
 
   private openOptions(
@@ -620,33 +766,26 @@ export class StructuredSessionService {
   }
 
   /**
-   * The profile a conversation runs on: the row's own, else the provider's default (a per-session Claude process that
-   * would otherwise start on the CLI's defaults) unless a granted launch named its own model or effort.
+   * The model and effort a conversation runs on when its row has no cost profile (a migrated tmux row, a history bind) and no
+   * launch named its own: what the tmux resume template gives it, effort `medium` and no model, so a resumed headless Claude
+   * process does not start on the CLI's own effort. Nothing is stored on the row. Codex has none: its shared process keeps the
+   * model it was configured with.
    */
-  private resolveProfile(
+  private fallbackModel(
     provider: ProviderId,
     instance: TransportInstance,
     profile: ModelProfileKey | undefined,
     fallbackModel: { model?: string; effort?: string },
-  ): { profile: ModelProfileKey | undefined; defaulted: boolean } {
-    if (profile) return { profile, defaulted: false };
-    const fallback = DEFAULT_PROFILES[provider];
-    if (!fallback || instance.capabilities.processModel !== 'per-session' || fallbackModel.model || fallbackModel.effort) {
-      return { profile: undefined, defaulted: false };
-    }
-    return { profile: fallback, defaulted: true };
+  ): { model?: string; effort?: string } {
+    if (profile || provider !== 'claude' || instance.capabilities.processModel !== 'per-session' || fallbackModel.model || fallbackModel.effort) return fallbackModel;
+    return { effort: UNPROFILED_CLAUDE_EFFORT };
   }
 
-  /** Tells the owner a default profile is in use, so it can store it on the row. */
-  private defaulted(state: LoadedSession): void {
-    if (state.profile) this.safely(() => this.callbacks.onProfileDefaulted?.(state.sessionId, state.profile!), state);
-  }
-
-  /** The instance of a provider whose processes are one per conversation, or undefined (no plugin, or a shared process). */
-  private perSessionInstance(provider: ProviderId): TransportInstance | undefined {
+  /** The instance of a provider whose plugin can adopt a process that outlived the backend, or undefined (no plugin, or none that can). */
+  private reattachingInstance(provider: ProviderId): TransportInstance | undefined {
     try {
       const instance = this.instanceFor(provider);
-      return instance.capabilities.processModel === 'per-session' ? instance : undefined;
+      return typeof instance.reattach === 'function' ? instance : undefined;
     } catch {
       return undefined;
     }
@@ -660,6 +799,7 @@ export class StructuredSessionService {
     transport: TransportSession,
     profile: ModelProfileKey | undefined,
     fallbackModel: { model?: string; effort?: string },
+    attaching = false,
   ): Promise<LoadedSession> {
     const connection = await instance.alive().catch(() => ({ pid: undefined, connected: false }));
     const epoch = nowIso();
@@ -677,6 +817,8 @@ export class StructuredSessionService {
       lastEventAt: Date.now(),
       profile,
       fallbackModel,
+      adoptedTurns: new Set(),
+      initialBurst: attaching,
       pendingRequests: new Set(),
       questions: new Map(),
       answering: new Set(),
@@ -687,8 +829,16 @@ export class StructuredSessionService {
     if (previous) { previous.closing = true; previous.loaded = false; }
     this.sessions.set(sessionId, state);
     this.meta.set(`structured-epoch:${sessionId}`, epoch);
+    // A turn the plugin found running when it attached is the session's turn from the start; it is not new activity.
+    if (attaching && transport.activeTurn) {
+      state.activeTurnId = transport.activeTurn;
+      state.adoptedTurns.add(transport.activeTurn);
+      this.safely(() => this.callbacks.onTurnStarted(sessionId, transport.activeTurn!, 'provider', false, true), state);
+    }
     // Questions of an earlier connection died with it.
     if (this.meta.get(structuredRequestsKey(sessionId))) this.publishRequests(state);
+    // What the plugin queued while it attached is read within this turn of the event loop; whatever comes later is new.
+    if (attaching) setImmediate(() => { state.initialBurst = false; });
     void this.consume(state);
     return state;
   }
@@ -752,13 +902,54 @@ export class StructuredSessionService {
   private closeRequest(state: LoadedSession, requestId: string): void {
     state.pendingRequests.delete(requestId);
     state.answering.delete(requestId);
-    if (state.questions.delete(requestId)) this.publishRequests(state);
+    if (state.questions.delete(requestId)) {
+      this.forgetAnnounced(state, requestId);
+      this.publishRequests(state);
+    }
+  }
+
+  // The request ids the person was told about (status line and push), kept across a backend restart: a question that was still
+  // open behind a surviving provider process is shown again by the next backend, without telling the person a second time.
+  // They belong to one provider process: Codex numbers its requests from 0 in every app-server process, so ids written down for
+  // an earlier process say nothing about the same ids from a new one.
+  private announcedKey(sessionId: string): string {
+    return `structured-announced:${sessionId}`;
+  }
+
+  private announcedIds(state: LoadedSession): string[] {
+    try {
+      const stored = JSON.parse(this.meta.get(this.announcedKey(state.sessionId)) ?? 'null') as { pid?: unknown; ids?: unknown } | null;
+      if (!stored || (stored.pid ?? null) !== (state.pid ?? null) || !Array.isArray(stored.ids)) return [];
+      return stored.ids.filter((id): id is string => typeof id === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  private writeAnnounced(state: LoadedSession, ids: string[]): void {
+    if (ids.length > 0) this.meta.set(this.announcedKey(state.sessionId), JSON.stringify({ pid: state.pid ?? null, ids: ids.slice(-64) }));
+    else this.meta.delete(this.announcedKey(state.sessionId));
+  }
+
+  private noteAnnounced(state: LoadedSession, requestId: string): void {
+    const ids = this.announcedIds(state);
+    if (!ids.includes(requestId)) this.writeAnnounced(state, [...ids, requestId]);
+  }
+
+  private forgetAnnounced(state: LoadedSession, requestId: string): void {
+    const ids = this.announcedIds(state);
+    if (ids.includes(requestId)) this.writeAnnounced(state, ids.filter(id => id !== requestId));
+  }
+
+  private clearAnnounced(sessionId: string): void {
+    this.meta.delete(this.announcedKey(sessionId));
   }
 
   /** Closes the questions `belongs` selects: ones a new turn or the end of their own turn made stale. */
   private dropRequests(state: LoadedSession, belongs: (question: PendingRequestSummary) => boolean): void {
     for (const question of [...state.questions.values()]) {
-      if (belongs(question)) this.closeRequest(state, question.requestId);
+      // A question the provider asked in a message outlives its turn: the model moved on, and the answer is a new message.
+      if (question.responseMode !== 'message' && belongs(question)) this.closeRequest(state, question.requestId);
     }
   }
 
@@ -770,11 +961,14 @@ export class StructuredSessionService {
       summary: event.summary,
       questions: event.questions ?? [],
       ...(event.turnId ? { turnId: event.turnId } : {}),
+      ...(event.responseMode === 'message' ? { responseMode: 'message' as const } : {}),
       openedAt: nowIso(),
     };
     state.questions.set(request.requestId, request);
     this.storeRequests(state);
-    this.safely(() => this.callbacks.onQuestion(state.sessionId, request), state);
+    const announced = this.announcedIds(state).includes(request.requestId);
+    if (!announced) this.noteAnnounced(state, request.requestId);
+    this.safely(() => this.callbacks.onQuestion(state.sessionId, request, { announced }), state);
   }
 
   private async dropInstanceIfDisconnected(provider: ProviderId, instance: TransportInstance): Promise<void> {
@@ -840,7 +1034,8 @@ export class StructuredSessionService {
           // A question belongs to the turn that raised it; one left over from an earlier turn is stale.
           this.dropRequests(state, question => question.turnId !== event.turnId);
         }
-        this.safely(() => this.callbacks.onTurnStarted(id, event.turnId, event.origin, event.replay), state);
+        if (event.adopted === true || (event.origin === 'provider' && state.initialBurst)) state.adoptedTurns.add(event.turnId);
+        this.safely(() => this.callbacks.onTurnStarted(id, event.turnId, event.origin, event.replay, state.adoptedTurns.has(event.turnId)), state);
         return;
       case 'item.completed':
         this.safely(() => this.callbacks.onItemCompleted(id, nowIso(), event.replay), state);
@@ -852,11 +1047,14 @@ export class StructuredSessionService {
           this.openQuestion(state, event);
           return;
         }
-        // There is no approval UI: decline anything else, then record it.
+        // There is no approval UI: decline anything else, then record it. What it asked stays in the server log; the owner's
+        // conversation log gets a fixed line for a question and a short line for the rest.
         void state.transport.respond(event.requestId, { decision: 'decline' }).catch((error: unknown) => {
+          if (error instanceof RequestNotPendingError) return; // withdrawn before the decline reached it
           this.logger?.warn({ err: error, sessionId: id, requestId: event.requestId }, 'Declining a provider request failed.');
         });
-        this.safely(() => this.callbacks.onRequest(id, event.summary), state);
+        this.logger?.warn({ sessionId: id, requestId: event.requestId, kind: event.kind, summary: event.summary }, 'Declined a provider request.');
+        this.safely(() => this.callbacks.onRequest(id, event.kind, event.summary), state);
         return;
       }
       case 'request.closed':

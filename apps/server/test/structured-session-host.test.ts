@@ -16,6 +16,7 @@ import {
   terminateHost,
   terminateHostAt,
   transportStartedFresh,
+  transportWasStarted,
   type LineTransportExit,
 } from '../src/providers/transport/line-transport.js';
 import {
@@ -24,10 +25,11 @@ import {
   LineSplitter,
   parseHostArgs,
   parseHostRecord,
+  processGroupHasMembers,
   ReplayBuffer,
   resolveExecutable,
 } from '../src/providers/transport/session-host.js';
-import { NotSentError } from '../src/providers/transport/types.js';
+import { LineTransportNotRunningError, NotSentError, TransportUnavailableError } from '../src/providers/transport/types.js';
 
 // These tests run the real host program (`session-host.ts`, whose types Node strips) against a scripted child.
 vi.setConfig({ testTimeout: 30_000 });
@@ -441,6 +443,66 @@ describe('the session host program', () => {
     expect(exits[0]).toMatchObject({ code: null, signal: 'SIGKILL', reason: 'exited' });
   });
 
+  describe('what the child leaves in its process group', () => {
+    // An MCP server or a background shell the provider started shares its group and can outlive it.
+    async function startWithGrandchild(): Promise<{ rig: HostRig; grandchild: number; childPid: number; transport: HostLineTransport; exits: LineTransportExit[] }> {
+      const rig = await startHost({ childFlags: ['--grandchild'], hostFlags: ['--linger-ms', '3000'] });
+      const grandchild = (await waitUntil(() => childEvents(rig).find((entry) => entry.event === 'grandchild'), 8_000, 'the grandchild'))!.pid as number;
+      cleanups.push(() => { try { process.kill(grandchild, 'SIGKILL'); } catch { /* gone */ } });
+      const { transport, exits } = await connect(rig);
+      expect(running(grandchild)).toBe(true);
+      expect(processGroupId(grandchild)).toBe(transport.pid); // in the child's group
+      return { rig, grandchild, childPid: transport.pid!, transport, exits };
+    }
+
+    it('are ended when the child exits on its own', async () => {
+      const { grandchild, transport, exits } = await startWithGrandchild();
+      await transport.write(line({ cmd: 'exit', code: 0 }));
+      await waitUntil(() => exits.length === 1, 8_000, 'the exit');
+      expect(await untilGone(grandchild, 5_000)).toBe(true);
+    });
+
+    it('are ended when the child is killed (a crash or an out-of-memory kill)', async () => {
+      const { grandchild, transport, exits } = await startWithGrandchild();
+      await transport.write(line({ cmd: 'signal', name: 'SIGKILL' }));
+      await waitUntil(() => exits.length === 1, 8_000, 'the exit');
+      expect(exits[0]).toMatchObject({ signal: 'SIGKILL' });
+      expect(await untilGone(grandchild, 5_000)).toBe(true);
+    });
+
+    it('are gone for good by the time a late terminate arrives, which stops the lingering host at once', async () => {
+      const { rig, grandchild, transport, exits } = await startWithGrandchild();
+      await transport.write(line({ cmd: 'exit', code: 0 }));
+      await waitUntil(() => exits.length === 1, 8_000, 'the exit');
+      expect(await untilGone(grandchild, 5_000)).toBe(true);
+      expect(running(rig.hostPid)).toBe(true); // lingering, as designed
+      expect(await terminateHostAt(rig.socketPath, { closeGraceMs: 300, termGraceMs: 300 })).toBe(true);
+      expect(await untilGone(rig.hostPid)).toBe(true);
+    });
+
+    it('leave a process outside the group alone', async () => {
+      const bystander = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });
+      cleanups.push(() => { try { process.kill(bystander.pid!, 'SIGKILL'); } catch { /* gone */ } });
+      await waitUntil(() => processStartTicks(bystander.pid!), 5_000, 'the bystander');
+      const { grandchild, transport, exits } = await startWithGrandchild();
+      await transport.write(line({ cmd: 'exit', code: 0 }));
+      await waitUntil(() => exits.length === 1, 8_000, 'the exit');
+      expect(await untilGone(grandchild, 5_000)).toBe(true);
+      expect(running(bystander.pid!)).toBe(true);
+    });
+
+    it('are found by group membership: a live group has members, an empty or unknown one has none', async () => {
+      const member = spawn('sleep', ['300'], { stdio: 'ignore', detached: true }); // leads its own group
+      cleanups.push(() => { try { process.kill(-member.pid!, 'SIGKILL'); } catch { /* gone */ } });
+      await waitUntil(() => processStartTicks(member.pid!), 5_000, 'the member');
+      expect(processGroupHasMembers(member.pid!)).toBe(true);
+      process.kill(member.pid!, 'SIGKILL');
+      expect(await untilGone(member.pid!)).toBe(true);
+      expect(processGroupHasMembers(member.pid!)).toBe(false);
+      expect(processGroupHasMembers(2_147_483_000)).toBe(false);
+    });
+  });
+
   it('ends the child in order on terminate: stdin EOF, then SIGTERM, then SIGKILL to its whole group', async () => {
     const rig = await startHost({ childFlags: ['--ignore-eof', '--ignore-term'] });
     const { transport, exits } = await connect(rig, undefined, { closeGraceMs: 250, termGraceMs: 250 });
@@ -657,6 +719,127 @@ describe('the line transport factory', () => {
     expect(await untilGone(hostPid)).toBe(true);
     expect(fs.existsSync(rig.paths.record)).toBe(false);
     expect(fs.existsSync(rig.paths.socket)).toBe(false);
+  });
+
+  it('leaves a running host alone when it only fails to answer in time, and finds it again once it does', async () => {
+    const rig = factoryRig();
+    const first = await open(rig.make(), rig.request());
+    const hostPid = first.transport.info.hostPid;
+    const childPid = first.transport.pid!;
+    await first.transport.close(); // the backend goes away; host and child stay
+    // A stalled machine: the host is alive (pid, start time and boot match its record) and answers nothing.
+    process.kill(hostPid, 'SIGSTOP');
+    cleanups.push(() => { try { process.kill(hostPid, 'SIGCONT'); } catch { /* gone */ } });
+    const slow = createLineTransportFactory({ runtimeDir: rig.runtimeDir, log, hostProgramPath: HOST_PROGRAM, hostConnectTimeoutMs: 400, hostWelcomeTimeoutMs: 400 });
+    const failure = await slow(rig.request()).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TransportUnavailableError);
+    expect(logs.some(([level, , message]) => level === 'warn' && /leaving it alone/.test(message))).toBe(true);
+    // Nothing was retired: the host and its provider still run, and the record and socket are still there.
+    expect(running(hostPid)).toBe(true);
+    expect(running(childPid)).toBe(true);
+    expect(readHostRecord(rig.paths.record)?.host.pid).toBe(hostPid);
+    expect(fs.existsSync(rig.paths.socket)).toBe(true);
+    expect(childEvents({ childLog: rig.childLog } as HostRig).filter((entry) => entry.event === 'sigterm' || entry.event === 'stdin-eof')).toEqual([]);
+
+    process.kill(hostPid, 'SIGCONT');
+    await sleep(100);
+    const again = await open(rig.make(), rig.request());
+    expect(again.transport.info.hostPid).toBe(hostPid); // the same host, the same provider
+    expect(again.transport.pid).toBe(childPid);
+    expect(childEvents({ childLog: rig.childLog } as HostRig).filter((entry) => entry.event === 'start')).toHaveLength(1);
+    await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
+  });
+
+  it('still replaces a host that runs but has no socket to answer on: nothing could ever reach its provider', async () => {
+    const rig = factoryRig();
+    const first = await open(rig.make(), rig.request());
+    const hostPid = first.transport.info.hostPid;
+    const childPid = first.transport.pid!;
+    await first.transport.close();
+    fs.unlinkSync(rig.paths.socket); // alive, but unreachable for good: not slow, refused
+    const second = await open(rig.make(), rig.request());
+    expect(second.transport.info.hostPid).not.toBe(hostPid);
+    expect(second.transport.pid).not.toBe(childPid);
+    expect(await untilGone(hostPid)).toBe(true);
+    expect(await untilGone(childPid)).toBe(true);
+    await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
+  });
+
+  it('tells an attach why nothing answered: no host, a provider that ended, a refused socket, or a host too slow to answer', async () => {
+    const rig = factoryRig();
+    const slow = () => createLineTransportFactory({ runtimeDir: rig.runtimeDir, log, hostProgramPath: HOST_PROGRAM, hostConnectTimeoutMs: 300, hostWelcomeTimeoutMs: 300 });
+    const reason = async (factory = slow()) => ((await factory(rig.request({ attachOnly: true })).catch((error: unknown) => error)) as LineTransportNotRunningError).reason;
+
+    expect(await reason()).toBe('absent'); // no record, no host
+
+    const first = await open(rig.make(), rig.request());
+    const hostPid = first.transport.info.hostPid;
+    await first.transport.close();
+    process.kill(hostPid, 'SIGSTOP');
+    cleanups.push(() => { try { process.kill(hostPid, 'SIGCONT'); } catch { /* gone */ } });
+    expect(await reason()).toBe('unreachable'); // alive, stalled: the provider may well run
+    expect(running(hostPid)).toBe(true);
+    process.kill(hostPid, 'SIGCONT');
+    await sleep(100);
+
+    const attached = await slow()(rig.request({ attachOnly: true })); // it answers now: an attach connects instead of failing
+    expect(transportWasStarted(attached)).toBe(false);
+    await attached.close();
+    fs.unlinkSync(rig.paths.socket);
+    expect(await reason()).toBe('absent'); // alive, but nobody can reach it
+
+    const other = factoryRig();
+    const second = await open(other.make(), other.request());
+    await second.transport.write(line({ cmd: 'exit', code: 0 }));
+    await waitUntil(() => !running(second.transport.pid!), 8_000, 'the provider to end');
+    const ended = (await other.make()(other.request({ attachOnly: true })).catch((error: unknown) => error)) as LineTransportNotRunningError;
+    expect(ended.reason).toBe('ended'); // the host lingers, the provider is gone
+  });
+
+  describe('replay', () => {
+    // Claude asks for what its process printed before it connected (hook frames), with sinceSeq 0, on every launch.
+    // That is right for a process this call started or one nobody has written to; it must never replay a used one.
+    it('shows the startup output to the client of a host it started, and of one never written to, and nothing to a client of a used host', async () => {
+      const rig = factoryRig();
+      const request = (extra: Record<string, unknown> = {}) => rig.request({ argv: [process.execPath, FAKE_CHILD, rig.childLog, '--banner'], sinceSeq: 0, ...extra });
+      const banners = (lines: string[]) => lines.filter((value) => value.includes('"banner"'));
+
+      const first = await open(rig.make(), request());
+      expect(transportWasStarted(first.transport)).toBe(true);
+      await waitUntil(() => banners(first.lines).length === 1, 8_000, 'the banner');
+      await first.transport.close();
+
+      const second = await open(rig.make(), request()); // the host exists, and nobody has written to it
+      expect(transportWasStarted(second.transport)).toBe(false);
+      expect(transportStartedFresh(second.transport)).toBe(true);
+      await waitUntil(() => banners(second.lines).length === 1, 8_000, 'the banner replayed to the second client');
+      await second.transport.write(line({ cmd: 'echo', text: 'used now' }));
+      await waitUntil(() => second.lines.some((value) => value.includes('used now')), 8_000, 'the echo');
+      await second.transport.close();
+
+      const third = await open(rig.make(), request()); // used: its past is not this client's
+      expect(transportWasStarted(third.transport)).toBe(false);
+      expect(transportStartedFresh(third.transport)).toBe(false);
+      await sleep(300);
+      expect(third.lines).toEqual([]);
+      await third.transport.write(line({ cmd: 'echo', text: 'live' }));
+      await waitUntil(() => third.lines.length === 1, 8_000, 'a live line');
+      expect(JSON.parse(third.lines[0]!)).toEqual({ echo: 'live' });
+      await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
+    });
+
+    it('marks a stdio child as started, and a bare connect to somebody else\'s host as not', async () => {
+      const rig = factoryRig();
+      const stdio = await rig.make()(rig.request({ hostId: undefined }));
+      cleanups.push(() => stdio.close());
+      expect(transportWasStarted(stdio)).toBe(true);
+      const hosted = await open(rig.make(), rig.request());
+      expect(transportWasStarted(hosted.transport)).toBe(true);
+      const bare = await HostLineTransport.connect({ socketPath: rig.paths.socket });
+      cleanups.push(() => bare.close().catch(() => undefined));
+      expect(bare.started).toBe(false);
+      await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
+    });
   });
 
   it('keeps the host out of the backend environment: no session identity reaches it', async () => {

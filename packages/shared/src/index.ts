@@ -325,6 +325,11 @@ export interface PendingRequestSummary {
   summary: string;
   questions: PendingRequestQuestion[];
   turnId?: string;
+  /**
+   * `live` (or omitted): the provider is waiting and the answer goes straight to it. `message`: the provider asked in a message and
+   * moved on, so the answer is sent as a normal message that quotes the question.
+   */
+  responseMode?: 'live' | 'message';
   openedAt: string;
 }
 

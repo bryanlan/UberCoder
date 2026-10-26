@@ -24,6 +24,7 @@ export const FAST_TIMINGS: Partial<ClaudeTimings> = {
   cancelSettleMs: 300,
   idleResultGraceMs: 300,
   contextUsageTimeoutMs: 2_000,
+  backgroundSnapshotGraceMs: 300,
 };
 
 export interface LogLine {

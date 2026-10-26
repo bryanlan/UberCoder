@@ -1,6 +1,7 @@
 import {
   NotSentError,
   PreviousTurnActiveError,
+  RequestNotPendingError,
   ResumeFailedError,
   TransportUnavailableError,
   TurnNotActiveError,
@@ -95,6 +96,12 @@ export class FakeTransportSession implements TransportSession {
   backgroundWork = false;
   /** The next `sendTurn` rejects with this error (once), after being recorded as a call. */
   failNextSend: Error | undefined;
+  /** What the next `interrupt` reports (once): the steers the provider dropped with the turn. */
+  nextInterruptResult: { cancelledSteerIds: string[] } | undefined;
+  /** Request ids `respond` refuses with `RequestNotPendingError`, as a plugin does for a request the provider withdrew. */
+  readonly withdrawn = new Set<string>();
+  /** The turn the plugin found running when it adopted the process (`TransportSession.activeTurn`). */
+  adoptedTurn: string | undefined;
   private turnCounter = 0;
   private readonly channel = new EventChannel();
 
@@ -108,6 +115,8 @@ export class FakeTransportSession implements TransportSession {
   }
 
   get capabilities(): TransportCapabilities { return this.instance.capabilities; }
+
+  get activeTurn(): string | undefined { return this.adoptedTurn; }
 
   /** Feed an event to the consumer. A terminal for the active turn frees the session for the next turn. */
   push(event: TransportEvent): void {
@@ -144,13 +153,17 @@ export class FakeTransportSession implements TransportSession {
     if (turnId !== this.activeTurnId) throw new TurnNotActiveError(turnId, `Cannot steer turn ${turnId}: it is not the active turn.`);
   }
 
-  async interrupt(turnId: string): Promise<void> {
+  async interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }> {
     this.calls.push({ method: 'interrupt', args: [turnId] });
     this.assertOpen();
+    const result = this.nextInterruptResult;
+    this.nextInterruptResult = undefined;
+    return result;
   }
 
   async respond(requestId: string, response: RequestResponse): Promise<void> {
     this.calls.push({ method: 'respond', args: [requestId, response] });
+    if (this.withdrawn.has(requestId)) throw new RequestNotPendingError(requestId);
   }
 
   hasBackgroundWork(): boolean {
@@ -206,6 +219,11 @@ export class FakeTransportInstance implements TransportInstance {
    * (once); any other id has no survivor. Shared with the plugin, so a test marks survivors before the instance exists.
    */
   survivors = new Map<string, number>();
+  /**
+   * Native ids whose surviving process is running a turn (native id -> turn id). The adopted session reports it as `activeTurn`
+   * and, as the Claude plugin does, starts a provider-origin turn for it without marking it as adopted.
+   */
+  survivorTurns = new Map<string, string>();
   private threadCounter = 0;
   private pidCounter = 0;
 
@@ -246,6 +264,11 @@ export class FakeTransportInstance implements TransportInstance {
     const session = this.open(nativeSessionId, options, true);
     session.pid = pid;
     session.reattached = true;
+    const running = this.survivorTurns.get(nativeSessionId);
+    if (running) {
+      session.adoptedTurn = running;
+      session.push({ type: 'turn.started', turnId: running, origin: 'provider', replay: false });
+    }
     return session;
   }
 
@@ -280,6 +303,8 @@ export interface FakeTransportPluginOptions {
   manualTurns?: boolean;
   /** Native id -> pid of a provider process that outlived the previous backend (see `FakeTransportInstance.survivors`). */
   survivors?: Record<string, number>;
+  /** Native id -> the turn that surviving process is running (see `FakeTransportInstance.survivorTurns`). */
+  survivorTurns?: Record<string, string>;
 }
 
 export class FakeTransportPlugin implements TransportPlugin {
@@ -300,6 +325,7 @@ export class FakeTransportPlugin implements TransportPlugin {
     instance.failResume = this.options.failResume ?? false;
     instance.manualTurns = this.options.manualTurns ?? false;
     instance.survivors = new Map(Object.entries(this.options.survivors ?? {}));
+    instance.survivorTurns = new Map(Object.entries(this.options.survivorTurns ?? {}));
     this.instances.push(instance);
     return instance;
   }

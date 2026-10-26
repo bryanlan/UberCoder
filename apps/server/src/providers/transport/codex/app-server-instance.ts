@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { StructuredProviderConfig } from '../../../config/schema.js';
 import {
+  LineTransportNotRunningError,
   ResumeFailedError,
   TransportUnavailableError,
   type LineTransport,
@@ -24,9 +25,18 @@ import {
   type ProviderFailure,
   type TransportInstance,
 } from '../types.js';
-import { createStdioLineTransportFactory, LineTransportSpawnError, transportOutlivesClose, transportStartedFresh, type LineTransportRequest } from '../line-transport.js';
+import {
+  createStdioLineTransportFactory,
+  HostLineTransport,
+  LineTransportSpawnError,
+  transportOutlivesClose,
+  transportStartedFresh,
+  type LineTransportExit,
+  type LineTransportRequest,
+  type ManagedLineTransport,
+} from '../line-transport.js';
 import { isArchivedThreadError } from './errors.js';
-import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcNotification } from './jsonrpc.js';
+import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcId, type JsonRpcNotification } from './jsonrpc.js';
 import {
   callCodex,
   INITIALIZED_NOTIFICATION,
@@ -44,6 +54,7 @@ import {
   CODEX_CAPABILITIES,
   DEFAULT_TIMINGS,
   declinedServerRequest,
+  pendingQuestions,
   sandboxModeFor,
   toTransportError,
   type CodexLogger,
@@ -51,6 +62,7 @@ import {
   type CodexTimings,
 } from './app-server-session.js';
 import { currentBootId, processStartTicks } from './process-lifetime.js';
+import { CodexRestartState } from './restart-state.js';
 import { mergeRateLimits, type CodexRateLimitSnapshot } from './usage.js';
 
 /**
@@ -201,6 +213,60 @@ function isMissingBinary(error: unknown): boolean {
   return false;
 }
 
+/** The lines a session host replayed on connect, oldest first. `firstSeq` is the sequence number of the first one. */
+interface ReplayedLines {
+  firstSeq: number;
+  /** The newest sequence number the host had when the connection was made. */
+  newestSeq: number;
+  lines: string[];
+}
+
+/** A host connection whose replayed lines were taken off already: the lines that came behind them are delivered first, then live output. */
+class ReplayGate implements ManagedLineTransport {
+  readonly outlivesClose: boolean;
+  readonly started: boolean;
+  private pending: string[];
+
+  constructor(private readonly inner: HostLineTransport, pending: string[]) {
+    this.outlivesClose = inner.outlivesClose;
+    this.started = inner.started;
+    this.pending = pending;
+  }
+
+  get pid(): number | undefined {
+    return this.inner.pid;
+  }
+
+  write(line: string): Promise<void> {
+    return this.inner.write(line);
+  }
+
+  onLine(listener: (line: string) => void): () => void {
+    const pending = this.pending;
+    this.pending = [];
+    for (const line of pending) {
+      try {
+        listener(line);
+      } catch {
+        // The listener owns its own errors; one line never stops the stream.
+      }
+    }
+    return this.inner.onLine(listener);
+  }
+
+  onExit(listener: (info: LineTransportExit) => void): () => void {
+    return this.inner.onExit(listener);
+  }
+
+  stderrTail(): string {
+    return this.inner.stderrTail();
+  }
+
+  close(options?: { terminate?: boolean }): Promise<void> {
+    return this.inner.close(options);
+  }
+}
+
 export class CodexAppServerInstance implements TransportInstance, CodexSessionHost {
   readonly plugin = 'codex';
   readonly capabilities = CODEX_CAPABILITIES;
@@ -216,6 +282,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private readonly clientVersion: string;
   private readonly openTransport: LineTransportFactory;
   private readonly sessions = new Map<string, CodexAppServerSession>();
+  /** What the next backend needs to pick up the app-server's work (questions, running turns, replay cursor), kept in the database. */
+  private readonly restart: CodexRestartState;
+  /** The session host connection the client reads, for its replay cursor. Absent over stdio. */
+  private hostTransport: HostLineTransport | undefined;
+  private hostStartTicks: string | undefined;
+  private cursorTimer: NodeJS.Timeout | undefined;
+  private lastSavedSeq = -1;
   private clientRef: JsonRpcClient | undefined;
   private starting: Promise<JsonRpcClient> | undefined;
   private rateLimitSnapshot: CodexRateLimitSnapshot | undefined;
@@ -233,6 +306,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.baseEnv = options.baseEnv ?? process.env;
     this.clientVersion = options.clientVersion ?? packageVersion();
+    this.restart = new CodexRestartState(context.meta);
     this.openTransport = context.lineTransport ?? createStdioLineTransportFactory({ log: { warn: (fields, message) => context.log.warn(fields, message) } });
   }
 
@@ -261,6 +335,16 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   release(session: CodexAppServerSession): void {
     if (this.sessions.get(session.nativeSessionId) === session) this.sessions.delete(session.nativeSessionId);
   }
+
+  noteTurn(threadId: string, turnId: string | undefined): void {
+    this.restart.noteTurn(threadId, turnId);
+    this.saveCursor(); // a turn boundary: the next backend must not see this one's lines again
+  }
+
+  readonly questions = {
+    save: (record: Parameters<CodexRestartState['saveQuestion']>[0]): void => this.restart.saveQuestion(record),
+    remove: (requestId: string): void => this.restart.removeQuestion(requestId),
+  };
 
   // -------------------------------------------------------------------------------------------------------
   // TransportInstance
@@ -337,6 +421,23 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     return session;
   }
 
+  /**
+   * After a backend restart: picks the thread up again when the app-server it ran in is still running behind its session host,
+   * and resolves undefined when no host answers. It connects to a running host only (nothing is started), then resumes the
+   * thread, which adopts a turn the thread is still running (see {@link CodexAppServerSession.adopt}).
+   */
+  async reattach(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession | undefined> {
+    if (!this.clientRef || this.clientRef.exited) {
+      try {
+        await this.ensureClient(true);
+      } catch (error) {
+        if (error instanceof LineTransportNotRunningError) return undefined;
+        throw error;
+      }
+    }
+    return this.resume(nativeSessionId, options);
+  }
+
   async resume(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession> {
     const client = await this.ensureClient();
     this.noteSessionEnv(options);
@@ -376,6 +477,11 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       throw toTransportError(error);
     }
     if (!session) throw new ResumeFailedError(`Codex returned no thread for ${nativeSessionId}.`);
+    // What an earlier backend left on the thread: a turn that is still running, one that ended meanwhile, a pending question.
+    await (session as CodexAppServerSession).adopt({
+      trackedTurnId: this.restart.trackedTurn(nativeSessionId),
+      held: this.restart.questionsForThread(nativeSessionId),
+    });
     return session;
   }
 
@@ -384,32 +490,42 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     if (this.starting) await this.starting.catch(() => undefined);
     const client = this.clientRef;
     this.clientRef = undefined;
-    for (const session of [...this.sessions.values()]) session.endLocal();
+    // A process held by a session host keeps running and keeps waiting for the answers to its questions: they stay held for the
+    // next backend. Answering them with nothing here would race the socket closing, and the app-server would wait for ever.
+    for (const session of [...this.sessions.values()]) session.endLocal({ keepQuestions: this.processOutlivesClose });
     this.sessions.clear();
+    this.stopCursorTimer();
     // A stdio child dies with its channel. A process held by a session host keeps running, and so does its record.
     if (client) {
+      if (this.processOutlivesClose) this.saveCursor();
+      else this.restart.reset();
       await client.close();
       if (!this.processOutlivesClose) this.context.meta.delete(INSTANCE_META_KEY);
     }
+    this.hostTransport = undefined;
   }
 
   // -------------------------------------------------------------------------------------------------------
   // Process
 
-  private async ensureClient(): Promise<JsonRpcClient> {
+  /** `attachOnly`: connect to a running host and start nothing; rejects with {@link LineTransportNotRunningError} when there is none. */
+  private async ensureClient(attachOnly = false): Promise<JsonRpcClient> {
     if (this.disposed) throw new TransportUnavailableError('The Codex app-server instance was shut down.');
     if (this.clientRef && !this.clientRef.exited) return this.clientRef;
-    this.starting ??= this.startClient().finally(() => {
+    this.starting ??= this.startClient(attachOnly).finally(() => {
       this.starting = undefined;
     });
     return this.starting;
   }
 
-  private async startClient(): Promise<JsonRpcClient> {
+  private async startClient(attachOnly = false): Promise<JsonRpcClient> {
     const cwd = this.context.runtimeDir;
     fs.mkdirSync(cwd, { recursive: true });
     const env = buildAppServerEnv(this.baseEnv, os.homedir(), this.config.env);
     const argv = buildAppServerCommand(this.config.command, this.context.coordination);
+    // An earlier backend connected to a process that may still run. Ask the host for everything it still has buffered, so the
+    // requests that arrived while no backend listened can be read (see `absorbReplay`).
+    const replayWanted = this.context.meta.get(INSTANCE_META_KEY) !== undefined;
     const request: LineTransportRequest = {
       argv,
       cwd,
@@ -423,18 +539,26 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     try {
       // Reconnects to the running host when there is one (same command), otherwise starts it. The npm launcher runs the
       // native app-server as its child; the host signals the whole process group, so both end together.
-      transport = await this.openTransport(request);
+      transport = await this.openHostTransport(request, attachOnly, replayWanted);
     } catch (error) {
       throw toTransportError(error instanceof LineTransportSpawnError ? new JsonRpcSpawnError(argv[0] ?? '', error) : error);
     }
-    const client = new JsonRpcClient(transport, { log: this.log, defaultRequestTimeoutMs: this.timings.requestTimeoutMs });
     const fresh = transportStartedFresh(transport);
+    // The lines the host replays are history: the client must see only what happens from now on.
+    let clientTransport: LineTransport = transport;
+    let replay: ReplayedLines | undefined;
+    if (transport instanceof HostLineTransport && replayWanted) {
+      const separated = await this.separateReplay(transport);
+      clientTransport = separated.transport;
+      replay = separated.replay;
+    }
+    const client = new JsonRpcClient(clientTransport, { log: this.log, defaultRequestTimeoutMs: this.timings.requestTimeoutMs });
     client.onNotification((notification) => this.onNotification(client, notification));
     for (const method of THREAD_SERVER_REQUESTS) {
       client.handleRequest(method, (params, request) => {
         const threadId = threadIdOf(method, params);
         const session = threadId ? this.sessions.get(threadId) : undefined;
-        if (session) return session.handleServerRequest(method, params, request.id);
+        if (session) return session.handleServerRequest(method, params, request.id, request.hold);
         // A subagent thread asked. It is not a Console conversation, but the request must still be answered.
         this.countUnknown(method, threadId, 'serverRequests');
         return declinedServerRequest(method, params).result;
@@ -456,13 +580,29 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       this.logStartFailure(client, error);
       throw toTransportError(error);
     }
+    this.processOutlivesClose = transportOutlivesClose(transport);
+    this.hostTransport = transport instanceof HostLineTransport ? transport : undefined;
+    this.hostStartTicks = this.hostTransport?.pid !== undefined ? processStartTicks(this.hostTransport.pid) : undefined;
+    // Nothing recorded about an earlier process is true of a new one (its question ids, its turns, its line numbers). What the
+    // host replayed is read before any thread can be resumed, or a question that arrived meanwhile would be missed.
+    if (fresh) {
+      this.restart.reset();
+    } else if (replay) {
+      try {
+        await this.absorbReplay(client, replay);
+      } catch (error) {
+        // Reading the replay is a help, not a condition: the connection works without it.
+        this.log.warn({ error: error instanceof Error ? error.message : String(error) }, 'reading the codex session host replay failed');
+      }
+    }
     if (client.exited) {
+      this.hostTransport = undefined;
       this.logStartFailure(client, undefined);
       throw new TransportUnavailableError(`The Codex app-server ended while starting (${exitReason(client.exitInfo!)}).`);
     }
     this.clientRef = client;
     this.respawnNeeded = false;
-    this.processOutlivesClose = transportOutlivesClose(transport);
+    this.startCursorTimer();
     const startTicks = client.pid !== undefined ? processStartTicks(client.pid) : undefined;
     const bootId = currentBootId();
     this.context.meta.set(
@@ -478,6 +618,132 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.log.info({ pid: client.pid, version: this.cliVersion, host: this.processOutlivesClose, reconnected: !fresh }, fresh ? 'codex app-server started' : 'reconnected to a running codex app-server');
     this.seedRateLimits(client);
     return client;
+  }
+
+  // -------------------------------------------------------------------------------------------------------
+  // Reconnecting to a host that kept running
+
+  /**
+   * The host replays what it still has buffered, ahead of live output. The lines are history (their notifications were
+   * handled, or are outdated), so they are taken off the stream and read once by `absorbReplay`; the client sees only lines
+   * that arrive after them. `status` is answered after the replay, which marks its end.
+   */
+  private async separateReplay(transport: HostLineTransport): Promise<{ transport: LineTransport; replay: ReplayedLines }> {
+    const { seq, firstSeq } = transport.info;
+    const replayCount = seq >= firstSeq ? seq - firstSeq + 1 : 0;
+    const lines: string[] = [];
+    const stop = transport.onLine((line) => void lines.push(line));
+    try {
+      await transport.status(this.timings.initializeTimeoutMs);
+    } catch {
+      // The connection is lost or the host is slow: the client reports it when it starts.
+    }
+    stop();
+    return {
+      transport: new ReplayGate(transport, lines.slice(replayCount)),
+      replay: { firstSeq, newestSeq: seq, lines: lines.slice(0, replayCount) },
+    };
+  }
+
+  /**
+   * Reads what the host buffered while no backend was connected and settles the server requests in it. A request that is not
+   * resolved later in the replay is still open in the app-server: a question is written down so its thread can hold it (when the
+   * thread is resumed) and an approval or elicitation is declined now, as it would have been had a backend been listening. A
+   * request that was resolved is forgotten. Turn lifecycle is not read from here: the thread's own state is (see
+   * {@link CodexAppServerSession.adopt}), which also covers a replay that no longer reaches back far enough.
+   */
+  private async absorbReplay(client: JsonRpcClient, replay: ReplayedLines): Promise<void> {
+    const transport = this.hostTransport;
+    const cursor = this.restart.cursor();
+    // A cursor is a position in one process's output: one from another process, or ahead of anything this host has, is no position here.
+    const sameProcess = cursor !== undefined && transport?.pid !== undefined && cursor.pid === transport.pid
+      && (cursor.startTicks === undefined || cursor.startTicks === this.hostStartTicks) && cursor.seq <= replay.newestSeq;
+    const seen = sameProcess ? cursor.seq : 0;
+    const gap = replay.newestSeq > seen && replay.firstSeq > seen + 1;
+    if (gap) this.log.info({ seen, firstSeq: replay.firstSeq, newestSeq: replay.newestSeq }, 'the codex session host no longer holds every line since the last backend; pending questions are checked against the thread status instead');
+    const requests: Array<{ id: JsonRpcId; method: string; params: unknown }> = [];
+    const resolved = new Set<string>();
+    replay.lines.forEach((line, index) => {
+      if (replay.firstSeq + index <= seen) return; // handled by the backend that saved the cursor
+      let frame: unknown;
+      try {
+        frame = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (typeof frame !== 'object' || frame === null) return;
+      const { method, id, params } = frame as { method?: unknown; id?: unknown; params?: unknown };
+      if (typeof method !== 'string') return;
+      if (method === 'serverRequest/resolved') {
+        const requestId = (params as { requestId?: unknown } | undefined)?.requestId;
+        if (typeof requestId === 'string' || typeof requestId === 'number') resolved.add(String(requestId));
+      } else if ((typeof id === 'string' || typeof id === 'number') && (THREAD_SERVER_REQUESTS as string[]).includes(method)) {
+        requests.push({ id, method, params });
+      }
+    });
+    for (const key of resolved) this.restart.removeQuestion(key);
+    for (const { id, method, params } of requests) {
+      const key = String(id);
+      if (resolved.has(key)) continue;
+      const threadId = threadIdOf(method, params);
+      if (method === 'item/tool/requestUserInput' && threadId && pendingQuestions(params)) {
+        if (!this.restart.hasQuestion(key)) {
+          const turnId = (params as { turnId?: unknown }).turnId;
+          this.restart.saveQuestion({ id, threadId, ...(typeof turnId === 'string' ? { turnId } : {}), params });
+        }
+        continue;
+      }
+      try {
+        await client.replyToServerRequest(id, declinedServerRequest(method, params).result);
+      } catch (error) {
+        this.log.warn({ method, error: error instanceof Error ? error.message : String(error) }, 'declining a request that arrived while no backend was connected failed');
+      }
+    }
+  }
+
+  /** Writes how far into the host's output this backend has read, so the next one replays only what it has not seen. */
+  private saveCursor(): void {
+    const transport = this.hostTransport;
+    if (!transport) return;
+    this.lastSavedSeq = transport.lastSeq;
+    this.restart.saveCursor({
+      seq: transport.lastSeq,
+      ...(transport.pid !== undefined ? { pid: transport.pid } : {}),
+      ...(this.hostStartTicks ? { startTicks: this.hostStartTicks } : {}),
+    });
+  }
+
+  private startCursorTimer(): void {
+    this.stopCursorTimer();
+    if (!this.hostTransport) return;
+    this.saveCursor();
+    this.cursorTimer = setInterval(() => {
+      if (this.hostTransport && this.hostTransport.lastSeq !== this.lastSavedSeq) this.saveCursor();
+    }, this.timings.cursorSaveMs);
+    this.cursorTimer.unref();
+  }
+
+  private stopCursorTimer(): void {
+    if (this.cursorTimer) clearInterval(this.cursorTimer);
+    this.cursorTimer = undefined;
+  }
+
+  /**
+   * A host that has been used replays nothing to an ordinary open (what it printed belongs to the client that was there), but an
+   * attach asks for it: the requests that arrived while no backend was connected are in there. So a backend that expects a
+   * running process attaches first, with the whole buffer, and opens the usual way (reconnect, replace or start) only when
+   * there is nothing to attach to. `attachOnly` stops after the attach.
+   */
+  private async openHostTransport(request: LineTransportRequest, attachOnly: boolean, replayWanted: boolean): Promise<LineTransport> {
+    if (attachOnly || replayWanted) {
+      try {
+        const attach: LineTransportRequest = { ...request, attachOnly: true, sinceSeq: 0 };
+        return await this.openTransport(attach);
+      } catch (error) {
+        if (!(error instanceof LineTransportNotRunningError) || attachOnly) throw error;
+      }
+    }
+    return this.openTransport(request);
   }
 
   private async initialize(client: JsonRpcClient): Promise<void> {
@@ -533,7 +799,14 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private onExit(client: JsonRpcClient, exit: JsonRpcExit): void {
     if (client !== this.clientRef) return; // a failed start, or a client already replaced
     this.clientRef = undefined;
-    if (exit.reason === 'exited') this.context.meta.delete(INSTANCE_META_KEY);
+    this.stopCursorTimer();
+    if (exit.reason === 'exited') {
+      this.context.meta.delete(INSTANCE_META_KEY);
+      this.restart.reset(); // the process is gone, and with it the questions it held and the turns it ran
+    } else {
+      this.saveCursor(); // only the connection dropped: the process and its questions live on for the next connection
+    }
+    this.hostTransport = undefined;
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.respawnNeeded = true;
@@ -541,7 +814,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     // stderr tail (redacted) goes to the server log.
     const failure: ProviderFailure = { class: 'transport_error', code: 'process_exited', message: exitReason(exit), retryable: true };
     this.log.warn({ code: exit.code, signal: exit.signal, reason: exit.reason, sessions: sessions.length, detail: describeExit(exit) }, exit.reason === 'exited' ? 'codex app-server exited unexpectedly' : 'lost the connection to the codex session host');
-    for (const session of sessions) session.handleProcessExit(failure);
+    for (const session of sessions) session.handleProcessExit(failure, { keepQuestions: exit.reason === 'disconnected' });
   }
 
   // -------------------------------------------------------------------------------------------------------
@@ -550,13 +823,15 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private register(response: ThreadStartResponse, options: OpenOptions): CodexAppServerSession {
     const thread = response.thread;
     const previous = this.sessions.get(thread.id);
-    if (previous) previous.endLocal(); // the same thread resumed again: the old session object is stale
+    // The same thread resumed again: the old session object is stale. Its questions stay held for the session that replaces it.
+    if (previous) previous.endLocal({ keepQuestions: true });
     const session = new CodexAppServerSession({
       threadId: thread.id,
       transcriptPath: thread.path,
       cwd: options.cwd,
       policy: options.policy,
       host: this,
+      status: thread.status,
     });
     this.sessions.set(thread.id, session);
     session.announce();
@@ -570,6 +845,11 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       const snapshot = (params as CodexNotificationMap['account/rateLimits/updated'] | undefined)?.rateLimits;
       if (snapshot) this.applyRateLimits(snapshot);
       return;
+    }
+    if (method === 'serverRequest/resolved') {
+      // A question written down for the next backend is settled (answered, withdrawn, or its turn ended).
+      const requestId = (params as { requestId?: unknown } | undefined)?.requestId;
+      if (typeof requestId === 'string' || typeof requestId === 'number') this.restart.removeQuestion(String(requestId));
     }
     if (method === 'configWarning') {
       const warning = params as CodexNotificationMap['configWarning'] | undefined;
