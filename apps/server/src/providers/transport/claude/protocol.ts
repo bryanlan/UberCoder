@@ -327,11 +327,31 @@ export interface SystemCompactBoundaryFrame extends FrameBase {
   compact_metadata?: { trigger?: string; pre_tokens?: number; post_tokens?: number; [key: string]: unknown };
 }
 
+/** One entry of `background_tasks_changed.tasks`: a live background task. */
+export interface BackgroundTaskEntry {
+  task_id?: string;
+  run_id?: string;
+  task_type?: string;
+  description?: string;
+  /** Not activity (a watcher, a housekeeping task): hosts leave these out of "is work running". */
+  ambient?: boolean;
+}
+
 export interface SystemTaskFrame extends FrameBase {
   type: 'system';
   subtype: 'task_started' | 'task_progress' | 'task_updated' | 'task_notification' | 'background_tasks_changed';
   task_id?: string;
+  /** Equal on every frame of one run of a task; a resumed task keeps its id and gets a new run id. Plain string order is run order. */
+  run_id?: string;
   status?: string;
+  /** `task_started`: false while the spawning tool call blocks on the task (a foreground task). */
+  is_backgrounded?: boolean;
+  skip_transcript?: boolean;
+  ambient?: boolean;
+  /** `task_updated`: the fields that changed. */
+  patch?: { status?: string; is_backgrounded?: boolean };
+  /** `background_tasks_changed`: every live background task after the change (replace semantics). */
+  tasks?: BackgroundTaskEntry[];
 }
 
 export interface SystemPermissionDeniedFrame extends FrameBase {

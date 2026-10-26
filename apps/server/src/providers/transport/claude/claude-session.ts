@@ -61,6 +61,7 @@ import {
   type SystemPermissionDeniedFrame,
   type SystemSessionStateChangedFrame,
   type SystemStatusFrame,
+  type SystemTaskFrame,
   type UserFrame,
 } from './protocol.js';
 import { ClaudeExitError, describeExit, type OpenServerRequest, type StreamJsonClient, type StreamJsonExit } from './stream-json.js';
@@ -283,6 +284,8 @@ export class ClaudeSession implements TransportSession {
   private readonly requests = new Map<string, PendingRequest>();
   private readonly openTools = new Map<string, OpenTool>();
   private readonly seenAssistant = new Set<string>();
+  /** Live background tasks the CLI reported, by task id, with the run id each was last seen under. */
+  private readonly backgroundTasks = new Map<string, string | undefined>();
   private readonly exitWaiters = new Set<() => void>();
   private readonly unsubscribe: Array<() => void> = [];
   private path: string | undefined;
@@ -752,7 +755,13 @@ export class ClaudeSession implements TransportSession {
       case 'hook_progress':
         this.onHook(frame as SystemHookFrame);
         return;
-      default: // task_*, background_tasks_changed and the rest: counted, not mapped
+      case 'task_started':
+      case 'task_updated':
+      case 'task_notification':
+      case 'background_tasks_changed':
+        this.onBackgroundTask(frame as SystemTaskFrame);
+        return;
+      default: // task_progress and the rest: counted, not mapped
         this.noteIgnored(`system/${String(frame.subtype)}`);
     }
   }
@@ -779,6 +788,59 @@ export class ClaudeSession implements TransportSession {
     }
     // `system/init` comes once per turn: it proves a turn is running even when no lifecycle frame announced it.
     this.attachTurnFrame(frame);
+  }
+
+  // ---- background work ----
+
+  /**
+   * True while the CLI reports background tasks of its own (a shell command or subagent left running) that no turn
+   * covers. The host reads it before ending an idle process. The state is per process, so it starts empty for every
+   * session object; a reattached process reports its current set right behind the repeated `initialize` reply.
+   */
+  hasBackgroundWork(): boolean {
+    return !this.ended && this.backgroundTasks.size > 0;
+  }
+
+  /**
+   * `background_tasks_changed` is the level signal: it carries every live task and replaces the set, so a missed edge
+   * cannot leave a stale indicator behind. `task_started` and the end frames (`task_notification`, a terminal
+   * `task_updated`) move one task between those snapshots. Ambient tasks (watchers, housekeeping) are not activity.
+   */
+  private onBackgroundTask(frame: SystemTaskFrame): void {
+    const taskId = asString(frame.task_id);
+    const runId = asString(frame.run_id);
+    switch (frame.subtype) {
+      case 'background_tasks_changed': {
+        if (!Array.isArray(frame.tasks)) return;
+        this.backgroundTasks.clear();
+        for (const task of frame.tasks) {
+          const id = isRecord(task) ? asString(task.task_id) : undefined;
+          if (id && !task.ambient) this.backgroundTasks.set(id, asString(task.run_id));
+        }
+        return;
+      }
+      case 'task_started':
+        // A foreground task blocks its own tool call inside the turn; it counts once it moves to the background.
+        if (taskId && frame.is_backgrounded !== false && !frame.ambient && !frame.skip_transcript && !this.isLateTaskFrame(taskId, runId)) {
+          this.backgroundTasks.set(taskId, runId ?? this.backgroundTasks.get(taskId));
+        }
+        return;
+      case 'task_updated': {
+        if (!taskId || this.isLateTaskFrame(taskId, runId)) return;
+        const status = frame.patch?.status;
+        if (status === 'completed' || status === 'failed' || status === 'killed') this.backgroundTasks.delete(taskId);
+        else if (frame.patch?.is_backgrounded === true) this.backgroundTasks.set(taskId, runId ?? this.backgroundTasks.get(taskId));
+        return;
+      }
+      default: // task_notification: the task ended (completed, failed or stopped)
+        if (taskId && !this.isLateTaskFrame(taskId, runId)) this.backgroundTasks.delete(taskId);
+    }
+  }
+
+  /** A frame of an earlier run of a task that has since been resumed under a newer run id (run ids sort in run order). */
+  private isLateTaskFrame(taskId: string, runId: string | undefined): boolean {
+    const shown = this.backgroundTasks.get(taskId);
+    return runId !== undefined && shown !== undefined && runId < shown;
   }
 
   private onStatus(frame: SystemStatusFrame): void {

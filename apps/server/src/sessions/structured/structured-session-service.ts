@@ -47,6 +47,17 @@ export interface StructuredCallbacks {
   onRequestsChanged(sessionId: string): void;
   onSessionState(sessionId: string, state: StructuredSessionState, failure?: ProviderFailure): void;
   appendStatus(sessionId: string, text: string): void;
+  /**
+   * The service gave a row with no cost profile the provider's default for this load (see `DEFAULT_PROFILES`). The owner
+   * stores it on the row so the person sees which model the conversation runs.
+   */
+  onProfileDefaulted?(sessionId: string, profile: ModelProfileKey): void;
+}
+
+/** A row the host hands over at startup to look for a surviving provider process, with the directory it runs in. */
+export interface SurvivorCandidate {
+  session: BoundSession;
+  cwd: string;
 }
 
 export interface StructuredSessionServiceOptions {
@@ -97,6 +108,20 @@ export interface AutomaticDelivery {
 
 const TERMINAL_MEMORY = 64;
 
+/**
+ * A provider that is not reporting anything is not trusted to still have background work: past this long without any
+ * event from the transport, the flag no longer blocks idle sleep or memory-pressure suspension.
+ */
+export const BACKGROUND_WORK_STALE_MS = 4 * 3_600_000;
+
+/**
+ * The cost profile a conversation gets when its row has none (a migrated tmux row, a history bind) and it was not launched
+ * with a model of its own. It is the profile new Claude chats get (`claude-provider.ts` and the bind code default to
+ * `medium`), so a resumed headless process does not start on the CLI's defaults. Codex has none: its shared process keeps
+ * the model it was configured with.
+ */
+const DEFAULT_PROFILES: Partial<Record<ProviderId, ModelProfileKey>> = { claude: 'medium' };
+
 interface LoadedSession {
   readonly sessionId: string;
   readonly provider: ProviderId;
@@ -108,6 +133,8 @@ interface LoadedSession {
   /** Set when the host itself ends the session, so the closing event stream is not an unexpected exit. */
   closing: boolean;
   lostReported: boolean;
+  /** When the transport last reported anything (or when the session was registered). Bounds the background-work flag. */
+  lastEventAt: number;
   activeTurnId?: string;
   pendingInterrupt?: { turnId: string; at: string };
   profile?: ModelProfileKey;
@@ -170,6 +197,8 @@ export class StructuredSessionService {
   private readonly contexts = new Map<string, PluginContext>();
   private readonly sessions = new Map<string, LoadedSession>();
   private readonly loading = new Map<string, Promise<'loaded' | 'unavailable'>>();
+  /** Survivor lookups at startup, so a use of the conversation waits for the answer instead of racing it with a resume. */
+  private readonly reattaching = new Map<string, Promise<unknown>>();
   private readonly failures = new Map<string, string>();
 
   constructor(options: StructuredSessionServiceOptions) {
@@ -241,9 +270,54 @@ export class StructuredSessionService {
     return { transcriptPath: this.transcriptPath(session.id), pid: state.pid };
   }
 
+  /**
+   * Startup, once: a per-session provider process can outlive a backend restart behind its session host, and nothing
+   * owns it until its conversation is used. For each candidate row of a per-session plugin this asks the plugin to adopt
+   * the conversation's own process. A survivor becomes a loaded session (new epoch, "Reconnected" status line), so idle
+   * sleep, memory pressure and release can end it like any other. A row with no survivor stays unloaded and resumes on its
+   * next use; nothing is started here. Shared-process plugins are skipped: their one process is reconnected on first use.
+   * Returns the ids now loaded. A failure on one row is logged and never stops the others.
+   */
+  async reattachSurvivors(candidates: SurvivorCandidate[]): Promise<string[]> {
+    const adopted: string[] = [];
+    for (const candidate of candidates) {
+      const lookup = this.reattachSurvivor(candidate).finally(() => { this.reattaching.delete(candidate.session.id); });
+      this.reattaching.set(candidate.session.id, lookup);
+      try {
+        if (await lookup) adopted.push(candidate.session.id);
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: candidate.session.id }, 'Reattaching a surviving provider process failed.');
+      }
+    }
+    return adopted;
+  }
+
+  private async reattachSurvivor({ session, cwd }: SurvivorCandidate): Promise<boolean> {
+    if (this.alive(session) || this.loading.has(session.id)) return false; // a use of the conversation got there first
+    const nativeSessionId = session.resumeConversationRef ?? session.conversationRef;
+    if (nativeSessionId.startsWith('pending:')) return false;
+    const instance = this.perSessionInstance(session.provider);
+    if (!instance?.reattach) return false;
+    const fallback = { model: session.launchContext?.model, effort: session.launchContext?.effort };
+    const resolved = this.resolveProfile(session.provider, instance, sessionProfile(session), fallback);
+    const options = this.openOptions(session.id, session.provider, instance, cwd, true, resolved.profile, fallback, session.launchContext);
+    const transport = await instance.reattach(nativeSessionId, options);
+    if (!transport) return false;
+    const state = await this.register(session.id, session.provider, instance, transport, resolved.profile, fallback);
+    if (resolved.defaulted) this.defaulted(state);
+    this.safely(() => this.callbacks.appendStatus(session.id, 'Reconnected to the running agent process'), state);
+    return true;
+  }
+
   /** Load the session's thread when it is not loaded. Failures become `unavailable` with a recorded reason. */
   async ensureLoaded(session: BoundSession, cwd?: string): Promise<'loaded' | 'unavailable'> {
     if (this.alive(session)) return 'loaded';
+    // A startup lookup for a surviving process may be answering right now; a resume beside it would meet its process.
+    const lookup = this.reattaching.get(session.id);
+    if (lookup) {
+      await lookup.catch(() => undefined);
+      if (this.alive(session)) return 'loaded';
+    }
     const inflight = this.loading.get(session.id);
     if (inflight) return inflight;
     const run = (async (): Promise<'loaded' | 'unavailable'> => {
@@ -273,6 +347,18 @@ export class StructuredSessionService {
 
   turnActive(session: Pick<BoundSession, 'id'>): boolean {
     return this.sessions.get(session.id)?.activeTurnId !== undefined;
+  }
+
+  /**
+   * The loaded session's process is running background work of its own (a shell command or subagent no turn covers). The
+   * tmux path refuses idle sleep while its screen shows the same; this is the structured counterpart. False for a session
+   * that is not loaded, for a plugin that cannot tell, and once the transport has said nothing for `BACKGROUND_WORK_STALE_MS`.
+   */
+  hasBackgroundWork(session: Pick<BoundSession, 'id'>): boolean {
+    const state = this.sessions.get(session.id);
+    if (!state?.loaded || typeof state.transport.hasBackgroundWork !== 'function') return false;
+    if (Date.now() - state.lastEventAt >= BACKGROUND_WORK_STALE_MS) return false;
+    return state.transport.hasBackgroundWork() === true;
   }
 
   loadedPid(sessionId: string): number | undefined {
@@ -494,15 +580,8 @@ export class StructuredSessionService {
     launchContext: AgentLaunchContext | undefined,
   ): Promise<LoadedSession> {
     const instance = this.instanceFor(provider);
-    const selected = profile ? profileTable(provider)[profile] : undefined;
-    const options: OpenOptions = {
-      conversationId: sessionId,
-      cwd,
-      model: selected?.model ?? fallbackModel.model,
-      effort: selected?.reasoningEffort ?? fallbackModel.effort,
-      policy: { approvals: 'never', sandbox: 'full-access' },
-      ...this.identityOptions(provider, instance, sessionId, nativeSessionId !== undefined, launchContext),
-    };
+    const resolved = this.resolveProfile(provider, instance, profile, fallbackModel);
+    const options = this.openOptions(sessionId, provider, instance, cwd, nativeSessionId !== undefined, resolved.profile, fallbackModel, launchContext);
     // One process per conversation: a second open while the first is loaded would put two writers on one transcript.
     if (instance.capabilities.processModel === 'per-session' && this.sessions.get(sessionId)?.loaded) {
       throw new StructuredUnavailableError('This conversation already has a running provider process.');
@@ -514,6 +593,74 @@ export class StructuredSessionService {
       await this.dropInstanceIfDisconnected(provider, instance);
       throw error;
     }
+    const state = await this.register(sessionId, provider, instance, transport, resolved.profile, fallbackModel);
+    if (resolved.defaulted) this.defaulted(state);
+    return state;
+  }
+
+  private openOptions(
+    sessionId: string,
+    provider: ProviderId,
+    instance: TransportInstance,
+    cwd: string,
+    resuming: boolean,
+    profile: ModelProfileKey | undefined,
+    fallbackModel: { model?: string; effort?: string },
+    launchContext: AgentLaunchContext | undefined,
+  ): OpenOptions {
+    const selected = profile ? profileTable(provider)[profile] : undefined;
+    return {
+      conversationId: sessionId,
+      cwd,
+      model: selected?.model ?? fallbackModel.model,
+      effort: selected?.reasoningEffort ?? fallbackModel.effort,
+      policy: { approvals: 'never', sandbox: 'full-access' },
+      ...this.identityOptions(provider, instance, sessionId, resuming, launchContext),
+    };
+  }
+
+  /**
+   * The profile a conversation runs on: the row's own, else the provider's default (a per-session Claude process that
+   * would otherwise start on the CLI's defaults) unless a granted launch named its own model or effort.
+   */
+  private resolveProfile(
+    provider: ProviderId,
+    instance: TransportInstance,
+    profile: ModelProfileKey | undefined,
+    fallbackModel: { model?: string; effort?: string },
+  ): { profile: ModelProfileKey | undefined; defaulted: boolean } {
+    if (profile) return { profile, defaulted: false };
+    const fallback = DEFAULT_PROFILES[provider];
+    if (!fallback || instance.capabilities.processModel !== 'per-session' || fallbackModel.model || fallbackModel.effort) {
+      return { profile: undefined, defaulted: false };
+    }
+    return { profile: fallback, defaulted: true };
+  }
+
+  /** Tells the owner a default profile is in use, so it can store it on the row. */
+  private defaulted(state: LoadedSession): void {
+    if (state.profile) this.safely(() => this.callbacks.onProfileDefaulted?.(state.sessionId, state.profile!), state);
+  }
+
+  /** The instance of a provider whose processes are one per conversation, or undefined (no plugin, or a shared process). */
+  private perSessionInstance(provider: ProviderId): TransportInstance | undefined {
+    try {
+      const instance = this.instanceFor(provider);
+      return instance.capabilities.processModel === 'per-session' ? instance : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Makes a started, resumed or reattached transport the conversation's loaded session and starts reading its events. */
+  private async register(
+    sessionId: string,
+    provider: ProviderId,
+    instance: TransportInstance,
+    transport: TransportSession,
+    profile: ModelProfileKey | undefined,
+    fallbackModel: { model?: string; effort?: string },
+  ): Promise<LoadedSession> {
     const connection = await instance.alive().catch(() => ({ pid: undefined, connected: false }));
     const epoch = nowIso();
     const state: LoadedSession = {
@@ -527,6 +674,7 @@ export class StructuredSessionService {
       loaded: true,
       closing: false,
       lostReported: false,
+      lastEventAt: Date.now(),
       profile,
       fallbackModel,
       pendingRequests: new Set(),
@@ -667,6 +815,7 @@ export class StructuredSessionService {
 
   private handle(state: LoadedSession, event: TransportEvent): void {
     const id = state.sessionId;
+    state.lastEventAt = Date.now();
     switch (event.type) {
       case 'session.state':
         if (event.state === 'error' || event.state === 'stopped') {

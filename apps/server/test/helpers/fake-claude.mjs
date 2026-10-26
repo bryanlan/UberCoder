@@ -18,6 +18,8 @@
 //   sessionStartHook        emit SessionStart hook_started/hook_response frames before the initialize reply
 //   hookStdout              the hook_response `stdout`
 //   initializeDelayMs, noInitializeReply, initializeError
+//   backgroundTasksOnReinitialize   the `tasks` of a `system/background_tasks_changed` snapshot the CLI sends right behind
+//                           the reply to every `initialize` after the first (a host that re-initializes a running process)
 //   startupFailure          {errors, reason?, exitCode?}: write the zeroed error result a failed startup writes, exit
 //   exitAtStart             exit with this code right after startup
 //   ignoreStdinEof, ignoreSigterm
@@ -103,6 +105,7 @@ let lastResultWasError = false;
 let resultIndex = 0;
 let turnCount = 0;
 let nextRequestId = 0;
+let initializeCount = 0;
 const responseWaiters = new Map(); // request_id -> resolve
 const openRequests = new Map(); // request_id -> control_request frame the CLI is still waiting on
 
@@ -369,6 +372,10 @@ async function handleControl(frame) {
         },
         { pending_permission_requests: [...(scenario.pendingPermissionRequests ?? []), ...openRequests.values()], pending_user_dialog_requests: [] },
       );
+      initializeCount += 1;
+      if (initializeCount > 1 && scenario.backgroundTasksOnReinitialize) {
+        write({ type: 'system', subtype: 'background_tasks_changed', tasks: scenario.backgroundTasksOnReinitialize, uuid: randomUUID(), session_id: sessionId });
+      }
       return;
     }
     case 'interrupt': {

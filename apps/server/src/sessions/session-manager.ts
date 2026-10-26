@@ -398,6 +398,8 @@ export class SessionManager {
   /** Provider-and-reason pairs already logged, so a standing condition is reported once and not on every pass. */
   private readonly loggedOnce = new Set<string>();
   private stopped = false;
+  /** Set once the startup pass has looked for provider processes that outlived the previous backend. */
+  private survivorsReattached = false;
 
   constructor(
     private readonly db: AppDatabase,
@@ -470,6 +472,7 @@ export class SessionManager {
         onRequestsChanged: (sessionId) => this.publishStructuredRequests(sessionId),
         onSessionState: (sessionId, state, failure) => this.handleStructuredSessionState(sessionId, state, failure),
         appendStatus: (sessionId, text) => this.appendStructuredStatus(sessionId, text),
+        onProfileDefaulted: (sessionId, profile) => this.storeDefaultedStructuredProfile(sessionId, profile),
       },
     });
     this.runRecovery = new RunRecovery({
@@ -1320,6 +1323,8 @@ export class SessionManager {
   }
 
   async reconcileSessions(): Promise<void> {
+    // The first pass adopts surviving provider processes before any idle or pressure decision looks at the rows.
+    await this.reattachStructuredSurvivors();
     const pressureActive = this.observeLowAvailableMemory();
     const sessions = this.listRestorableSessions();
     if (pressureActive) {
@@ -3665,13 +3670,16 @@ export class SessionManager {
       && screenInputMatchesText(screen, notice.notice === 'unattended' ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT);
   }
 
-  private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | 'turn_running' | 'queued_input' | undefined> {
+  private async suspensionBlockReason(session: BoundSession, mode: 'manual' | 'idle' | 'pressure'): Promise<'assignment' | 'ownership' | 'screen' | 'busy' | 'turn_running' | 'queued_input' | 'background_work' | undefined> {
     if (session.transport === 'structured') {
       const current = this.db.boundSessions.getById(session.id);
       if (!current || !current.shouldRestore || current.status !== 'bound' || current.modelProfileRequest
         || current.manualSuspendedAt || current.pressureSuspendedAt || current.conversationRef.startsWith('pending:')) return 'busy';
       if (mode !== 'idle' && this.hasActiveCoordinationAssignment(session)) return 'assignment';
       if (this.structured.turnActive(session)) return 'turn_running';
+      // The tmux path refuses while the screen shows background work; this is the same rule for a headless process that
+      // reports shell commands or subagents it left running. Ending the process would kill them.
+      if (this.structured.hasBackgroundWork(session)) return 'background_work';
       // Manual suspension cancels queued input itself; sleeping on its own must not strand it.
       if (mode !== 'manual' && current.queuedInputs?.length) return 'queued_input';
       return undefined;
@@ -3754,6 +3762,7 @@ export class SessionManager {
       }
       if (blockReason === 'turn_running') throw new SessionInputRejectedError('A turn is running. Stop it or wait for it to finish before suspending.');
       if (blockReason === 'queued_input') throw new SessionInputRejectedError('A message is queued for this session.');
+      if (blockReason === 'background_work') throw new SessionInputRejectedError('The session is running background work. Wait for it to finish before suspending.');
       if (session.transport === 'structured') {
         await this.structured.unload(session);
         this.structuredMonitors.delete(session.id);
@@ -4138,6 +4147,63 @@ export class SessionManager {
       screen,
       timestamp: screen.capturedAt,
     });
+  }
+
+  /**
+   * A row with no cost profile was loaded on the provider's default (see the service). Keep it on the row, so the person
+   * sees which model the conversation runs and a later load starts on the same one.
+   */
+  private storeDefaultedStructuredProfile(sessionId: string, profile: ModelProfileKey): void {
+    const session = this.structuredRow(sessionId);
+    if (!session || activeModelProfile(session)) return;
+    const updated = this.updateBoundSessionFields(sessionId, { ...launchModelProfile(session.provider, profile), updatedAt: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: updated });
+  }
+
+  /**
+   * First reconcile pass only. A per-session provider process (one Claude CLI per conversation) can outlive a backend
+   * restart behind its session host, and nothing owns it until its conversation is used, so idle sleep, memory pressure and
+   * release could not end it. This asks the plugin to adopt each established, awake conversation's own process. A row with
+   * no survivor stays unloaded and resumes on its next use; nothing is started here. Rows that are suspended, not yet
+   * established or served by one shared process are skipped.
+   */
+  private async reattachStructuredSurvivors(): Promise<void> {
+    const projects = this.recoveryDependencies?.projectService;
+    // Without project paths there is no working directory to hand the plugin; the next pass tries again.
+    if (this.survivorsReattached || !projects) return;
+    this.survivorsReattached = true;
+    const awake = (row: BoundSession | undefined): row is BoundSession => row !== undefined && row.transport === 'structured' && row.shouldRestore === true
+      && row.status === 'bound' && !row.manualSuspendedAt && !row.pressureSuspendedAt && !row.idleSuspendedAt;
+    let adoptedAny = false;
+    for (const row of this.listRestorableSessions()) {
+      if (this.stopped) return;
+      if (!awake(row) || this.structured.processModel(row.provider) !== 'per-session') continue;
+      try {
+        const project = await projects.getProjectBySlug(row.projectSlug);
+        if (!project) continue;
+        await this.runtimes.run(row.id, 'reattachSurvivor', async () => {
+          const current = this.db.boundSessions.getById(row.id);
+          if (this.stopped || !awake(current)) return;
+          const [adopted] = await this.structured.reattachSurvivors([{ session: current, cwd: project.path }]);
+          if (!adopted) return;
+          adoptedAny = true;
+          let session = this.updateBoundSessionFields(row.id, { pid: this.structured.loadedPid(row.id) });
+          await this.verifyNativeProcessEpoch(session);
+          // The turn the row says is running may have ended while no backend was listening, and nothing announces that.
+          // The working-state expiry clears the flag after an idle window unless the process reports a turn by then.
+          if (session.isWorking) this.scheduleWorkingExpiry(session.id, nowIso());
+          this.watchSessionOutput(session);
+          session = this.mustGetSession(row.id);
+          this.eventBus.emit({ type: 'session.updated', session });
+          this.publishStructuredScreen(session.id);
+        });
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: row.id }, 'Reattaching a surviving provider process failed.');
+      }
+    }
+    // The process sends what it still has open (a snapshot of its background tasks) right behind the reply to the repeated
+    // initialize. Let the event loop read it before the pass decides which idle conversations to put to sleep.
+    if (adoptedAny) await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
   private appendStructuredStatus(sessionId: string, text: string): void {
@@ -4681,7 +4747,8 @@ export class SessionManager {
       } else {
         started = await this.structured.resume(session, input.project.path);
       }
-      const bound: BoundSession = { ...session, status: 'bound', updatedAt: nowIso(), pid: started.pid };
+      // The row as it is now: loading the thread may have stored a default cost profile on it.
+      const bound: BoundSession = { ...(this.db.boundSessions.getById(sessionId) ?? session), status: 'bound', updatedAt: nowIso(), pid: started.pid };
       this.db.boundSessions.upsert(bound);
       await this.verifyNativeProcessEpoch(bound);
       let current = bound;

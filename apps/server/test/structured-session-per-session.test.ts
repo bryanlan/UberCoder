@@ -1,9 +1,9 @@
 import fs from 'node:fs';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentLaunchContext } from '@agent-console/shared';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
-import type { OpenOptions } from '../src/providers/transport/types.js';
+import type { OpenOptions, TurnInput } from '../src/providers/transport/types.js';
 import { FakeTransportPlugin, fakePluginContext, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
@@ -19,7 +19,10 @@ function fixture(options: Parameters<typeof structuredSessionFixture>[0] = {}) {
   open.push(f);
   return f;
 }
-afterEach(async () => { for (const f of open.splice(0)) await f.cleanup(); });
+afterEach(async () => {
+  vi.useRealTimers();
+  for (const f of open.splice(0)) await f.cleanup();
+});
 
 function backdate(f: StructuredSessionFixture, sessionId: string, minutes: number) {
   const at = new Date(Date.now() - minutes * 60_000).toISOString();
@@ -290,5 +293,179 @@ describe('Per-session processes: sleep, pressure, release', () => {
     // One conversation ending leaves the instance alone: it only starts processes, it holds no shared connection.
     expect(f.plugin.instances).toHaveLength(1);
     expect(f.plugin.instance!.disposed).toBe(false);
+  });
+});
+
+describe('Per-session processes: the default cost profile', () => {
+  const MEDIUM = { model: 'claude-opus-5-5', effort: 'xhigh' };
+
+  it('starts a history-bound conversation on the default profile, names it on every turn and keeps it on the row', async () => {
+    const f = fixture({ plugin: PER_SESSION });
+    const session = await f.bindHistory('native-history-1');
+
+    expect(f.row(session.id).claudeProfile).toBe('medium');
+    expect(startOptions(f)).toMatchObject(MEDIUM);
+    await f.manager.sendInput(session.id, 'hello');
+    const sent = f.calls('native-history-1', 'sendTurn').map(call => call.args[0] as TurnInput);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject(MEDIUM);
+    // The row is what the person sees, so the UI shows the profile too.
+    expect(f.events.some(event => event.type === 'session.updated' && event.session.id === session.id && event.session.claudeProfile === 'medium')).toBe(true);
+  });
+
+  it('gives a migrated row with no profile the default when it wakes, and stores it', async () => {
+    const f = fixture({ plugin: PER_SESSION });
+    const { session } = await f.bindNew();
+    f.db.sqlite.prepare('update bound_sessions set claude_profile=null where id=?').run(session.id);
+    expect(f.row(session.id).claudeProfile).toBeUndefined();
+
+    await f.manager.suspendSession(session.id);
+    await f.manager.resumeSession(session.id);
+    expect(startOptions(f, 1)).toMatchObject(MEDIUM);
+    expect(f.row(session.id).claudeProfile).toBe('medium');
+    await f.manager.sendInput(session.id, 'hello');
+    expect(f.calls(session.conversationRef, 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject(MEDIUM);
+  });
+
+  it('leaves a row that has a profile on it, and a granted launch on the model it named', async () => {
+    const f = fixture({ plugin: PER_SESSION });
+    const low = await f.bindNew({ claudeProfile: 'low' });
+    expect(startOptions(f, 0)).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });
+    expect(f.row(low.session.id).claudeProfile).toBe('low');
+
+    const granted = await f.bindNew({ launchContext: { ...launchContext, model: 'claude-custom', effort: 'low' } });
+    expect(startOptions(f, 1)).toMatchObject({ model: 'claude-custom', effort: 'low' });
+    expect(f.row(granted.session.id).claudeProfile).toBeUndefined();
+    await f.manager.suspendSession(granted.session.id);
+    await f.manager.resumeSession(granted.session.id);
+    expect(startOptions(f, 2)).toMatchObject({ model: 'claude-custom', effort: 'low' });
+    expect(f.row(granted.session.id).claudeProfile).toBeUndefined();
+  });
+
+  it('switches off the default when the person picks a profile', async () => {
+    const f = fixture({ plugin: PER_SESSION });
+    const session = await f.bindHistory('native-history-2');
+    expect(f.row(session.id).claudeProfile).toBe('medium');
+    await f.manager.requestModelProfile(session.id, 'low');
+    await settle();
+    await f.manager.sendInput(session.id, 'hello');
+    expect(f.row(session.id).claudeProfile).toBe('low');
+    expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });
+  });
+
+  it('gives a shared Codex thread no default: its process keeps the model it was configured with', async () => {
+    const f = fixture();
+    const session = await f.bindHistory('native-history-3');
+    expect(startOptions(f).model).toBeUndefined();
+    expect(startOptions(f).effort).toBeUndefined();
+    expect(f.row(session.id).codexProfile).toBeUndefined();
+    await f.manager.sendInput(session.id, 'hello');
+    const sent = f.calls('native-history-3', 'sendTurn').map(call => call.args[0] as TurnInput)[0]!;
+    expect(sent.model).toBeUndefined();
+    expect(sent.effort).toBeUndefined();
+  });
+});
+
+describe('Per-session processes: background work', () => {
+  const PRESSURE = { pressureSuspendAvailableBytes: 8 * 1024 ** 3, pressureSuspendIdleMs: 1, readMemInfo: () => 'MemAvailable:      1048576 kB\n' };
+  const HOUR = 3_600_000;
+
+  async function backgroundSession(manager: Parameters<typeof structuredSessionFixture>[0] = {}) {
+    const f = fixture({ plugin: PER_SESSION, ...manager });
+    const { session } = await f.bindNew();
+    const thread = f.plugin.instance!.sessions[0]!;
+    thread.backgroundWork = true;
+    return { f, session, thread };
+  }
+
+  it('leaves an idle process alone while it runs background work and sleeps it once that ends', async () => {
+    const { f, session, thread } = await backgroundSession();
+    backdate(f, session.id, 120);
+    await f.manager.reconcileSessions();
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(false);
+    expect(thread.calls.map(call => call.method)).not.toContain('unload');
+    expect(f.row(session.id).idleSuspendedAt).toBeUndefined();
+    expect(eventLogLines(f.row(session.id)).some(line => /suspended/i.test(line.text))).toBe(false);
+
+    thread.backgroundWork = false;
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(true);
+    expect(f.row(session.id).idleSuspendedAt).toBeTruthy();
+  });
+
+  it('leaves it alone under memory pressure too, until the work ends', async () => {
+    const { f, session, thread } = await backgroundSession({ manager: PRESSURE });
+    backdate(f, session.id, 5);
+    await f.manager.reconcileSessions(); // the first low sample only counts
+    await f.manager.reconcileSessions();
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(f.row(session.id).pressureSuspendedAt).toBeUndefined();
+    expect(thread.closed).toBe(false);
+
+    thread.backgroundWork = false;
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(f.row(session.id).pressureSuspendedAt).toBeTruthy();
+    expect(thread.closed).toBe(true);
+  });
+
+  it('refuses a manual suspend and says why', async () => {
+    const { f, session, thread } = await backgroundSession();
+    await expect(f.manager.suspendSession(session.id)).rejects.toThrow(/background work/i);
+    expect(thread.closed).toBe(false);
+    expect(f.row(session.id).manualSuspendedAt).toBeUndefined();
+    thread.backgroundWork = false;
+    expect((await f.manager.suspendSession(session.id)).manualSuspendedAt).toBeTruthy();
+    expect(thread.closed).toBe(true);
+  });
+
+  it('stops honoring the flag after four hours without a single event from the process', async () => {
+    const { f, session, thread } = await backgroundSession();
+    backdate(f, session.id, 120);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 3 * HOUR);
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(false); // three hours of silence is still inside the bound
+
+    vi.setSystemTime(Date.now() + 2 * HOUR); // five hours in all
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(true);
+    expect(thread.backgroundWork).toBe(true); // the flag was never cleared; it was no longer believed
+    expect(f.row(session.id).idleSuspendedAt).toBeTruthy();
+  });
+
+  it('counts any event from the process as proof of life, so the bound restarts', async () => {
+    const { f, session, thread } = await backgroundSession();
+    backdate(f, session.id, 120);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 3 * HOUR);
+    thread.push({ type: 'notice', level: 'info', text: 'still here' });
+    await settle();
+    vi.setSystemTime(Date.now() + 2 * HOUR); // five hours since the start, two since the last event
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(false);
+
+    vi.setSystemTime(Date.now() + 3 * HOUR); // five hours since the last event
+    await f.manager.reconcileSessions();
+    await settle();
+    expect(thread.closed).toBe(true);
+  });
+
+  it('reads as no background work when the session is not loaded or its plugin cannot tell', async () => {
+    const { f, session, thread } = await backgroundSession();
+    const service = (f.manager as unknown as { structured: { hasBackgroundWork(session: { id: string }): boolean } }).structured;
+    expect(service.hasBackgroundWork({ id: session.id })).toBe(true);
+    expect(service.hasBackgroundWork({ id: 'no-such-session' })).toBe(false);
+    (thread as { hasBackgroundWork?: unknown }).hasBackgroundWork = undefined;
+    expect(service.hasBackgroundWork({ id: session.id })).toBe(false);
+    await f.manager.releaseSession(session.id);
+    expect(service.hasBackgroundWork({ id: session.id })).toBe(false);
   });
 });

@@ -11,13 +11,16 @@ import { StreamJsonClient, ClaudeControlTimeoutError, ClaudeExitError } from '..
 import { ClaudeRateLimitTracker, contextFromUsageResponse, contextMaxFromModelUsage, contextUsedFromResultUsage } from '../src/providers/transport/claude/usage.js';
 import { escapeProjectDir, findSessionHolder } from '../src/providers/transport/claude/transcript.js';
 import { processStartTicks } from '../src/providers/transport/codex/process-lifetime.js';
+import { createStdioLineTransportFactory, terminateHost } from '../src/providers/transport/line-transport.js';
 import {
+  LineTransportNotRunningError,
   NotSentError,
   PreviousTurnActiveError,
   ResumeFailedError,
   TransportUnavailableError,
   TurnNotActiveError,
   type LineTransport,
+  type LineTransportSpawn,
   type TransportEvent,
 } from '../src/providers/transport/types.js';
 import {
@@ -1448,6 +1451,110 @@ describe('session over a lost connection', () => {
   });
 });
 
+describe('background work', () => {
+  // The CLI reports the background tasks of its own process: edge frames (task_started, task_notification, task_updated)
+  // and the level frame background_tasks_changed, which carries every live task and replaces what the reader holds.
+  function background() {
+    const memory = memoryTransport();
+    const session = new ClaudeSession({
+      sessionId: 's-bg',
+      cwd: '/work',
+      client: new StreamJsonClient({ transport: memory.transport }),
+      log: { info: () => undefined, warn: () => undefined },
+      timings: DEFAULT_CLAUDE_TIMINGS,
+      configDir: '/nonexistent',
+      requireSubscriptionLogin: false,
+      onEnded: () => undefined,
+    });
+    const send = (frame: Record<string, unknown>) => memory.fromCli({ type: 'system', uuid: 'u', session_id: 's-bg', ...frame });
+    return { memory, session, send };
+  }
+  const task = (id: string, extra: Record<string, unknown> = {}) => ({ task_id: id, task_type: 'local_bash', description: id, ...extra });
+
+  it('reports none for a session that has seen no task', () => {
+    expect(background().session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('is true from a started background task until its notification', () => {
+    const { session, send } = background();
+    send({ subtype: 'task_started', task_id: 't1', description: 'build', is_backgrounded: true });
+    expect(session.hasBackgroundWork()).toBe(true);
+    send({ subtype: 'task_started', task_id: 't2', description: 'watch logs' });
+    send({ subtype: 'task_notification', task_id: 't1', status: 'completed', summary: 'done', output_file: '/tmp/o' });
+    expect(session.hasBackgroundWork()).toBe(true); // t2 still runs
+    send({ subtype: 'task_notification', task_id: 't2', status: 'stopped', summary: 'stopped', output_file: '/tmp/o2' });
+    expect(session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('counts a foreground task only once it moves to the background, and not at all when it simply ends', () => {
+    const { session, send } = background();
+    send({ subtype: 'task_started', task_id: 'fg', description: 'tests', is_backgrounded: false });
+    expect(session.hasBackgroundWork()).toBe(false);
+    send({ subtype: 'task_updated', task_id: 'fg', patch: { is_backgrounded: true } });
+    expect(session.hasBackgroundWork()).toBe(true);
+    send({ subtype: 'task_updated', task_id: 'fg', patch: { status: 'completed' } });
+    expect(session.hasBackgroundWork()).toBe(false);
+    send({ subtype: 'task_started', task_id: 'fg2', description: 'tests', is_backgrounded: false });
+    send({ subtype: 'task_notification', task_id: 'fg2', status: 'completed', summary: '', output_file: '' });
+    expect(session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('takes background_tasks_changed as the whole truth: it replaces the set, so a missed end cannot wedge the flag', () => {
+    const { session, send } = background();
+    send({ subtype: 'task_started', task_id: 'lost', description: 'its notification never arrives' });
+    expect(session.hasBackgroundWork()).toBe(true);
+    send({ subtype: 'background_tasks_changed', tasks: [task('a'), task('b')] });
+    expect(session.hasBackgroundWork()).toBe(true);
+    send({ subtype: 'task_notification', task_id: 'a', status: 'completed', summary: '', output_file: '' });
+    expect(session.hasBackgroundWork()).toBe(true); // b
+    send({ subtype: 'background_tasks_changed', tasks: [] });
+    expect(session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('ignores ambient tasks (watchers and housekeeping are not activity)', () => {
+    const { session, send } = background();
+    send({ subtype: 'background_tasks_changed', tasks: [task('watch', { ambient: true })] });
+    expect(session.hasBackgroundWork()).toBe(false);
+    send({ subtype: 'task_started', task_id: 'tidy', description: 'housekeeping', ambient: true });
+    send({ subtype: 'task_started', task_id: 'quiet', description: 'hidden', skip_transcript: true });
+    expect(session.hasBackgroundWork()).toBe(false);
+    send({ subtype: 'background_tasks_changed', tasks: [task('watch', { ambient: true }), task('real')] });
+    expect(session.hasBackgroundWork()).toBe(true);
+  });
+
+  it('does not let a late frame of an earlier run end a resumed task', () => {
+    const { session, send } = background();
+    send({ subtype: 'task_started', task_id: 'agent', description: 'subagent', run_id: 'run-02' });
+    send({ subtype: 'task_notification', task_id: 'agent', run_id: 'run-01', status: 'completed', summary: '', output_file: '' }); // the first run's end, delivered late
+    expect(session.hasBackgroundWork()).toBe(true);
+    send({ subtype: 'task_notification', task_id: 'agent', run_id: 'run-02', status: 'completed', summary: '', output_file: '' });
+    expect(session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('is false once the process has ended, and keeps no task frame as an unhandled one', async () => {
+    const { session, send, memory } = background();
+    send({ subtype: 'task_started', task_id: 't1', description: 'build' });
+    send({ subtype: 'task_progress', task_id: 't1', description: 'build', usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 } });
+    expect(session.hasBackgroundWork()).toBe(true);
+    expect(session.ignored.has('system/task_started')).toBe(false);
+    expect(session.ignored.get('system/task_progress')).toBe(1);
+    memory.exit(0);
+    await waitUntil(() => session.isEnded);
+    expect(session.hasBackgroundWork()).toBe(false);
+  });
+
+  it('knows the work of a process found again from the snapshot the CLI sends behind the repeated initialize', async () => {
+    const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false, backgroundTasksOnReinitialize: [{ task_id: 'bg-1', task_type: 'local_bash', description: 'build' }] }, { host: true });
+    const first = setup.track(await setup.instance.start(setup.open()));
+    expect(first.hasBackgroundWork()).toBe(false); // nothing is emitted at startup
+    await setup.instance.dispose('shutdown');
+    const { instance } = setup.restartBackend();
+    const second = setup.track((await instance.reattach(first.nativeSessionId, setup.open()))!);
+    await waitUntil(() => second.hasBackgroundWork(), 5000, 'the snapshot');
+    expect(second.hasBackgroundWork()).toBe(true);
+  }, 30_000);
+});
+
 describe('stream-json client', () => {
   it('matches control responses by request id and fails pending requests when the channel ends', async () => {
     const memory = memoryTransport();
@@ -1604,6 +1711,164 @@ describe('session host', () => {
     await expect(instance.resume(first.nativeSessionId, setup.open())).rejects.toBeInstanceOf(ClaudeSessionHeldError);
     expect(startEntries(setup.logFile)).toHaveLength(1);
   }, 30_000);
+
+  describe('reattach', () => {
+    it('adopts the running process without starting one: same pid, the repeated initialize, the open question and the turn picked up', async () => {
+      const setup = setupFake(
+        {
+          sessionsDir: 'auto',
+          sessionStartHook: true,
+          turns: [{ steps: [{ request: { request_id: 'req-q', request: canUseTool('AskUserQuestion', QUESTION_INPUT, 'tool-q') } }, assistantText('thanks for the answer')] }],
+        },
+        { host: true, context: { coordination: COORDINATION } },
+      );
+      const first = setup.track(await setup.instance.start(setup.open({ appendSystemPrompt: 'AUTHORITY TEXT' })));
+      const firstEvents = new EventLog(first);
+      await first.sendTurn({ text: 'ask me' });
+      await firstEvents.waitForType('request.opened');
+      const pid = first.pid!;
+      await setup.instance.dispose('shutdown');
+      await firstEvents.done;
+
+      const { instance, context } = setup.restartBackend();
+      const second = setup.track((await instance.reattach(first.nativeSessionId, setup.open({ appendSystemPrompt: 'IGNORED, THE PROCESS HAS ITS PROMPT' })))!);
+      const events = new EventLog(second);
+      expect(second).toBeDefined();
+      expect(second.pid).toBe(pid);
+      expect(startEntries(setup.logFile)).toHaveLength(1); // no second process, ever
+      expect(receivedControls(setup.logFile, 'initialize').map((frame) => frame.request)).toEqual([
+        { subtype: 'initialize', appendSystemPrompt: 'AUTHORITY TEXT' },
+        { subtype: 'initialize' }, // the repeat only reads what the process still has open
+      ]);
+      expect(instance.openSessionIds).toEqual([first.nativeSessionId]);
+
+      const opened = await events.waitForType('request.opened');
+      expect(opened).toMatchObject({ requestId: 'req-q', kind: 'question' });
+      await second.respond('req-q', { decision: 'answer', answers: { q0: ['Postgres'] } });
+      expect((await events.waitFor((event) => event.type === 'turn.terminal')).type).toBe('turn.terminal');
+
+      // Ending it ends the process behind the host, like any session this backend owns.
+      await second.close('release');
+      await events.done;
+      await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the process to end');
+      expect(context.metaStore.has('claude-launch:conversation-1')).toBe(false);
+    }, 30_000);
+
+    it('answers undefined, and starts nothing, when no process survived', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await setup.instance.dispose('shutdown');
+      // The process dies while no backend is looking, but its launch record is still in the plugin's meta.
+      await terminateHost(setup.hostRuntimeDir, hostIdFor('conversation-1'), setup.context.log, { closeGraceMs: 300, termGraceMs: 300, staleTermGraceMs: 300 });
+      await waitUntil(() => processStartTicks(first.pid!) === undefined, 5000, 'the process to end');
+      expect(setup.context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+
+      const { instance } = setup.restartBackend();
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(instance.openSessionIds).toEqual([]);
+    }, 30_000);
+
+    it('answers undefined with no launch on record, a record for another session, or a record that does not name the session', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+      const first = setup.track(await setup.instance.start(setup.open()));
+      const stored = JSON.parse(setup.context.metaStore.get('claude-launch:conversation-1')!) as { sessionId: string; argv: string[] };
+      await setup.instance.dispose('shutdown');
+      const { instance, context } = setup.restartBackend();
+
+      context.metaStore.delete('claude-launch:conversation-1');
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      context.metaStore.set('claude-launch:conversation-1', JSON.stringify({ ...stored, sessionId: 'someone-else' }));
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      context.metaStore.set('claude-launch:conversation-1', JSON.stringify({ sessionId: first.nativeSessionId, argv: [...stored.argv.slice(0, stored.argv.indexOf('--session-id')), '--session-id', 'someone-else'] }));
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      // Nothing was started, and the process is still there for a record that is right.
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(processStartTicks(first.pid!)).toBeDefined();
+      context.metaStore.set('claude-launch:conversation-1', JSON.stringify(stored));
+      setup.track((await instance.reattach(first.nativeSessionId, setup.open()))!);
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+    }, 30_000);
+
+    it('leaves a host that runs another command line alone: no new process, and the old one is not ended', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+      const first = setup.track(await setup.instance.start(setup.open({ model: 'sonnet' })));
+      const stored = JSON.parse(setup.context.metaStore.get('claude-launch:conversation-1')!) as { sessionId: string; argv: string[] };
+      await setup.instance.dispose('shutdown');
+      const { instance, context } = setup.restartBackend();
+      // The record says the launch used another model: the host (keyed by its command line) is not that process.
+      context.metaStore.set('claude-launch:conversation-1', JSON.stringify({ ...stored, argv: [...stored.argv, '--effort', 'low'] }));
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(processStartTicks(first.pid!)).toBeDefined();
+      // Where `resume` would have replaced it, reattach did not touch it: the right record still finds it.
+      context.metaStore.set('claude-launch:conversation-1', JSON.stringify(stored));
+      const again = setup.track((await instance.reattach(first.nativeSessionId, setup.open()))!);
+      expect(again.pid).toBe(first.pid);
+    }, 30_000);
+
+    it('never starts a process under a plain stdio factory, where nothing can survive a restart', async () => {
+      const setup = setupFake({ sessionStartHook: false });
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await setup.instance.dispose('shutdown'); // the stdio child ends with its parent
+      await waitUntil(() => processStartTicks(first.pid!) === undefined, 5000, 'the child to end');
+      const { instance } = setup.restartBackend();
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      // The factory itself refuses rather than starts.
+      await expect(createStdioLineTransportFactory()({ argv: setup.command, cwd: setup.cwd, env: {}, hostId: 'x', attachOnly: true })).rejects.toBeInstanceOf(LineTransportNotRunningError);
+    }, 30_000);
+
+    it('refuses a survivor while another live process holds the session, and lets go of it without ending it', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await setup.instance.dispose('shutdown');
+      const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'claude-holder'], { stdio: 'ignore' });
+      try {
+        await waitUntil(() => holder.pid !== undefined && processStartTicks(holder.pid) !== undefined);
+        writeRegistryFile(setup.configDir, { pid: holder.pid!, sessionId: first.nativeSessionId, procStart: processStartTicks(holder.pid!) });
+        const { instance } = setup.restartBackend();
+        const error = await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ClaudeSessionHeldError);
+        expect((error as ClaudeSessionHeldError).heldByPid).toBe(holder.pid);
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+        expect(processStartTicks(first.pid!)).toBeDefined(); // disconnected, not ended
+        expect(instance.openSessionIds).toEqual([]);
+      } finally {
+        holder.kill('SIGKILL');
+      }
+    }, 30_000);
+
+    it('refuses a conversation this instance has loaded or is loading, so there is never a second connection', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await expect(setup.instance.reattach(first.nativeSessionId, setup.open())).rejects.toBeInstanceOf(ClaudeSessionHeldError);
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(first.isEnded).toBe(false);
+    }, 30_000);
+
+    it('adopts a process the earlier backend started and never spoke to: a full handshake, with its hook frames replayed', async () => {
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: true }, { host: true, context: { coordination: COORDINATION } });
+      const sessionId = '11111111-2222-4333-8444-555555555555';
+      const argv = buildClaudeArgv({ command: setup.command, mode: 'new', sessionId });
+      // The earlier backend got as far as starting the host, then went away before it wrote `initialize`.
+      const started = await setup.context.lineTransport!({ argv, cwd: setup.cwd, env: buildClaudeEnv({ base: { PATH: process.env.PATH }, conversationId: 'conversation-1', home: setup.home }), hostId: hostIdFor('conversation-1'), sinceSeq: 0 } as LineTransportSpawn);
+      const childPid = started.pid!;
+      // The hook frames are out before any client attaches again; only a replay can show them to the new backend.
+      await waitUntil(() => sentFrames(setup.logFile).some((frame) => frame.subtype === 'hook_response'), 5000, 'the SessionStart hook frames');
+      await started.close();
+      setup.context.metaStore.set('claude-launch:conversation-1', JSON.stringify({ sessionId, argv }));
+
+      const session = setup.track((await setup.instance.reattach(sessionId, setup.open({ appendSystemPrompt: 'AUTHORITY TEXT' })))!);
+      expect(session.pid).toBe(childPid);
+      expect(session.sawSessionStartHook).toBe(true); // replayed from the host's buffer
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(receivedControls(setup.logFile, 'initialize').map((frame) => frame.request)).toEqual([{ subtype: 'initialize', appendSystemPrompt: 'AUTHORITY TEXT' }]);
+      const events = new EventLog(session);
+      const { turnId } = await session.sendTurn({ text: 'hello' });
+      expect((await events.waitForTerminal(turnId)).status).toBe('completed');
+    }, 30_000);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------------------

@@ -44,6 +44,9 @@ function writeRollout(f: StructuredSessionFixture, sessionId: string, native: st
 }
 
 const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** No thread is loaded and the provider was asked for nothing. The reconcile pass may create the instance object to read its process model. */
+const nothingLoaded = (plugin: { instances: Array<{ sessions: unknown[]; calls: unknown[] }> }) =>
+  plugin.instances.every(instance => instance.sessions.length === 0 && instance.calls.length === 0);
 const lossLines = (f: StructuredSessionFixture, sessionId: string) =>
   eventLogLines(f.row(sessionId)).filter(line => /connection ended/.test(line.text));
 const runState = (manager: StructuredSessionFixture['manager'], sessionId: string) =>
@@ -69,7 +72,7 @@ describe('A turn cut by a backend restart', () => {
       await pause(30);
       expect(f.row(session.id).isWorking).toBe(false);
     }
-    expect(backend.plugin.instances).toHaveLength(0);
+    expect(nothingLoaded(backend.plugin)).toBe(true);
     expect(lossLines(f, session.id)).toHaveLength(1);
     await backend.manager.reconcileSessions();
     await pause(100);
@@ -137,7 +140,7 @@ describe('Recovery that was scheduled when the backend restarted', () => {
     const { f, session, native } = await scheduledRecovery();
     const backend = await f.restartBackend();
     await backend.manager.reconcileSessions();
-    expect(backend.plugin.instances).toHaveLength(0); // nothing is loaded at boot
+    expect(nothingLoaded(backend.plugin)).toBe(true); // nothing is loaded at boot
     await vi.waitFor(() => expect(runState(backend.manager, session.id)?.status).toBe('failed'), { timeout: 5000, interval: 20 });
 
     await vi.advanceTimersByTimeAsync(15_000); // the first retry delay of the persisted budget

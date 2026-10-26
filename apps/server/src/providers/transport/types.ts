@@ -74,6 +74,12 @@ export interface TransportSession {
    */
   unload(): Promise<void>;
   /**
+   * True while the provider process is running work of its own that no turn covers (a background shell command or
+   * subagent). Idle sleep and memory pressure leave such a process alone, as they leave a tmux screen that shows
+   * background work. Optional: a plugin that cannot tell leaves it out and the host treats the session as having none.
+   */
+  hasBackgroundWork?(): boolean;
+  /**
    * The host is finished with the session. Per-session plugins end the process whatever the reason; `release` also means the
    * conversation is over. A shared process keeps running for its other threads.
    */
@@ -98,6 +104,13 @@ export interface LineTransportSpawn {
   env: Record<string, string>;
   /** Stable identity for reconnecting to a host relay after a backend restart. */
   hostId?: string;
+  /**
+   * Connect to the live process behind `hostId` and do nothing else. No process is started, and nothing is ended: not a
+   * stale host, not a host that runs another command line. Rejects with {@link LineTransportNotRunningError} when no live
+   * process answers for exactly this `hostId` and `argv`. A factory that runs children directly over stdio (no hosts)
+   * rejects the same way, because a stdio child cannot outlive its parent.
+   */
+  attachOnly?: boolean;
 }
 
 export type LineTransportFactory = (spawn: LineTransportSpawn) => Promise<LineTransport>;
@@ -133,6 +146,13 @@ export interface TransportInstance {
   probe(): Promise<{ installed: boolean; version?: string; auth: 'ok' | 'missing' | 'unknown'; models: Array<{ id: string; label: string; efforts?: string[] }> }>;
   start(options: OpenOptions): Promise<TransportSession>;
   resume(nativeSessionId: string, options: OpenOptions): Promise<TransportSession>; // throws ResumeFailedError
+  /**
+   * Per-session plugins only. Adopts the conversation's own process when one outlived a backend restart behind its session
+   * host, and resolves undefined when there is none. It never starts a process, never ends one it does not adopt, and
+   * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
+   * sleep, memory pressure and release can end survivors that nobody has used since the restart.
+   */
+  reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
   alive(): Promise<{ pid?: number; connected: boolean }>;
   dispose(reason: 'shutdown' | 'restart'): Promise<void>; // shared: disconnect; never kills a process that other Consoles own
 }
@@ -198,6 +218,15 @@ export class ResumeFailedError extends Error {
   constructor(message = 'The native session could not be resumed.') {
     super(message);
     this.name = 'ResumeFailedError';
+  }
+}
+
+/** `attachOnly` found no live process for the host id and command line. Nothing was started or ended. */
+export class LineTransportNotRunningError extends Error {
+  readonly code = 'transport_not_running';
+  constructor(message = 'No live provider process answers for this session host.') {
+    super(message);
+    this.name = 'LineTransportNotRunningError';
   }
 }
 

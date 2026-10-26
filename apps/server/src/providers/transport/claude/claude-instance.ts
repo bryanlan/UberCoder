@@ -4,7 +4,8 @@
 // spawn through the host's `LineTransportFactory` (a session host relay in production, so the process outlives a
 // backend restart; `hostId` is `claude-<conversationId>`) and fall back to a plain stdio child when the host gives
 // none. A backend restart finds the process still running behind its host: `resume` then reattaches (with the argv
-// the process was launched with, recorded in plugin meta, because the host is keyed by it) instead of spawning.
+// the process was launched with, recorded in plugin meta, because the host is keyed by it) instead of spawning, and
+// `reattach` adopts such a survivor without ever starting a process when there is none.
 // After a spawn they run the handshake: an `initialize` control request (carrying the appended system prompt,
 // so it stays out of `ps`), the launch checks, and only then hand over a ready {@link ClaudeSession}. Nothing here
 // makes a model call: `probe` and the handshake only read what `initialize` answers.
@@ -14,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  LineTransportNotRunningError,
   ResumeFailedError,
   TransportUnavailableError,
   type LineTransport,
@@ -337,6 +339,37 @@ export class ClaudeInstance implements TransportInstance {
   }
 
   /**
+   * Adopts this conversation's process when one outlived a backend restart behind its session host, and resolves undefined
+   * when there is none. Unlike `resume` it never starts a process: the connection is made with `attachOnly`, which finds a
+   * live host that runs exactly the command line this plugin recorded for the conversation or reports that none does.
+   *
+   * The process is the conversation's own when the recorded launch names this native id, the host id is the
+   * conversation's (`claude-<conversationId>`) and the host's command line hash matches the recorded argv. It is the
+   * only writer when no other live process holds the session in the CLI's registry; a holder that is not the host's child
+   * is another writer, and the survivor is let go (disconnected, still running) with {@link ClaudeSessionHeldError}.
+   *
+   * A survivor that already ran its handshake is initialized again, which only reads what it still has open (the CLI
+   * allows a repeated `initialize`, for example after a reconnect). One the earlier backend never spoke to is handshaken
+   * as a new launch, with its SessionStart hook frames replayed.
+   */
+  async reattach(nativeSessionId: string, options: OpenOptions): Promise<ClaudeSession | undefined> {
+    if (this.disposed) return undefined;
+    const claude = options as ClaudeOpenOptions;
+    const recorded = this.readLaunchRecord(claude.conversationId, nativeSessionId);
+    // No record, or one that names another conversation's process: there is nothing of ours to find.
+    if (!recorded || !argvNamesSession(recorded.argv, nativeSessionId)) return undefined;
+    const loaded = this.sessions.get(nativeSessionId);
+    if (loaded && !loaded.isEnded) throw new ClaudeSessionHeldError(nativeSessionId, loaded.pid ?? process.pid);
+    if (this.opening.has(nativeSessionId)) throw new ClaudeSessionHeldError(nativeSessionId, process.pid);
+    this.opening.add(nativeSessionId);
+    try {
+      return await this.attachSurvivor(nativeSessionId, claude, recorded.argv);
+    } finally {
+      this.opening.delete(nativeSessionId);
+    }
+  }
+
+  /**
    * The backend is going away or the instance is being replaced. Behind a session host the processes keep running for
    * the next backend (the connection just closes); a plain stdio child is ended.
    */
@@ -449,6 +482,66 @@ export class ClaudeInstance implements TransportInstance {
       await transport.close({ terminate: true }).catch(() => undefined);
       throw new ClaudeSessionHeldError(sessionId, extra.reattach.holderPid);
     }
+    return this.bringUp(transport, fresh, mode, sessionId, options, configDir, argv, extra.transcriptPath);
+  }
+
+  /** `reattach`, with the instance's `opening` guard held: connect to the survivor, check the one-writer rule, run the handshake. */
+  private async attachSurvivor(sessionId: string, options: ClaudeOpenOptions, argv: string[]): Promise<ClaudeSession | undefined> {
+    const configDir = this.configDirFor(options);
+    const env = buildClaudeEnv({ base: this.baseEnv, configEnv: this.config.env, optionsEnv: options.env, conversationId: options.conversationId, home: this.home });
+    const request: LineTransportRequest = {
+      argv,
+      cwd: options.cwd,
+      env,
+      hostId: hostIdFor(options.conversationId),
+      attachOnly: true,
+      closeGraceMs: this.timings.closeGraceMs,
+      termGraceMs: this.timings.termGraceMs,
+    };
+    const connect = async (replayFromStart: boolean): Promise<LineTransport | undefined> => {
+      try {
+        return await this.factory(replayFromStart ? { ...request, sinceSeq: 0 } : request);
+      } catch (error) {
+        if (error instanceof LineTransportNotRunningError) return undefined; // nothing survived; nothing was started
+        throw toTransportError(error);
+      }
+    };
+    let transport = await connect(false);
+    if (!transport) return undefined;
+    let fresh = transportStartedFresh(transport);
+    if (fresh) {
+      // The earlier backend started this process and never spoke to it, so its SessionStart hook frames went by before
+      // this connection. Connect again and have the host replay them (a disconnect leaves the process running).
+      await transport.close().catch(() => undefined);
+      transport = await connect(true);
+      if (!transport) return undefined;
+      fresh = transportStartedFresh(transport);
+    }
+    // One writer: the CLI registers every live process with the session it has open. The only one allowed is the
+    // host's own child; anything else writes the same transcript.
+    const holder = findSessionHolder(configDir, sessionId, transport.pid !== undefined ? { ignorePids: [transport.pid] } : {});
+    if (holder) {
+      await transport.close().catch(() => undefined); // let go; the survivor keeps running
+      throw new ClaudeSessionHeldError(sessionId, holder.pid);
+    }
+    return this.bringUp(transport, fresh, 'resume', sessionId, options, configDir, argv, locateTranscripts(configDir, options.cwd, sessionId)[0]);
+  }
+
+  /**
+   * Wraps a connected channel in a session and runs the handshake. The channel is a new process (`fresh`) or one an
+   * earlier backend already initialized. Records the launch before the handshake, so a backend that dies right after
+   * still finds the process again.
+   */
+  private async bringUp(
+    transport: LineTransport,
+    fresh: boolean,
+    mode: 'new' | 'resume',
+    sessionId: string,
+    options: ClaudeOpenOptions,
+    configDir: string,
+    argv: string[],
+    transcriptPath: string | undefined,
+  ): Promise<ClaudeSession> {
     const client = new StreamJsonClient({ transport, log: this.log, label: 'claude', controlTimeoutMs: this.timings.controlTimeoutMs });
     // A resume that fails at startup answers with a zeroed error result and exits, without ever replying to `initialize`.
     let startupResult: ClaudeResultFrame | undefined;
@@ -462,7 +555,7 @@ export class ClaudeInstance implements TransportInstance {
       log: this.log,
       timings: this.timings,
       configDir,
-      transcriptPath: extra.transcriptPath ?? expectedTranscriptPaths(configDir, options.cwd, sessionId)[0],
+      transcriptPath: transcriptPath ?? expectedTranscriptPaths(configDir, options.cwd, sessionId)[0],
       ...optionalFlag('model', flagValue(argv, '--model')),
       ...optionalFlag('effort', flagValue(argv, '--effort')),
       requireSubscriptionLogin: this.requireSubscriptionLogin,
@@ -551,6 +644,11 @@ export class ClaudeInstance implements TransportInstance {
   private async endProbeProcess(client: StreamJsonClient): Promise<void> {
     await client.close({ terminate: true }).catch(() => undefined);
   }
+}
+
+/** True when the argv launches this native session: `--session-id <id>` or `--resume <id>`. */
+function argvNamesSession(argv: string[], sessionId: string): boolean {
+  return flagValue(argv, '--session-id') === sessionId || flagValue(argv, '--resume') === sessionId;
 }
 
 /** The value after a flag in an argv. */

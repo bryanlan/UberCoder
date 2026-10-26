@@ -28,7 +28,7 @@ import {
   type HostProcessIdentity,
   type HostRecord,
 } from './session-host.js';
-import { NotSentError } from './types.js';
+import { LineTransportNotRunningError, NotSentError } from './types.js';
 import type { LineTransport, LineTransportFactory, LineTransportSpawn } from './types.js';
 
 /** After the child's `exit`, wait this long for its stdout pipe to drain before the exit is final. */
@@ -241,7 +241,9 @@ export class StdioLineTransport extends LineChannel implements ManagedLineTransp
    * server as its child; a group signal reaches both) and resolves once it exists. Rejects with
    * {@link LineTransportSpawnError}, for example `ENOENT` for a missing binary.
    */
-  static async spawn(request: Pick<LineTransportRequest, 'argv' | 'cwd' | 'env' | 'closeGraceMs' | 'termGraceMs'>, options: StdioLineTransportOptions = {}): Promise<StdioLineTransport> {
+  static async spawn(request: Pick<LineTransportRequest, 'argv' | 'cwd' | 'env' | 'closeGraceMs' | 'termGraceMs' | 'attachOnly'>, options: StdioLineTransportOptions = {}): Promise<StdioLineTransport> {
+    // A child of this process is gone with it: there is never a running one to attach to.
+    if (request.attachOnly) throw new LineTransportNotRunningError('A stdio provider process does not outlive its parent, so there is none to attach to.');
     const [executable, ...args] = request.argv;
     if (!executable) throw new LineTransportSpawnError('', new Error('The command is empty.'));
     const child = spawn(executable, args, { cwd: request.cwd, env: request.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
@@ -850,7 +852,29 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
     };
   }
 
+  /** `attachOnly`: connect to the live host that runs exactly this command line, or say there is none. Starts and ends nothing. */
+  async function attachHost(request: LineTransportRequest, hostId: string): Promise<LineTransport> {
+    const paths = hostPaths(options.runtimeDir, hostId);
+    const record = readHostRecord(paths.record);
+    if (!record || !identityRunning(record.host)) throw new LineTransportNotRunningError(`No session host is running for ${hostId}.`);
+    // The host is keyed by its command line; another one is not this conversation's process and is left alone.
+    if (record.argvHash !== argvHash(request.argv)) throw new LineTransportNotRunningError(`The session host for ${hostId} runs another command line.`);
+    let transport: HostLineTransport;
+    try {
+      transport = await HostLineTransport.connect(hostConnectOptions(request, paths.socket));
+    } catch (error) {
+      throw new LineTransportNotRunningError(`The session host for ${hostId} did not answer: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!transport.info.alive) {
+      await transport.close().catch(() => undefined); // disconnect only; the lingering host is not ours to end here
+      throw new LineTransportNotRunningError(`The provider process of the session host for ${hostId} has ended.`);
+    }
+    log.info({ hostId, hostPid: transport.info.hostPid, childPid: transport.info.childPid, seq: transport.info.seq, fresh: transportStartedFresh(transport) }, 'attached to a running session host');
+    return transport;
+  }
+
   async function openHost(request: LineTransportRequest, hostId: string): Promise<LineTransport> {
+    if (request.attachOnly) return attachHost(request, hostId);
     const paths = hostPaths(options.runtimeDir, hostId);
     fs.mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
     const hash = argvHash(request.argv);

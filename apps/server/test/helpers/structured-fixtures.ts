@@ -89,6 +89,10 @@ export class FakeTransportSession implements TransportSession {
   /** A per-session fake gets its own pid, as the real plugin reports its conversation's process. */
   pid: number | undefined;
   closed = false;
+  /** Set when the session was adopted from a process that outlived the previous backend (`reattach`), not started or resumed. */
+  reattached = false;
+  /** What `hasBackgroundWork()` reports: background shell commands or subagents the process is still running. */
+  backgroundWork = false;
   /** The next `sendTurn` rejects with this error (once), after being recorded as a call. */
   failNextSend: Error | undefined;
   private turnCounter = 0;
@@ -149,6 +153,10 @@ export class FakeTransportSession implements TransportSession {
     this.calls.push({ method: 'respond', args: [requestId, response] });
   }
 
+  hasBackgroundWork(): boolean {
+    return !this.closed && this.backgroundWork;
+  }
+
   /** As the real plugin: the thread leaves memory, so the session ends and its event stream with it. */
   async unload(): Promise<void> {
     this.calls.push({ method: 'unload', args: [] });
@@ -193,6 +201,11 @@ export class FakeTransportInstance implements TransportInstance {
   nextNativeSessionId: string | undefined;
   pid: number | undefined = process.pid;
   disposed = false;
+  /**
+   * Native ids whose provider process outlived the previous backend, with the pid it keeps. `reattach` adopts one of them
+   * (once); any other id has no survivor. Shared with the plugin, so a test marks survivors before the instance exists.
+   */
+  survivors = new Map<string, number>();
   private threadCounter = 0;
   private pidCounter = 0;
 
@@ -221,6 +234,19 @@ export class FakeTransportInstance implements TransportInstance {
     this.assertOpen();
     if (this.failResume) throw new ResumeFailedError(`Fake resume of ${nativeSessionId} failed.`);
     return this.open(nativeSessionId, options, true);
+  }
+
+  /** As the real plugin: adopts a surviving process, never starts one. */
+  async reattach(nativeSessionId: string, options: OpenOptions): Promise<FakeTransportSession | undefined> {
+    this.calls.push({ method: 'reattach', args: [nativeSessionId, options] });
+    this.assertOpen();
+    const pid = this.survivors.get(nativeSessionId);
+    if (pid === undefined) return undefined;
+    this.survivors.delete(nativeSessionId);
+    const session = this.open(nativeSessionId, options, true);
+    session.pid = pid;
+    session.reattached = true;
+    return session;
   }
 
   async alive(): Promise<{ pid?: number; connected: boolean }> {
@@ -252,6 +278,8 @@ export interface FakeTransportPluginOptions {
   capabilities?: Partial<TransportCapabilities>;
   failResume?: boolean;
   manualTurns?: boolean;
+  /** Native id -> pid of a provider process that outlived the previous backend (see `FakeTransportInstance.survivors`). */
+  survivors?: Record<string, number>;
 }
 
 export class FakeTransportPlugin implements TransportPlugin {
@@ -271,6 +299,7 @@ export class FakeTransportPlugin implements TransportPlugin {
     const instance = new FakeTransportInstance(this.id, { ...this.capabilities }, config, context);
     instance.failResume = this.options.failResume ?? false;
     instance.manualTurns = this.options.manualTurns ?? false;
+    instance.survivors = new Map(Object.entries(this.options.survivors ?? {}));
     this.instances.push(instance);
     return instance;
   }
