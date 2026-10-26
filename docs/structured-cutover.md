@@ -375,19 +375,26 @@ providers whose lane is on, `structuredRows` (rows already moved) and one entry 
 
 **Open items found while building C2**
 
-- A per-session process that survived a backend restart behind its host is not owned by the new backend until the
-  conversation is used again (structured rows load on first use). Until then idle sleep, pressure suspension and
-  release see an unloaded row and do not end that process. The plugin can reattach it on `resume`, but there is no
-  "reattach if running, do nothing otherwise" call, so the host cannot adopt or reap survivors without starting a
-  process for a conversation that has none. It needs a small optional instance method (for example
-  `reattach(nativeSessionId, options)` returning undefined when no process is running) in C1, and a boot-time or
-  sleep-time call in the service.
 - `--system-prompt-snapshot off` on a resume with authority text is unproven against the real CLI.
-- A migrated or history-bound Claude row has no cost profile, so its resumed process starts without `--model` and
-  `--effort` and takes the CLI defaults. The tmux resume command carries `--effort medium` from the config template.
-  Check what a resumed headless session reports before the flip, or give migrated rows a profile.
-- Idle sleep and pressure suspension end a Claude process by Console recency alone; the tmux path also refuses while the
-  screen shows background work. A headless process with a long background task would be ended at idle.
+
+**Built in lane C5 (fixes for the C2 open items)**
+
+- **Survivors after a backend restart.** The first `reconcileSessions` pass calls `reattachSurvivors` for every awake
+  (bound, not suspended) row of a per-session plugin. The optional `TransportInstance.reattach(nativeSessionId, options)`
+  returns the conversation's own process when one outlived the restart behind its host, and undefined when there is none;
+  it never starts a process. The Claude plugin connects with the new `attachOnly` request flag (live host, exact recorded
+  command line, nothing started or ended), requires the recorded launch to name this native id, refuses a session another
+  live process holds in the CLI registry, and repeats `initialize`. A survivor is then loaded like any other (new epoch,
+  "Reconnected to the running agent process"), so idle sleep, pressure suspension and release can end it. A row with no
+  survivor stays unloaded and resumes on its next use. Unverified against the real CLI: that a repeated `initialize` on a
+  running process behaves as the SDK types describe (answer with the open requests and a background-task snapshot), and
+  that the process id in the CLI registry file equals the host's child pid (the one-writer check ignores only that pid).
+- **Profile-less Claude rows.** A per-session Claude row with no cost profile and no model of its own from a granted
+  launch runs on `medium` for the resume and every turn, and the service has the manager store it on the row.
+- **Background work.** `TransportSession.hasBackgroundWork()` (the Claude session derives it from
+  `system/background_tasks_changed`, `task_started`, `task_notification` and terminal `task_updated` frames) blocks idle
+  sleep, pressure suspension and manual suspend with the reason `background_work`, like the tmux screen check. The flag
+  is ignored after four hours without any event from the transport.
 
 ## Parity features
 
@@ -424,13 +431,136 @@ the fake plugin). `bound_sessions.tmux_session_name` becomes nullable in a later
 
 ## Verification
 
-- Unit: Claude plugin against a scripted fake `claude` (stream-json), host per-session paths with the
-  fake plugin, relay reconnect and replay, question card and answer route, images, migration.
-- Real proofs: `scripts/prove-structured-claude.mjs` (same twelve steps as the Codex proof, plus a question
-  answered through the card route, an image turn, and a backend restart with a running turn that survives
-  through the relay); the Codex proof extended with the relay restart step; a migration proof on a copy of
-  the live database.
+- Unit: the Claude plugin against a scripted fake `claude` (`structured-claude-plugin`), the relay and its factory
+  (`structured-session-host`), per-session paths, questions, images, survivors, the default transport and the
+  migration with the fake plugin (`structured-session-*`), Codex questions and images (`structured-codex-requests`). The
+  commands and what each file covers are in `docs/agent_docs/running_tests.md`.
+- Real proofs. Each is opt-in (`--run`, after `npm run build`), runs one isolated backend (temp database and runtime,
+  scratch git project, private tmux socket, free port) that never touches the live Console, uses the host's Claude and Codex
+  logins with short fixed prompts, and ends with no `claude`, `codex app-server`, session host or `agent-coord.mjs mcp` of its
+  own left running and its temp root removed. They share `scripts/structured-proof-kit.mjs`; the Codex proof keeps its own copy of
+  the helpers.
+  - `scripts/prove-structured-claude.mjs` (12 steps): bind, first reply with transcript and human turn origin, coordination
+    hook and MCP call, steer, Stop, an `AskUserQuestion` answered through the card route, an image turn, a live model and
+    effort switch, manual sleep and restore, a graceful backend restart with the process alive, release.
+  - `scripts/prove-structured-migration.mjs` (8 steps): one real tmux Codex chat and one real tmux Claude chat are moved by
+    the reconcile pass after `defaultTransport` flips to `structured`, then answer on the structured path in the same native
+    conversation.
+  - `scripts/prove-structured-codex.mjs` (14 steps): the earlier 12 steps plus a question step and an image step.
 - Full suites and typecheck; the three known timing failures on this host stay the baseline.
+
+Decision log. The plan said the migration proof would run on a copy of the live database. It runs on fresh chats created in the
+isolated backend instead. A copy of the live database names the live tmux sessions, transcripts, runtime and 38 real
+conversations, so a mistake would kill or write to real work; fresh chats exercise the same code (`classify`, kill, confirm,
+`setTransport`, resume) with nothing to lose. The cost is that a real-world row shape the proof does not create (a history-bound
+Claude row without a profile, a working row, a row whose tmux session already died) is covered only by the unit tests and the
+dry-run route.
+
+## Verification evidence
+
+Real-provider proofs, 2026-10-26, `claude` 2.1.310, `codex-cli` 0.164.0, built from `daa80d7` with a clean source tree.
+Evidence JSON is copied to `docs/research/cutover-2026-10-26/` (steps, key values, findings, cleanup; no message bodies,
+tokens or addresses). Each run also writes an untracked copy under `test-results/`.
+
+**Claude proof**: `claude-proof-2026-10-26T17-18-56Z.json`, 12 of 12 passed in 77 s, no cleanup problems. Two earlier runs
+failed on defects of the script itself (it filtered request records by the TUI's label, and it read the effort of the wrong turn);
+a third passed 12 of 12 before lane C5's boot-time reattach landed, when step k recorded a finding instead of asserting it. No
+run showed a defect in the product.
+
+| Step | Result and key values |
+|---|---|
+| a. tree | `structuredProviders: ['claude']` |
+| b. bind | `transport: structured`; `conversation_ref` is the session UUID the Console minted; sentinel name `structured:<id>`; no raw log; the per-session host record `claude-<id>.json` names the `claude` pid, its own process group and start times that match `/proc`, and the process is the host's child with a parent death signal; the process environment holds the isolated `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`, its own `AGENT_CONSOLE_SESSION_ID`, no `TMUX`, and `CLAUDE_CODE_SDK_READS_SESSION_STATE=1`; the argv is stream-json without `-p`; one coordination MCP server child, with the isolated runtime |
+| c. first message | profile switched to `low` before the turn with the same pid; queue record `submitted`, `deliveryMode: turn`; reply `PONG`, `lastResponseAt` set; transcript at `~/.claude/projects/<escaped cwd>/<id>.jsonl`, the prompt row has `turnOrigin: human`, `origin: {kind: human}`, `entrypoint: sdk-cli`, `promptSource: sdk`; the index points at it; the first request used `claude-sonnet-5` at effort `high` although the process was launched with `claude-opus-5-5` / `xhigh` |
+| d. coordination | the SessionStart hook registered `native_session_id` = the Claude session id in the isolated runtime (the hook command is the live checkout's helper; the env redirects it); the agent called `mcp__agent_console_coordination__agent_coordination` (`status`), the call succeeded, reply `REGISTERED`; `last_seen_at` advanced; one `agent-coord.mjs mcp` process with the isolated runtime was seen |
+| e. steer | message sent mid-turn: `deliveryMode: steer`, same `turnId`; reply `STEERED`; see finding 1 |
+| f. Stop | idle 264 ms after Escape; same pid, still the host's child; the counting shell command gone 324 ms after Escape; transcript marker `[Request interrupted by user for tool use]` |
+| g. question | `AskUserQuestion` became one pending request (`kind: question`, options Red/Blue, `multiSelect: false`, `allowCustom: true`) while the session read as working; the answer through `POST /api/sessions/:id/requests/:requestId` left the row, a second answer was refused (404), the tool result the model received held the answer, reply `blue` |
+| h. image | a 64x64 solid green PNG through the image route and `/keys`: the user row holds one base64 `image` block; reply `Green` |
+| i. model and effort | `medium` turn: request model `claude-opus-5-5`, effort `xhigh`; back to `low`: `claude-sonnet-5`, `high`; same pid and same command line; the timeline shows no `/model` rows |
+| j. sleep and restore | the assignment was `waiting`, so the manual suspend was accepted (the proof checks the 409 refusal for an `active` assignment only when it applies); the process and its host exited, the screen route 404s while suspended; resume started a new process on `--resume <same id>` with the row's session identity in its environment and a new epoch; reply `RESTORED` |
+| k. backend restart | the process and its host survived `app.close()`, the host record still matched `/proc`; the first reconcile pass (lane C5) adopted the process before any message (`reattachedAtBoot: true`, new epoch, screen `Claude (structured) idle`, same pid, one process under the host); reply `RESUMED` from the same pid; the CLI registry showed exactly one live holder of the session |
+| l. release | row `ended`, `should_restore` 0, process and host gone, host record removed, no process with the proof's runtime or temp root, no `claude`, no `agent-coord.mjs mcp`; then backend shutdown with still nothing left |
+
+**Migration proof**: `migration-proof-2026-10-26T17-26-34Z.json`, 8 of 8 passed in 37 s, no cleanup problems.
+
+| Step | Result and key values |
+|---|---|
+| a. bind on tmux | two `transport: tmux` rows through `/new/bind`, real `ac-codex-…` and `ac-claude-…` sessions on the private socket |
+| b. first replies | both answered `TMUX`, each row got a native id (Codex thread UUID, Claude session UUID) and an indexed transcript; the Codex first message relaunched Codex and bound a new Console session id (`restartPendingSessionWithInitialPrompt`), which the proof follows; 3 and 2 processes carried the session ids |
+| c. flip | config rewritten to `defaultTransport: structured`, backend closed and rebuilt (both tmux sessions survived the backend); the dry run, 0.1 s after boot, listed `providers: [codex, claude]`, `structuredRows: 0`, `idle: 2` |
+| d. reconcile | the first pass (about 6.7 s after boot) flipped both rows: `transport: structured`, `idle_suspended_at` set, `tmux_session_name` `structured:<id>`, `pid` and `raw_log_path` cleared, `conversation_ref` unchanged, `should_restore` 1; the report then showed `structuredRows: 2` and every outcome 0 |
+| e. tmux gone | neither tmux session exists, the private tmux server is gone, none of the 5 processes of the tmux phase is alive, nothing carries the proof's runtime |
+| f. Codex | `MIGRATED` on the structured path: app-server held by the `codex` session host, same thread id, the earlier `TMUX` reply still in the conversation, index unchanged, `idle_suspended_at` cleared |
+| g. Claude | `MIGRATED`: a `claude` process on `--resume <same id>` with `--model claude-opus-5-5 --effort xhigh` (the row kept the profile it had on tmux), own session id in its environment, host record names its pid, the earlier `TMUX` reply still in the transcript |
+| h. release | both rows `ended`; the Codex host ended with `terminateHost`, the Claude host with the release; nothing left |
+
+**Codex proof**: `codex-proof-2026-10-26T17-30-16Z.json`, 14 of 14 passed in 119 s (the run where the model kept the question turn open). Steps a to l are as in
+`docs/structured-providers.md`, "Verification evidence"; the new ones:
+
+| Step | Result and key values |
+|---|---|
+| h2. question | `request_user_input_async` was called once (`{"accepted":true}`) and no pending request reached the Console; the model then polled with two `sleep` calls, the step stopped the turn after 60 s (finding 9). The step records that and passes; the card path for Codex stays covered by `structured-codex-requests` against the fake app-server |
+| h3. image | a solid green PNG through the image route: the rollout holds an `<image …>` text item and an `input_image` item with the file's data URL; reply `Green` |
+
+Targeted suites on `daa80d7`: `structured-session-host structured-claude-plugin structured-codex-requests structured-session-requests
+structured-session-per-session structured-session-migration structured-session-default-transport structured-session-launches
+structured-session-survivors` passed (274 tests, 3 skipped opt-in tests, 28 s with two workers).
+
+**Findings from the real CLI and Codex** (what the research briefs left open or got wrong):
+
+1. *Steer folds at the tool boundary and does not shorten a running command* (brief section 4, "fold is unverified"). A plain
+   message sent while a turn runs is queued at once (`queue-operation enqueue`), then folded into the running turn after the
+   current tool call returns and before the next model request: the transcript holds
+   `attachment {type: queued_command, prompt: [{type: text}], source_uuid, delivery_id, origin: {kind: human}, humanTurn: true}`
+   followed by `queue-operation remove`. There is one Stop hook for the whole exchange, so it is one turn. A 30 second shell
+   command printed all 30 numbers before the fold; `STEERED` came 30 s after the steer. A person who wants a running command cut
+   short must press Stop. The headless `queued_command` record has the fields the brief expected from the TUI (with the prompt as a list of content
+   blocks).
+2. *Interrupt during a tool* (brief section 5): idle in about 265 ms, the process survives (same pid), the foreground shell
+   command is killed within about 325 ms, the Stop hook does not run. The transcript holds a tool result "The user doesn't want to
+   proceed with this tool use. The tool use was rejected…" and a text row `[Request interrupted by user for tool use]` (the brief
+   saw `[Request interrupted by user]` for an interrupt before the model call). `isNativeInterruption` accepts both.
+3. *`AskUserQuestion` under bypass reaches the host* (brief sections 6 and 14): launched with `--dangerously-skip-permissions
+   --permission-prompt-tool stdio` it arrives as `can_use_tool`, blocks the turn until answered, and the answer comes back as a
+   tool result "Your questions have been answered: …". `ExitPlanMode` was not exercised and stays open.
+4. *Hooks* (brief sections 7 and 14): `SessionStart` (at launch, before the first prompt), `UserPromptSubmit`, `PreToolUse`,
+   `PostToolUse` and `Stop` all run in a headless process from the user's installed settings, including on a successful turn;
+   `Stop` does not run for an interrupted turn. They register in the isolated runtime although their command is the live
+   checkout's helper, because the plugin's per-process `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG` redirect it.
+5. *MCP name clash*: `~/.claude.json` defines a user-scope `agent_console_coordination` server that names the live runtime; the
+   plugin's `--mcp-config` entry with the same name won. Exactly one coordination server ran, with the isolated runtime. If the
+   CLI ever changed that precedence, a conversation would talk to the wrong Console, so the proof fails the MCP call before it is
+   made when the server's runtime is not its own.
+6. *Headless transcript shape*: `entrypoint: sdk-cli`, `promptSource: sdk`, `turnOrigin: human` (because `origin` is stamped),
+   request records labelled `querySource: "sdk"` (the TUI uses `repl_main_thread`), `stop_hook_summary` rows and no
+   `turn_duration` rows; the assistant rows carry `effort`. Console's parsers read none of these.
+7. *Live model and effort switch works* (brief section 8): `set_model` and the effort follow the profile on the next request of
+   the same process (`claude-sonnet-5`/`high`, `claude-opus-5-5`/`xhigh`), and each switch writes a `<command-name>/model`
+   local-command row into the transcript. The parser already skips those rows; the proof checks that the timeline shows none.
+8. *Images*: the base64 block reaches the model, and the CLI adds a `[Image: source: …]` meta row. The prompt text still carries
+   the tmux envelope ("Inspect the attached local image files with Read"), so the model also opens the stored file: one redundant
+   tool call, same answer. Stripping the envelope for structured sends would remove it.
+9. *Codex questions outside plan mode*: on `codex-cli` 0.164.0 in the default collaboration mode the model's tool is
+   `request_user_input_async`, which returns `{"accepted":true}` at once and raises no `item/tool/requestUserInput` server request.
+   In one run the turn ended with the question as ordinary assistant text; in another the model kept the turn open with `sleep`
+   calls waiting for an answer and wrote no text at all (two of four runs ended the turn and two kept it open; the step stops a
+   turn that waits 60 s, and the last run took that branch). The question is then only in the tool call, so a person may not see it. A
+   blocking question needs plan mode. Whether to render the async question in the timeline is a decision for Bryan.
+10. *Reattach after a backend restart* (lane C5): the repeated `initialize` on a running process was accepted, the process kept
+    its pid and its place in the CLI registry (exactly one live holder), and answered the next turn. This settles the two
+    "unverified against the real CLI" points of lane C5.
+11. *Timing on this host*: the first Claude turn (with the profile switch and the index lookup) took about 5 s; a manual
+    sleep, the restore and a one-word turn together about 3.3 s. The Codex medium model (`gpt-6.1-sol`) was rate limited once during the migration proof (a turn waited minutes),
+    then answered in about 5 s; the proofs use the low profile where a stall would hide a defect.
+12. *Pending Codex first message on tmux* (not a defect of this work, but it shapes any caller): the first message of a new tmux
+    Codex chat releases the session and binds a new Console session id. A caller must follow the `session.id` in the `/input`
+    response; the migration proof does.
+
+Not proven by any run: `ExitPlanMode` under bypass, `priority: "now"` during running tools, streamed deltas,
+`--system-prompt-snapshot off` on a resume with authority text, TUI resume of a headless session and the reverse, a running
+turn that spans a backend restart, a history-bound Claude row without a profile (C5 gives it `medium`; covered by unit tests),
+and the idle-sleep timer itself (the proofs sleep manually).
 
 ## Work breakdown
 

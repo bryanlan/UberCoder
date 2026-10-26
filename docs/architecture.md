@@ -566,9 +566,10 @@ See [the audit contract](peer-wake-audit.md).
 ## Structured provider lane
 
 Behind `structuredSessions.<provider>.enabled` (default off), a conversation can be driven through a
-provider protocol instead of a hidden tmux session. Codex is the first provider, through
-`codex app-server`. The plan, contracts and verification evidence are in
-[the lane plan](structured-providers.md); this section is the summary.
+provider protocol instead of a hidden tmux session. Codex runs through `codex app-server` and Claude through its
+headless stream-json CLI. The plan, contracts and verification evidence are in
+[the lane plan](structured-providers.md) (Codex) and [the cutover plan](structured-cutover.md) (relay, Claude, questions,
+migration); this section is the summary.
 
 - Transport column: `bound_sessions.transport` (`tmux` by default, `structured`; schema 19) is chosen at
   bind time and persisted on the row, so turning the flag off later leaves existing rows working.
@@ -588,17 +589,45 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   `providers/transport/codex/` implements it with one shared `codex app-server` child per Console (stdio
   JSON-RPC) and one thread per conversation, routed by thread id. Plugin events carry no message bodies:
   durable history is still the Codex rollout, so transcript parsing, search and live-output
-  normalization are unchanged, and replayed events never move recency. The child runs behind a session host (`providers/transport/session-host.ts`, started detached by
-  `providers/transport/line-transport.ts`) that owns its stdio and a Unix socket, so a backend restart or crash does
-  not end an app-server mid-turn (the service keeps `KillMode=process`): the next backend reads the host's record
-  file, reconnects when the recorded host and command still match, and re-resumes its threads on the same
-  process. The host starts the child in its own process group through `setpriv --pdeathsig TERM --` relative to the
-  host, and group signals reach the native server behind the npm `codex` launcher. A recorded child left without
-  its host is ended through its recorded group before a new host starts; every signal is gated on pid, start ticks
-  and boot id. See `docs/structured-cutover.md`, "Session host relay".
+  normalization are unchanged, and replayed events never move recency.
+- Session host relay: a provider process never belongs to the backend. `providers/transport/session-host.ts` is a small
+  standalone Node program, started detached by `providers/transport/line-transport.ts`, that owns the provider child and
+  its stdio and serves a Unix socket speaking the same newline JSON. A backend restart or crash therefore does not
+  end a provider process mid-turn (the service keeps `KillMode=process`): the next backend reads the host's record
+  file under `<runtime>/structured/hosts/`, reconnects when the recorded host and command line still match and takes
+  over as the single client. Codex uses one host for its shared app-server (`codex`), Claude one host per conversation
+  (`claude-<sessionId>`). The host starts the child in its own process group through `setpriv --pdeathsig TERM --`
+  relative to the host, so group signals reach the native server behind the npm `codex` launcher and a dying host
+  takes its child with it. A recorded child left without its host is ended through its recorded group before a new
+  host starts; every signal is gated on pid, start ticks and boot id. A bounded output buffer lets a client that kept a
+  cursor replay what it missed; a backend that connects fresh asks for live output only and reads the rest from the
+  provider's own record. See `docs/structured-cutover.md`, "Session host relay".
+- Claude plugin: `providers/transport/claude/` drives `claude --output-format stream-json --input-format stream-json`
+  directly (no SDK package) and declares `processModel: 'per-session'`: one process per conversation, behind its own
+  host, started lazily. The Console mints the session id (`--session-id`, later `--resume <id>`), so there is no
+  pending adoption. Each launch passes the permission flags, the model and effort of the profile, and the
+  conversation's coordination MCP config, and the process environment carries `AGENT_COORD_RUNTIME`,
+  `AGENT_CONSOLE_CONFIG` and its own `AGENT_CONSOLE_SESSION_ID`, so the hooks already installed in the user's Claude
+  settings register unchanged. A grant's authority text goes through the `initialize` request, which keeps it out of
+  `ps`. Human text is sent with `origin: human`; a message sent mid-turn folds into the running turn at the next tool
+  boundary (it does not shorten a running shell command); Stop is an `interrupt` control request and the process
+  survives it; a profile change is applied live (`set_model`, effort) with no restart; images are base64 blocks in front of
+  the text. A launch that shows no `SessionStart` hook (the CLI came up in bare mode) or runs on an API key is refused.
+  Durable history is the CLI's own transcript under `~/.claude/projects`, so transcript parsing, search and recency are
+  unchanged. The one-writer rule (the CLI does not refuse two processes on one transcript) is enforced by the plugin
+  through its table of open sessions, the host record and the CLI's live-process registry `~/.claude/sessions/<pid>.json`. Findings from the real-CLI proof
+  are in `docs/structured-cutover.md`, "Verification evidence".
 - Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
-  A server request that still arrives (approval, elicitation, user-input question) is declined and
+  A server request that still arrives (command, file or permission approval, MCP form) is declined and
   recorded as a status event. There is no approval UI.
+- Questions: a question the agent asks the person (Claude `AskUserQuestion`, Codex `item/tool/requestUserInput`) is
+  kept instead of declined. The service stores it under the session's `structuredRequestsKey` meta record, the
+  bound-sessions repository projects it onto the row as `pendingRequests`, the conversation pane shows it as a card
+  (`PendingQuestionCard`) with the options and a typed answer, and `POST /api/sessions/:id/requests/:requestId` answers
+  it exactly once (a second answer is refused). The turn waits for the answer, so a new question also goes out through
+  the grant push channel. Questions of an earlier connection are dropped at boot, because the connection that raised
+  them is gone. Codex raises a blocking question only in some collaboration modes; in the default mode the model
+  asks in ordinary text and the person answers with a normal message.
 - Identity: the thread id is known at `thread/start`, so the binding is written with it at once and the
   pending alias is adopted immediately. A shared process cannot carry a per-session
   `AGENT_CONSOLE_SESSION_ID`; hooks and the coordination MCP identify the thread by its id and
@@ -622,17 +651,26 @@ provider protocol instead of a hidden tmux session. Codex is the first provider,
   suspended under memory pressure.
 - Default transport and migration: `structuredSessions.defaultTransport` (`tmux` unless set) is the transport of a
   bind that names none, including granted launches, for providers whose lane is on. While it is `structured`,
-  `reconcileSessions` also moves existing tmux conversations over: a live tmux session is stopped like idle sleep and
-  confirmed dead, then the row becomes a sleeping structured row that resumes on its next message.
-  `GET /api/sessions/structured-migration` reports what would move. See `docs/structured-cutover.md`.
+  `reconcileSessions` also moves existing tmux conversations over, one row at a time under its command lock: a live
+  tmux session passes the idle-sleep guard, is killed and confirmed dead, then `BoundSessionsRepo.setTransport` flips the
+  row (`transport='structured'`, the `structured:<id>` name, `idle_suspended_at` set, identity, native conversation and
+  recency unchanged). The row resumes its native conversation on its next message; nothing is loaded at move time.
+  Working rows, rows with queued input and Claude rows without a transcript wait and are retried.
+  `GET /api/sessions/structured-migration` is the dry run. `scripts/prove-structured-migration.mjs` runs the whole move
+  against real tmux Codex and Claude chats. See `docs/structured-cutover.md`.
+- Images: the existing attachment flow feeds both providers (Codex `localImage`, Claude base64 image blocks). The route
+  still appends its "inspect the attached files" envelope to the text, which the structured path sends too, so a model may
+  also open the stored file (one redundant tool call; see `docs/structured-cutover.md`, finding 8).
 - Limits: pressure suspension skips rows on a shared process (it cannot be suspended per thread);
-  the recovery and launch memory floors still apply. Image attachments, streamed assistant text and
-  approval UI are not in slice 1.
-- Restart limitation: the stdio child ends with the backend, also after a crash (through the `--pdeathsig`
-  launch). A running structured turn is lost on a backend restart (RunRecovery reports `process_exited`);
-  the next use starts a new app-server and resumes the thread from its rollout. After a restart an unloaded
-  row never reads as working, and a scheduled recovery or a half-restored row re-arms at boot. A socket-mode
-  process that outlives the backend is a follow-up.
+  the recovery and launch memory floors still apply. Streamed assistant text is not shipped: display is driven by
+  the provider transcript, as for tmux.
+- Restart behavior: with the relay (the production path) provider processes outlive a backend restart or crash. A
+  plain stdio child (tests, or a plugin given no factory) ends with the backend. A turn that was running when the
+  backend went down is not followed by the new backend (it asks the host for live output only); its result is read from
+  the provider's own record. After a restart an unloaded row never reads as working, and a scheduled recovery or a
+  half-restored row re-arms at boot. A per-session process that survived behind its host is adopted by the first
+  reconcile pass (`reattachSurvivors`, which never starts a process), so idle sleep, pressure suspension and release own
+  it again before anyone writes to the conversation; the real-CLI proof checks that the same process then answers.
 
 ## Provider run failures and bounded recovery
 

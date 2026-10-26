@@ -3,9 +3,9 @@
 //
 // Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux
 // socket) with `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
-// API the web client uses: bind, send, coordination hook and MCP, steer, Stop, model profile, manual sleep and
-// restore, a graceful backend restart (the app-server, held by its session host, survives it and serves the next
-// turn) and release. The coordination MCP server is pinned to the proof's runtime by the product itself (the
+// API the web client uses: bind, send, coordination hook and MCP, steer, Stop, a question answered through the card
+// route (h2), an image turn (h3), model profile, manual sleep and restore, a graceful backend restart (the app-server,
+// held by its session host, survives it and serves the next turn) and release. The coordination MCP server is pinned to the proof's runtime by the product itself (the
 // app-server argv), not by this script; a backend crash is not exercised here. Real Codex
 // turns run with the host's ChatGPT login; every prompt is one short fixed sentence.
 //
@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, scryptSync } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
+import { solidPng } from './structured-proof-kit.mjs';
 
 if (!process.argv.includes('--run')) {
   process.stderr.write('Use --run to opt into a real Codex app-server proof (several short turns on the host login). Run `npm run build` first.\n');
@@ -42,6 +43,8 @@ const PROMPTS = {
   first: 'Reply with exactly the single word PONG and nothing else.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
   steer: 'Stop counting now and reply with the single word STEERED.',
+  question: 'Use the request_user_input tool to ask me which color I prefer, with options red and blue. After I answer, reply with exactly the single word of the color I chose.',
+  image: 'What color is the attached image? Reply with one word.',
   model: 'Reply with the single word MODEL.',
   settle: 'Reply with the single word SETTLED.',
   restored: 'Reply with the single word RESTORED.',
@@ -107,11 +110,17 @@ const codexVersion = (() => { try { return execFileSync('codex', ['--version'], 
 const evidence = {
   script: 'scripts/prove-structured-codex.mjs', startedAt: startedAt.toISOString(), finishedAt: null,
   revision: (() => { try { return execFileSync('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })(),
+  workingTree: (() => { try { return execFileSync('git', ['-C', repoRoot, 'status', '--porcelain', '--', 'apps', 'packages'], { encoding: 'utf8' }).split('\n').filter(Boolean).map(line => line.slice(3)); } catch { return []; } })(),
   codexVersion, node: process.version, tempRoot: root, runtimeDir, port, threadId: null, sessionId: null,
-  pids: {}, models: {}, steps: [], cleanup: [], result: 'running',
+  pids: {}, models: {}, steps: [], findings: [], cleanup: [], result: 'running',
 };
 const flush = () => fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
 const say = line => process.stderr.write(`PROOF ${line}\n`);
+/** A place where the real provider behaved differently from the research brief, or settled something it left open. */
+const finding = (id, text) => {
+  if (!evidence.findings.some(entry => entry.id === id)) evidence.findings.push({ id, text });
+  say(`FINDING ${id}: ${text}`);
+};
 const brief = values => Object.entries(values).filter(([, v]) => typeof v !== 'object').map(([k, v]) => `${k}=${v}`).join(' ');
 say(`evidence ${evidencePath}`);
 say(`temp root ${root} (removed at the end); ${codexVersion}`);
@@ -203,6 +212,11 @@ const indexRow = () => db.prepare('select transcript_path from conversation_inde
 const assignment = () => db.prepare('select * from coordination_assignments where provider = ? and native_session_id = ?').get('codex', threadId);
 const timeline = async () => (await api('GET', `/api/conversations/demo/codex/${encodeURIComponent(threadId)}/messages?limit=200`)).messages ?? [];
 const assistantHas = async marker => (await timeline()).some(message => message.role === 'assistant' && message.text.includes(marker));
+/** Assistant messages that hold the marker as a whole word (so `red` does not match `registered`). */
+const countAssistant = async marker => {
+  const pattern = new RegExp(`\\b${marker}\\b`, 'i');
+  return (await timeline()).filter(message => message.role === 'assistant' && pattern.test(message.text)).length;
+};
 const rolloutPath = () => indexRow()?.transcript_path ?? undefined;
 const rolloutRecords = () => {
   const file = rolloutPath();
@@ -235,9 +249,9 @@ const watchScreens = async () => {
 };
 
 /** Send one chat message the way the web client does and return the queue record it produced. */
-const send = async text => {
+const send = async (text, extra = {}) => {
   const submissionId = randomUUID();
-  const response = await api('POST', `/api/sessions/${sessionId}/keys`, { submissionId, submittedText: text, text, keys: ['Enter'] });
+  const response = await api('POST', `/api/sessions/${sessionId}/keys`, { submissionId, submittedText: text, text, keys: ['Enter'], ...extra });
   const record = queueRecord(submissionId);
   assert.ok(record, 'The queued-input record is missing.');
   return { submissionId, record, response };
@@ -277,7 +291,14 @@ const providerRetries = () => {
 let aborted = false;
 /** A failed step can leave a turn running; stop it so the next step is judged on its own. */
 const ensureIdle = async entry => {
-  if (!sessionId || !app || !db || await idle()) return;
+  if (!sessionId || !app || !db) return;
+  const polled = await call('GET', `/api/sessions/${sessionId}/screen`);
+  if (polled.status === 404) return; // a suspended row has no screen and nothing running
+  for (const request of polled.body.session.pendingRequests ?? []) {
+    await call('POST', `/api/sessions/${sessionId}/requests/${request.requestId}`, { decision: 'decline' });
+    entry.values.declinedLeftoverQuestion = true;
+  }
+  if (await idle()) return;
   try { await wait('the previous turn to end', idle, 20_000, 500); return; } catch { /* still working: stop it */ }
   entry.values.stoppedLeftoverTurn = true;
   await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
@@ -473,6 +494,75 @@ try {
     values.turnAborted = abortRecord.payload.reason;
   });
 
+  await step('h2', 'question: a request_user_input becomes a pending request, the card route answers it, the answer reaches the model', async values => {
+    const skip = rolloutRecords().length;
+    const before = await countAssistant('blue');
+    await send(PROMPTS.question);
+    let sawWorking = false;
+    const sentAt = Date.now();
+    const outcome = await wait('a pending question, the end of the turn, or 60 s of waiting with no question', async () => {
+      const state = await sessionState();
+      if (state.pendingRequests?.length) return { kind: 'question', request: state.pendingRequests[0], working: state.isWorking };
+      if (state.isWorking === true) sawWorking = true;
+      if (sawWorking && state.isWorking !== true) return { kind: 'ended' };
+      if (sawWorking && Date.now() - sentAt > 60_000) return { kind: 'stalled' };
+      return undefined;
+    }, 150_000, 250);
+    if (outcome.kind !== 'question') {
+      // Codex offers a blocking question to the model only in some modes; if it did not, that is a finding about Codex, not a failure.
+      const records = rolloutRecords().slice(skip);
+      const calls = records.filter(record => record.payload?.type === 'function_call' && /request_user_input/.test(record.payload.name ?? ''));
+      const outputs = records.filter(record => record.payload?.type === 'function_call_output' && calls.some(call => call.payload.call_id === record.payload.call_id)).map(record => String(record.payload.output).slice(0, 80));
+      const names = [...new Set(calls.map(record => record.payload.name))];
+      const sleeps = records.filter(record => record.payload?.type === 'function_call' && record.payload.name === 'sleep').length;
+      if (outcome.kind === 'stalled') {
+        await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
+        await wait('the stalled turn to stop', idle, 20_000, 250);
+        values.stoppedStalledTurn = true;
+      }
+      values.requestUserInputOffered = 'no question reached the Console';
+      values.outcome = outcome.kind;
+      values.toolNames = names.join(',') || 'none';
+      values.toolAttempts = calls.length;
+      values.toolOutputs = outputs.join(' | ');
+      values.sleepCalls = sleeps;
+      finding('request-user-input', `In the default collaboration mode Codex ${evidence.codexVersion} offered the model the tool ${names.join(', ') || '(none)'} (${calls.length} call(s); outputs: ${outputs.join(' | ') || 'none'}), not a blocking item/tool/requestUserInput: no pending request reached the Console. `
+        + `The turn ${outcome.kind === 'ended' ? 'ended, leaving the question to the conversation text' : `stayed open for 60 s while the model polled with ${sleeps} sleep call(s) for an answer, and Stop ended it`}; the question itself is only in the tool call, so a person may not see it.`);
+      return;
+    }
+    const request = outcome.request;
+    assert.equal(request.kind, 'question');
+    assert.equal(outcome.working, true, 'The turn is blocked on the question: the session must read as working.');
+    assert.ok(request.questions.length >= 1, 'The pending request must carry its question.');
+    const question = request.questions[0];
+    const labels = question.options.map(option => option.label);
+    const blue = labels.find(label => /blue/i.test(label));
+    assert.ok(blue && labels.some(label => /red/i.test(label)), `The options must offer red and blue (saw ${labels.join(', ')}).`);
+    values.options = labels.join('/');
+    values.allowCustom = String(question.allowCustom ?? false);
+    const answered = await api('POST', `/api/sessions/${sessionId}/requests/${request.requestId}`, { decision: 'answer', answers: { [question.id]: [blue] } });
+    assert.equal(answered.session.pendingRequests?.length ?? 0, 0, 'The answered question must leave the row.');
+    const second = await call('POST', `/api/sessions/${sessionId}/requests/${request.requestId}`, { decision: 'answer', answers: { [question.id]: [blue] } });
+    assert.ok(second.status >= 400, 'A second answer to the same question must be refused.');
+    await wait('assistant reply containing blue', async () => (await idle()) && (await countAssistant('blue')) > before);
+    values.secondAnswerStatus = second.status;
+  });
+
+  await step('h3', 'image: an attached PNG reaches the model as a local image item', async values => {
+    const skip = rolloutRecords().length;
+    const before = await countAssistant('green');
+    const upload = await app.inject({ method: 'POST', url: `/api/sessions/${sessionId}/images`, payload: solidPng(64, [0, 170, 0]), headers: { ...headers, 'content-type': 'image/png' } });
+    assert.equal(upload.statusCode, 201, `image upload: HTTP ${upload.statusCode}`);
+    const image = upload.json().image;
+    const sent = await send(PROMPTS.image, { imageIds: [image.id] });
+    assert.equal(sent.record.state, 'submitted');
+    await wait('assistant reply containing green', async () => (await idle()) && (await countAssistant('green')) > before);
+    // The rollout records the user message with its image content; the stored file is what the item points at.
+    const imageRecord = rolloutRecords().slice(skip).find(record => JSON.stringify(record).includes('input_image') || JSON.stringify(record).includes('localImage') || JSON.stringify(record).includes('local_image'));
+    assert.ok(imageRecord, 'The rollout shows no image content for the turn.');
+    Object.assign(values, { imageId: image.id, mediaType: image.mediaType, rolloutRecordType: imageRecord.payload?.type ?? imageRecord.type });
+  });
+
 
   await step('i', 'manual sleep unloads the thread (screen reads asleep) and restore reloads it (new epoch)', async values => {
     const pidBefore = row().pid;
@@ -619,7 +709,7 @@ try {
   evidence.providerRetries = providerRetries();
   if (evidence.providerRetries?.length) say(`NOTE Codex retried a model request ${evidence.providerRetries.length} time(s) on this thread (${[...new Set(evidence.providerRetries.map(entry => entry.cause))].join('; ')}); turns that waited out a backoff look hung.`);
   evidence.finishedAt = new Date().toISOString();
-  evidence.result = failed === 0 && skipped === 0 && evidence.steps.length === 12 ? 'pass' : 'fail';
+  evidence.result = failed === 0 && skipped === 0 && evidence.steps.length === 14 ? 'pass' : 'fail';
   evidence.summary = { passed: evidence.steps.filter(entry => entry.pass).length, failed, skipped };
   flush();
   say(`${evidence.result.toUpperCase()}: ${evidence.summary.passed} passed, ${failed} failed, ${skipped} skipped. Evidence ${evidencePath}`);

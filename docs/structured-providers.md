@@ -207,6 +207,7 @@ export interface TransportSession {
   respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void>;
   readonly pid?: number;                                    // per-session plugins: this conversation's own process
   unload(): Promise<void>;                                  // shared process: drop the thread from memory; per-session: end this conversation's process (it stays resumable)
+  hasBackgroundWork?(): boolean;                            // the process runs background shell commands or subagents no turn covers; idle sleep and pressure leave it alone
   close(reason: 'release' | 'shutdown' | 'error'): Promise<void>; // per-session: ends the process whatever the reason
 }
 
@@ -227,6 +228,7 @@ export interface TransportInstance {
   probe(): Promise<{ installed: boolean; version?: string; auth: 'ok' | 'missing' | 'unknown'; models: Array<{ id: string; label: string; efforts?: string[] }> }>;
   start(options: OpenOptions): Promise<TransportSession>;
   resume(nativeSessionId: string, options: OpenOptions): Promise<TransportSession>; // throws ResumeFailedError
+  reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>; // per-session only: adopt this conversation's process that outlived a backend restart; undefined when none; never starts a process
   alive(): Promise<{ pid?: number; connected: boolean }>;
   dispose(reason: 'shutdown' | 'restart'): Promise<void>;   // shared: disconnect; never kills a process that other Consoles own
 }
@@ -257,6 +259,10 @@ Contract errors (`types.ts`):
 - `TurnNotActiveError` (`turn_not_active`): `steer` named a turn that already ended. The host sends the text
   as a new turn for this error only.
 - `ResumeFailedError` (`resume_failed`) and `TransportUnavailableError` (`transport_unavailable`).
+- `LineTransportNotRunningError` (`transport_not_running`): a `LineTransportFactory` request with `attachOnly` found no
+  live process for the host id and command line. `attachOnly` connects to a running host and nothing else: it never
+  starts a process and never ends one (not a stale host, not a host that runs another command line). A stdio factory
+  answers the same, because a stdio child does not outlive its parent. `reattach` is built on it.
 
 `TurnAlreadyCompletedError` no longer exists; `TurnNotActiveError` replaced it.
 
@@ -434,7 +440,7 @@ Line numbers are from `main` at `af009e3`.
 | RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `deferred` delivery (nothing was sent: the transport's `NotSentError`, a turn that started first, an unloaded thread) throws `RecoverySubmitDeferredError`; RunRecovery then gives the attempt back and schedules the retry one backoff step later, inside the same 10-minute recovery window, instead of stopping as "outcome uncertain". Only a `failed` delivery or another error stops recovery as uncertain. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
 | `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `alive ? turnActive : false`: a thread that is not loaded runs nothing, so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
 | `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot. Boot settles lost work only: a row still marked working loses its turn with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
-| `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `queued_input`. |
+| `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `background_work`, `queued_input`. |
 | `reconcileSessions`, `defaultTransportFor`, `migrateTmuxRowToStructured` (lane C2) | While `structuredSessions.defaultTransport` is `structured`, each restorable tmux row of a provider whose lane is on is classified and, when idle or dead, flipped to a sleeping structured row (`BoundSessionsRepo.setTransport`); a live tmux session is stopped like idle sleep and confirmed dead first. `structuredMigrationReport()` is the dry run, served at `GET /api/sessions/structured-migration`. A bind that names no transport takes `defaultTransportFor(provider)`. See `docs/structured-cutover.md`. |
 | `releaseSessionInternal` (3481) | `interrupt` if a turn is active, then `unload`, then `ended`; delete the runtime dir as today. |
 | `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running (or one starts during the switch) put the request back to `queued` with `turn_running`, and the next `turn.terminal` re-runs it. The next `sendTurn` carries `model`/`effort`. |
@@ -475,7 +481,35 @@ unload(session): Promise<void>
 release(session): Promise<void>
 alive(session): boolean
 screen(session): SessionScreen
+reattachSurvivors(candidates: Array<{ session; cwd }>): Promise<string[]>   // startup, per-session plugins only
+hasBackgroundWork(session): boolean
 ```
+
+Per-session behavior of the service (lane C5, on top of lane C2):
+
+- **Survivors.** A per-session provider process can outlive a backend restart behind its session host, and the service
+  loads rows on first use, so nothing would own it: idle sleep, pressure suspension and release see an unloaded row.
+  The first `reconcileSessions` pass therefore hands every awake (bound, not suspended) row of a per-session plugin to
+  `reattachSurvivors`, which calls the plugin's `reattach`. A process found becomes a loaded session (new epoch, status
+  line "Reconnected to the running agent process") and is reaped like any other. A row with no survivor stays unloaded
+  and resumes on next use; `reattach` never starts a process. A use of the conversation waits for its own lookup
+  (`ensureLoaded`). Shared-process plugins are never asked. Claude's `reattach` connects with `attachOnly`, requires the
+  recorded launch to name this native id and the host to run exactly that command line, refuses a session another live
+  process holds in the CLI's registry (only the host's own child may), then repeats `initialize` (the CLI answers with
+  the requests still open and a snapshot of its background tasks). A process the earlier backend started but never
+  spoke to is handshaken as a new launch, with the host replaying its SessionStart hook frames.
+  The row may still say a turn is running that ended while no backend listened; the working-state expiry clears that after
+  one idle window unless the process reports a turn by then.
+- **Default profile.** A Claude per-session row with no cost profile (a migrated tmux row, a history bind) and no model
+  of its own from a granted launch runs on `medium`, the profile new Claude chats get: its `model` and `effort` go on
+  the resume and on every turn, and `onProfileDefaulted` stores `medium` on the row so the UI shows it. Codex keeps the
+  model its shared process was configured with.
+- **Background work.** `hasBackgroundWork(session)` reads the transport's flag, bounded: it is ignored once the transport
+  has sent no event for four hours (`BACKGROUND_WORK_STALE_MS`). `suspensionBlockReason` returns `background_work` for
+  idle sleep, pressure suspension and manual suspend, as the tmux path refuses while its screen shows background work.
+  The Claude session derives the flag from `system/background_tasks_changed` (the full live set, replaced on every
+  frame) plus `task_started`, `task_notification` and terminal `task_updated` frames; ambient tasks and foreground tasks
+  do not count, and a late frame of an earlier run of a resumed task is ignored.
 
 `start` takes no opening prompt: `SessionManager` journals the prompt and sends it as the first turn after
 `start` returns, and rolls the bind back if that send fails.
@@ -483,7 +517,8 @@ screen(session): SessionScreen
 The service subscribes to each session's event stream and calls SM-provided callbacks:
 `onTurnStarted`, `onItemCompleted` (live only: `lastOutputAt = lastActivityAt = now`),
 `onTurnTerminal` (completed: `lastResponseAt`; failed: RunRecovery `changed`), `onRequest` (decline and
-`status` event), `onSessionState` (error: RunRecovery `processExited`), `appendStatus`.
+`status` event), `onSessionState` (error: RunRecovery `processExited`), `appendStatus`, `onProfileDefaulted`
+(optional: a row loaded on the provider's default cost profile gets it stored).
 
 ## Coordination, grants and other readers
 
