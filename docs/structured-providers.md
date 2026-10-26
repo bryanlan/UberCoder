@@ -489,9 +489,10 @@ The service subscribes to each session's event stream and calls SM-provided call
   row, not-sent delivery, a turn id that runs again), `tmux-client-structured-guard` and
   `structured-session-env`, and extended the plugin, input, recovery, coordination and wake suites.
 - Web tests: New Chat option, hidden controls, badge.
-- `npm run typecheck && npm run build` and the full `npm test`. The full server run on `be43958` had three
-  failures, identical on untouched `main` (`claude-ready-lifecycle` twice, `claude-run-state > never sends
-  Enter when Stop arrives during automatic text entry`).
+- `npm run typecheck && npm run build` and the full `npm test`. The full server runs on `be43958` and on
+  `ca41634` each had the same three failures, identical on untouched `main` on this host
+  (`claude-ready-lifecycle` twice, `claude-run-state > never sends Enter when Stop arrives during automatic
+  text entry`); see Verification evidence for the counts.
 - Real Codex proof: `scripts/prove-structured-codex.mjs` (opt-in with `--run`, needs `npm run build` and a
   host Codex login). It starts an isolated backend (temp database and runtime, scratch git project, private
   tmux socket, `structuredSessions.codex.enabled`, coordination enabled) and drives one structured chat
