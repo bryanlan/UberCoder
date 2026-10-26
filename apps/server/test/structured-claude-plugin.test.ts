@@ -1,0 +1,1664 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { buildClaudeArgv, buildClaudeEnv, ClaudeLaunchRefusedError, ClaudeSessionHeldError, createClaudePlugin, type ClaudeOpenOptions } from '../src/providers/transport/claude/index.js';
+import { ClaudeSession, DEFAULT_TIMINGS as DEFAULT_CLAUDE_TIMINGS } from '../src/providers/transport/claude/claude-session.js';
+import { hostIdFor } from '../src/providers/transport/claude/claude-instance.js';
+import { assistantRateLimitEvidence, classifyResult, failureFromApiRetry, newTurnEvidence } from '../src/providers/transport/claude/errors.js';
+import type { ClaudeResultFrame } from '../src/providers/transport/claude/protocol.js';
+import { StreamJsonClient, ClaudeControlTimeoutError, ClaudeExitError } from '../src/providers/transport/claude/stream-json.js';
+import { ClaudeRateLimitTracker, contextFromUsageResponse, contextMaxFromModelUsage, contextUsedFromResultUsage } from '../src/providers/transport/claude/usage.js';
+import { escapeProjectDir, findSessionHolder } from '../src/providers/transport/claude/transcript.js';
+import { processStartTicks } from '../src/providers/transport/codex/process-lifetime.js';
+import {
+  NotSentError,
+  PreviousTurnActiveError,
+  ResumeFailedError,
+  TransportUnavailableError,
+  TurnNotActiveError,
+  type LineTransport,
+  type TransportEvent,
+} from '../src/providers/transport/types.js';
+import {
+  assistantText,
+  canUseTool,
+  cleanupAll,
+  EventLog,
+  FAKE_CLAUDE,
+  makeContext,
+  QUESTION_INPUT,
+  rateLimitEvent,
+  readLog,
+  receivedControls,
+  receivedFrames,
+  receivedResponses,
+  receivedUserFrames,
+  sentFrames,
+  setupFake,
+  sleep,
+  startEntries,
+  transcriptPathFor,
+  userText,
+  waitUntil,
+  writeRegistryFile,
+  writeTranscript,
+  type FakeSetup,
+  type Scenario,
+  type SetupOptions,
+} from './helpers/claude-harness.js';
+
+afterEach(async () => {
+  await cleanupAll();
+});
+
+async function startSession(scenario: Scenario = {}, options: SetupOptions = {}, open: Partial<ClaudeOpenOptions> = {}): Promise<{ setup: FakeSetup; session: ClaudeSession; events: EventLog }> {
+  const setup = setupFake(scenario, options);
+  const session = setup.track(await setup.instance.start(setup.open(open)));
+  return { setup, session, events: new EventLog(session) };
+}
+
+const COORDINATION = { runtimeDir: '/runtime/console', helperPath: '/opt/console/agent-coord.mjs' };
+
+/** An in-memory line transport: the test plays the CLI. */
+function memoryTransport(): { transport: LineTransport; fromCli(frame: object): void; written: Array<Record<string, any>>; exit(code?: number | 'disconnected'): void; closed: Array<unknown> } {
+  const lineListeners = new Set<(line: string) => void>();
+  const exitListeners = new Set<(info: { code: number | null; signal: string | null; reason: 'exited' | 'disconnected' }) => void>();
+  const written: Array<Record<string, any>> = [];
+  const closed: unknown[] = [];
+  let ended = false;
+  const transport: LineTransport = {
+    pid: 4242,
+    write: async (line) => {
+      if (ended) throw new NotSentError('closed');
+      written.push(JSON.parse(line));
+    },
+    onLine: (listener) => {
+      lineListeners.add(listener);
+      return () => lineListeners.delete(listener);
+    },
+    onExit: (listener) => {
+      exitListeners.add(listener);
+      return () => exitListeners.delete(listener);
+    },
+    close: async (options) => {
+      closed.push(options ?? {});
+    },
+  };
+  return {
+    transport,
+    written,
+    closed,
+    fromCli: (frame) => {
+      for (const listener of [...lineListeners]) listener(JSON.stringify(frame));
+    },
+    exit: (code = 0) => {
+      ended = true;
+      const info = code === 'disconnected' ? { code: null, signal: null, reason: 'disconnected' as const } : { code, signal: null, reason: 'exited' as const };
+      for (const listener of [...exitListeners]) listener(info);
+    },
+  };
+}
+
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('launch', () => {
+  it('starts claude with the planned argv, the coordination MCP server and no -p', async () => {
+    const { setup, session } = await startSession({}, { context: { coordination: COORDINATION }, plugin: { requireHooks: false } }, { model: 'sonnet', effort: 'low' });
+    const [start] = startEntries(setup.logFile);
+    expect(start!.argv).toEqual([
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--input-format', 'stream-json',
+      '--dangerously-skip-permissions',
+      '--permission-prompt-tool', 'stdio',
+      '--model', 'sonnet',
+      '--effort', 'low',
+      '--session-id', session.nativeSessionId,
+      '--mcp-config', expect.any(String),
+    ]);
+    expect(start!.argv).not.toContain('-p');
+    expect(session.nativeSessionId).toMatch(/^[0-9a-f-]{36}$/);
+    const mcp = JSON.parse(start!.argv![start!.argv!.indexOf('--mcp-config') + 1]!);
+    expect(mcp).toEqual({
+      mcpServers: {
+        agent_console_coordination: {
+          command: 'node',
+          args: ['/opt/console/agent-coord.mjs', 'mcp'],
+          env: { AGENT_COORD_RUNTIME: '/runtime/console', AGENT_CONSOLE_SESSION_ID: 'conversation-1' },
+        },
+      },
+    });
+    expect(start!.cwd).toBe(setup.cwd);
+  });
+
+  it('omits flags it has no value for, and passes --system-prompt-snapshot off when told', async () => {
+    const setup = setupFake({});
+    const argv = buildClaudeArgv({ command: ['claude'], mode: 'resume', sessionId: 'abc', snapshotOff: true });
+    expect(argv).toEqual(['claude', '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json', '--dangerously-skip-permissions', '--permission-prompt-tool', 'stdio', '--resume', 'abc', '--system-prompt-snapshot', 'off']);
+    const session = setup.track(await setup.instance.start(setup.open()));
+    const [start] = startEntries(setup.logFile);
+    expect(start!.argv).not.toContain('--model');
+    expect(start!.argv).not.toContain('--effort');
+    expect(start!.argv).not.toContain('--mcp-config');
+    expect(session.capabilities).toEqual({ processModel: 'per-session', nativeIds: 'client-allocated', resume: 'reattach', steer: 'native', interrupt: 'terminal-follows', images: true, enforcement: 'native', modelSwitch: 'next-turn' });
+  });
+
+  it('scrubs the inherited Claude, tmux and Console identity and sets this session identity', async () => {
+    const { setup } = await startSession(
+      {},
+      {
+        baseEnv: {
+          CLAUDECODE: '1',
+          CLAUDE_CODE_SESSION_ID: 'parent-session',
+          CLAUDE_CODE_ENTRYPOINT: 'cli',
+          CLAUDE_CODE_MESSAGING_SOCKET: '/run/x.sock',
+          TMUX: '/tmp/tmux-1000/default,1,0',
+          TMUX_PANE: '%3',
+          CODEX_THREAD_ID: 'thread-9',
+          AGENT_CONSOLE_SESSION_ID: 'stale',
+          AGENT_COORD_RUNTIME: '/stale',
+          NODE_OPTIONS: '--require=./loader.cjs',
+          DEBUG: '*',
+          KEEP_ME: 'yes',
+        },
+        config: { env: { AGENT_COORD_RUNTIME: '/runtime/console', AGENT_CONSOLE_CONFIG: '/etc/console.json', CLAUDE_CONFIG_DIR: '~/alt-claude', CLAUDE_CODE_USE_BEDROCK: '1' } },
+        plugin: { requireHooks: false },
+      },
+      { env: { EXTRA: 'from-open', TMUX: 'sneaky' } },
+    );
+    const env = startEntries(setup.logFile)[0]!.env!;
+    for (const key of ['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_USE_BEDROCK', 'TMUX', 'TMUX_PANE', 'CODEX_THREAD_ID', 'NODE_OPTIONS', 'DEBUG']) {
+      expect(env, key).not.toHaveProperty(key);
+    }
+    expect(env.AGENT_CONSOLE_SESSION_ID).toBe('conversation-1');
+    expect(env.AGENT_COORD_RUNTIME).toBe('/runtime/console');
+    expect(env.AGENT_CONSOLE_CONFIG).toBe('/etc/console.json');
+    expect(env.CLAUDE_CODE_SDK_READS_SESSION_STATE).toBe('1');
+    expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(setup.home, 'alt-claude'));
+    expect(env.KEEP_ME).toBe('yes');
+    expect(env.EXTRA).toBe('from-open');
+  });
+
+  it('buildClaudeEnv leaves no identity variable and builds the same value for the probe', () => {
+    const env = buildClaudeEnv({ base: { PATH: '/bin', CLAUDECODE: '1', CLAUDE_CODE_X: '1', TMUX: 't', AGENT_CONSOLE_FOO: 'x' }, home: '/home/test' });
+    expect(env).toEqual({ PATH: '/bin', CLAUDE_CODE_SDK_READS_SESSION_STATE: '1' });
+  });
+
+  it('sends initialize with the appended system prompt and no dialog kinds, keeping the text out of argv', async () => {
+    const { setup, events } = await startSession({}, { plugin: { requireHooks: false } }, { appendSystemPrompt: 'GRANT AUTHORITY TEXT' });
+    const initialize = receivedControls(setup.logFile, 'initialize');
+    expect(initialize).toHaveLength(1);
+    expect(initialize[0]).toEqual({ type: 'control_request', request_id: 'console-1', request: { subtype: 'initialize', appendSystemPrompt: 'GRANT AUTHORITY TEXT' } });
+    expect(JSON.stringify(startEntries(setup.logFile)[0]!.argv)).not.toContain('GRANT AUTHORITY TEXT');
+    await waitUntil(() => events.events.length >= 2);
+    expect(events.events[0]).toMatchObject({ type: 'session.native', transcriptPath: expect.stringContaining(`${escapeProjectDir(setup.cwd)}`) });
+    expect(events.events[1]).toEqual({ type: 'session.state', state: 'ready' });
+  });
+
+  it('sends a bare initialize when there is no text to append', async () => {
+    const { setup } = await startSession();
+    expect(receivedControls(setup.logFile, 'initialize')[0]!.request).toEqual({ subtype: 'initialize' });
+  });
+
+  it('refuses to start in a working directory that does not exist', async () => {
+    const setup = setupFake();
+    await expect(setup.instance.start(setup.open({ cwd: path.join(setup.dir, 'missing') }))).rejects.toBeInstanceOf(TransportUnavailableError);
+    expect(startEntries(setup.logFile)).toHaveLength(0);
+  });
+
+  it('reports a missing binary as unavailable', async () => {
+    const setup = setupFake({}, { config: { command: ['/nonexistent/claude-binary'] } });
+    await expect(setup.instance.start(setup.open())).rejects.toBeInstanceOf(TransportUnavailableError);
+  });
+
+  it('uses the session id the caller gives for a conversation that has no transcript yet, and refuses one that has', async () => {
+    const setup = setupFake();
+    const id = '11111111-2222-4333-8444-555555555555';
+    const session = setup.track(await setup.instance.start(setup.open({ sessionId: id })));
+    expect(session.nativeSessionId).toBe(id);
+    expect(startEntries(setup.logFile)[0]!.argv).toContain(id);
+    await session.close('release');
+    writeTranscript(setup.configDir, setup.cwd, id);
+    await expect(setup.instance.start(setup.open({ sessionId: id }))).rejects.toBeInstanceOf(TransportUnavailableError);
+  });
+
+  it('derives a valid session host id from the conversation id', () => {
+    expect(hostIdFor('0a1b2c3d-1111-2222-3333-444455556666')).toBe('claude-0a1b2c3d-1111-2222-3333-444455556666');
+    expect(hostIdFor('a:b/c d')).toBe('claude-a-b-c-d');
+    expect(hostIdFor('x'.repeat(300))).toHaveLength(128);
+  });
+
+  it('passes the host id and the close graces to the line transport factory', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const setup = setupFake(
+      {},
+      {
+        plugin: { requireHooks: false },
+        context: {
+          lineTransport: async (request) => {
+            requests.push(request as unknown as Record<string, unknown>);
+            const { createStdioLineTransportFactory } = await import('../src/providers/transport/line-transport.js');
+            return createStdioLineTransportFactory()(request);
+          },
+        },
+      },
+    );
+    setup.track(await setup.instance.start(setup.open({ conversationId: 'conv-42' })));
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ hostId: 'claude-conv-42', closeGraceMs: 400, termGraceMs: 400, cwd: setup.cwd });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('probe', () => {
+  it('reads models, account and version with a throwaway process that never receives a message', async () => {
+    const setup = setupFake({ account: { tokenSource: 'none', apiProvider: 'firstParty' } });
+    const result = await setup.instance.probe();
+    expect(result).toEqual({
+      installed: true,
+      version: '2.1.310',
+      auth: 'missing',
+      models: [
+        { id: 'default', label: 'Default (recommended)', efforts: ['low', 'medium', 'high'] },
+        { id: 'haiku', label: 'Haiku' },
+      ],
+    });
+    const [start] = startEntries(setup.logFile);
+    expect(start!.argv).toEqual([
+      '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
+      '--session-id', expect.stringMatching(/^[0-9a-f-]{36}$/),
+      '--no-session-persistence',
+      '--settings', '{"disableAllHooks":true}',
+    ]);
+    expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
+    await waitUntil(() => readLog(setup.logFile).some((entry) => entry.event === 'stdin-eof'), 3000, 'end of input');
+    expect(await setup.instance.alive()).toEqual({ connected: false });
+  });
+
+  it('reports a signed-in subscription account as ok', async () => {
+    const setup = setupFake({ account: { email: 'a@example.com', subscriptionType: 'max', tokenSource: 'claude.ai', apiProvider: 'firstParty' }, version: '2.1.400' });
+    expect(await setup.instance.probe()).toMatchObject({ installed: true, version: '2.1.400', auth: 'ok' });
+  });
+
+  it('reports a binary that is not installed', async () => {
+    const setup = setupFake({}, { config: { command: ['/nonexistent/claude-binary'] } });
+    expect(await setup.instance.probe()).toEqual({ installed: false, auth: 'unknown', models: [] });
+  });
+
+  it('fails when the process dies before it answers', async () => {
+    const setup = setupFake({ exitAtStart: 2 });
+    await expect(setup.instance.probe()).rejects.toBeInstanceOf(TransportUnavailableError);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('turns', () => {
+  it('maps a turn to started, item, usage and terminal events in order, matched by uuid', async () => {
+    const { setup, session, events } = await startSession({
+      turns: [
+        {
+          steps: [
+            assistantText('Looking.'),
+            { toolUse: { id: 'tool-bash', name: 'Bash', input: { command: 'echo hi' } } },
+            { toolResult: { id: 'tool-bash' } },
+            { toolUse: { id: 'tool-edit', name: 'Edit', input: { file_path: '/work/a.ts' } } },
+            { toolResult: { id: 'tool-edit' } },
+            { toolUse: { id: 'tool-read', name: 'Read', input: { file_path: '/work/b.ts' } } },
+            { toolResult: { id: 'tool-read' } },
+            { toolUse: { id: 'tool-web', name: 'WebSearch', input: { query: 'vitest docs' } } },
+            { toolResult: { id: 'tool-web' } },
+            { toolUse: { id: 'tool-mcp', name: 'mcp__agent_console_coordination__send', input: {} } },
+            { toolResult: { id: 'tool-mcp' } },
+            { assistant: { blocks: [{ type: 'thinking', thinking: 'hmm' }] } },
+            assistantText('Done.'),
+          ],
+        },
+      ],
+    });
+    const { turnId } = await session.sendTurn({ text: 'SECRET-PROMPT-TEXT please' });
+    const terminal = await events.waitForTerminal(turnId);
+    expect(terminal).toEqual({ type: 'turn.terminal', turnId, status: 'completed', sessionUsable: true, replay: false });
+    const items = events.of('item.completed');
+    expect(items.map((item) => [item.kind, item.title])).toEqual([
+      ['assistant', undefined],
+      ['command', 'echo hi'],
+      ['file_change', '/work/a.ts'],
+      ['other', '/work/b.ts'],
+      ['search', 'vitest docs'],
+      ['mcp', 'agent_console_coordination/send'],
+      ['reasoning', undefined],
+      ['assistant', undefined],
+    ]);
+    expect(items.every((item) => item.turnId === turnId && !item.replay)).toBe(true);
+    expect(new Set(items.map((item) => item.itemId)).size).toBe(items.length);
+    const started = events.indexOf((event) => event.type === 'turn.started');
+    expect(events.events[started]).toEqual({ type: 'turn.started', turnId, origin: 'user', replay: false });
+    expect(started).toBeLessThan(events.indexOf((event) => event.type === 'item.completed'));
+    expect(events.indexOf((event) => event.type === 'item.completed')).toBeLessThan(events.indexOf((event) => event.type === 'turn.terminal'));
+    expect(events.of('turn.started')).toHaveLength(1);
+    expect(events.terminalsOf(turnId)).toHaveLength(1);
+
+    // The user message carries our uuid, the human origin, an empty session id and no priority.
+    const [user] = receivedUserFrames(setup.logFile);
+    expect(user).toEqual({
+      type: 'user',
+      session_id: '',
+      message: { role: 'user', content: [{ type: 'text', text: 'SECRET-PROMPT-TEXT please' }] },
+      parent_tool_use_id: null,
+      uuid: turnId,
+      origin: { kind: 'human' },
+    });
+
+    // Frames are never logged whole: the prompt text stays out of the log.
+    expect(JSON.stringify(setup.context.logs)).not.toContain('SECRET-PROMPT-TEXT');
+  });
+
+  it('reports context fill from the result and from get_context_usage', async () => {
+    const { setup, session, events } = await startSession({ contextUsage: { totalTokens: 4321, rawMaxTokens: 1000000 } });
+    const { turnId } = await session.sendTurn({ text: 'hi' });
+    await events.waitForTerminal(turnId);
+    await events.waitFor((event) => event.type === 'usage.updated' && event.contextUsedTokens === 4321);
+    const usage = events.of('usage.updated').filter((event) => event.contextUsedTokens !== undefined || event.contextMaxTokens !== undefined);
+    // From the result: the last iteration (10 + 100 + 5) and the model window.
+    expect(usage[0]).toEqual({ type: 'usage.updated', contextUsedTokens: 115, contextMaxTokens: 200000 });
+    expect(usage.at(-1)).toEqual({ type: 'usage.updated', contextUsedTokens: 4321, contextMaxTokens: 1000000 });
+    expect(receivedControls(setup.logFile, 'get_context_usage')[0]!.request).toEqual({ subtype: 'get_context_usage', detail: 'summary' });
+  });
+
+  it('stops asking for context usage after the CLI refuses it once', async () => {
+    const { setup, session, events } = await startSession({ contextUsage: 'error' });
+    for (let i = 0; i < 2; i += 1) {
+      const { turnId } = await session.sendTurn({ text: `turn ${i}` });
+      await events.waitForTerminal(turnId);
+      await sleep(80);
+    }
+    expect(receivedControls(setup.logFile, 'get_context_usage')).toHaveLength(1);
+  });
+
+  it('rejects a second turn while one runs and a steer after it ended', async () => {
+    const { session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    const { turnId } = await session.sendTurn({ text: 'first' });
+    await expect(session.sendTurn({ text: 'second' })).rejects.toBeInstanceOf(PreviousTurnActiveError);
+    await events.waitForType('turn.started');
+    await session.interrupt(turnId);
+    await events.waitForTerminal(turnId);
+    await expect(session.steer(turnId, { text: 'late' })).rejects.toBeInstanceOf(TurnNotActiveError);
+    const next = await session.sendTurn({ text: 'again' });
+    await events.waitForTerminal(next.turnId);
+  });
+
+  it('claims the turn slot at once so two sends in a row cannot both go through', async () => {
+    const { session } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    const results = await Promise.allSettled([session.sendTurn({ text: 'a' }), session.sendTurn({ text: 'b' })]);
+    expect(results.map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+    expect((results[1] as PromiseRejectedResult).reason).toBeInstanceOf(PreviousTurnActiveError);
+  });
+
+  it('applies a model and effort change before the message and only when it changes', async () => {
+    const { setup, session, events } = await startSession({}, {}, { model: 'sonnet', effort: 'low' });
+    const first = await session.sendTurn({ text: 'one', model: 'opus', effort: 'high' });
+    await events.waitForTerminal(first.turnId);
+    const second = await session.sendTurn({ text: 'two', model: 'opus', effort: 'high' });
+    await events.waitForTerminal(second.turnId);
+    const sequence = receivedFrames(setup.logFile)
+      .filter((frame) => frame.type === 'user' || (frame.type === 'control_request' && ['set_model', 'apply_flag_settings'].includes(frame.request.subtype)))
+      .map((frame) => (frame.type === 'user' ? `user:${userText(frame)}` : frame.request.subtype === 'set_model' ? `set_model:${frame.request.model}` : `effort:${frame.request.settings.effortLevel}`));
+    expect(sequence).toEqual(['set_model:opus', 'effort:high', 'user:one', 'user:two']);
+  });
+
+  it('sends images as base64 blocks before the text', async () => {
+    const { setup, session, events } = await startSession();
+    const image = path.join(setup.dir, 'shot.png');
+    fs.writeFileSync(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
+    const { turnId } = await session.sendTurn({ text: 'look', images: [{ path: image, mimeType: 'image/png' }] });
+    await events.waitForTerminal(turnId);
+    const [user] = receivedUserFrames(setup.logFile);
+    expect(user!.message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).toString('base64') } },
+      { type: 'text', text: 'look' },
+    ]);
+  });
+
+  it('fails a send whose image cannot be read, before anything is written', async () => {
+    const { setup, session } = await startSession();
+    await expect(session.sendTurn({ text: 'look', images: [{ path: path.join(setup.dir, 'missing.png'), mimeType: 'image/png' }] })).rejects.toThrow();
+    expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
+    // The slot is free again.
+    const { turnId } = await session.sendTurn({ text: 'ok' });
+    expect(turnId).toBeTruthy();
+  });
+
+  it('uses a caller uuid as the message uuid and a fresh one otherwise', async () => {
+    const { setup, session, events } = await startSession();
+    const given = 'aaaaaaaa-1111-4222-8333-444444444444';
+    const a = await session.sendTurn({ text: 'a', clientMessageId: given });
+    expect(a.turnId).toBe(given);
+    await events.waitForTerminal(a.turnId);
+    const b = await session.sendTurn({ text: 'b', clientMessageId: 'not-a-uuid' });
+    expect(b.turnId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(b.turnId).not.toBe('not-a-uuid');
+    await events.waitForTerminal(b.turnId);
+    expect(receivedUserFrames(setup.logFile).map((frame) => frame.uuid)).toEqual([given, b.turnId]);
+  });
+
+  it('treats a repeated uuid as already handled: no turn runs and the send still ends once', async () => {
+    const { setup, session, events } = await startSession();
+    const uuid = 'bbbbbbbb-1111-4222-8333-444444444444';
+    const first = await session.sendTurn({ text: 'once', clientMessageId: uuid });
+    await events.waitForTerminal(first.turnId);
+    const again = await session.sendTurn({ text: 'once', clientMessageId: uuid });
+    expect(again.turnId).toBe(uuid);
+    await waitUntil(() => events.of('turn.terminal').length === 2);
+    expect(events.of('turn.started')).toHaveLength(2);
+    expect(events.of('turn.terminal').map((event) => event.status)).toEqual(['completed', 'completed']);
+    expect(events.of('notice').some((event) => /already had this message/.test(event.text))).toBe(true);
+    // The fake answered the repeat with a bare `completed`: no `started`, no init, no result.
+    const lifecycle = sentFrames(setup.logFile).filter((frame) => frame.type === 'command_lifecycle' && frame.command_uuid === uuid).map((frame) => frame.state);
+    expect(lifecycle).toEqual(['queued', 'started', 'completed', 'completed']);
+    expect(sentFrames(setup.logFile).filter((frame) => frame.type === 'result')).toHaveLength(1);
+    await sleep(100);
+    expect(events.of('turn.terminal')).toHaveLength(2);
+  });
+
+  it('starts a provider-origin turn when the CLI begins one on its own and ends it with its result', async () => {
+    const { setup, session, events } = await startSession();
+    expect(session.activeTurn).toBeUndefined();
+    // A background task finished: the CLI starts a turn nobody sent. The fake can only do that from a script, so
+    // run a turn whose steps emit a second, uuid-less turn's frames after the first result.
+    setup.rewriteScenario({
+      turns: [
+        {
+          steps: [
+            { result: {} },
+            { emit: { type: 'system', subtype: 'init', session_id: '{{sessionId}}', model: 'claude-test', apiKeySource: 'none', uuid: 'cccccccc-0000-4000-8000-000000000001' } },
+            { emit: { type: 'assistant', message: { id: 'm-bg', model: 'claude-test', role: 'assistant', content: [{ type: 'text', text: 'The build finished.' }] }, parent_tool_use_id: null, session_id: '{{sessionId}}', uuid: 'cccccccc-0000-4000-8000-000000000002' } },
+            { emit: { type: 'result', subtype: 'success', is_error: false, result: 'ok', terminal_reason: 'completed', session_id: '{{sessionId}}', uuid: 'cccccccc-0000-4000-8000-000000000003', usage: {}, modelUsage: {} } },
+          ],
+        },
+      ],
+    });
+    // The running fake already read its scenario; start a new session for the rewritten one.
+    await session.close('release');
+    const second = setup.track(await setup.instance.start(setup.open({ conversationId: 'conversation-2' })));
+    const log = new EventLog(second);
+    const { turnId } = await second.sendTurn({ text: 'go' });
+    await waitUntil(() => log.of('turn.terminal').length === 2, 5000, 'two terminals');
+    const [own, provider] = log.of('turn.started');
+    expect(own).toMatchObject({ turnId, origin: 'user' });
+    expect(provider).toMatchObject({ origin: 'provider' });
+    expect(provider!.turnId).not.toBe(turnId);
+    expect(log.of('turn.terminal').map((event) => [event.turnId, event.status])).toEqual([[turnId, 'completed'], [provider!.turnId, 'completed']]);
+    expect(log.of('item.completed').filter((item) => item.turnId === provider!.turnId)).toHaveLength(1);
+  });
+
+  it('does not treat a late frame of a finished turn as a new turn', async () => {
+    const { session, events } = await startSession({
+      turns: [
+        {
+          steps: [
+            { result: {} },
+            // After its result the same turn emits another assistant frame (matching uuids): it is late, not a new turn.
+            { emit: { type: 'assistant', message: { id: 'm-late', model: 'claude-test', role: 'assistant', content: [{ type: 'text', text: 'late' }] }, parent_tool_use_id: null, session_id: '{{sessionId}}', uuid: 'dddddddd-0000-4000-8000-000000000001', user_message_uuids: ['{{uuid}}'] } },
+          ],
+        },
+      ],
+    });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    await sleep(150);
+    expect(events.of('turn.started')).toHaveLength(1);
+    expect(events.of('item.completed')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('steering', () => {
+  it('writes a plain user message while the turn runs and folds into it: one turn, one terminal', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ sleep: 400 }, { fold: true }, assistantText('done')] }] });
+    const { turnId } = await session.sendTurn({ text: 'first' });
+    await events.waitForType('turn.started');
+    await session.steer(turnId, { text: 'also this' });
+    await events.waitForTerminal(turnId);
+    const frames = receivedUserFrames(setup.logFile);
+    expect(frames).toHaveLength(2);
+    expect(frames[1]).toMatchObject({ type: 'user', origin: { kind: 'human' }, message: { content: [{ type: 'text', text: 'also this' }] } });
+    expect(frames[1]).not.toHaveProperty('priority');
+    expect(frames[1]!.uuid).not.toBe(turnId);
+    const result = sentFrames(setup.logFile).find((frame) => frame.type === 'result')!;
+    expect(result.user_message_uuids).toEqual([turnId, frames[1]!.uuid]);
+    await sleep(100);
+    expect(events.of('turn.started')).toHaveLength(1);
+    expect(events.of('turn.terminal')).toHaveLength(1);
+  });
+
+  it('reports a steer that found no tool boundary as the next turn it became', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ sleep: 150 }] }] });
+    const { turnId } = await session.sendTurn({ text: 'first' });
+    await events.waitForType('turn.started');
+    await session.steer(turnId, { text: 'afterthought' });
+    const steerUuid = (await waitUntil(() => receivedUserFrames(setup.logFile)[1]))!.uuid;
+    await events.waitForTerminal(steerUuid);
+    expect(events.of('turn.started').map((event) => [event.turnId, event.origin])).toEqual([[turnId, 'user'], [steerUuid, 'user']]);
+    expect(events.of('turn.terminal').map((event) => [event.turnId, event.status])).toEqual([[turnId, 'completed'], [steerUuid, 'completed']]);
+  });
+
+  it('sends "now" messages with priority now: the running turn ends interrupted and the message runs as its own turn', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    const { turnId } = await session.sendTurn({ text: 'long job' });
+    await events.waitForType('turn.started');
+    await session.steerNow(turnId, { text: 'stop that, do this' });
+    const urgent = await waitUntil(() => receivedUserFrames(setup.logFile)[1]);
+    expect(urgent).toMatchObject({ priority: 'now', origin: { kind: 'human' } });
+    await events.waitForTerminal(urgent.uuid);
+    expect(events.of('turn.terminal').map((event) => [event.turnId, event.status])).toEqual([[turnId, 'interrupted'], [urgent.uuid, 'completed']]);
+    expect(events.of('turn.started')).toHaveLength(2);
+  });
+
+  it('refuses to steer when the session ended', async () => {
+    const { session, events } = await startSession();
+    await session.close('release');
+    await events.done;
+    await expect(session.steer('x', { text: 'late' })).rejects.toBeInstanceOf(NotSentError);
+    await expect(session.sendTurn({ text: 'late' })).rejects.toBeInstanceOf(NotSentError);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('interrupt', () => {
+  it('sends interrupt with cancel_queued and ends the turn interrupted when the aborted result follows', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    const { turnId } = await session.sendTurn({ text: 'long job' });
+    await events.waitForType('turn.started');
+    await session.interrupt(turnId);
+    const terminal = await events.waitForTerminal(turnId);
+    expect(terminal).toMatchObject({ status: 'interrupted', sessionUsable: true });
+    expect(terminal.failure).toBeUndefined();
+    expect(receivedControls(setup.logFile, 'interrupt')[0]!.request).toEqual({ subtype: 'interrupt', cancel_queued: true });
+    expect(events.terminalsOf(turnId)).toHaveLength(1);
+    // The process survives: the next turn runs in it.
+    const next = await session.sendTurn({ text: 'again' });
+    expect((await events.waitForTerminal(next.turnId)).status).toBe('completed');
+    expect(startEntries(setup.logFile)).toHaveLength(1);
+  });
+
+  it('closes the turn locally once when no result follows, and ignores the late result', async () => {
+    const { session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }], interrupt: { ignore: true, lateResultMs: 700 } });
+    const { turnId } = await session.sendTurn({ text: 'long job' });
+    await events.waitForType('turn.started');
+    await session.interrupt(turnId);
+    const terminal = await events.waitForTerminal(turnId, 2000);
+    expect(terminal.status).toBe('interrupted');
+    expect(events.of('notice').some((event) => event.level === 'warn' && /closed locally/.test(event.text))).toBe(true);
+    await sleep(900); // the late aborted result arrives
+    expect(events.terminalsOf(turnId)).toHaveLength(1);
+    expect(events.of('turn.started')).toHaveLength(1);
+  });
+
+  it('drops a queued send the CLI cancelled, with no result to wait for', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    const first = await session.sendTurn({ text: 'running' });
+    await events.waitForType('turn.started');
+    // A steer queued behind the running turn is cancelled with it.
+    await session.steer(first.turnId, { text: 'queued steer' });
+    await waitUntil(() => receivedUserFrames(setup.logFile)[1]);
+    await session.interrupt(first.turnId);
+    await events.waitForTerminal(first.turnId);
+    await sleep(100);
+    const lifecycle = sentFrames(setup.logFile).filter((frame) => frame.type === 'command_lifecycle').map((frame) => `${frame.command_uuid}:${frame.state}`);
+    const steerUuid = receivedUserFrames(setup.logFile)[1]!.uuid;
+    expect(lifecycle).toContain(`${steerUuid}:cancelled`);
+    expect(events.of('turn.started')).toHaveLength(1);
+    expect(events.of('turn.terminal')).toHaveLength(1);
+  });
+
+  it('ends a send that is interrupted before the CLI started it, from the cancelled list of the reply', async () => {
+    const { setup, session, events } = await startSession({ startDelayMs: 400 });
+    const { turnId } = await session.sendTurn({ text: 'queued' });
+    await session.interrupt(turnId);
+    const terminal = await events.waitForTerminal(turnId, 1000);
+    expect(terminal.status).toBe('interrupted');
+    expect(events.indexOf((event) => event.type === 'turn.started')).toBeLessThan(events.indexOf((event) => event.type === 'turn.terminal'));
+    await sleep(500);
+    // The CLI dropped it: no turn ran and no second terminal came.
+    expect(sentFrames(setup.logFile).filter((frame) => frame.type === 'result')).toHaveLength(0);
+    expect(events.terminalsOf(turnId)).toHaveLength(1);
+  });
+
+  it('closes a send the CLI cancelled before it started once nothing follows', async () => {
+    const { session, events } = await startSession({ cancelQueuedAfterMs: 30 });
+    const { turnId } = await session.sendTurn({ text: 'queued' });
+    const terminal = await events.waitForTerminal(turnId, 2000);
+    expect(terminal.status).toBe('interrupted');
+    // The slot is free again.
+    expect(session.activeTurn).toBeUndefined();
+  });
+
+  it('closes a turn that the CLI reports idle without ever sending its result', async () => {
+    const { session, events } = await startSession({
+      turns: [{ steps: [{ emit: { type: 'system', subtype: 'session_state_changed', state: 'idle', uuid: 'abababab-0000-4000-8000-000000000001', session_id: '{{sessionId}}' } }, { hold: true }] }],
+    });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    const terminal = await events.waitForTerminal(turnId, 2000);
+    expect(terminal).toMatchObject({ status: 'failed', failure: { class: 'transport_error', code: 'result_missing' }, sessionUsable: true });
+    expect(events.of('notice').some((event) => /went idle without reporting/.test(event.text))).toBe(true);
+  });
+
+  it('is a no-op for a turn that is not running', async () => {
+    const { setup, session } = await startSession();
+    await session.interrupt('no-such-turn');
+    expect(receivedControls(setup.logFile, 'interrupt')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('requests', () => {
+  const questionTurn = (extra: Array<Record<string, unknown>> = []): Scenario => ({
+    turns: [{ steps: [{ request: { request_id: 'req-q', request: canUseTool('AskUserQuestion', QUESTION_INPUT, 'tool-q') } }, assistantText('thanks'), ...extra] }],
+  });
+
+  it('opens a question with mapped questions and the turn id, and answers it with the exact allow shape', async () => {
+    const { setup, session, events } = await startSession(questionTurn());
+    const { turnId } = await session.sendTurn({ text: 'ask me' });
+    const opened = await events.waitForType('request.opened');
+    expect(opened).toEqual({
+      type: 'request.opened',
+      requestId: 'req-q',
+      kind: 'question',
+      summary: 'Database: Which database?',
+      turnId,
+      questions: [
+        { id: 'q0', header: 'Database', question: 'Which database?', options: [{ label: 'Postgres', description: 'relational' }, { label: 'SQLite', description: 'embedded' }], multiSelect: false, allowCustom: true },
+        { id: 'q1', header: 'Extras', question: 'Which extras?', options: [{ label: 'Cache', description: 'redis' }, { label: 'Queue', description: 'jobs' }], multiSelect: true, allowCustom: true },
+      ],
+    });
+    await session.respond('req-q', { decision: 'answer', answers: { q0: ['SQLite'], q1: ['Cache', 'Queue'] }, text: 'free words' });
+    await events.waitForTerminal(turnId);
+    const [answer] = receivedResponses(setup.logFile);
+    expect(answer).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: 'req-q',
+        response: {
+          behavior: 'allow',
+          updatedInput: { ...QUESTION_INPUT, answers: { 'Which database?': 'SQLite', 'Which extras?': 'Cache, Queue' }, response: 'free words' },
+          toolUseID: 'tool-q',
+        },
+      },
+    });
+    // The host closes an answered request itself: the plugin emits no request.closed for it.
+    expect(events.of('request.closed')).toHaveLength(0);
+  });
+
+  it('answers a declined or cancelled question with a deny', async () => {
+    for (const decision of ['decline', 'cancel'] as const) {
+      const { setup, session, events } = await startSession(questionTurn());
+      const { turnId } = await session.sendTurn({ text: 'ask me' });
+      await events.waitForType('request.opened');
+      await session.respond('req-q', { decision });
+      await events.waitForTerminal(turnId);
+      const body = receivedResponses(setup.logFile)[0]!.response.response;
+      expect(body).toMatchObject({ behavior: 'deny', toolUseID: 'tool-q' });
+      expect(body.message).toEqual(expect.any(String));
+      await setup.cleanup();
+    }
+  });
+
+  it('ignores a response for a request that is not open, and answers each request once', async () => {
+    const { setup, session, events } = await startSession(questionTurn());
+    const { turnId } = await session.sendTurn({ text: 'ask me' });
+    await events.waitForType('request.opened');
+    await session.respond('unknown', { decision: 'decline' });
+    await session.respond('req-q', { decision: 'decline' });
+    await session.respond('req-q', { decision: 'answer', answers: { q0: ['Postgres'] } });
+    await events.waitForTerminal(turnId);
+    expect(receivedResponses(setup.logFile)).toHaveLength(1);
+  });
+
+  it('opens a permission request for any other tool and answers allow or deny', async () => {
+    for (const [decision, behavior] of [['answer', 'allow'], ['decline', 'deny']] as const) {
+      const input = { command: 'rm -rf build/' };
+      const { setup, session, events } = await startSession({ turns: [{ steps: [{ request: { request_id: 'req-b', request: canUseTool('Bash', input, 'tool-b', { display_name: 'Run shell command', description: 'remove build' }) } }, assistantText('ok')] }] });
+      const { turnId } = await session.sendTurn({ text: 'go' });
+      const opened = await events.waitForType('request.opened');
+      expect(opened).toMatchObject({ requestId: 'req-b', kind: 'permission', summary: 'Run shell command: rm -rf build/', turnId });
+      expect(opened.questions).toBeUndefined();
+      await session.respond('req-b', decision === 'answer' ? { decision: 'answer', answers: {} } : { decision: 'decline' });
+      await events.waitForTerminal(turnId);
+      const body = receivedResponses(setup.logFile)[0]!.response.response;
+      expect(body.behavior).toBe(behavior);
+      if (behavior === 'allow') expect(body).toEqual({ behavior: 'allow', updatedInput: input, toolUseID: 'tool-b' });
+      await setup.cleanup();
+    }
+  });
+
+  it('opens an MCP elicitation as an mcp request and declines or cancels it', async () => {
+    const elicitation = { subtype: 'elicitation', mcp_server_name: 'forms', message: 'Fill in the form', mode: 'form', requested_schema: { type: 'object', properties: {} } };
+    for (const [decision, action] of [['decline', 'decline'], ['cancel', 'cancel'], ['answer', 'decline']] as const) {
+      const { setup, session, events } = await startSession({ turns: [{ steps: [{ request: { request_id: 'req-e', request: elicitation } }, assistantText('ok')] }] });
+      const { turnId } = await session.sendTurn({ text: 'go' });
+      const opened = await events.waitForType('request.opened');
+      expect(opened).toMatchObject({ requestId: 'req-e', kind: 'mcp', summary: 'forms: Fill in the form', turnId });
+      await session.respond('req-e', decision === 'answer' ? { decision: 'answer', answers: {} } : { decision });
+      await events.waitForTerminal(turnId);
+      expect(receivedResponses(setup.logFile)[0]).toEqual({ type: 'control_response', response: { subtype: 'success', request_id: 'req-e', response: { action } } });
+      await setup.cleanup();
+    }
+  });
+
+  it('closes a request as cancelled when the CLI withdraws it', async () => {
+    const { session, events } = await startSession({
+      turns: [
+        {
+          steps: [
+            { emit: { type: 'control_request', request_id: 'req-w', request: canUseTool('AskUserQuestion', QUESTION_INPUT, 'tool-w') } },
+            { sleep: 60 },
+            { emit: { type: 'control_cancel_request', request_id: 'req-w' } },
+            { sleep: 60 },
+            assistantText('moved on'),
+          ],
+        },
+      ],
+    });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    expect(events.of('request.closed')).toEqual([{ type: 'request.closed', requestId: 'req-w', outcome: 'cancelled' }]);
+    // A response after the withdrawal does nothing.
+    await session.respond('req-w', { decision: 'decline' });
+  });
+
+  it('closes a request as cancelled when its turn ends first', async () => {
+    const { session, events } = await startSession(questionTurn());
+    const { turnId } = await session.sendTurn({ text: 'ask me' });
+    await events.waitForType('request.opened');
+    await session.interrupt(turnId);
+    await events.waitForTerminal(turnId);
+    const closedAt = events.indexOf((event) => event.type === 'request.closed');
+    expect(events.events[closedAt]).toEqual({ type: 'request.closed', requestId: 'req-q', outcome: 'cancelled' });
+    expect(closedAt).toBeLessThan(events.indexOf((event) => event.type === 'turn.terminal'));
+  });
+
+  it('denies open requests when the session closes, so the blocked turn can end', async () => {
+    const { setup, session, events } = await startSession(questionTurn());
+    await session.sendTurn({ text: 'ask me' });
+    await events.waitForType('request.opened');
+    await session.close('release');
+    await events.done;
+    expect(receivedResponses(setup.logFile)[0]!.response.response).toMatchObject({ behavior: 'deny', toolUseID: 'tool-q' });
+    expect(events.of('request.closed')).toEqual([{ type: 'request.closed', requestId: 'req-q', outcome: 'cancelled' }]);
+  });
+
+  it('answers an unknown control subtype from the CLI with an error response', async () => {
+    const { setup, session, events } = await startSession({
+      turns: [{ steps: [{ emit: { type: 'control_request', request_id: 'req-u', request: { subtype: 'hook_callback', callback_id: 'x' } } }, { sleep: 80 }, assistantText('ok')] }],
+    });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    expect(receivedResponses(setup.logFile)).toEqual([{ type: 'control_response', response: { subtype: 'error', request_id: 'req-u', error: 'Unsupported control request: hook_callback' } }]);
+    expect(events.of('request.opened')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('failures', () => {
+  const resetsAt = 1_900_000_000;
+  const failingTurn = (steps: Array<Record<string, unknown>>): Scenario => ({ turns: [{ steps }] });
+
+  async function terminalOf(scenario: Scenario): Promise<Extract<TransportEvent, { type: 'turn.terminal' }>> {
+    const { session, events } = await startSession(scenario);
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    return events.waitForTerminal(turnId);
+  }
+
+  it('maps a 429 with a rejected rate limit to usage_limit with the reset time', async () => {
+    const terminal = await terminalOf(
+      failingTurn([
+        rateLimitEvent({ status: 'rejected', rateLimitType: 'five_hour', resetsAt, utilization: 1 }),
+        { assistant: { text: 'You have hit your limit', error: 'rate_limit', apiErrorParams: { rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resetsAt } } } },
+        { result: { is_error: true, terminal_reason: 'api_error', api_error_status: 429, result: 'API Error: 429 rate limit' } },
+      ]),
+    );
+    expect(terminal.status).toBe('failed');
+    expect(terminal.failure).toMatchObject({ class: 'usage_limit', code: 'api_error_429', retryable: false, resetAt: new Date(resetsAt * 1000).toISOString() });
+    expect(terminal.sessionUsable).toBe(true);
+  });
+
+  it('maps a 429 without any rate-limit evidence to usage_limit without a reset time', async () => {
+    const terminal = await terminalOf(failingTurn([{ result: { is_error: true, terminal_reason: 'api_error', api_error_status: 429, result: 'API Error: 429' } }]));
+    expect(terminal.failure?.class).toBe('usage_limit');
+    expect(terminal.failure).not.toHaveProperty('resetAt');
+  });
+
+  it('maps 529 to server_overloaded and 5xx to server_unavailable, both retryable provider errors', async () => {
+    const overloaded = await terminalOf(failingTurn([{ result: { is_error: true, terminal_reason: 'api_error', api_error_status: 529, result: 'overloaded_error' } }]));
+    expect(overloaded.failure).toMatchObject({ class: 'provider_error', code: 'server_overloaded', retryable: true });
+    for (const status of [500, 502, 503, 504]) {
+      const terminal = await terminalOf(failingTurn([{ result: { is_error: true, terminal_reason: 'api_error', api_error_status: status, result: `API Error: ${status}` } }]));
+      expect(terminal.failure, String(status)).toMatchObject({ class: 'provider_error', code: 'server_unavailable', retryable: true });
+    }
+  });
+
+  it('maps an authentication failure to permission_error', async () => {
+    const terminal = await terminalOf(
+      failingTurn([{ assistant: { text: 'Not logged in', error: 'authentication_failed' } }, { result: { is_error: true, terminal_reason: 'api_error', api_error_status: null, result: 'Not logged in · Please run /login' } }]),
+    );
+    expect(terminal.failure).toMatchObject({ class: 'permission_error', code: 'authentication_failed', retryable: false, message: expect.stringContaining('Not logged in') });
+    // The CLI's own error message is evidence, never agent output.
+  });
+
+  it('maps max-turns and budget results to validation_error', async () => {
+    const turns = await terminalOf(failingTurn([{ result: { subtype: 'error_max_turns', is_error: true, terminal_reason: 'max_turns', errors: ['Reached the maximum number of turns (3)'] } }]));
+    expect(turns.failure).toMatchObject({ class: 'validation_error', code: 'error_max_turns' });
+    const budget = await terminalOf(failingTurn([{ result: { subtype: 'error_max_budget_usd', is_error: true, errors: ['Budget exceeded'] } }]));
+    expect(budget.failure).toMatchObject({ class: 'validation_error', code: 'error_max_budget_usd' });
+  });
+
+  it('keeps the session usable after a failed turn and runs the next one', async () => {
+    const { session, events } = await startSession({ turns: [{ steps: [{ result: { is_error: true, terminal_reason: 'api_error', api_error_status: 529, result: 'overloaded' } }] }] });
+    const first = await session.sendTurn({ text: 'one' });
+    expect((await events.waitForTerminal(first.turnId)).status).toBe('failed');
+    const second = await session.sendTurn({ text: 'two' });
+    expect((await events.waitForTerminal(second.turnId)).status).toBe('completed');
+  });
+
+  it('reports api_retry as a warning notice', async () => {
+    const { session, events } = await startSession(
+      failingTurn([
+        { emit: { type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 10, retry_delay_ms: 1000, error_status: 529, error: 'server_error', uuid: 'eeeeeeee-0000-4000-8000-000000000001', session_id: '{{sessionId}}' } },
+        { result: { is_error: true, terminal_reason: 'api_error', api_error_status: null, result: 'connection reset' } },
+      ]),
+    );
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    const terminal = await events.waitForTerminal(turnId);
+    expect(events.of('notice').find((event) => /retrying \(attempt 2 of 10\)/.test(event.text))?.level).toBe('warn');
+    // No HTTP status on the result and a retry before it: a transport error, which RunRecovery treats as retryable.
+    expect(terminal.failure?.class).toBe('provider_error');
+  });
+
+  it('treats a result with no status after retries without a status as a transport error', async () => {
+    const { session, events } = await startSession(
+      failingTurn([
+        { emit: { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: null, error: 'unknown', uuid: 'eeeeeeee-0000-4000-8000-000000000002', session_id: '{{sessionId}}' } },
+        { result: { is_error: true, terminal_reason: 'api_error', api_error_status: null, result: 'fetch failed' } },
+      ]),
+    );
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    const terminal = await events.waitForTerminal(turnId);
+    expect(terminal.failure).toMatchObject({ class: 'transport_error', retryable: true });
+  });
+
+  it('maps compaction, permission-denied and informational frames to notices', async () => {
+    const frame = (subtype: string, extra: Record<string, unknown>): Record<string, unknown> => ({ emit: { type: 'system', subtype, uuid: `eeeeeeee-0000-4000-8000-0000000000${subtype.length}`, session_id: '{{sessionId}}', ...extra } });
+    const { session, events } = await startSession(
+      failingTurn([
+        frame('status', { status: 'compacting' }),
+        frame('compact_boundary', { compact_metadata: { trigger: 'auto', pre_tokens: 150000 } }),
+        frame('permission_denied', { tool_name: 'Bash', tool_use_id: 't1', decision_reason: 'blocked by rule' }),
+        frame('informational', { content: 'Working directory was deleted', level: 'warning' }),
+        assistantText('ok'),
+      ]),
+    );
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    const notices = events.of('notice').map((event) => [event.level, event.text]);
+    expect(notices).toEqual([
+      ['info', 'Claude is compacting the conversation.'],
+      ['info', 'Claude compacted the conversation (150000 tokens before).'],
+      ['warn', 'Claude was not allowed to use Bash: blocked by rule'],
+      ['warn', 'Working directory was deleted'],
+    ]);
+  });
+
+  it('reports an MCP server that failed to start', async () => {
+    const { session, events } = await startSession({ mcpServers: [{ name: 'broken', status: 'failed' }, { name: 'fine', status: 'connected' }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    expect(events.of('notice').map((event) => event.text)).toEqual(['MCP server "broken" failed to start.']);
+  });
+});
+
+describe('classifyResult', () => {
+  const base: ClaudeResultFrame = { type: 'result', subtype: 'success', is_error: false, terminal_reason: 'completed', result: 'ok' };
+  const classify = (overrides: Partial<ClaudeResultFrame>, evidence = newTurnEvidence(), interruptRequested = false) =>
+    classifyResult({ ...base, ...overrides }, evidence, { interruptRequested, nowMs: Date.parse('2026-10-26T12:00:00Z') });
+
+  it('completes a clean result', () => {
+    expect(classify({})).toEqual({ status: 'completed' });
+  });
+
+  it('lets an aborted terminal reason win over a success subtype', () => {
+    expect(classify({ terminal_reason: 'aborted_streaming' }).status).toBe('interrupted');
+    expect(classify({ terminal_reason: 'aborted_tools', is_error: true }).status).toBe('interrupted');
+    expect(classify({ subtype: 'error_during_execution', terminal_reason: 'aborted_streaming', is_error: true }).status).toBe('interrupted');
+  });
+
+  it('treats a requested interrupt as an interrupt even when the turn finished', () => {
+    expect(classify({}, newTurnEvidence(), true)).toEqual({ status: 'interrupted' });
+  });
+
+  it('classifies error subtypes by their text when they name an interrupt or cancel', () => {
+    expect(classify({ subtype: 'error_during_execution', is_error: true, errors: ['Request interrupted by user'] }).status).toBe('interrupted');
+    expect(classify({ subtype: 'error_during_execution', is_error: true, errors: ['cancelled'] }).status).toBe('interrupted');
+    expect(classify({ subtype: 'error_during_execution', is_error: true, errors: ['boom'] })).toMatchObject({ status: 'failed', failure: { class: 'provider_error', code: 'error_during_execution' } });
+  });
+
+  it('maps usage limits with the latest reset among blocked limits, or none when one is unknown', () => {
+    const evidence = newTurnEvidence(new Map([['five_hour', '2026-10-26T15:00:00.000Z'], ['seven_day', '2026-10-30T00:00:00.000Z']]));
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 429 }, evidence).failure).toMatchObject({ class: 'usage_limit', resetAt: '2026-10-30T00:00:00.000Z' });
+    const unknown = newTurnEvidence(new Map([['five_hour', '2026-10-26T15:00:00.000Z'], ['seven_day', null]]));
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 429 }, unknown).failure).not.toHaveProperty('resetAt');
+  });
+
+  it('treats a blocked limit with no HTTP status as a usage limit, but not when authentication failed', () => {
+    const blocked = newTurnEvidence(new Map([['five_hour', '2026-10-26T15:00:00.000Z']]));
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: null }, blocked).failure?.class).toBe('usage_limit');
+    blocked.authenticationFailed = true;
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: null }, blocked).failure?.class).toBe('permission_error');
+  });
+
+  it('uses the reset time of a blocked assistant frame', () => {
+    const evidence = newTurnEvidence();
+    evidence.assistantRateLimit = assistantRateLimitEvidence({ rateLimitType: 'seven_day', resetsAt: 1_900_000_000 });
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 429 }, evidence).failure).toMatchObject({ class: 'usage_limit', resetAt: new Date(1_900_000_000_000).toISOString() });
+  });
+
+  it('reads the reset time from a gateway 503 that embeds a 429', () => {
+    const result = 'API Error: 503 [gw-1] [429]: {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}} (reset after 1h 2m 3s)';
+    const classified = classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 503, result });
+    expect(classified.failure).toMatchObject({ class: 'usage_limit', resetAt: new Date(Date.parse('2026-10-26T12:00:00Z') + (3600 + 120 + 3) * 1000).toISOString() });
+  });
+
+  it('maps overloaded text with no status to server_overloaded and 403 to a permission error', () => {
+    expect(classify({ is_error: true, terminal_reason: 'api_error', result: 'The server is overloaded' }).failure).toMatchObject({ code: 'server_overloaded', retryable: true });
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 403, result: 'forbidden' }).failure).toMatchObject({ class: 'permission_error', code: 'api_error_403' });
+    expect(classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 401, result: 'unauthorized' }).failure).toMatchObject({ class: 'permission_error' });
+  });
+
+  it('maps context and budget terminal reasons to validation errors', () => {
+    for (const reason of ['prompt_too_long', 'image_error', 'budget_exhausted']) {
+      expect(classify({ is_error: true, terminal_reason: reason }).failure, reason).toMatchObject({ class: 'validation_error', code: reason });
+    }
+    expect(classify({ is_error: true, terminal_reason: 'model_error' }).failure?.class).toBe('provider_error');
+  });
+
+  it('redacts credentials from failure messages', () => {
+    const failure = classify({ is_error: true, terminal_reason: 'api_error', api_error_status: 500, result: 'failed with Bearer abcdefghijklmnop12345 token' }).failure!;
+    expect(failure.message).not.toContain('abcdefghijklmnop12345');
+  });
+
+  it('classifies api_retry frames', () => {
+    expect(failureFromApiRetry({ error_status: 429, error: 'rate_limit' })).toMatchObject({ class: 'usage_limit', code: 'api_error_429', retryable: true });
+    expect(failureFromApiRetry({ error_status: null, error: 'unknown' })).toMatchObject({ class: 'transport_error', retryable: true });
+    expect(failureFromApiRetry({ error_status: 529, error: 'server_error' })).toMatchObject({ class: 'provider_error', code: 'api_error_529' });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('rate limits and usage', () => {
+  it('turns rate_limit_event frames into usage windows per limit type, once per change', async () => {
+    const reset = 1_900_000_000;
+    const { session, events } = await startSession({
+      turns: [
+        {
+          steps: [
+            rateLimitEvent({ status: 'allowed', rateLimitType: 'five_hour', utilization: 0.42, resetsAt: reset }),
+            rateLimitEvent({ status: 'allowed', rateLimitType: 'five_hour', utilization: 0.42, resetsAt: reset }),
+            rateLimitEvent({ status: 'allowed_warning', rateLimitType: 'seven_day', utilization: 0.9, resetsAt: reset + 86400 }),
+            rateLimitEvent({ status: 'allowed', rateLimitType: 'overage', utilization: 0.1 }),
+            assistantText('ok'),
+          ],
+        },
+      ],
+    });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    const windows = events.of('usage.updated').filter((event) => event.windows);
+    expect(windows).toHaveLength(2);
+    expect(windows[0]!.windows).toEqual([{ id: 'five_hour', usedPercent: 42, resetsAt: new Date(reset * 1000).toISOString() }]);
+    expect(windows[1]!.windows).toEqual([
+      { id: 'five_hour', usedPercent: 42, resetsAt: new Date(reset * 1000).toISOString() },
+      { id: 'seven_day', usedPercent: 90, resetsAt: new Date((reset + 86400) * 1000).toISOString() },
+    ]);
+  });
+
+  it('marks a blocked limit exhausted, announces it once per reset time, and clears it when allowed again', () => {
+    const tracker = new ClaudeRateLimitTracker();
+    const reset = 1_900_000_000;
+    const first = tracker.apply({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: reset });
+    expect(first.windows).toEqual([{ id: 'five_hour', usedPercent: 100, resetsAt: new Date(reset * 1000).toISOString() }]);
+    expect(first.announce).toContain('5-hour usage limit reached');
+    const again = tracker.apply({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: reset });
+    expect(again.announce).toBeUndefined();
+    expect(again.changed).toBe(false);
+    expect([...tracker.blocked()]).toEqual([['five_hour', new Date(reset * 1000).toISOString()]]);
+    const overage = tracker.apply({ status: 'rejected', rateLimitType: 'five_hour', resetsAt: reset + 5, overageStatus: 'allowed' });
+    expect(overage.announce).toBeUndefined();
+    expect(tracker.blocked().size).toBe(0);
+    const cleared = tracker.apply({ status: 'allowed', rateLimitType: 'five_hour', utilization: 0.05, resetsAt: reset + 18000 });
+    expect(cleared.windows[0]).toMatchObject({ id: 'five_hour', usedPercent: 5 });
+  });
+
+  it('warns once when the account is blocked', async () => {
+    const reset = 1_900_000_000;
+    const { session, events } = await startSession({ turns: [{ steps: [rateLimitEvent({ status: 'rejected', rateLimitType: 'seven_day', resetsAt: reset }), rateLimitEvent({ status: 'rejected', rateLimitType: 'seven_day', resetsAt: reset }), assistantText('x')] }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    expect(events.of('notice').filter((event) => /weekly usage limit reached/.test(event.text))).toHaveLength(1);
+  });
+
+  it('computes context numbers from results and usage replies', () => {
+    expect(contextMaxFromModelUsage({ 'claude-a': { contextWindow: 200000 }, 'claude-b': { contextWindow: 1000000 } })).toBe(1000000);
+    expect(contextMaxFromModelUsage({ 'claude-a': { contextWindow: 200000 }, 'claude-b': { contextWindow: 1000000 } }, 'claude-a')).toBe(200000);
+    expect(contextMaxFromModelUsage({}, 'x')).toBeUndefined();
+    expect(contextUsedFromResultUsage({ iterations: [{ input_tokens: 1, output_tokens: 1 }, { input_tokens: 10, cache_read_input_tokens: 90, cache_creation_input_tokens: 5, output_tokens: 7 }] })).toBe(112);
+    expect(contextUsedFromResultUsage({ input_tokens: 999 })).toBeUndefined();
+    expect(contextFromUsageResponse({ totalTokens: 5, maxTokens: 150, rawMaxTokens: 200 })).toEqual({ used: 5, max: 200 });
+    expect(contextFromUsageResponse(undefined)).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('process lifetime', () => {
+  it('ends the turn as a transport error and the session as error then stopped when the process exits mid-turn', async () => {
+    const { session, events } = await startSession({ turns: [{ steps: [assistantText('working'), { sleep: 30 }, { exit: 3 }] }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.done;
+    const types = events.types();
+    expect(types.slice(-4)).toEqual(['item.completed', 'turn.terminal', 'session.state', 'session.state']);
+    const terminal = events.terminalsOf(turnId);
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({ status: 'failed', sessionUsable: false, failure: { class: 'transport_error', code: 'process_exited', retryable: true, message: 'exit code 3' } });
+    expect(events.of('session.state').slice(-2)).toEqual([
+      { type: 'session.state', state: 'error', failure: { class: 'transport_error', code: 'process_exited', message: 'exit code 3', retryable: true } },
+      { type: 'session.state', state: 'stopped' },
+    ]);
+    await expect(session.sendTurn({ text: 'again' })).rejects.toBeInstanceOf(NotSentError);
+    expect(await session.interrupt(turnId)).toBeUndefined();
+  });
+
+  it('kills what the CLI left behind in its process group once it has exited', async () => {
+    const { setup, session, events } = await startSession({ grandchild: true, turns: [{ steps: [{ exit: 3 }] }] });
+    const grandchild = (await waitUntil(() => readLog(setup.logFile).find((entry) => entry.event === 'grandchild')))!.pid as number;
+    expect(processStartTicks(grandchild)).toBeDefined();
+    await session.sendTurn({ text: 'go' });
+    await events.done;
+    await waitUntil(() => processStartTicks(grandchild) === undefined, 3000, 'the grandchild to be killed');
+  });
+
+  it('reports an idle process that dies as error then stopped, with no terminal', async () => {
+    const { session, events, setup } = await startSession();
+    process.kill(session.pid!, 'SIGKILL');
+    await events.done;
+    expect(events.of('turn.terminal')).toHaveLength(0);
+    expect(events.of('session.state').slice(-2).map((event) => event.state)).toEqual(['error', 'stopped']);
+    expect(await setup.instance.alive()).toEqual({ connected: false });
+  });
+
+  it('unload ends the process cleanly: stopped without an error', async () => {
+    const { setup, session, events } = await startSession();
+    await session.unload();
+    await events.done;
+    expect(events.of('session.state').map((event) => event.state)).toEqual(['ready', 'stopped']);
+    expect(readLog(setup.logFile).some((entry) => entry.event === 'stdin-eof')).toBe(true);
+    await session.close('release'); // idempotent
+    expect(await setup.instance.alive()).toEqual({ connected: false });
+  });
+
+  it('close lets a running turn finish on end of input, then ends the session', async () => {
+    const { session, events } = await startSession({ turns: [{ steps: [{ sleep: 120 }, assistantText('finished')] }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForType('turn.started');
+    await session.close('release');
+    await events.done;
+    expect(events.terminalsOf(turnId)).toEqual([{ type: 'turn.terminal', turnId, status: 'completed', sessionUsable: true, replay: false }]);
+    expect(events.of('session.state').some((event) => event.state === 'error')).toBe(false);
+  });
+
+  it('escalates to SIGTERM when the process ignores end of input and ends the running turn interrupted', async () => {
+    const { setup, session, events } = await startSession({ ignoreStdinEof: true, turns: [{ steps: [{ hold: true }] }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForType('turn.started');
+    await session.close('release');
+    await events.done;
+    expect(readLog(setup.logFile).some((entry) => entry.event === 'sigterm')).toBe(true);
+    expect(events.terminalsOf(turnId)).toEqual([{ type: 'turn.terminal', turnId, status: 'interrupted', sessionUsable: false, replay: false }]);
+    expect(events.of('session.state').some((event) => event.state === 'error')).toBe(false);
+  });
+
+  it('kills a process that ignores both end of input and SIGTERM', async () => {
+    const { session, events } = await startSession({ ignoreStdinEof: true, ignoreSigterm: true });
+    const pid = session.pid!;
+    await session.close('release');
+    await events.done;
+    await waitUntil(() => processStartTicks(pid) === undefined, 3000, 'the process to be gone');
+  });
+
+  it('close with reason error does not hang and leaves nothing running', async () => {
+    const { session, events } = await startSession();
+    const pid = session.pid!;
+    await session.close('error');
+    await events.done;
+    expect(processStartTicks(pid)).toBeUndefined();
+  });
+
+  it('dispose detaches every session and ends their event streams', async () => {
+    const setup = setupFake({});
+    const a = setup.track(await setup.instance.start(setup.open({ conversationId: 'a' })));
+    const b = setup.track(await setup.instance.start(setup.open({ conversationId: 'b' })));
+    const logs = [new EventLog(a), new EventLog(b)];
+    expect(setup.instance.openSessionIds).toHaveLength(2);
+    await setup.instance.dispose('shutdown');
+    await Promise.all(logs.map((log) => log.done));
+    expect(logs.map((log) => log.events.at(-1))).toEqual([{ type: 'session.state', state: 'stopped' }, { type: 'session.state', state: 'stopped' }]);
+    await expect(setup.instance.start(setup.open())).rejects.toBeInstanceOf(TransportUnavailableError);
+  });
+
+  it('reports a live process through alive()', async () => {
+    const { setup, session } = await startSession();
+    expect(await setup.instance.alive()).toEqual({ pid: session.pid, connected: true });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('resume', () => {
+  const sessionId = '12345678-1234-4234-8234-123456789abc';
+
+  it('resumes by id when the transcript holds a conversation, and reports its path', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    const transcript = writeTranscript(setup.configDir, setup.cwd, sessionId);
+    const session = setup.track(await setup.instance.resume(sessionId, setup.open({ model: 'sonnet' })));
+    const events = new EventLog(session);
+    expect(session.nativeSessionId).toBe(sessionId);
+    const argv = startEntries(setup.logFile)[0]!.argv!;
+    expect(argv).toEqual(expect.arrayContaining(['--resume', sessionId]));
+    expect(argv).not.toContain('--session-id');
+    await waitUntil(() => events.events.length >= 1);
+    expect(events.events[0]).toEqual({ type: 'session.native', nativeSessionId: sessionId, transcriptPath: transcript });
+    expect(session.transcriptPath).toBe(transcript);
+  });
+
+  it('refuses when the transcript file is absent, without starting a process', async () => {
+    const setup = setupFake();
+    await expect(setup.instance.resume(sessionId, setup.open())).rejects.toBeInstanceOf(ResumeFailedError);
+    expect(startEntries(setup.logFile)).toHaveLength(0);
+  });
+
+  it('refuses when the transcript holds no conversation yet (the first prompt never reached the model)', async () => {
+    const setup = setupFake();
+    writeTranscript(setup.configDir, setup.cwd, sessionId, false);
+    await expect(setup.instance.resume(sessionId, setup.open())).rejects.toThrow(/no conversation to resume/);
+    expect(startEntries(setup.logFile)).toHaveLength(0);
+  });
+
+  it('finds a transcript under any project directory, as the CLI does', async () => {
+    const setup = setupFake();
+    const other = path.join(setup.dir, 'elsewhere');
+    fs.mkdirSync(other);
+    const transcript = writeTranscript(setup.configDir, other, sessionId);
+    const session = setup.track(await setup.instance.resume(sessionId, setup.open()));
+    expect(session.transcriptPath).toBe(transcript);
+  });
+
+  describe('one writer', () => {
+    let holder: ChildProcess | undefined;
+    afterEach(() => {
+      holder?.kill('SIGKILL');
+      holder = undefined;
+    });
+
+    // A long-lived process whose command line names claude, standing in for another Claude process.
+    async function startHolder(): Promise<number> {
+      holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'claude-holder'], { stdio: 'ignore' });
+      await waitUntil(() => holder!.pid !== undefined && processStartTicks(holder!.pid) !== undefined);
+      return holder.pid!;
+    }
+
+    it('refuses to resume a session another live process holds, naming the pid', async () => {
+      const setup = setupFake();
+      writeTranscript(setup.configDir, setup.cwd, sessionId);
+      const pid = await startHolder();
+      writeRegistryFile(setup.configDir, { pid, sessionId, procStart: processStartTicks(pid) });
+      const error = await setup.instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ClaudeSessionHeldError);
+      expect(error).toBeInstanceOf(ResumeFailedError);
+      expect((error as ClaudeSessionHeldError).heldByPid).toBe(pid);
+      expect((error as ClaudeSessionHeldError).message).toContain(String(pid));
+      expect(startEntries(setup.logFile)).toHaveLength(0);
+    });
+
+    it('refuses a start that reuses the id of a held session', async () => {
+      const setup = setupFake();
+      const pid = await startHolder();
+      writeRegistryFile(setup.configDir, { pid, sessionId });
+      await expect(setup.instance.start(setup.open({ sessionId }))).rejects.toBeInstanceOf(ClaudeSessionHeldError);
+    });
+
+    it('ignores a registry file whose pid now belongs to another process or no longer exists', async () => {
+      const setup = setupFake({ sessionStartHook: false });
+      writeTranscript(setup.configDir, setup.cwd, sessionId);
+      const pid = await startHolder();
+      // Same pid, different start time: the process that wrote the file is gone.
+      writeRegistryFile(setup.configDir, { pid, sessionId, procStart: String(Number(processStartTicks(pid)) + 1) });
+      expect(findSessionHolder(setup.configDir, sessionId)).toBeUndefined();
+      holder!.kill('SIGKILL');
+      await waitUntil(() => processStartTicks(pid) === undefined, 3000, 'the holder to exit');
+      writeRegistryFile(setup.configDir, { pid, sessionId });
+      expect(findSessionHolder(setup.configDir, sessionId)).toBeUndefined();
+      setup.track(await setup.instance.resume(sessionId, setup.open()));
+    });
+
+    it('without a procStart, a registry pid counts only when the process looks like claude', async () => {
+      const setup = setupFake();
+      writeRegistryFile(setup.configDir, { pid: process.pid, sessionId });
+      expect(findSessionHolder(setup.configDir, sessionId)).toBeUndefined(); // this test process is not claude
+      const pid = await startHolder();
+      writeRegistryFile(setup.configDir, { pid, sessionId });
+      expect(findSessionHolder(setup.configDir, sessionId)).toMatchObject({ pid });
+    });
+
+    it('refuses a second launch of a session while the first is still starting', async () => {
+      const setup = setupFake({ sessionStartHook: false, initializeDelayMs: 200 });
+      writeTranscript(setup.configDir, setup.cwd, sessionId);
+      const first = setup.instance.resume(sessionId, setup.open());
+      await waitUntil(() => startEntries(setup.logFile).length === 1);
+      await expect(setup.instance.resume(sessionId, setup.open())).rejects.toBeInstanceOf(ClaudeSessionHeldError);
+      setup.track(await first);
+    });
+
+    it('refuses to open the same session twice in one instance', async () => {
+      const setup = setupFake({ sessionStartHook: false });
+      writeTranscript(setup.configDir, setup.cwd, sessionId);
+      const first = setup.track(await setup.instance.resume(sessionId, setup.open()));
+      await expect(setup.instance.resume(sessionId, setup.open())).rejects.toBeInstanceOf(ClaudeSessionHeldError);
+      await first.close('release');
+      await waitUntil(() => setup.instance.openSessionIds.length === 0);
+      setup.track(await setup.instance.resume(sessionId, setup.open()));
+    });
+
+    it('reattaches only through a recorded launch: with none, a live holder is simply refused; with one, a host that does not know it is refused too', async () => {
+      const setup = setupFake({ sessionStartHook: false });
+      writeTranscript(setup.configDir, setup.cwd, sessionId);
+      const pid = await startHolder();
+      writeRegistryFile(setup.configDir, { pid, sessionId, procStart: processStartTicks(pid) });
+      setup.context.metaStore.set('claude-launch:conversation-1', JSON.stringify({ sessionId, argv: [process.execPath, FAKE_CLAUDE, setup.scenarioPath, '--session-id', sessionId] }));
+      // A plain stdio factory always starts a new process, which is exactly what must not happen beside a holder.
+      const error = await setup.instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ClaudeSessionHeldError);
+      const entries = startEntries(setup.logFile);
+      expect(entries).toHaveLength(1); // the throwaway process, which the plugin ended
+      await waitUntil(() => processStartTicks(entries[0]!.pid!) === undefined, 3000, 'the extra process to end');
+    });
+  });
+
+  it('reports the CLI own refusal when the resume fails at startup', async () => {
+    const setup = setupFake({ startupFailure: { errors: [`No conversation found with session ID: ${sessionId}`], exitCode: 1 } });
+    writeTranscript(setup.configDir, setup.cwd, sessionId);
+    const error = await setup.instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ResumeFailedError);
+    expect((error as Error).message).toContain('No conversation found');
+  });
+
+  it('reports a failed startup of a new session as unavailable, with the CLI reason', async () => {
+    const setup = setupFake({ startupFailure: { errors: ['Running as root is not allowed'], reason: 'bypass_root', exitCode: 1 } });
+    const error = await setup.instance.start(setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(TransportUnavailableError);
+    expect((error as Error).message).toMatch(/bypass_root.*Running as root/);
+  });
+
+  it('records the launch command line so a later backend can find the process again, and forgets it when the process ends', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    const session = setup.track(await setup.instance.start(setup.open()));
+    const stored = JSON.parse(setup.context.metaStore.get('claude-launch:conversation-1')!);
+    expect(stored.sessionId).toBe(session.nativeSessionId);
+    expect(stored.argv).toEqual(expect.arrayContaining(['--session-id', session.nativeSessionId]));
+    await session.close('release');
+    expect(setup.context.metaStore.has('claude-launch:conversation-1')).toBe(false);
+  });
+
+  it('keeps the launch record when the instance is disposed, because the process lives on behind its host', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    setup.track(await setup.instance.start(setup.open()));
+    await setup.instance.dispose('shutdown');
+    expect(setup.context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('bare mode and login checks', () => {
+  it('fails fast when no SessionStart hook ran and the Console expects its hooks', async () => {
+    const setup = setupFake({ sessionStartHook: false }, { context: { coordination: COORDINATION } });
+    const pidBefore = startEntries(setup.logFile).length;
+    const error = await setup.instance.start(setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClaudeLaunchRefusedError);
+    expect((error as ClaudeLaunchRefusedError).reason).toBe('no_hooks');
+    const entries = startEntries(setup.logFile);
+    expect(pidBefore).toBe(0);
+    await waitUntil(() => processStartTicks(entries[0]!.pid!) === undefined, 3000, 'the refused process to end');
+    expect(setup.instance.openSessionIds).toEqual([]);
+  });
+
+  it('accepts a launch whose SessionStart hook ran', async () => {
+    const setup = setupFake({ sessionStartHook: true }, { context: { coordination: COORDINATION } });
+    const session = setup.track(await setup.instance.start(setup.open()));
+    expect(session.sawSessionStartHook).toBe(true);
+  });
+
+  it('does not require hooks without coordination, or when told not to', async () => {
+    const withoutCoordination = setupFake({ sessionStartHook: false });
+    withoutCoordination.track(await withoutCoordination.instance.start(withoutCoordination.open()));
+    const told = setupFake({ sessionStartHook: false }, { context: { coordination: COORDINATION }, plugin: { requireHooks: false } });
+    told.track(await told.instance.start(told.open()));
+  });
+
+  it('fails fast when initialize reports an API key instead of the subscription login', async () => {
+    const setup = setupFake({ account: { tokenSource: 'ANTHROPIC_API_KEY', apiKeySource: 'ANTHROPIC_API_KEY', apiProvider: 'firstParty' } });
+    const error = await setup.instance.start(setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ClaudeLaunchRefusedError);
+    expect((error as ClaudeLaunchRefusedError).reason).toBe('api_key');
+    const allowed = setupFake({ account: { apiKeySource: 'ANTHROPIC_API_KEY' } }, { plugin: { requireSubscriptionLogin: false } });
+    allowed.track(await allowed.instance.start(allowed.open()));
+    const oauth = setupFake({ account: { apiKeySource: 'oauth' } });
+    oauth.track(await oauth.instance.start(oauth.open()));
+  });
+
+  it('ends the turn and the process when system/init reveals an API key source', async () => {
+    const { session, events } = await startSession({ initApiKeySource: 'user', turns: [{ steps: [{ hold: true }] }] });
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    const terminal = await events.waitForTerminal(turnId);
+    expect(terminal).toMatchObject({ status: 'failed', sessionUsable: false, failure: { class: 'permission_error', code: 'api_key_source' } });
+    await events.done;
+    expect(events.of('turn.terminal')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('transcript path', () => {
+  it('computes the path from the config dir and the escaped cwd', async () => {
+    const { setup, session } = await startSession();
+    expect(session.transcriptPath).toBe(path.join(setup.configDir, 'projects', escapeProjectDir(setup.cwd)!, `${session.nativeSessionId}.jsonl`));
+    expect(escapeProjectDir('/home/bryan/my project.v2')).toBe('-home-bryan-my-project-v2');
+    expect(escapeProjectDir(`/${'a'.repeat(250)}`)).toBeUndefined();
+  });
+
+  it('honors CLAUDE_CONFIG_DIR from the configured environment', async () => {
+    const setup = setupFake({}, { config: { env: { CLAUDE_CONFIG_DIR: '~/custom-claude' } } });
+    const session = setup.track(await setup.instance.start(setup.open()));
+    expect(session.transcriptPath).toBe(path.join(setup.home, 'custom-claude', 'projects', escapeProjectDir(setup.cwd)!, `${session.nativeSessionId}.jsonl`));
+  });
+
+  it('takes the path a SessionStart hook prints, and corrects the path once the file is found elsewhere', async () => {
+    const hookPath = '/elsewhere/projects/hooked/abc.jsonl';
+    const { setup, session, events } = await startSession({ sessionStartHook: true, hookStdout: JSON.stringify({ transcript_path: hookPath }) }, { plugin: { requireHooks: true } });
+    expect(session.transcriptPath).toBe(hookPath);
+    const natives = (): number => events.of('session.native').length;
+    await waitUntil(() => natives() >= 2);
+    expect(events.of('session.native')[1]).toMatchObject({ transcriptPath: hookPath });
+
+    // After the first turn the real file is found by scanning the project directories.
+    const realFile = path.join(setup.configDir, 'projects', 'some-other-project', `${session.nativeSessionId}.jsonl`);
+    fs.mkdirSync(path.dirname(realFile), { recursive: true });
+    fs.writeFileSync(realFile, `${JSON.stringify({ type: 'user', message: {} })}\n`);
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    await events.waitForTerminal(turnId);
+    await waitUntil(() => session.transcriptPath === realFile, 3000, 'the corrected transcript path');
+    expect(events.of('session.native').at(-1)).toEqual({ type: 'session.native', nativeSessionId: session.nativeSessionId, transcriptPath: realFile });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+
+describe('session over a lost connection', () => {
+  it('ends the turn as a transport error and leaves the process, and its launch record, for the next backend', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport });
+    const kinds: string[] = [];
+    const session = new ClaudeSession({
+      sessionId: 's-1',
+      cwd: '/work',
+      client,
+      log: { info: () => undefined, warn: () => undefined },
+      timings: DEFAULT_CLAUDE_TIMINGS,
+      configDir: '/nonexistent',
+      requireSubscriptionLogin: false,
+      onEnded: (_ended, kind) => void kinds.push(kind),
+    });
+    const events = new EventLog(session);
+    const { turnId } = await session.sendTurn({ text: 'go' });
+    memory.fromCli({ type: 'command_lifecycle', command_uuid: turnId, state: 'started' });
+    memory.exit('disconnected');
+    await events.done;
+    expect(events.terminalsOf(turnId)).toEqual([
+      { type: 'turn.terminal', turnId, status: 'failed', failure: { class: 'transport_error', code: 'process_exited', message: 'connection lost', retryable: true }, sessionUsable: false, replay: false },
+    ]);
+    expect(kinds).toEqual(['detached']);
+    expect(memory.closed).toEqual([]);
+  });
+});
+
+describe('stream-json client', () => {
+  it('matches control responses by request id and fails pending requests when the channel ends', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport, controlTimeoutMs: 1000 });
+    const first = client.sendControl({ subtype: 'set_model', model: 'opus' });
+    const second = client.sendControl({ subtype: 'apply_flag_settings', settings: { effortLevel: 'low' } });
+    await waitUntil(() => memory.written.length === 2);
+    memory.fromCli({ type: 'control_response', response: { subtype: 'success', request_id: memory.written[0]!.request_id, response: { model: 'claude-opus' } } });
+    expect((await first).response).toEqual({ model: 'claude-opus' });
+    second.catch(() => undefined);
+    memory.exit(1);
+    await expect(second).rejects.toBeInstanceOf(ClaudeExitError);
+    await expect(client.sendControl({ subtype: 'interrupt' })).rejects.toBeInstanceOf(ClaudeExitError);
+    await expect(client.write({ type: 'user' })).rejects.toBeInstanceOf(ClaudeExitError);
+  });
+
+  it('times out a control request and withdraws it', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport, controlTimeoutMs: 40 });
+    await expect(client.sendControl({ subtype: 'interrupt' })).rejects.toBeInstanceOf(ClaudeControlTimeoutError);
+    await waitUntil(() => memory.written.some((frame) => frame.type === 'control_cancel_request'));
+    expect(memory.written.at(-1)).toEqual({ type: 'control_cancel_request', request_id: memory.written[0]!.request_id });
+  });
+
+  it('answers every server request even with no handler, a throwing handler, or an unknown subtype', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport });
+    memory.fromCli({ type: 'control_request', request_id: 'a', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: {}, tool_use_id: 'tu-a' } });
+    memory.fromCli({ type: 'control_request', request_id: 'b', request: { subtype: 'elicitation', mcp_server_name: 's', message: 'm' } });
+    memory.fromCli({ type: 'control_request', request_id: 'c', request: { subtype: 'mcp_message' } });
+    client.setServerRequestHandler(() => {
+      throw new Error('boom');
+    });
+    memory.fromCli({ type: 'control_request', request_id: 'd', request: { subtype: 'can_use_tool', tool_name: 'Edit', input: {}, tool_use_id: 'tu-d' } });
+    await waitUntil(() => memory.written.length === 4);
+    const byId = Object.fromEntries(memory.written.map((frame) => [frame.response.request_id, frame.response]));
+    expect(byId.a.response).toMatchObject({ behavior: 'deny', toolUseID: 'tu-a' });
+    expect(byId.b.response).toEqual({ action: 'decline' });
+    expect(byId.c).toEqual({ subtype: 'error', request_id: 'c', error: 'Unsupported control request: mcp_message' });
+    expect(byId.d.response).toMatchObject({ behavior: 'deny', toolUseID: 'tu-d' });
+    expect(client.openServerRequests()).toEqual([]);
+  });
+
+  it('keeps a request open for a later answer, answers it once, and drops it on withdrawal', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport });
+    const seen: string[] = [];
+    const cancelled: string[] = [];
+    client.setServerRequestHandler((open) => void seen.push(open.requestId));
+    client.onServerRequestCancelled((requestId) => void cancelled.push(requestId));
+    memory.fromCli({ type: 'control_request', request_id: 'x', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: {}, tool_use_id: 'tu' } });
+    memory.fromCli({ type: 'control_request', request_id: 'y', request: { subtype: 'elicitation', mcp_server_name: 's', message: 'm' } });
+    expect(client.openServerRequests().map((open) => open.requestId)).toEqual(['x', 'y']);
+    expect(await client.respondCanUseTool('x', { behavior: 'allow', updatedInput: { a: 1 } })).toBe(true);
+    expect(await client.respondCanUseTool('x', { behavior: 'allow', updatedInput: {} })).toBe(false);
+    memory.fromCli({ type: 'control_cancel_request', request_id: 'y' });
+    expect(cancelled).toEqual(['y']);
+    expect(await client.respondElicitation('y', { action: 'decline' })).toBe(false);
+    expect(memory.written).toEqual([{ type: 'control_response', response: { subtype: 'success', request_id: 'x', response: { behavior: 'allow', updatedInput: { a: 1 } } } }]);
+  });
+
+  it('routes frames to listeners, skips keep-alives and unparseable lines, and never logs a whole frame', async () => {
+    const memory = memoryTransport();
+    const debug: Array<[object, string]> = [];
+    const warn: Array<[object, string]> = [];
+    const client = new StreamJsonClient({ transport: memory.transport, log: { debug: (fields, message) => void debug.push([fields, message]), warn: (fields, message) => void warn.push([fields, message]) } });
+    const frames: string[] = [];
+    client.onFrame((frame) => void frames.push(`${frame.type}/${(frame as { subtype?: string }).subtype ?? ''}`));
+    memory.fromCli({ type: 'keep_alive' });
+    memory.fromCli({ type: 'assistant', message: { content: [{ type: 'text', text: 'TOP-SECRET-OUTPUT' }] }, uuid: 'u1' });
+    memory.fromCli({ type: 'system', subtype: 'init', uuid: 'u2' });
+    expect(frames).toEqual(['assistant/', 'system/init']);
+    expect(client.stats.keepAlives).toBe(1);
+    await client.write({ type: 'user', message: { content: [{ type: 'text', text: 'TOP-SECRET-PROMPT' }] }, uuid: 'u3' });
+    const logged = JSON.stringify([debug, warn]);
+    expect(logged).not.toContain('TOP-SECRET');
+    expect(debug.find(([fields]) => (fields as { uuid?: string }).uuid === 'u1')?.[0]).toMatchObject({ direction: 'in', type: 'assistant', uuid: 'u1', bytes: expect.any(Number) });
+  });
+
+  it('closes through the transport and keeps a throwing frame listener from stopping the others', async () => {
+    const memory = memoryTransport();
+    const client = new StreamJsonClient({ transport: memory.transport });
+    const seen: string[] = [];
+    client.onFrame(() => {
+      throw new Error('listener failed');
+    });
+    client.onFrame((frame) => void seen.push(frame.type));
+    memory.fromCli({ type: 'result' });
+    expect(seen).toEqual(['result']);
+    await client.close({ terminate: true });
+    await client.close();
+    expect(memory.closed).toEqual([{ terminate: true }, {}]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+describe('session host', () => {
+  it('finds the running process again after a backend restart: same pid, no second process, the turn and the open question picked up', async () => {
+    const setup = setupFake(
+      {
+        sessionsDir: 'auto',
+        sessionStartHook: true,
+        turns: [{ steps: [{ request: { request_id: 'req-q', request: canUseTool('AskUserQuestion', QUESTION_INPUT, 'tool-q') } }, assistantText('thanks for the answer')] }],
+      },
+      { host: true, context: { coordination: COORDINATION } },
+    );
+    const first = setup.track(await setup.instance.start(setup.open({ appendSystemPrompt: 'AUTHORITY TEXT' })));
+    const firstEvents = new EventLog(first);
+    await first.sendTurn({ text: 'ask me' });
+    await firstEvents.waitForType('request.opened');
+    const pid = first.pid!;
+
+    // The backend goes away without ending anything.
+    await setup.instance.dispose('shutdown');
+    await firstEvents.done;
+    expect(processStartTicks(pid)).toBeDefined();
+    expect(setup.context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+
+    const { instance, context } = setup.restartBackend();
+    const second = setup.track(await instance.resume(first.nativeSessionId, setup.open()));
+    const events = new EventLog(second);
+    expect(second.pid).toBe(pid);
+    expect(startEntries(setup.logFile)).toHaveLength(1);
+    expect(receivedControls(setup.logFile, 'initialize').map((frame) => frame.request)).toEqual([
+      { subtype: 'initialize', appendSystemPrompt: 'AUTHORITY TEXT' },
+      { subtype: 'initialize' }, // the repeat only reads what the process still has open
+    ]);
+
+    // The question the old backend never answered is reported again, on a turn the CLI started itself as far as this backend knows.
+    const opened = await events.waitForType('request.opened');
+    expect(opened).toMatchObject({ requestId: 'req-q', kind: 'question' });
+    expect(opened.turnId).toBeTruthy();
+    await second.respond('req-q', { decision: 'answer', answers: { q0: ['Postgres'] } });
+    const terminal = await events.waitFor((event) => event.type === 'turn.terminal');
+    expect(terminal).toMatchObject({ status: 'completed', turnId: opened.turnId });
+    expect(events.of('turn.started')[0]).toMatchObject({ origin: 'provider', turnId: opened.turnId });
+    expect(receivedResponses(setup.logFile).map((frame) => frame.response.request_id)).toEqual(['req-q']);
+
+    // The reattached session works like any other, and ending it ends the process behind the host.
+    const next = await second.sendTurn({ text: 'again' });
+    expect((await events.waitForTerminal(next.turnId)).status).toBe('completed');
+    await second.close('release');
+    await events.done;
+    await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the process to end');
+    expect(context.metaStore.has('claude-launch:conversation-1')).toBe(false);
+  }, 30_000);
+
+  it('refuses a resume when another process holds the session and no launch was recorded', async () => {
+    const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+    const first = setup.track(await setup.instance.start(setup.open()));
+    await setup.instance.dispose('shutdown');
+    const { instance, context } = setup.restartBackend();
+    context.metaStore.delete('claude-launch:conversation-1');
+    await expect(instance.resume(first.nativeSessionId, setup.open())).rejects.toBeInstanceOf(ClaudeSessionHeldError);
+    expect(startEntries(setup.logFile)).toHaveLength(1);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Real CLI. Opt in with AGENT_CONSOLE_REAL_CLAUDE=1. Everything runs against a throwaway CLAUDE_CONFIG_DIR that
+// holds no credentials, so no model call can happen: initialize answers locally and a turn stops at "Not logged in".
+
+describe.skipIf(process.env.AGENT_CONSOLE_REAL_CLAUDE !== '1')('real claude (no credentials, no model call)', () => {
+  const realCommand = (process.env.AGENT_CONSOLE_REAL_CLAUDE_BIN ?? 'claude').split(' ');
+
+  const configDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of configDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // A throwaway config directory with no credentials, so the CLI can never reach the model.
+  function realSetup(): FakeSetup {
+    const configDir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'claude-real-cfg-'));
+    configDirs.push(configDir);
+    return setupFake({}, { baseEnv: { HOME: process.env.HOME }, config: { command: realCommand, env: { CLAUDE_CONFIG_DIR: configDir } } });
+  }
+
+  it('probes the installed binary: version, models and the missing login', async () => {
+    const setup = realSetup();
+    const result = await setup.instance.probe();
+    expect(result.installed).toBe(true);
+    expect(result.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(result.auth).toBe('missing');
+    expect(result.models.length).toBeGreaterThan(0);
+    expect(result.models[0]).toMatchObject({ id: expect.any(String), label: expect.any(String) });
+    // eslint-disable-next-line no-console
+    console.log(`real claude probe: ${JSON.stringify({ version: result.version, auth: result.auth, models: result.models.map((model) => model.id) })}`);
+  }, 30_000);
+
+  it('starts a session with the planned argv, runs one turn to "Not logged in", and classifies it', async () => {
+    const setup = realSetup();
+    const session = setup.track(await setup.instance.start(setup.open({ model: 'sonnet', effort: 'low', appendSystemPrompt: 'Test authority text.' })));
+    const events = new EventLog(session);
+    const { turnId } = await session.sendTurn({ text: 'hello' });
+    const terminal = await events.waitForTerminal(turnId, 20_000);
+    expect(terminal.status).toBe('failed');
+    expect(terminal.failure).toMatchObject({ class: 'permission_error', code: 'authentication_failed' });
+    expect(events.of('turn.started')[0]).toMatchObject({ turnId, origin: 'user' });
+    await session.refreshContextUsage();
+    await session.close('release');
+    await events.done;
+  }, 60_000);
+
+  it('refuses to resume a session that does not exist, before starting a process', async () => {
+    const setup = realSetup();
+    await expect(setup.instance.resume('99999999-2222-4333-8444-555555555555', setup.open())).rejects.toBeInstanceOf(ResumeFailedError);
+  }, 20_000);
+});
+
+// Silence unused-import lint for helpers kept for readability.
+void createClaudePlugin;
+void makeContext;
+void transcriptPathFor;
+void receivedFrames;

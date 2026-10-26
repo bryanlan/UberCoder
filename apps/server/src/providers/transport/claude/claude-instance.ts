@@ -1,0 +1,580 @@
+// The Claude plugin as a `TransportInstance`: one `claude` process per conversation (`processModel: 'per-session'`).
+//
+// `start` mints a session id and launches `claude --session-id <id>`; `resume` launches `claude --resume <id>`. Both
+// spawn through the host's `LineTransportFactory` (a session host relay in production, so the process outlives a
+// backend restart; `hostId` is `claude-<conversationId>`) and fall back to a plain stdio child when the host gives
+// none. A backend restart finds the process still running behind its host: `resume` then reattaches (with the argv
+// the process was launched with, recorded in plugin meta, because the host is keyed by it) instead of spawning.
+// After a spawn they run the handshake: an `initialize` control request (carrying the appended system prompt,
+// so it stays out of `ps`), the launch checks, and only then hand over a ready {@link ClaudeSession}. Nothing here
+// makes a model call: `probe` and the handshake only read what `initialize` answers.
+
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  ResumeFailedError,
+  TransportUnavailableError,
+  type LineTransport,
+  type LineTransportFactory,
+  type OpenOptions,
+  type PluginContext,
+  type TransportInstance,
+} from '../types.js';
+import { createStdioLineTransportFactory, transportStartedFresh, type LineTransportRequest } from '../line-transport.js';
+import { redactFreeText } from '../codex/redact.js';
+import { ClaudeLaunchRefusedError, ClaudeSessionHeldError } from './errors.js';
+import {
+  asString,
+  isRecord,
+  type ClaudeFrame,
+  type ClaudeResultFrame,
+  type InitializeResponseBody,
+} from './protocol.js';
+import {
+  CLAUDE_CAPABILITIES,
+  ClaudeSession,
+  DEFAULT_TIMINGS,
+  type ClaudeLogger,
+  type ClaudeTimings,
+} from './claude-session.js';
+import { ClaudeControlError, ClaudeControlTimeoutError, ClaudeExitError, describeExit, StreamJsonClient } from './stream-json.js';
+import { claudeConfigDir, expectedTranscriptPaths, findSessionHolder, locateTranscripts, transcriptHasConversation } from './transcript.js';
+
+export const DEFAULT_CLAUDE_COMMAND = ['claude'];
+
+/**
+ * `structuredSessions.claude` in the Console config. Same shape as the Codex block: the host merges the Console's
+ * coordination variables into `env` first; `enabled` and `idleUnloadMinutes` are the host's.
+ */
+export interface ClaudeStructuredConfig {
+  enabled: boolean;
+  /** The `claude` executable and any leading arguments. Defaults to `['claude']`. */
+  command: string[];
+  idleUnloadMinutes: number;
+  env: Record<string, string>;
+}
+
+/**
+ * `OpenOptions` plus what only this plugin uses. The contract's `OpenOptions` has no place for them, so the host passes
+ * them on the same object and this plugin reads them through this type (a documented cast, not a second code path).
+ */
+export interface ClaudeOpenOptions extends OpenOptions {
+  /** The grant authority text, appended to the system prompt through `initialize`. */
+  appendSystemPrompt?: string;
+  /**
+   * `'off'` launches with `--system-prompt-snapshot off`. The CLI records the system prompt on a conversation's first
+   * request and replays that record on every resume, so changed appended text reaches a resumed conversation only
+   * with this set (or after compaction).
+   */
+  systemPromptSnapshot?: 'off';
+  /** `start` only: launch under this id instead of a new one. Valid only when the id has no transcript yet. */
+  sessionId?: string;
+}
+
+/** Test and embedding hooks. Production code passes none of them. */
+export interface ClaudePluginOptions {
+  timings?: Partial<ClaudeTimings>;
+  /** The environment the child inherits. Defaults to `process.env`. */
+  baseEnv?: NodeJS.ProcessEnv;
+  /** The home directory used for `~` and `~/.claude`. Defaults to `os.homedir()`. */
+  homeDir?: string;
+  /** Spawns the process. Defaults to the factory on the plugin context, then to a plain stdio child. */
+  lineTransport?: LineTransportFactory;
+  /**
+   * Refuse a launch that shows no `SessionStart` hook (the CLI came up in bare mode, which skips the Console's
+   * coordination hooks). Defaults to true when coordination is enabled.
+   */
+  requireHooks?: boolean;
+  /** Refuse a launch on an API key instead of the subscription login. Defaults to true. */
+  requireSubscriptionLogin?: boolean;
+}
+
+/** Variables that carry the identity of whatever started this process; the child must not inherit them. */
+const SCRUBBED_EXACT = new Set(['CLAUDECODE', 'TMUX', 'TMUX_PANE', 'CODEX_THREAD_ID']);
+
+function isScrubbedKey(key: string): boolean {
+  return SCRUBBED_EXACT.has(key) || key.startsWith('CLAUDE_CODE_');
+}
+
+function expandHome(value: string, home: string): string {
+  if (value === '~') return home;
+  if (value.startsWith('~/')) return path.join(home, value.slice(2));
+  return value;
+}
+
+/**
+ * The child's environment. The inherited environment loses everything that names another session (`CLAUDECODE`,
+ * `CLAUDE_CODE_*`, `TMUX`, `CODEX_THREAD_ID`, `AGENT_CONSOLE_*`, `AGENT_COORD_*`), plus `NODE_OPTIONS` and `DEBUG`
+ * (which can change what the CLI writes). The configured and per-session values go on top with `~` expanded, minus the
+ * same identity variables; then this session's identity and the flag that makes the CLI report the authoritative turn
+ * end (`system/session_state_changed`) are set.
+ */
+export function buildClaudeEnv(input: {
+  base: NodeJS.ProcessEnv;
+  configEnv?: Record<string, string>;
+  optionsEnv?: Record<string, string>;
+  conversationId?: string;
+  home?: string;
+}): Record<string, string> {
+  const home = input.home ?? os.homedir();
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input.base)) {
+    if (value === undefined || isScrubbedKey(key) || key.startsWith('AGENT_CONSOLE_') || key.startsWith('AGENT_COORD_') || key === 'NODE_OPTIONS' || key === 'DEBUG') continue;
+    env[key] = value;
+  }
+  for (const layer of [input.configEnv, input.optionsEnv]) {
+    for (const [key, value] of Object.entries(layer ?? {})) {
+      if (isScrubbedKey(key)) continue;
+      env[key] = expandHome(value, home);
+    }
+  }
+  if (input.conversationId) env.AGENT_CONSOLE_SESSION_ID = input.conversationId;
+  env.CLAUDE_CODE_SDK_READS_SESSION_STATE = '1';
+  return env;
+}
+
+/** The argv for a conversation process. No `-p`: stream-json input implies print mode, and `-p` may gain `--bare`. */
+export function buildClaudeArgv(input: {
+  command: string[];
+  mode: 'new' | 'resume';
+  sessionId: string;
+  model?: string;
+  effort?: string;
+  mcpConfig?: string;
+  snapshotOff?: boolean;
+}): string[] {
+  return [
+    ...input.command,
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--input-format', 'stream-json',
+    // The Console decides what the agent may do; this keeps the CLI from prompting for anything but the few things
+    // that always ask (AskUserQuestion, explicit ask rules), which arrive as `can_use_tool` control requests.
+    '--dangerously-skip-permissions',
+    '--permission-prompt-tool', 'stdio',
+    ...(input.model ? ['--model', input.model] : []),
+    ...(input.effort ? ['--effort', input.effort] : []),
+    input.mode === 'resume' ? '--resume' : '--session-id', input.sessionId,
+    ...(input.mcpConfig ? ['--mcp-config', input.mcpConfig] : []),
+    ...(input.snapshotOff ? ['--system-prompt-snapshot', 'off'] : []),
+  ];
+}
+
+/** The per-session coordination MCP server, as the tmux launch passes it. */
+export function buildMcpConfig(coordination: NonNullable<PluginContext['coordination']>, conversationId: string): string {
+  return JSON.stringify({
+    mcpServers: {
+      agent_console_coordination: {
+        command: 'node',
+        args: [coordination.helperPath, 'mcp'],
+        env: { AGENT_COORD_RUNTIME: coordination.runtimeDir, AGENT_CONSOLE_SESSION_ID: conversationId },
+      },
+    },
+  });
+}
+
+function isMissingBinary(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code ?? ((error as { cause?: NodeJS.ErrnoException } | undefined)?.cause?.code);
+  return code === 'ENOENT';
+}
+
+function errorText(error: unknown): string {
+  return redactFreeText(error instanceof Error ? error.message : String(error), 500);
+}
+
+/** Process and transport problems become `TransportUnavailableError`; refusals the caller must see stay as they are. */
+export function toTransportError(error: unknown): Error {
+  if (error instanceof ClaudeLaunchRefusedError || error instanceof ResumeFailedError || error instanceof TransportUnavailableError) return error;
+  if (error instanceof ClaudeExitError || error instanceof ClaudeControlTimeoutError || error instanceof ClaudeControlError || isMissingBinary(error)) {
+    const unavailable = new TransportUnavailableError(`Claude is not available: ${errorText(error)}`);
+    unavailable.cause = error;
+    return unavailable;
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+export class ClaudeInstance implements TransportInstance {
+  readonly plugin = 'claude';
+  readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly log: ClaudeLogger;
+  readonly timings: ClaudeTimings;
+
+  private readonly config: ClaudeStructuredConfig;
+  private readonly context: PluginContext;
+  private readonly baseEnv: NodeJS.ProcessEnv;
+  private readonly home: string;
+  private readonly factory: LineTransportFactory;
+  private readonly requireHooks: boolean;
+  private readonly requireSubscriptionLogin: boolean;
+  private readonly sessions = new Map<string, ClaudeSession>();
+  /** Session ids being launched right now: a second launch of the same id would be a second writer. */
+  private readonly opening = new Set<string>();
+  private disposed = false;
+
+  constructor(config: ClaudeStructuredConfig, context: PluginContext, options: ClaudePluginOptions = {}) {
+    this.config = config;
+    this.context = context;
+    this.log = context.log;
+    this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
+    this.baseEnv = options.baseEnv ?? process.env;
+    this.home = options.homeDir ?? os.homedir();
+    this.factory = options.lineTransport ?? context.lineTransport ?? createStdioLineTransportFactory({ log: context.log });
+    this.requireHooks = options.requireHooks ?? context.coordination !== undefined;
+    this.requireSubscriptionLogin = options.requireSubscriptionLogin ?? true;
+  }
+
+  /** Sessions with a live process, by native id. */
+  get openSessionIds(): string[] {
+    return [...this.sessions.keys()];
+  }
+
+  // -------------------------------------------------------------------------------------------------------
+  // TransportInstance
+
+  async alive(): Promise<{ pid?: number; connected: boolean }> {
+    const live = [...this.sessions.values()].filter((session) => !session.isEnded);
+    const pid = live.find((session) => session.pid !== undefined)?.pid;
+    return { ...(pid !== undefined ? { pid } : {}), connected: live.length > 0 };
+  }
+
+  /**
+   * A throwaway process answers `initialize` (models, account, version) and gets end of input. It never receives a
+   * message, so no model call is made and nothing is stored (`--no-session-persistence`).
+   */
+  async probe(): Promise<{ installed: boolean; version?: string; auth: 'ok' | 'missing' | 'unknown'; models: Array<{ id: string; label: string; efforts?: string[] }> }> {
+    const deadline = Date.now() + this.timings.probeDeadlineMs;
+    const left = (): number => Math.max(1, deadline - Date.now());
+    const cwd = this.context.runtimeDir;
+    fs.mkdirSync(cwd, { recursive: true });
+    const argv = [
+      ...this.command(),
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--input-format', 'stream-json',
+      '--session-id', randomUUID(),
+      '--no-session-persistence',
+      // The probe is not a conversation: the Console's coordination hooks must not run for it.
+      '--settings', JSON.stringify({ disableAllHooks: true }),
+    ];
+    let transport: LineTransport;
+    try {
+      const request: LineTransportRequest = {
+        argv,
+        cwd,
+        env: buildClaudeEnv({ base: this.baseEnv, configEnv: this.config.env, home: this.home }),
+        closeGraceMs: Math.min(2_000, this.timings.closeGraceMs),
+        termGraceMs: this.timings.termGraceMs,
+      };
+      transport = await this.factory(request);
+    } catch (error) {
+      if (isMissingBinary(error)) return { installed: false, auth: 'unknown', models: [] };
+      throw toTransportError(error);
+    }
+    const client = new StreamJsonClient({ transport, log: this.log, label: 'claude probe', controlTimeoutMs: this.timings.controlTimeoutMs });
+    try {
+      const reply = await client.sendControl({ subtype: 'initialize' }, { timeoutMs: Math.min(left(), this.timings.initializeTimeoutMs) });
+      const body = (reply.response ?? {}) as InitializeResponseBody;
+      const models: Array<{ id: string; label: string; efforts?: string[] }> = [];
+      const seen = new Set<string>();
+      for (const model of Array.isArray(body.models) ? body.models : []) {
+        if (!isRecord(model) || typeof model.value !== 'string' || seen.has(model.value)) continue;
+        seen.add(model.value);
+        models.push({
+          id: model.value,
+          label: typeof model.displayName === 'string' && model.displayName.length > 0 ? model.displayName : model.value,
+          ...(Array.isArray(model.supportedEffortLevels) ? { efforts: model.supportedEffortLevels.filter((level): level is string => typeof level === 'string') } : {}),
+        });
+      }
+      return { installed: true, ...(body.claude_code_version ? { version: body.claude_code_version } : {}), auth: authFromAccount(body.account), models };
+    } catch (error) {
+      throw toTransportError(error);
+    } finally {
+      await this.endProbeProcess(client);
+    }
+  }
+
+  async start(options: OpenOptions): Promise<ClaudeSession> {
+    const claude = options as ClaudeOpenOptions;
+    const sessionId = claude.sessionId ?? randomUUID();
+    const configDir = this.configDirFor(claude);
+    if (claude.sessionId) {
+      // Reusing an id is for a conversation whose first prompt never reached the model: it has no transcript.
+      const existing = locateTranscripts(configDir, claude.cwd, sessionId);
+      if (existing.length > 0) throw new TransportUnavailableError(`Claude session ${sessionId} already has a transcript; resume it instead.`);
+      this.assertNotHeld(configDir, sessionId);
+    }
+    return this.launch('new', sessionId, claude, configDir);
+  }
+
+  async resume(nativeSessionId: string, options: OpenOptions): Promise<ClaudeSession> {
+    const claude = options as ClaudeOpenOptions;
+    const configDir = this.configDirFor(claude);
+    const loaded = this.sessions.get(nativeSessionId);
+    if (loaded && !loaded.isEnded) throw new ClaudeSessionHeldError(nativeSessionId, loaded.pid ?? process.pid);
+    // The CLI does not stop two processes writing one transcript, so this is the only check there is.
+    const holder = findSessionHolder(configDir, nativeSessionId);
+    if (holder) {
+      // After a backend restart the holder is usually our own process, still running behind its session host. It is
+      // ours when this plugin recorded how it was launched and the host answers for exactly that command line.
+      const recorded = this.readLaunchRecord(claude.conversationId, nativeSessionId);
+      if (!recorded) throw new ClaudeSessionHeldError(nativeSessionId, holder.pid);
+      return this.launch('resume', nativeSessionId, claude, configDir, { reattach: { argv: recorded.argv, holderPid: holder.pid } });
+    }
+    const files = locateTranscripts(configDir, claude.cwd, nativeSessionId);
+    if (files.length === 0) throw new ResumeFailedError(`Claude has no transcript for session ${nativeSessionId}, so it cannot be resumed.`);
+    let conversation: string | undefined;
+    for (const file of files) {
+      if (await transcriptHasConversation(file)) {
+        conversation = file;
+        break;
+      }
+    }
+    // A session whose first prompt never reached the model has only preamble: `--resume` fails and the id is unusable.
+    if (!conversation) throw new ResumeFailedError(`Claude session ${nativeSessionId} has no conversation to resume.`);
+    return this.launch('resume', nativeSessionId, claude, configDir, { transcriptPath: conversation });
+  }
+
+  /**
+   * The backend is going away or the instance is being replaced. Behind a session host the processes keep running for
+   * the next backend (the connection just closes); a plain stdio child is ended.
+   */
+  async dispose(reason: 'shutdown' | 'restart'): Promise<void> {
+    this.disposed = true;
+    this.log.info({ reason, sessions: this.sessions.size }, 'claude instance disposed');
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.allSettled(sessions.map((session) => session.detach()));
+  }
+
+  // -------------------------------------------------------------------------------------------------------
+  // Launch
+
+  private command(): string[] {
+    return this.config.command.length > 0 ? this.config.command : DEFAULT_CLAUDE_COMMAND;
+  }
+
+  private configDirFor(options: OpenOptions): string {
+    const merged = buildClaudeEnv({ base: this.baseEnv, configEnv: this.config.env, optionsEnv: options.env, home: this.home });
+    return claudeConfigDir(merged, this.home);
+  }
+
+  private assertNotHeld(configDir: string, sessionId: string): void {
+    const loaded = this.sessions.get(sessionId);
+    if (loaded && !loaded.isEnded) throw new ClaudeSessionHeldError(sessionId, loaded.pid ?? process.pid);
+    const holder = findSessionHolder(configDir, sessionId);
+    if (holder) throw new ClaudeSessionHeldError(sessionId, holder.pid);
+  }
+
+  // The command line a conversation's process was launched with. A session host is keyed by it, so a backend restart
+  // must present exactly this one to find the process again (a resume would otherwise use `--resume` where the launch
+  // used `--session-id`, and a profile switched since would differ in `--model`).
+  private launchKey(conversationId: string): string {
+    return `claude-launch:${conversationId}`;
+  }
+
+  private readLaunchRecord(conversationId: string, sessionId: string): { argv: string[] } | undefined {
+    const stored = this.context.meta.get(this.launchKey(conversationId));
+    if (!stored) return undefined;
+    try {
+      const record = JSON.parse(stored) as { sessionId?: unknown; argv?: unknown };
+      if (record.sessionId !== sessionId || !Array.isArray(record.argv) || !record.argv.every((entry) => typeof entry === 'string')) return undefined;
+      return { argv: record.argv as string[] };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async launch(
+    mode: 'new' | 'resume',
+    sessionId: string,
+    options: ClaudeOpenOptions,
+    configDir: string,
+    extra: { transcriptPath?: string; reattach?: { argv: string[]; holderPid: number } } = {},
+  ): Promise<ClaudeSession> {
+    if (this.disposed) throw new TransportUnavailableError('The Claude instance was shut down.');
+    if (!fs.existsSync(options.cwd)) throw new TransportUnavailableError(`The working directory does not exist: ${options.cwd}`);
+    if (this.opening.has(sessionId)) throw new ClaudeSessionHeldError(sessionId, process.pid);
+    this.opening.add(sessionId);
+    try {
+      return await this.launchProcess(mode, sessionId, options, configDir, extra);
+    } finally {
+      this.opening.delete(sessionId);
+    }
+  }
+
+  private async launchProcess(
+    mode: 'new' | 'resume',
+    sessionId: string,
+    options: ClaudeOpenOptions,
+    configDir: string,
+    extra: { transcriptPath?: string; reattach?: { argv: string[]; holderPid: number } },
+  ): Promise<ClaudeSession> {
+    const env = buildClaudeEnv({ base: this.baseEnv, configEnv: this.config.env, optionsEnv: options.env, conversationId: options.conversationId, home: this.home });
+    const argv =
+      extra.reattach?.argv ??
+      buildClaudeArgv({
+        command: this.command(),
+        mode,
+        sessionId,
+        ...(options.model ? { model: options.model } : {}),
+        ...(options.effort ? { effort: options.effort } : {}),
+        ...(this.context.coordination ? { mcpConfig: buildMcpConfig(this.context.coordination, options.conversationId) } : {}),
+        snapshotOff: options.systemPromptSnapshot === 'off',
+      });
+    const request: LineTransportRequest = {
+      argv,
+      cwd: options.cwd,
+      env,
+      hostId: hostIdFor(options.conversationId),
+      closeGraceMs: this.timings.closeGraceMs,
+      termGraceMs: this.timings.termGraceMs,
+      // A process this call starts has said nothing before we connect that we could not want: the SessionStart hook
+      // frames come first, and a host that is not asked to replay would drop whatever it printed before the client
+      // attached. A process found again has history that belongs to the previous backend, so it gets live output only.
+      ...(extra.reattach ? {} : { sinceSeq: 0 }),
+    };
+    let transport: LineTransport;
+    try {
+      transport = await this.factory(request);
+    } catch (error) {
+      throw toTransportError(error);
+    }
+    // A fresh channel means the process was just started (or never used); otherwise a process from an earlier backend,
+    // already initialized and possibly in the middle of a turn, was found again.
+    const fresh = transportStartedFresh(transport);
+    if (extra.reattach && fresh) {
+      // The host did not know this command line, so a new process was started beside the one that holds the session.
+      await transport.close({ terminate: true }).catch(() => undefined);
+      throw new ClaudeSessionHeldError(sessionId, extra.reattach.holderPid);
+    }
+    const client = new StreamJsonClient({ transport, log: this.log, label: 'claude', controlTimeoutMs: this.timings.controlTimeoutMs });
+    // A resume that fails at startup answers with a zeroed error result and exits, without ever replying to `initialize`.
+    let startupResult: ClaudeResultFrame | undefined;
+    const stopWatching = client.onFrame((frame: ClaudeFrame) => {
+      if (frame.type === 'result' && (frame as ClaudeResultFrame).is_error) startupResult = frame as ClaudeResultFrame;
+    });
+    const session = new ClaudeSession({
+      sessionId,
+      cwd: options.cwd,
+      client,
+      log: this.log,
+      timings: this.timings,
+      configDir,
+      transcriptPath: extra.transcriptPath ?? expectedTranscriptPaths(configDir, options.cwd, sessionId)[0],
+      ...optionalFlag('model', flagValue(argv, '--model')),
+      ...optionalFlag('effort', flagValue(argv, '--effort')),
+      requireSubscriptionLogin: this.requireSubscriptionLogin,
+      onEnded: (ended, kind) => {
+        if (this.sessions.get(ended.nativeSessionId) === ended) this.sessions.delete(ended.nativeSessionId);
+        // The process is gone: nothing is left to reattach to. A detached session leaves its process running.
+        if (kind === 'exited' && this.readLaunchRecord(options.conversationId, sessionId)) this.context.meta.delete(this.launchKey(options.conversationId));
+      },
+    });
+    this.sessions.set(sessionId, session);
+    // Recorded before the handshake: a backend that dies right after the process came up must still find it again.
+    // A failed handshake ends the process of a fresh launch, and its exit removes the record.
+    this.context.meta.set(this.launchKey(options.conversationId), JSON.stringify({ sessionId, argv, startedAt: new Date().toISOString() }));
+    let pending: unknown;
+    try {
+      pending = await this.handshake(client, session, options, fresh);
+    } catch (error) {
+      stopWatching();
+      this.sessions.delete(sessionId);
+      if (fresh) {
+        await session.close('error').catch(() => undefined);
+      } else {
+        // Do not end a process that may be running a turn for the person; let go of it.
+        await session.detach().catch(() => undefined);
+      }
+      throw this.startupError(error, mode, sessionId, startupResult, client);
+    }
+    stopWatching();
+    session.announce();
+    client.adoptServerRequests(pending);
+    this.log.info({ pid: session.pid, mode, sessionId, reattached: !fresh }, fresh ? 'claude session started' : 'reattached to a running claude session');
+    return session;
+  }
+
+  /** Returns the requests the process already had open when it was re-initialized (reattach only). */
+  private async handshake(client: StreamJsonClient, session: ClaudeSession, options: ClaudeOpenOptions, fresh: boolean): Promise<unknown> {
+    const reply = await client.sendControl(
+      { subtype: 'initialize', ...(fresh && options.appendSystemPrompt ? { appendSystemPrompt: options.appendSystemPrompt } : {}) },
+      { timeoutMs: this.timings.initializeTimeoutMs },
+    );
+    const body = (reply.response ?? {}) as InitializeResponseBody;
+    const source = body.account?.apiKeySource;
+    if (this.requireSubscriptionLogin && typeof source === 'string' && source !== 'none' && source !== 'oauth') {
+      throw new ClaudeLaunchRefusedError('api_key', `Claude came up on an API key (${source}) instead of the subscription login, so it was not used.`);
+    }
+    // A process found again ran its SessionStart hooks long ago; only a new one shows them now.
+    if (fresh && this.requireHooks && !(await this.sawSessionStartHook(session))) {
+      throw new ClaudeLaunchRefusedError('no_hooks', 'Claude came up without the Console hooks (no SessionStart hook ran; the CLI may have started in bare mode), so it was not used.');
+    }
+    return fresh ? undefined : reply.pending_permission_requests;
+  }
+
+  /** SessionStart hook frames precede the `initialize` reply; a slow hook gets a short grace. */
+  private async sawSessionStartHook(session: ClaudeSession): Promise<boolean> {
+    const deadline = Date.now() + this.timings.hookGraceMs;
+    while (!session.sawSessionStartHook) {
+      if (Date.now() >= deadline || session.isEnded) return session.sawSessionStartHook;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
+  private startupError(error: unknown, mode: 'new' | 'resume', sessionId: string, startupResult: ClaudeResultFrame | undefined, client: StreamJsonClient): Error {
+    if (error instanceof ClaudeLaunchRefusedError) return error;
+    if (startupResult) {
+      const detail = redactFreeText((startupResult.errors ?? []).join('; ') || 'the process reported an error', 300);
+      const reason = startupResult.startup_failure_reason ? ` (${startupResult.startup_failure_reason})` : '';
+      const failure = mode === 'resume'
+        ? new ResumeFailedError(`Claude could not resume session ${sessionId}${reason}: ${detail}`)
+        : new TransportUnavailableError(`Claude could not start${reason}: ${detail}`);
+      failure.cause = error;
+      return failure;
+    }
+    if (error instanceof ClaudeExitError) {
+      const failure = mode === 'resume'
+        ? new ResumeFailedError(`Claude exited while resuming session ${sessionId} (${describeExit(error.exit)}).`)
+        : new TransportUnavailableError(`Claude exited while starting (${describeExit(error.exit)}).`);
+      failure.cause = error;
+      return failure;
+    }
+    this.log.warn({ pid: client.pid, error: errorText(error), stderr: client.stderrTail() }, 'claude handshake failed');
+    return toTransportError(error);
+  }
+
+  /** End of input, then the process group if it lingers (the transport runs the stages). A probe process exits in about 150 ms. */
+  private async endProbeProcess(client: StreamJsonClient): Promise<void> {
+    await client.close({ terminate: true }).catch(() => undefined);
+  }
+}
+
+/** The value after a flag in an argv. */
+function flagValue(argv: string[], flag: string): string | undefined {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : undefined;
+}
+
+function optionalFlag(key: 'model' | 'effort', value: string | undefined): { model?: string; effort?: string } {
+  return value ? { [key]: value } : {};
+}
+
+/** A session host id: letters, digits, `.`, `_` and `-` only. */
+export function hostIdFor(conversationId: string): string {
+  return `claude-${conversationId.replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 128);
+}
+
+/** `account` from `initialize`: `tokenSource: 'none'` with no email or key source means nobody is signed in. */
+function authFromAccount(account: InitializeResponseBody['account']): 'ok' | 'missing' | 'unknown' {
+  if (!isRecord(account)) return 'unknown';
+  if (asString(account.apiProvider) && account.apiProvider !== 'firstParty') return 'unknown'; // auth is outside the Console's reach
+  const signedIn = asString(account.email) || asString(account.subscriptionType) || asString(account.organization);
+  const source = asString(account.tokenSource);
+  const keySource = asString(account.apiKeySource);
+  if (signedIn || (source && source !== 'none') || (keySource && keySource !== 'none')) return 'ok';
+  return source === 'none' ? 'missing' : 'unknown';
+}
