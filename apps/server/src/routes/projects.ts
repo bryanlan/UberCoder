@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { ConversationSummary, TreeResponse } from '@agent-console/shared';
+import type { ConversationSummary, ProviderId, TreeResponse } from '@agent-console/shared';
 import { z } from 'zod';
 import { nowIso } from '../lib/time.js';
 import { AuthService } from '../security/auth-service.js';
@@ -40,12 +40,18 @@ export async function registerProjectRoutes(
   authService: AuthService,
   indexing: IndexingService,
   sessions: SessionManager,
+  structuredProviders: readonly ProviderId[],
 ): Promise<void> {
   const TREE_OBSERVATION_INTERVAL_MS = 5_000;
   const TREE_OBSERVATION_DEFER_MS = 60_000;
   let lastTreeObservationCompletedAt = 0;
   let treeObservationPromise: Promise<void> | undefined;
   let treeObservationTimer: NodeJS.Timeout | undefined;
+
+  // The tree tells the web which providers offer the structured (app-server) New Chat option.
+  function withStructuredProviders(tree: TreeResponse): TreeResponse {
+    return { ...tree, structuredProviders: [...structuredProviders] };
+  }
 
   function maybeObserveSessionsForTree(): void {
     if (treeObservationPromise || treeObservationTimer) {
@@ -81,7 +87,7 @@ export async function registerProjectRoutes(
       return;
     }
     maybeObserveSessionsForTree();
-    return indexing.getTree();
+    return withStructuredProviders(indexing.getTree());
   });
 
   app.post('/api/projects/refresh', async (request, reply) => {
@@ -114,7 +120,7 @@ export async function registerProjectRoutes(
         }, 'Project refresh completed with recent-conversation auto-track failures.');
       }
     }
-    return indexing.getTree();
+    return withStructuredProviders(indexing.getTree());
   });
 
   app.addHook('onClose', async () => {

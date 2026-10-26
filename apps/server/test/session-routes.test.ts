@@ -724,4 +724,135 @@ describe('session routes', () => {
       db.close();
     }
   });
+
+  describe('structured sessions', () => {
+    const structuredSession: BoundSession = {
+      id: 'session-structured',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:structured-first-turn',
+      tmuxSessionName: 'acs-session-structured',
+      transport: 'structured',
+      status: 'bound',
+      shouldRestore: true,
+      startedAt: '2026-10-26T10:00:00.000Z',
+      updatedAt: '2026-10-26T10:00:00.000Z',
+    };
+
+    it('answers raw-output with a 404 that explains structured sessions have no terminal output', async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+      const app = fastify();
+      await registerSessionRoutes(
+        app,
+        { ensureAuthenticated: async () => undefined } as never,
+        db,
+        {} as never,
+        {} as never,
+        { getSessionById: vi.fn((id: string) => (id === structuredSession.id ? structuredSession : undefined)) } as never,
+      );
+      await app.ready();
+      try {
+        const structured = await app.inject({ method: 'GET', url: '/api/sessions/session-structured/raw-output' });
+        expect(structured.statusCode).toBe(404);
+        expect(structured.json()).toEqual({ error: 'Structured sessions have no raw terminal output.' });
+
+        const missing = await app.inject({ method: 'GET', url: '/api/sessions/unknown/raw-output' });
+        expect(missing.statusCode).toBe(404);
+        expect(missing.json()).toEqual({ error: 'Session not found.' });
+      } finally {
+        await app.close();
+        db.close();
+      }
+    });
+
+    it('refuses image attachments on a structured session before touching the image store', async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+      const resolve = vi.fn();
+      const sendKeystrokes = vi.fn();
+      const app = fastify();
+      await registerSessionRoutes(
+        app,
+        { ensureAuthenticated: async () => undefined } as never,
+        db,
+        {} as never,
+        {} as never,
+        { getSessionById: vi.fn(() => structuredSession), sendKeystrokes } as never,
+        { resolve } as never,
+      );
+      await app.ready();
+      try {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/session-structured/keys',
+          payload: { text: 'look at this', keys: ['Enter'], imageIds: ['d5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5'] },
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({ error: 'Images cannot be attached to app-server sessions.' });
+        expect(resolve).not.toHaveBeenCalled();
+        expect(sendKeystrokes).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+        db.close();
+      }
+    });
+
+    it('never relaunches a structured session as a first-turn pending terminal chat', async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
+      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+      db.pendingConversations.put({
+        ref: structuredSession.conversationRef,
+        kind: 'pending',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'New Codex conversation',
+        createdAt: '2026-10-26T10:00:00.000Z',
+        updatedAt: '2026-10-26T10:00:00.000Z',
+        isBound: true,
+        boundSessionId: structuredSession.id,
+        degraded: false,
+        rawMetadata: { pending: true },
+      } satisfies ConversationSummary);
+      const restartPendingSessionWithInitialPrompt = vi.fn();
+      const sendKeystrokes = vi.fn(async () => commandResult(structuredSession));
+      const sendInput = vi.fn(async () => commandResult(structuredSession));
+      const app = fastify();
+      await registerSessionRoutes(
+        app,
+        { ensureAuthenticated: async () => undefined } as never,
+        db,
+        {} as never,
+        {} as never,
+        {
+          getSessionById: vi.fn(() => structuredSession),
+          allowsLiteralSelectionKeystroke: vi.fn(async () => false),
+          restartPendingSessionWithInitialPrompt,
+          sendKeystrokes,
+          sendInput,
+        } as never,
+      );
+      await app.ready();
+      try {
+        const keys = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/session-structured/keys',
+          payload: { text: 'first prompt', keys: ['Enter'] },
+        });
+        expect(keys.statusCode).toBe(200);
+        const input = await app.inject({
+          method: 'POST',
+          url: '/api/sessions/session-structured/input',
+          payload: { text: 'second prompt' },
+        });
+        expect(input.statusCode).toBe(200);
+        expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
+        expect(sendKeystrokes).toHaveBeenCalledOnce();
+        expect(sendInput).toHaveBeenCalledWith('session-structured', 'second prompt');
+      } finally {
+        await app.close();
+        db.close();
+      }
+    });
+  });
 });

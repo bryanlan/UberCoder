@@ -18,6 +18,7 @@ import type {
   SessionModelProfileResponse,
   UiPreferences,
   SessionKeystrokeRequest,
+  SessionTransport,
   TreeResponse,
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
@@ -189,7 +190,7 @@ export const api = {
     provider: string,
     conversationRef: string,
     csrfToken?: string,
-    options: { force?: boolean; initialPrompt?: string; confirmExternalHandoff?: boolean } = {},
+    options: { force?: boolean; initialPrompt?: string; confirmExternalHandoff?: boolean; transport?: SessionTransport } = {},
   ) => request<{ session: BoundSession }>(
     `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`,
     {
@@ -197,12 +198,18 @@ export const api = {
       body: JSON.stringify({
         force: options.force === true,
         initialPrompt: options.initialPrompt,
+        ...(options.transport ? { transport: options.transport } : {}),
         ...(options.confirmExternalHandoff === true ? { confirmExternalHandoff: true } : {}),
       }),
     },
     csrfToken,
   ),
-  bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string) => request<{ session: BoundSession; conversationRef: string }>(`/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`, { method: 'POST', body: '{}' }, csrfToken),
+  bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string, options: { transport?: SessionTransport } = {}) =>
+    request<{ session: BoundSession; conversationRef: string }>(
+      `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`,
+      { method: 'POST', body: JSON.stringify(options.transport ? { transport: options.transport } : {}) },
+      csrfToken,
+    ),
   renameConversation: (projectSlug: string, provider: string, conversationRef: string, body: RenameConversationRequest, csrfToken?: string) =>
     request<{ conversation: ConversationTimeline['conversation'] }>(
       `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/title`,

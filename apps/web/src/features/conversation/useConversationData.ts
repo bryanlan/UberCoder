@@ -360,7 +360,8 @@ export function useConversationData({
   const rawOutputQuery = useQuery({
     queryKey: ['raw-output', boundSession?.id],
     queryFn: () => api.rawOutput(boundSession!.id),
-    enabled: Boolean(debugOpen && boundSession?.id && !isBoundSessionSuspended(boundSession)),
+    // An app-server session has no raw terminal log; the server answers 404.
+    enabled: Boolean(debugOpen && boundSession?.id && boundSession.transport !== 'structured' && !isBoundSessionSuspended(boundSession)),
     refetchInterval: realtimeDegraded && boundSession && !isBoundSessionSuspended(boundSession) ? 1000 : false,
   });
 

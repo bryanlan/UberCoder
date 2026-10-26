@@ -193,6 +193,9 @@ const specialKeyButtons = [
   { label: 'Tab', keys: ['Tab'] },
 ] satisfies Array<{ label: string; keys: SessionKeyToken[] }>;
 
+/** App-server sessions take a message and an interrupt; terminal navigation keys do not exist there. */
+const structuredKeyButtons = specialKeyButtons.filter(({ keys }) => keys[0] === 'Enter' || keys[0] === 'Escape');
+
 interface LiveBridgeDraftState {
   draftText?: string;
   draftDirty?: boolean;
@@ -257,6 +260,7 @@ function LiveSessionInputBridge({
   hasQueuedInput,
   queuedDraftText,
   nativeSelectionActive,
+  structured,
 }: {
   csrfToken?: string;
   sessionId: string;
@@ -285,6 +289,8 @@ function LiveSessionInputBridge({
   hasQueuedInput: boolean;
   queuedDraftText?: string;
   nativeSelectionActive: boolean;
+  /** App-server session: no terminal, so no Text Bypass, navigation keys or image attachments. */
+  structured: boolean;
 }) {
   const [textBypassEnabled, setTextBypassEnabled] = useState(false);
   const [draftText, setDraftText] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftText ?? '');
@@ -1228,7 +1234,9 @@ function LiveSessionInputBridge({
                 event.preventDefault();
                 return;
               }
-              const files = event.clipboardData.files ? Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')) : [];
+              const files = !structured && event.clipboardData.files
+                ? Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'))
+                : [];
               if (files.length) {
                 event.preventDefault();
                 clipboardImages.paste(files);
@@ -1264,7 +1272,7 @@ function LiveSessionInputBridge({
               if (event.nativeEvent.isComposing) {
                 return;
               }
-              if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
+              if (!structured && event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
                 event.preventDefault();
                 if (!event.repeat) {
                   void handleToggleTextBypass();
@@ -1339,7 +1347,7 @@ function LiveSessionInputBridge({
           </div>}
           {(!mobileCollapsible || mobileInputPanel === 'controls') && (
             <div className={clsx("mt-3 flex flex-wrap gap-2", mobileCollapsible && "order-first")}>
-              {specialKeyButtons.map((button) => (
+              {(structured ? structuredKeyButtons : specialKeyButtons).map((button) => (
                 <button
                   key={button.label}
                   type="button"
@@ -1354,24 +1362,26 @@ function LiveSessionInputBridge({
                   {button.label}
                 </button>
               ))}
-              <button
-                type="button"
-                aria-pressed={textBypassEnabled}
-                disabled={bridgeBusy || hasQueuedInput}
-                onPointerDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  void handleToggleTextBypass();
-                }}
-                className={clsx(
-                  'rounded-xl border px-3 py-2 text-xs font-medium transition',
-                  textBypassEnabled
-                    ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
-                    : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-                  bridgeBusy && 'cursor-not-allowed opacity-60',
-                )}
-              >
-                Text Bypass
-              </button>
+              {!structured && (
+                <button
+                  type="button"
+                  aria-pressed={textBypassEnabled}
+                  disabled={bridgeBusy || hasQueuedInput}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    void handleToggleTextBypass();
+                  }}
+                  className={clsx(
+                    'rounded-xl border px-3 py-2 text-xs font-medium transition',
+                    textBypassEnabled
+                      ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
+                      : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+                    bridgeBusy && 'cursor-not-allowed opacity-60',
+                  )}
+                >
+                  Text Bypass
+                </button>
+              )}
               <button
                 type="button"
                 aria-label="Copy latest assistant message"
@@ -1571,6 +1581,7 @@ export function ConversationPane({
   const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
+  const structuredSession = boundSession?.transport === 'structured';
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = isMobile ? !mobileDetailsOpen : mobileChromeHidden;
   const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
@@ -1745,15 +1756,17 @@ export function ConversationPane({
     () => groupTranscriptTurns(visibleHistoryMessages),
     [visibleHistoryMessages],
   );
-  const mobileNeedsSelection = liveScreen?.inputActive === false && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`);
-  const liveScreenPanel = liveScreen && (!isMobile || mobileNeedsSelection || mobileInputPanel === 'controls' || !hasSavedHistory) && shouldShowLiveScreenContent(liveScreen, boundSession?.isWorking) ? (
+  // An app-server session has no terminal: its synthesized screen only carries status, model and context.
+  const terminalScreen = structuredSession ? undefined : liveScreen;
+  const mobileNeedsSelection = terminalScreen?.inputActive === false && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`);
+  const liveScreenPanel = terminalScreen && (!isMobile || mobileNeedsSelection || mobileInputPanel === 'controls' || !hasSavedHistory) && shouldShowLiveScreenContent(terminalScreen, boundSession?.isWorking) ? (
     <div
       data-testid="live-screen-panel"
       className="mt-4 rounded-md border border-slate-800 bg-slate-950 p-3 shadow-inner"
     >
       <LiveAnsiBlock
-        text={liveScreenDisplayText(liveScreen)}
-        ansiText={liveScreenDisplayAnsiText(liveScreen)}
+        text={liveScreenDisplayText(terminalScreen)}
+        ansiText={liveScreenDisplayAnsiText(terminalScreen)}
         className="scrollbar-thin max-h-[22rem] overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-200"
       />
     </div>
@@ -1843,6 +1856,7 @@ export function ConversationPane({
               summary={[
                 timeline.conversation.title,
                 conversationStatus,
+                structuredSession ? 'app-server' : undefined,
                 timeline.conversation.degraded ? 'Degraded parse' : undefined,
               ].filter(Boolean).join(' · ')}
               className=""
@@ -1901,6 +1915,9 @@ export function ConversationPane({
                   <span className={clsx('rounded-full border px-2.5 py-1', boundSession ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-400')}>
                     {conversationStatus}
                   </span>
+                  {structuredSession && (
+                    <span title="Driven through the Codex app-server protocol rather than a terminal" className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">app-server</span>
+                  )}
                   {timeline.conversation.degraded && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
                   )}
@@ -2027,7 +2044,7 @@ export function ConversationPane({
           </div>
         ) : boundSession ? (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
-            {WAITING_FOR_SESSION_OUTPUT_TEXT}
+            {structuredSession ? 'Send a message to start this app-server session.' : WAITING_FOR_SESSION_OUTPUT_TEXT}
           </div>
         ) : (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
@@ -2036,7 +2053,7 @@ export function ConversationPane({
         )}
       </div>
 
-      {isMobile && liveScreen?.inputActive === false && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`) && mobileInputPanel !== 'controls' && (
+      {isMobile && terminalScreen?.inputActive === false && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`) && mobileInputPanel !== 'controls' && (
         <button type="button" onClick={onOpenMobileControls} className="shrink-0 border-t border-amber-400/20 bg-amber-500/10 px-3 py-2 text-left text-sm text-amber-200">Needs your input · Open controls</button>
       )}
       {sessionSuspended ? (
@@ -2072,8 +2089,9 @@ export function ConversationPane({
           activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}
-          nativeSelectionActive={liveScreen?.inputActive === false
-            && screenHasInteractiveControlText(`${liveScreen.content}\n${liveScreen.status}`)}
+          nativeSelectionActive={terminalScreen?.inputActive === false
+            && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`)}
+          structured={structuredSession}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
@@ -2118,7 +2136,7 @@ export function ConversationPane({
             <div className="font-medium">Raw terminal/debug output</div>
             <div className="text-xs text-slate-500">{rawLoading ? 'Refreshing…' : 'Live view'}</div>
           </div>
-          <pre className="scrollbar-thin max-h-52 overflow-auto rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs leading-6 text-slate-300">{rawOutput?.trim() || 'No raw output captured yet.'}</pre>
+          <pre className="scrollbar-thin max-h-52 overflow-auto rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs leading-6 text-slate-300">{structuredSession ? 'App-server sessions have no raw terminal output.' : rawOutput?.trim() || 'No raw output captured yet.'}</pre>
         </div>
       )}
       {externalHandoffDialog}

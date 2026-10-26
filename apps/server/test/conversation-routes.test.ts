@@ -2994,4 +2994,491 @@ describe('conversation routes', () => {
       db.close();
     }
   });
+
+  describe('structured transport binds', () => {
+    const baseSession = (overrides: Partial<BoundSession>): BoundSession => ({
+      id: 'session-x',
+      provider: 'codex',
+      projectSlug: 'demo',
+      conversationRef: 'pending:x',
+      tmuxSessionName: 'ac-codex-demo-x',
+      transport: 'tmux',
+      status: 'bound',
+      shouldRestore: true,
+      title: 'New Codex conversation',
+      startedAt: '2026-10-26T10:00:00.000Z',
+      updatedAt: '2026-10-26T10:00:00.000Z',
+      ...overrides,
+    });
+    const pendingRecord = (overrides: Partial<ConversationSummary>): ConversationSummary => ({
+      ref: 'pending:existing',
+      kind: 'pending',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'New Codex conversation',
+      createdAt: '2026-10-26T10:00:00.000Z',
+      updatedAt: '2026-10-26T10:00:00.000Z',
+      isBound: true,
+      boundSessionId: 'session-existing',
+      degraded: false,
+      rawMetadata: { pending: true },
+      ...overrides,
+    });
+
+    async function buildBindApp(input: {
+      db: AppDatabase;
+      tempDir: string;
+      sessions: Record<string, unknown>;
+      structuredProviders?: Array<'codex' | 'claude'>;
+      omitStructuredProviders?: boolean;
+    }) {
+      const app = fastify();
+      const args = [
+        app,
+        { ensureAuthenticated: async () => undefined } as never,
+        input.db,
+        {
+          getProjectBySlug: async (projectSlug: string) => (projectSlug === 'demo' ? { slug: 'demo', displayName: 'Demo' } : undefined),
+          getMergedProviderSettings: () => ({
+            id: 'codex',
+            enabled: true,
+            discoveryRoot: input.tempDir,
+            commands: {
+              newCommand: ['codex'],
+              resumeCommand: ['codex', 'resume', '{{conversationId}}'],
+              continueCommand: ['codex', 'resume', '--last'],
+              env: {},
+            },
+          }),
+        } as never,
+        { get: () => ({ getConversation: async () => null }) } as never,
+        input.sessions as never,
+        new RealtimeEventBus(),
+      ] as const;
+      if (input.omitStructuredProviders) {
+        await registerConversationRoutes(...args);
+      } else {
+        await registerConversationRoutes(...args, undefined, input.structuredProviders ?? []);
+      }
+      await app.ready();
+      return app;
+    }
+
+    async function withDb<T>(run: (db: AppDatabase, tempDir: string) => Promise<T>): Promise<T> {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
+      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+      try {
+        return await run(db, tempDir);
+      } finally {
+        db.close();
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    }
+
+    it('refuses a structured new chat with 400 unless the provider lane is enabled', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn();
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() } });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(response.statusCode).toBe(400);
+          expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+          expect(bindConversation).not.toHaveBeenCalled();
+          expect(db.pendingConversations.list()).toEqual([]);
+
+          const claude = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/claude/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(claude.statusCode).toBe(400);
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('refuses a structured new chat for a provider missing from the enabled list', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn();
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
+        });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/claude/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(response.statusCode).toBe(400);
+          expect(bindConversation).not.toHaveBeenCalled();
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('rejects an unknown transport value', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn();
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() } });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'pty' },
+          });
+          expect(response.statusCode).toBe(400);
+          expect(response.json().error).toBe('Invalid bind payload.');
+          expect(bindConversation).not.toHaveBeenCalled();
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('passes transport structured to the session manager and keeps an adopted alias intact', async () => {
+      await withDb(async (db, tempDir) => {
+        let pendingSeenDuringBind: ConversationSummary | undefined;
+        const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
+          pendingSeenDuringBind = db.pendingConversations.get(input.conversationRef);
+          // The session manager adopts the alias as soon as the thread id is known.
+          db.pendingConversations.put({
+            ...pendingSeenDuringBind!,
+            isBound: false,
+            rawMetadata: { ...pendingSeenDuringBind!.rawMetadata, adoptedConversationRef: 'thread-1' },
+          });
+          return baseSession({ id: 'session-structured', conversationRef: 'thread-1', transport: 'structured' });
+        });
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
+        });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(response.statusCode).toBe(200);
+          const body = response.json() as { session: BoundSession; conversationRef: string };
+          expect(body.session.id).toBe('session-structured');
+          expect(body.conversationRef).toMatch(/^pending:/);
+          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
+            transport: 'structured',
+            kind: 'pending',
+            conversationRef: body.conversationRef,
+          }));
+          // The alias exists before the bind so the session manager can adopt it.
+          expect(pendingSeenDuringBind).toMatchObject({ ref: body.conversationRef, isBound: false });
+          expect(db.pendingConversations.get(body.conversationRef)).toMatchObject({
+            isBound: false,
+            rawMetadata: { adoptedConversationRef: 'thread-1' },
+          });
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('records the structured alias as bound when the session manager did not adopt it', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
+          const session = baseSession({ id: 'session-structured', conversationRef: input.conversationRef, transport: 'structured' });
+          db.boundSessions.upsert(session);
+          return session;
+        });
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
+        });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(response.statusCode).toBe(200);
+          expect(db.pendingConversations.get(response.json().conversationRef)).toMatchObject({
+            isBound: true,
+            boundSessionId: 'session-structured',
+          });
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('maps a session manager structured-disabled error to 400 and drops the alias', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn(async () => { throw new Error('Structured sessions are disabled for codex.'); });
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
+        });
+        try {
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(response.statusCode).toBe(400);
+          expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+          expect(db.pendingConversations.list()).toEqual([]);
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('keeps the tmux default: no body means tmux, with the pending record written only after the bind', async () => {
+      await withDb(async (db, tempDir) => {
+        let pendingSeenDuringBind: ConversationSummary | undefined;
+        const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
+          pendingSeenDuringBind = db.pendingConversations.get(input.conversationRef);
+          const session = baseSession({ id: 'session-tmux', conversationRef: input.conversationRef });
+          db.boundSessions.upsert(session);
+          return session;
+        });
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
+        });
+        try {
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind' });
+          expect(response.statusCode).toBe(200);
+          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ transport: 'tmux', kind: 'pending' }));
+          expect(pendingSeenDuringBind).toBeUndefined();
+          expect(db.pendingConversations.get(response.json().conversationRef)).toMatchObject({
+            isBound: true,
+            boundSessionId: 'session-tmux',
+          });
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('still serves tmux binds when the route is built without a structured provider source', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn(async () => baseSession({ id: 'session-tmux' }));
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, omitStructuredProviders: true,
+        });
+        try {
+          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
+          expect(tmux.statusCode).toBe(200);
+          const structured = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(structured.statusCode).toBe(400);
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('reuses a bound pending chat only when its transport matches the request', async () => {
+      await withDb(async (db, tempDir) => {
+        const tmuxSession = baseSession({ id: 'session-existing', conversationRef: 'pending:existing' });
+        db.boundSessions.upsert(tmuxSession);
+        db.pendingConversations.put(pendingRecord({}));
+        const ensureSession = vi.fn(async (id: string) => (id === tmuxSession.id ? tmuxSession : undefined));
+        const bindConversation = vi.fn(async () => baseSession({ id: 'session-structured', transport: 'structured' }));
+        const getSessionById = vi.fn((id: string) => (id === tmuxSession.id ? tmuxSession : undefined));
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, ensureSession, getSessionById }, structuredProviders: ['codex'],
+        });
+        try {
+          const structured = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(structured.statusCode).toBe(200);
+          expect(ensureSession).not.toHaveBeenCalled();
+          expect(bindConversation).toHaveBeenCalledOnce();
+          expect(structured.json().session.id).toBe('session-structured');
+
+          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
+          expect(tmux.statusCode).toBe(200);
+          expect(ensureSession).toHaveBeenCalledWith('session-existing');
+          expect(bindConversation).toHaveBeenCalledOnce();
+          expect(tmux.json()).toMatchObject({ session: { id: 'session-existing' }, conversationRef: 'pending:existing' });
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('does not reuse a bound structured pending chat for a tmux new chat', async () => {
+      await withDb(async (db, tempDir) => {
+        const structuredSession = baseSession({ id: 'session-existing', conversationRef: 'pending:existing', transport: 'structured' });
+        db.boundSessions.upsert(structuredSession);
+        db.pendingConversations.put(pendingRecord({}));
+        const ensureSession = vi.fn(async () => structuredSession);
+        const bindConversation = vi.fn(async () => baseSession({ id: 'session-tmux' }));
+        const app = await buildBindApp({
+          db,
+          tempDir,
+          sessions: { bindConversation, ensureSession, getSessionById: vi.fn(() => structuredSession) },
+          structuredProviders: ['codex'],
+        });
+        try {
+          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
+          expect(tmux.statusCode).toBe(200);
+          expect(ensureSession).not.toHaveBeenCalled();
+          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ transport: 'tmux' }));
+
+          const structured = await app.inject({
+            method: 'POST',
+            url: '/api/conversations/demo/codex/new/bind',
+            payload: { transport: 'structured' },
+          });
+          expect(structured.statusCode).toBe(200);
+          expect(ensureSession).toHaveBeenCalledWith('session-existing');
+          expect(structured.json().session.id).toBe('session-existing');
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    describe('history bind', () => {
+      const history: ConversationSummary = {
+        ref: 'thread-history',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: 'Earlier chat',
+        createdAt: '2026-10-26T09:00:00.000Z',
+        updatedAt: '2026-10-26T09:30:00.000Z',
+        isBound: false,
+        degraded: false,
+      };
+
+      it('refuses a structured resume with 400 unless the provider lane is enabled', async () => {
+        await withDb(async (db, tempDir) => {
+          db.conversationIndex.replace('demo', 'codex', [history]);
+          const bindConversation = vi.fn();
+          const app = await buildBindApp({
+            db,
+            tempDir,
+            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
+          });
+          try {
+            const response = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: { transport: 'structured' },
+            });
+            expect(response.statusCode).toBe(400);
+            expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+            expect(bindConversation).not.toHaveBeenCalled();
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('passes the requested transport through and defaults to tmux', async () => {
+        await withDb(async (db, tempDir) => {
+          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
+          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({
+            id: 'session-history', conversationRef: 'thread-history', transport: input.transport === 'structured' ? 'structured' : 'tmux',
+          }));
+          const app = await buildBindApp({
+            db,
+            tempDir,
+            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
+            structuredProviders: ['codex'],
+          });
+          try {
+            const structured = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: { transport: 'structured' },
+            });
+            expect(structured.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({
+              transport: 'structured', kind: 'history', conversationRef: 'thread-history',
+            }));
+
+            const tmux = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: {},
+            });
+            expect(tmux.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('refuses a structured resume of a conversation that a live terminal session owns', async () => {
+        await withDb(async (db, tempDir) => {
+          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
+          const owner = baseSession({ id: 'session-owner', conversationRef: 'thread-history' });
+          const bindConversation = vi.fn();
+          const ensureSession = vi.fn(async () => owner);
+          const releaseSession = vi.fn(async () => undefined);
+          const app = await buildBindApp({
+            db,
+            tempDir,
+            sessions: { bindConversation, ensureSession, releaseSession, getSessionByConversation: vi.fn(() => owner), getSessionById: vi.fn() },
+            structuredProviders: ['codex'],
+          });
+          try {
+            const response = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: { transport: 'structured' },
+            });
+            expect(response.statusCode).toBe(409);
+            expect(ensureSession).not.toHaveBeenCalled();
+            expect(bindConversation).not.toHaveBeenCalled();
+
+            // A default request still returns the live owner, as before.
+            const tmux = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: {},
+            });
+            expect(tmux.statusCode).toBe(200);
+            expect(tmux.json().session.id).toBe('session-owner');
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('maps a session manager structured-disabled error to 400', async () => {
+        await withDb(async (db, tempDir) => {
+          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
+          const bindConversation = vi.fn(async () => { throw new Error('Structured sessions are not enabled for codex.'); });
+          const app = await buildBindApp({
+            db,
+            tempDir,
+            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
+            structuredProviders: ['codex'],
+          });
+          try {
+            const response = await app.inject({
+              method: 'POST',
+              url: '/api/conversations/demo/codex/thread-history/bind',
+              payload: { transport: 'structured' },
+            });
+            expect(response.statusCode).toBe(400);
+            expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+          } finally {
+            await app.close();
+          }
+        });
+      });
+    });
+  });
 });

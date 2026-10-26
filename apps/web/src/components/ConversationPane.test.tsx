@@ -1189,3 +1189,129 @@ describe('ConversationPane external Claude handoff', () => {
     } finally { media.mockRestore(); }
   });
 });
+
+describe('ConversationPane app-server (structured) sessions', () => {
+  const structured = { transport: 'structured' as const, tmuxSessionName: 'acs-session-1' };
+  const terminalOnlyButtons = ['Text Bypass', 'Backspace', 'Tab', '↑', '↓', '←', '→'];
+
+  it('hides every terminal-only control and shows the app-server badge', () => {
+    renderPane({ sessionOverrides: structured });
+
+    for (const name of terminalOnlyButtons) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.getByText('app-server')).toBeVisible();
+    expect(screen.getByText('Bound')).toBeVisible();
+  });
+
+  it('keeps Send, Esc and Stop, the model profile controls, copy, suspend and release', () => {
+    renderPane({ sessionOverrides: structured });
+
+    expect(screen.getByRole('textbox', { name: 'Message' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Enter' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Esc' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Interrupt session' })).toBeVisible();
+    for (const profile of ['high', 'medium', 'low']) {
+      expect(screen.getByRole('button', { name: `Use ${profile} Codex profile` })).toBeVisible();
+    }
+    expect(screen.getByRole('button', { name: 'Copy latest assistant message' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Suspend' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Release' })).toBeVisible();
+  });
+
+  it('submits a message with Enter and interrupts with Esc exactly like a terminal chat', async () => {
+    const send = vi.fn().mockResolvedValue({ session: boundSession(structured) });
+    renderPane({ onSendKeystrokes: send, sessionOverrides: structured });
+    const textbox = screen.getByRole('textbox', { name: 'Message' });
+
+    fireEvent.change(textbox, { target: { value: 'build the thing' } });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send.mock.calls[0]?.[0]).toBe('session-1');
+    expect(send.mock.calls[0]?.[1]).toMatchObject({ keys: ['Enter'], submittedText: 'build the thing' });
+
+    await waitFor(() => expect(textbox).not.toHaveAttribute('readonly'));
+    fireEvent.click(screen.getByRole('button', { name: 'Esc' }));
+    await waitFor(() => expect(send).toHaveBeenLastCalledWith('session-1', { keys: ['Escape'] }));
+  });
+
+  it('does not forward arrow keys, Tab or Backspace, and Ctrl+/ cannot start Text Bypass', async () => {
+    const send = vi.fn().mockResolvedValue({ session: boundSession(structured) });
+    renderPane({ onSendKeystrokes: send, sessionOverrides: structured });
+    const textbox = screen.getByRole('textbox', { name: 'Message' });
+
+    for (const key of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab', 'Backspace']) {
+      fireEvent.keyDown(textbox, { key });
+    }
+    fireEvent.keyDown(textbox, { key: '/', ctrlKey: true });
+    await act(async () => { await Promise.resolve(); });
+    // In Text Bypass the textarea only mirrors terminal input and ignores edits.
+    fireEvent.change(textbox, { target: { value: 'still an ordinary draft' } });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(textbox).toHaveValue('still an ordinary draft');
+    fireEvent.change(textbox, { target: { value: '' } });
+  });
+
+  it('ignores pasted images because the server refuses them on app-server sessions', () => {
+    const upload = vi.spyOn(api, 'uploadImage').mockResolvedValue(pastedImage);
+    try {
+      renderPane({ sessionOverrides: structured });
+      pasteImage(screen.getByRole('textbox', { name: 'Message' }));
+
+      expect(upload).not.toHaveBeenCalled();
+      expect(screen.queryByText('Uploading image…')).not.toBeInTheDocument();
+    } finally {
+      upload.mockRestore();
+    }
+  });
+
+  it('never shows the terminal screen panel, even for picker-like screen text', () => {
+    renderPane({
+      sessionOverrides: { ...structured, isWorking: false },
+      inputActive: false,
+      inputText: '/model',
+      screenContent: 'Select Model and Effort\n› 2. GPT-6-Sol (current)\nenter select · esc back',
+    });
+
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Select Model and Effort/)).not.toBeInTheDocument();
+    expect(screen.getByText('Send a message to start this app-server session.')).toBeVisible();
+  });
+
+  it('copes with an empty synthesized screen and still shows the session status block', () => {
+    renderPane({
+      sessionOverrides: structured,
+      screenContent: '',
+      screenStatus: 'Idle',
+      screenModel: 'gpt-5.5',
+    });
+
+    expect(screen.queryByTestId('live-screen-panel')).not.toBeInTheDocument();
+    expect(screen.getByText('Idle')).toBeVisible();
+  });
+
+  it('keeps the queued-message and provider-failure notices', () => {
+    renderPane({
+      sessionOverrides: {
+        ...structured,
+        queuedInputs: [{ requestId: 'queued-1', text: 'pending message', requestedAt: baseTime,
+          state: 'queued', reason: 'Waiting for the session to accept input.' }],
+        runFailure: { turnId: 't1', failedAt: baseTime, code: 'server_overloaded', message: 'Selected model is at capacity.',
+          attempts: 0, maxAttempts: 3, status: 'scheduled', nextRetryAt: baseTime },
+      },
+    });
+
+    expect(screen.getByText('pending message')).toBeVisible();
+    expect(screen.getByText(/Selected model is at capacity\./)).toBeVisible();
+  });
+
+  it('leaves a terminal session unchanged: all keys, Text Bypass and no badge', () => {
+    renderPane();
+
+    for (const name of terminalOnlyButtons) {
+      expect(screen.getByRole('button', { name })).toBeVisible();
+    }
+    expect(screen.queryByText('app-server')).not.toBeInTheDocument();
+  });
+});

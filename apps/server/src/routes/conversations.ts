@@ -1,7 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
-import { PROVIDERS, type BoundSession, type ConversationSummary, type NormalizedMessage } from '@agent-console/shared';
+import {
+  PROVIDERS,
+  SESSION_TRANSPORTS,
+  type BoundSession,
+  type ConversationSummary,
+  type NormalizedMessage,
+  type ProviderId,
+  type SessionTransport,
+} from '@agent-console/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
@@ -27,7 +35,12 @@ const projectProviderParamsSchema = z.object({
 const conversationParamsSchema = projectProviderParamsSchema.extend({
   conversationRef: z.string().min(1),
 });
+const transportSchema = z.enum(SESSION_TRANSPORTS).default('tmux');
+const newConversationBodySchema = z.object({
+  transport: transportSchema,
+});
 const bindConversationBodySchema = z.object({
+  transport: transportSchema,
   force: z.boolean().optional(),
   initialPrompt: z.string().trim().min(1).optional(),
   confirmExternalHandoff: z.literal(true).optional(),
@@ -66,6 +79,26 @@ function parseConversationParams(params: unknown, reply: FastifyReply): Conversa
     return undefined;
   }
   return parsed.data;
+}
+
+const STRUCTURED_DISABLED_MESSAGE = 'Structured sessions are not enabled for this provider.';
+
+function isStructuredDisabledError(error: unknown): boolean {
+  return error instanceof Error && /structured/i.test(error.message) && /not enabled|disabled/i.test(error.message);
+}
+
+/** Replies 400 and returns false when a structured bind is requested for a provider whose lane is off. */
+function structuredTransportAllowed(
+  transport: SessionTransport,
+  providerId: ProviderId,
+  structuredProviders: readonly ProviderId[],
+  reply: FastifyReply,
+): boolean {
+  if (transport !== 'structured' || structuredProviders.includes(providerId)) {
+    return true;
+  }
+  reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+  return false;
 }
 
 function resolveAdoptedConversationRef(summary: ConversationSummary | undefined): string | undefined {
@@ -219,6 +252,7 @@ export async function registerConversationRoutes(
   sessions: SessionManager,
   eventBus: RealtimeEventBus,
   liveOutputReader: LiveOutputReader = new LiveOutputReader(),
+  structuredProviders: readonly ProviderId[] = [],
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
@@ -363,11 +397,20 @@ export async function registerConversationRoutes(
     } catch {
       return;
     }
+    const parsedBody = newConversationBodySchema.safeParse(request.body ?? {});
+    if (!parsedBody.success) {
+      reply.code(400).send({ error: 'Invalid bind payload.', details: parsedBody.error.flatten() });
+      return;
+    }
     const parsedParams = parseProjectProviderParams(request.params, reply);
     if (!parsedParams) {
       return;
     }
     const { projectSlug, provider: providerId } = parsedParams;
+    const { transport } = parsedBody.data;
+    if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
+      return;
+    }
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
       reply.code(404).send({ error: 'Project not found.' });
@@ -379,23 +422,30 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Provider is disabled for this project.' });
       return;
     }
-    const existingPending = db.pendingConversations.list()
-      .find((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId && conversation.isBound);
-    if (existingPending?.boundSessionId) {
-      const existingSession = sessions.getSessionById(existingPending.boundSessionId);
-      if (existingSession?.shouldRestore) {
-        const liveSession = await sessions.ensureSession(existingSession.id);
-        if (liveSession) {
-          return { session: liveSession, conversationRef: existingPending.ref };
-        }
-        const refreshedSession = sessions.getSessionById(existingSession.id);
-        if (refreshedSession?.shouldRestore) {
-          if (refreshedSession.conversationRef === existingPending.ref && refreshedSession.conversationRef.startsWith('pending:')) {
-            clearUnrestorablePendingBinding(db, existingPending, refreshedSession);
-          } else {
-            reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
-            return;
-          }
+    // A bound pending chat is reused only when it runs on the requested transport.
+    let existingPending: ConversationSummary | undefined;
+    let existingSession: BoundSession | undefined;
+    for (const candidate of db.pendingConversations.list()) {
+      if (candidate.projectSlug !== projectSlug || candidate.provider !== providerId || !candidate.isBound) continue;
+      const candidateSession = candidate.boundSessionId ? sessions.getSessionById(candidate.boundSessionId) : undefined;
+      if ((candidateSession?.transport ?? 'tmux') === transport) {
+        existingPending = candidate;
+        existingSession = candidateSession;
+        break;
+      }
+    }
+    if (existingPending && existingSession?.shouldRestore) {
+      const liveSession = await sessions.ensureSession(existingSession.id);
+      if (liveSession) {
+        return { session: liveSession, conversationRef: existingPending.ref };
+      }
+      const refreshedSession = sessions.getSessionById(existingSession.id);
+      if (refreshedSession?.shouldRestore) {
+        if (refreshedSession.conversationRef === existingPending.ref && refreshedSession.conversationRef.startsWith('pending:')) {
+          clearUnrestorablePendingBinding(db, existingPending, refreshedSession);
+        } else {
+          reply.code(409).send({ error: 'Existing pending conversation is still bound but could not be restored.' });
+          return;
         }
       }
     }
@@ -413,6 +463,10 @@ export async function registerConversationRoutes(
       // A generated title replaces the placeholder after the first human message.
       rawMetadata: { pending: true, titleGeneration: TITLE_GENERATION_AWAITING_MESSAGE },
     };
+    if (transport === 'structured') {
+      // The thread id is known at bind time, so the session manager adopts this alias immediately.
+      db.pendingConversations.put(pendingConversation);
+    }
     try {
       const session = await sessions.bindConversation({
         project,
@@ -421,11 +475,19 @@ export async function registerConversationRoutes(
         conversationRef: pendingRef,
         title: pendingConversation.title,
         kind: 'pending',
+        transport,
       });
-      db.pendingConversations.put({ ...pendingConversation, boundSessionId: session.id, isBound: true });
+      // An adopted alias already points at the native conversation; do not overwrite that record.
+      if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {
+        db.pendingConversations.put({ ...pendingConversation, boundSessionId: session.id, isBound: true });
+      }
       return { session, conversationRef: pendingRef };
     } catch (error) {
       db.pendingConversations.delete(pendingRef);
+      if (isStructuredDisabledError(error)) {
+        reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+        return;
+      }
       throw error;
     }
   });
@@ -446,6 +508,10 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId, conversationRef } = parsedParams;
+    const { transport } = parsedBody.data;
+    if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
+      return;
+    }
     const project = await projectService.getProjectBySlug(projectSlug);
     if (!project) {
       reply.code(404).send({ error: 'Project not found.' });
@@ -480,6 +546,13 @@ export async function registerConversationRoutes(
       );
     if (!parsedBody.data.force) {
       if (existingSession?.shouldRestore) {
+        // Never answer an explicit app-server request with a terminal session.
+        if (transport === 'structured' && existingSession.transport !== 'structured') {
+          reply.code(409).send({
+            error: 'Conversation is already bound to a terminal session. Release it before starting an app-server session.',
+          });
+          return;
+        }
         const liveSession = await sessions.ensureSession(existingSession.id);
         if (liveSession) {
           return { session: liveSession };
@@ -516,17 +589,26 @@ export async function registerConversationRoutes(
         await sessions.releaseSession(existingSession.id);
       }
     }
-    const session = await sessions.bindConversation({
-      project,
-      provider,
-      providerSettings,
-      conversationRef: resolvedConversationRef,
-      title: bindableSummary.title,
-      kind: 'history',
-      initialPrompt: parsedBody.data.initialPrompt,
-      codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
-    });
-    return { session };
+    try {
+      const session = await sessions.bindConversation({
+        project,
+        provider,
+        providerSettings,
+        conversationRef: resolvedConversationRef,
+        title: bindableSummary.title,
+        kind: 'history',
+        initialPrompt: parsedBody.data.initialPrompt,
+        codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
+        transport,
+      });
+      return { session };
+    } catch (error) {
+      if (isStructuredDisabledError(error)) {
+        reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.put('/api/conversations/:projectSlug/:provider/:conversationRef/title', async (request, reply) => {

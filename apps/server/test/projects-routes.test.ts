@@ -1,5 +1,9 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
+import { buildApp } from '../src/app.js';
 import { registerProjectRoutes } from '../src/routes/projects.js';
 
 describe('project routes', () => {
@@ -36,6 +40,7 @@ describe('project routes', () => {
       {
         observeSessions,
       } as never,
+      [],
     );
     await app.ready();
 
@@ -142,6 +147,7 @@ describe('project routes', () => {
       { ensureAuthenticated: async () => undefined } as never,
       { getTree: () => tree, refreshAll } as never,
       { observeSessions, autoTrackConversations } as never,
+      [],
     );
     await app.ready();
 
@@ -176,6 +182,7 @@ describe('project routes', () => {
         refreshAll: async () => undefined,
       } as never,
       { observeSessions: async () => undefined, autoTrackConversations } as never,
+      [],
     );
     await app.ready();
 
@@ -202,6 +209,7 @@ describe('project routes', () => {
         refreshProjectProvider,
       } as never,
       { observeSessions: async () => undefined, autoTrackConversations: vi.fn() } as never,
+      [],
     );
     await app.ready();
 
@@ -219,4 +227,112 @@ describe('project routes', () => {
       await app.close();
     }
   });
+
+  it('advertises the providers whose structured lane is enabled on the tree and refresh responses', async () => {
+    const app = fastify();
+    await registerProjectRoutes(
+      app,
+      { ensureAuthenticated: async () => undefined } as never,
+      {
+        getTree: () => ({ projects: [], boundSessions: [], lastIndexedAt: 'now' }),
+        refreshAll: async () => undefined,
+      } as never,
+      { observeSessions: async () => undefined, autoTrackConversations: vi.fn() } as never,
+      ['codex'],
+    );
+    await app.ready();
+
+    try {
+      const tree = await app.inject({ method: 'GET', url: '/api/projects/tree' });
+      expect(tree.statusCode).toBe(200);
+      expect(tree.json()).toMatchObject({ lastIndexedAt: 'now', structuredProviders: ['codex'] });
+
+      const refreshed = await app.inject({ method: 'POST', url: '/api/projects/refresh', payload: {} });
+      expect(refreshed.json().structuredProviders).toEqual(['codex']);
+    } finally {
+      await app.close();
+    }
+  });
 });
+
+describe('structured provider configuration wiring', () => {
+  async function buildConfiguredApp(structuredSessions?: { codex: { enabled: boolean } }) {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-structured-wiring-'));
+    const root = path.join(tempDir, 'projects');
+    await fs.mkdir(path.join(root, 'demo'), { recursive: true });
+    await fs.writeFile(path.join(root, 'demo', 'AGENTS.md'), '# Demo');
+    await fs.mkdir(path.join(tempDir, 'codex-home'), { recursive: true });
+    await fs.mkdir(path.join(tempDir, 'claude-home'), { recursive: true });
+    const provider = (discoveryRoot: string, command: string) => ({
+      enabled: true,
+      discoveryRoot,
+      commands: { newCommand: [command], resumeCommand: [command, 'resume'], continueCommand: [command, 'continue'], env: {} },
+    });
+    const configPath = path.join(tempDir, 'config.json');
+    await fs.writeFile(configPath, JSON.stringify({
+      server: { host: '127.0.0.1', port: 4317, webDistPath: '../web/dist' },
+      projectsRoot: root,
+      runtimeDir: path.join(tempDir, 'runtime'),
+      databasePath: path.join(tempDir, 'agent-console.sqlite'),
+      ...(structuredSessions ? { structuredSessions } : {}),
+      security: {
+        passwordHash: 'scrypt:e63f79449b39327540c914ce72df7fd8:8b59c3daf10c16c5ea0c645aea6e47c7ede25beb73c167852b1cbbdf5d4bdad218bc4f25193ebfe2f29779e5d7cc995b890a6b46ea9c4c5096973b301087e4bc',
+        sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        cookieSecure: false,
+        sessionTtlHours: 24,
+        loginRateLimitMax: 10,
+        loginRateLimitWindowMs: 900000,
+        trustTailscaleHeaders: false,
+      },
+      providers: {
+        codex: provider(path.join(tempDir, 'codex-home'), 'codex'),
+        claude: provider(path.join(tempDir, 'claude-home'), 'claude'),
+      },
+      projects: { demo: { active: true, path: path.join(root, 'demo'), displayName: 'Demo', allowedLocalhostPorts: [], tags: [] } },
+    }, null, 2));
+    const { app } = await buildApp({ configPath });
+    await app.ready();
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password: 'agent-console-demo' } });
+    expect(login.statusCode).toBe(200);
+    return {
+      app,
+      tempDir,
+      headers: { cookie: login.headers['set-cookie'] as string, 'x-csrf-token': login.json().csrfToken as string },
+    };
+  }
+
+  it('advertises codex and refuses structured claude when only the Codex lane is enabled', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true } });
+    try {
+      const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
+      expect(tree.json().structuredProviders).toEqual(['codex']);
+
+      const claude = await app.inject({
+        method: 'POST', url: '/api/conversations/demo/claude/new/bind', headers, payload: { transport: 'structured' },
+      });
+      expect(claude.statusCode).toBe(400);
+      expect(claude.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+    } finally {
+      await app.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('advertises nothing and refuses structured binds when the config leaves the lane off', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp();
+    try {
+      const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
+      expect(tree.json().structuredProviders).toEqual([]);
+
+      const codex = await app.inject({
+        method: 'POST', url: '/api/conversations/demo/codex/new/bind', headers, payload: { transport: 'structured' },
+      });
+      expect(codex.statusCode).toBe(400);
+      expect(codex.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+    } finally {
+      await app.close();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+

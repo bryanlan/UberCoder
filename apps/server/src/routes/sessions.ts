@@ -105,8 +105,10 @@ async function restartFirstPendingCodexTurnIfNeeded(input: {
   const pendingConversation = input.session.conversationRef.startsWith('pending:')
     ? input.db.pendingConversations.get(input.session.conversationRef)
     : undefined;
+  // The first-turn relaunch is a terminal concept; structured sessions deliver the first turn directly.
   const isFirstPendingCodexTurn =
-    input.session.provider === 'codex'
+    input.session.transport !== 'structured'
+    && input.session.provider === 'codex'
     && Boolean(pendingConversation)
     && typeof pendingConversation?.rawMetadata?.lastUserInputHash !== 'string';
   if (!isFirstPendingCodexTurn) {
@@ -345,7 +347,11 @@ export async function registerSessionRoutes(
     }
     const session = sessions.getSessionById(sessionId);
     if (!session?.rawLogPath) {
-      reply.code(404).send({ error: 'Session not found.' });
+      reply.code(404).send({
+        error: session?.transport === 'structured'
+          ? 'Structured sessions have no raw terminal output.'
+          : 'Session not found.',
+      });
       return;
     }
     try {
@@ -391,6 +397,10 @@ export async function registerSessionRoutes(
     const session = sessions.getSessionById(sessionId);
     if (!session) {
       reply.code(404).send({ error: 'Session not found.' });
+      return;
+    }
+    if (parsed.data.imageIds && session.transport === 'structured') {
+      reply.code(400).send({ error: 'Images cannot be attached to app-server sessions.' });
       return;
     }
     // Capture before image/native preflight, which can finish after a later Stop.
