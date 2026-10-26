@@ -104,6 +104,15 @@ export function buildAppServerEnv(base: NodeJS.ProcessEnv, home: string = os.hom
   return env;
 }
 
+/**
+ * Per-thread config overrides. Codex waits only about one second for optional MCP servers before the first
+ * model request; the grace period lets the coordination MCP server from the user's config.toml finish
+ * starting first (the value T3 Code uses).
+ */
+export function threadConfig(options: Pick<OpenOptions, 'effort'>): NonNullable<ThreadStartParams['config']> {
+  return { mcp_optional_startup_grace_ms: 10_000, ...(options.effort ? { model_reasoning_effort: options.effort } : {}) };
+}
+
 export function buildAppServerCommand(command: string[]): string[] {
   return [...command, '-c', 'check_for_update_on_startup=false'];
 }
@@ -260,7 +269,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       approvalPolicy: approvalPolicyFor(options.policy),
       sandbox: sandboxModeFor(options.policy),
       approvalsReviewer: 'user',
-      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
+      config: threadConfig(options),
       ephemeral: false,
     };
     let session: CodexAppServerSession | undefined;
@@ -290,7 +299,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       approvalPolicy: approvalPolicyFor(options.policy),
       approvalsReviewer: 'user',
       sandbox: sandboxModeFor(options.policy),
-      ...(options.effort ? { config: { model_reasoning_effort: options.effort } } : {}),
+      config: threadConfig(options),
     };
     let session: CodexAppServerSession | undefined;
     const attempt = (): Promise<unknown> =>

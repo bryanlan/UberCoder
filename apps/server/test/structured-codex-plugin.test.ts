@@ -7,6 +7,7 @@ import {
   buildAppServerCommand,
   buildAppServerEnv,
   expandHome,
+  threadConfig,
   type CodexAppServerInstance,
 } from '../src/providers/transport/codex/app-server-instance.js';
 import {
@@ -304,6 +305,11 @@ describe('codex request building', () => {
     expect(() => buildTurnStartParams('t1', { text: 'x', images: [{ path: '/a.png', mimeType: 'image/png' }] }, policy, '/work', 'm')).toThrow(/image/);
   });
 
+  it('always asks Codex to wait for optional MCP servers, and adds the effort override only when given', () => {
+    expect(threadConfig({})).toEqual({ mcp_optional_startup_grace_ms: 10_000 });
+    expect(threadConfig({ effort: 'high' })).toEqual({ mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'high' });
+  });
+
   it('maps the other sandbox policies', () => {
     expect(sandboxPolicyFor({ approvals: 'on-request', sandbox: 'read-only' }, '/w')).toEqual({ type: 'readOnly', networkAccess: false });
     expect(sandboxPolicyFor({ approvals: 'on-request', sandbox: 'workspace-write' }, '/w')).toMatchObject({ type: 'workspaceWrite', writableRoots: ['/w'] });
@@ -550,7 +556,7 @@ describe('codex instance and session against a scripted app-server', () => {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       approvalsReviewer: 'user',
-      config: { model_reasoning_effort: 'high' },
+      config: { mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'high' },
       ephemeral: false,
     });
     const log = new EventLog(session);
@@ -1213,7 +1219,7 @@ describe('codex instance and session against a scripted app-server', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
         sandbox: 'danger-full-access',
-        config: { model_reasoning_effort: 'low' },
+        config: { mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'low' },
       });
       const log = new EventLog(session);
       await waitUntil(() => log.events.length >= 2);
@@ -1528,7 +1534,7 @@ describe.skipIf(process.env.AGENT_CONSOLE_REAL_CODEX !== '1')('real codex app-se
       ['turn/start', buildTurnStartParams(bogus, { text: 'never sent', model: 'gpt-x', effort: 'high' }, policy, dir, 'msg-1')],
       ['turn/steer', { threadId: bogus, input: [{ type: 'text', text: 'x' }], expectedTurnId: 'turn', clientUserMessageId: 'm' }],
       ['turn/interrupt', { threadId: bogus, turnId: 'turn' }],
-      ['thread/resume', { threadId: bogus, excludeTurns: true, cwd: dir, approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: 'danger-full-access', config: { model_reasoning_effort: 'low' } }],
+      ['thread/resume', { threadId: bogus, excludeTurns: true, cwd: dir, approvalPolicy: 'never', approvalsReviewer: 'user', sandbox: 'danger-full-access', config: threadConfig({ effort: 'low' }) }],
       ['thread/unarchive', { threadId: bogus }],
       ['thread/unsubscribe', { threadId: bogus }],
       ['thread/read', { threadId: bogus, includeTurns: false }],
