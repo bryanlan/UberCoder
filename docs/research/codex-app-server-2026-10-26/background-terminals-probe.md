@@ -28,3 +28,28 @@ The item listing stays a secondary source for a version that lists in-progress i
 
 Also seen: `-c mcp_servers.<name>.enabled=false` is accepted and keeps that server from starting; `features.skills` in
 `~/.codex/config.toml` is reported as an unrecognized setting by 0.164.0 (a warning, not an error).
+
+## Second probe (2026-10-27 03:46 UTC): a process an earlier turn left behind
+
+Question: can an adopted turn tell its own running command from a background terminal an earlier turn left running?
+
+Method: the same app-server setup; turn 1 asked the model to start `sh -c "echo <bg-marker>; sleep 600"` in the background
+and reply at once; turn 2 ran the 90 s counting loop; the item list and the terminal list were read after turn 1, during
+turn 2 and after `turn/interrupt` of turn 2.
+
+Seen:
+
+- The model ran turn 1's command as `/bin/bash -lc "nohup sh -c '…' > /tmp/… 2>&1 &"`. Its `commandExecution` item got
+  `item/started` (`processId: "31245"`, `inProgress`) and then `item/completed` (`status: "completed"`) inside turn 1, and
+  turn 1 completed. Right after that no process carrying the marker was alive: Codex ends the process group of a completed
+  command, so a `nohup … &` child does not outlive its command.
+- After turn 1, `thread/backgroundTerminals/list` was empty, and `thread/items/list` listed turn 1's command as a completed
+  item with its `processId` and `turnId`.
+- During turn 2 the terminal list held exactly one entry, turn 2's running command (`itemId`, `processId: "6340"`); the item
+  list still did not contain it. After `turn/interrupt` the entry was still there and `terminate` ended it
+  (`item/completed` with `status: "failed"`).
+
+Consequence: an earlier turn can leave a process behind only as a Codex background terminal that is still in progress (a
+long command the model did not wait for), and such a terminal carries no turn id and no timestamp, so the lists cannot
+assign it to a turn. Console therefore records which turn started each command from the `item/started` frames it sees
+(`turnId`, `processId`) and, at adoption, leaves the terminals recorded under another turn alone.
