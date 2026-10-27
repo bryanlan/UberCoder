@@ -604,7 +604,27 @@ tmux chat does, and calls none of their tools.
 
 ## Verification evidence
 
-Real-provider proofs, 2026-10-26, `claude` 2.1.310, `codex-cli` 0.164.0, run on `e7e0a2a` (the review round 1 fixes) with a
+**Round 3 run (current).** On `b2e6e5e` (the review round 3 fixes), 2026-10-27 03:24 to 03:35 UTC, `claude` 2.1.310,
+`codex-cli` 0.164.0: the full server suite (105 files, 2430 tests; the only failures are the three `claude-ready-lifecycle`
+and `claude-run-state` tests that fail on `main` too), the web suite (19 files, 215 tests), `npm run build`, then the three
+proofs one at a time with the tightened assertions, no process left behind:
+
+- `claude-proof-2026-10-27T03-30-52Z.json`: 14 of 14. Step f: idle 262 ms and the command gone 324 ms after Stop. Step k2:
+  the turn adopted 485 ms after boot; Stop ended the count 327 ms after Escape; one interrupted and no completed turn-end
+  record after Stop, one completed after the next message; a message sent during the re-adopted turn was delivered as a
+  steer, was still unanswered 2.36 s into the count, and was answered after it; the steered turn ended exactly once.
+- `codex-proof-2026-10-27T03-33-03Z.json`: 16 of 16. Step h: the command gone 327 ms after Stop. Step k2: adopted 457 ms
+  after boot; Stop ended the count 327 ms after Escape (the round 2 build left it running: the adopted turn now takes its
+  commands from `thread/backgroundTerminals/list`); one aborted turn after Stop, one completed after the next message; the
+  steer during the re-adopted turn was unanswered 2.36 s into the count and answered after it. Step h2 showed the
+  message-mode card and delivered the answer as a steer.
+- `migration-proof-2026-10-27T03-35-02Z.json`: 9 of 9.
+
+The run before it, on `59fde29` (2026-10-27 02:44 to 02:55 UTC), is kept as `*-proof-2026-10-27T02-5*.json`: Claude 14 of
+14, migration 9 of 9, Codex 15 of 16 with k2 failing the new 5 s Stop rule, which is what led to the probe and the round 3
+fix.
+
+**Round 1 and 2 runs.** Real-provider proofs, 2026-10-26, `claude` 2.1.310, `codex-cli` 0.164.0, run on `e7e0a2a` (the review round 1 fixes) with a
 clean source tree. The evidence JSON is in `docs/research/cutover-2026-10-26/` (steps, key values, findings, cleanup; no message
 bodies, tokens or addresses):
 

@@ -1,0 +1,335 @@
+{
+  "script": "scripts/prove-structured-claude.mjs",
+  "startedAt": "2026-10-27T03:30:52.965Z",
+  "finishedAt": "2026-10-27T03:32:59.700Z",
+  "revision": "b2e6e5e",
+  "workingTree": [],
+  "node": "v22.18.0",
+  "tempRoot": "/tmp/console-structured-claude-proof-DvJvKM",
+  "runtimeDir": "/tmp/console-structured-claude-proof-DvJvKM/runtime",
+  "port": 14390,
+  "claudeVersion": "2.1.311 (Claude Code)",
+  "sessionId": "c42befca-2c77-42d8-b407-0e60f354f5e2",
+  "nativeSessionId": "eb7bac3c-7d57-4383-b8bb-844b939176e8",
+  "models": {
+    "firstTurn": "claude-sonnet-5 high",
+    "mediumTurn": "claude-opus-5-5 xhigh",
+    "lowTurn": "claude-sonnet-5 high"
+  },
+  "pids": {
+    "claudeFirst": 732828,
+    "sessionHost": 732821,
+    "claudeAfterRestore": 734440
+  },
+  "steps": [
+    {
+      "id": "a",
+      "name": "project tree advertises the structured provider",
+      "pass": true,
+      "skipped": false,
+      "ms": 3,
+      "values": {
+        "structuredProviders": "claude"
+      }
+    },
+    {
+      "id": "b",
+      "name": "structured bind: UUID native id, sentinel name, host record, process environment",
+      "pass": true,
+      "skipped": false,
+      "ms": 705,
+      "values": {
+        "sessionId": "c42befca-2c77-42d8-b407-0e60f354f5e2",
+        "nativeId": "eb7bac3c-7d57-4383-b8bb-844b939176e8",
+        "pid": 732828,
+        "hostPid": 732821,
+        "tmuxName": "structured:c42befca-2c77-42d8-b407-0e60f354f5e2",
+        "tmuxServer": "none",
+        "coordEnv": "ok",
+        "consoleSessionIdEnv": "ok",
+        "mcpServers": 1,
+        "mcpIsolated": "true"
+      }
+    },
+    {
+      "id": "c",
+      "name": "first message completes; transcript, human turn origin and index",
+      "pass": true,
+      "skipped": false,
+      "ms": 6040,
+      "values": {
+        "turnId": "6024cdfe-4f1e-4221-9cd8-5bd245d3340e",
+        "deliveryMode": "turn",
+        "lastResponseAt": "2026-10-27T03:30:59.743Z",
+        "transcript": "~/.claude/projects/-tmp-console-structured-claude-proof-DvJvKM-projects-demo/eb7bac3c-7d57-4383-b8bb-844b939176e8.jsonl",
+        "records": 33,
+        "turnOrigin": "human",
+        "entrypoint": "sdk-cli",
+        "promptSource": "sdk",
+        "model": "claude-sonnet-5",
+        "effort": "high",
+        "profileSwitchedBeforeTurn": "low",
+        "pid": 732828
+      }
+    },
+    {
+      "id": "d",
+      "name": "coordination: SessionStart hook registered the session; the agent called the MCP tool",
+      "pass": true,
+      "skipped": false,
+      "ms": 8384,
+      "values": {
+        "assignmentId": "4527ba8f-9bca-409a-8bd0-f0c93d1736cf",
+        "nativeSessionId": "eb7bac3c-7d57-4383-b8bb-844b939176e8",
+        "status": "waiting",
+        "lastSeenBefore": "2026-10-27T03:30:59.718Z",
+        "lastSeenAfter": "2026-10-27T03:31:08.165Z",
+        "mcpProcesses": 1,
+        "mcpToolName": "mcp__agent_console_coordination__agent_coordination"
+      }
+    },
+    {
+      "id": "e",
+      "name": "steer: a message sent mid-turn is delivered as a steer; how it lands in the transcript",
+      "pass": true,
+      "skipped": false,
+      "ms": 34777,
+      "values": {
+        "commandPids": 1,
+        "steerToReplyMs": 30125,
+        "turnId": "1542789d-a10e-4a26-b080-bae0715c6d97",
+        "deliveryMode": "steer",
+        "steerRowType": "attachment:queued_command",
+        "queuedCommandOrigin": "human",
+        "queuedCommandHumanTurn": "true",
+        "queueOperations": "remove",
+        "steerRowIndex": 14,
+        "toolResultIndex": 11,
+        "finalAssistantIndex": 22,
+        "commandOutputLastNumber": 30,
+        "stopHookSummaries": 1,
+        "hooksSeen": "PostToolUse,PreToolUse,Stop"
+      }
+    },
+    {
+      "id": "f",
+      "name": "Stop: Escape interrupts a running turn; the process survives and the shell command ends",
+      "pass": true,
+      "skipped": false,
+      "ms": 4956,
+      "values": {
+        "commandPids": 1,
+        "idleAfterMs": 262,
+        "commandGoneAfterMs": 324,
+        "interruptionMarker": "[Request interrupted by user for tool use]",
+        "pid": 732828,
+        "processSurvived": true
+      }
+    },
+    {
+      "id": "g",
+      "name": "question: AskUserQuestion becomes a pending request, the card route answers it, the answer reaches the model",
+      "pass": true,
+      "skipped": false,
+      "ms": 3808,
+      "values": {
+        "requestKind": "question",
+        "options": "Red/Blue",
+        "multiSelect": "false",
+        "allowCustom": "true",
+        "toolResultCarriesAnswer": true,
+        "secondAnswerStatus": 404
+      }
+    },
+    {
+      "id": "h",
+      "name": "image: an attached PNG reaches the model as an image block",
+      "pass": true,
+      "skipped": false,
+      "ms": 1039,
+      "values": {
+        "imageId": "fcdb9c63-a5d6-44d6-9444-8f10541f648f",
+        "mediaType": "image/png",
+        "imageBlocks": 1,
+        "sourceType": "base64",
+        "width": 64,
+        "readToolCalls": 0
+      }
+    },
+    {
+      "id": "i",
+      "name": "model and effort: the profile reaches the running process on the next turn, with no restart",
+      "pass": true,
+      "skipped": false,
+      "ms": 5131,
+      "values": {
+        "pid": 732828,
+        "mediumModel": "claude-opus-5-5",
+        "mediumEffort": "xhigh",
+        "lowModel": "claude-sonnet-5",
+        "lowEffort": "high",
+        "modelCommandRowsPerSwitch": 1,
+        "timelineLeaks": 0
+      }
+    },
+    {
+      "id": "j",
+      "name": "manual sleep ends the process; restore resumes the same session on a new process",
+      "pass": true,
+      "skipped": false,
+      "ms": 2628,
+      "values": {
+        "assignmentBefore": "waiting",
+        "manualSuspendedAt": "2026-10-27T03:31:58.394Z",
+        "pidBefore": 732828,
+        "pidAfter": 734440,
+        "processEnded": true,
+        "resumedSameSession": true,
+        "epochChanged": true
+      }
+    },
+    {
+      "id": "k1",
+      "name": "graceful backend restart while idle: the process survives in its session host and answers the next turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 11223,
+      "values": {
+        "reattachedAtBoot": true,
+        "screenBeforeMessage": "Claude (structured) idle",
+        "oldPid": 734440,
+        "newPid": 734440,
+        "samePid": true,
+        "hostPid": 734433,
+        "recordMatchesProc": true,
+        "liveHolders": 1
+      }
+    },
+    {
+      "id": "k2",
+      "name": "graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, a message sent meanwhile steers it and is answered after it, the next message completes on the same process, and every turn ends exactly once",
+      "pass": true,
+      "skipped": false,
+      "ms": 44957,
+      "values": {
+        "commandPids": 1,
+        "continuationBeforeRestart": "unattended",
+        "firstPollHttp": 200,
+        "firstPollScreen": "Claude (structured) working",
+        "firstPollWorking": "true",
+        "connectionEndedAfterFirstPoll": false,
+        "adoptedAfterBootMs": 485,
+        "screenWhileCounting": "Claude (structured) working",
+        "polls": 6,
+        "countSeenRunningForMs": 3697,
+        "idleAfterMs": 265,
+        "commandGoneAfterMs": 327,
+        "interruptionMarker": "[Request interrupted by user for tool use]",
+        "turnEndsAfterStop": "0 completed, 1 interrupted",
+        "turnEndsAfterResume": "1 completed, 0 interrupted",
+        "steerCommandPids": 1,
+        "steerFirstPollHttp": 200,
+        "steerFirstPollScreen": "Claude (structured) working",
+        "steerFirstPollWorking": "true",
+        "steerConnectionEndedAfterFirstPoll": false,
+        "steerAdoptedAfterBootMs": 528,
+        "steerScreenWhileCounting": "Claude (structured) working",
+        "steerPolls": 6,
+        "steerCountSeenRunningForMs": 3747,
+        "followUpDelivery": "steer",
+        "followUpUnansweredForMs": 2358,
+        "followUpAnswered": "after the count",
+        "turnEndsAfterSteeredTurn": "1 completed, 0 interrupted",
+        "oldPid": 734440,
+        "newPid": 734440,
+        "samePid": true,
+        "hostPid": 734433,
+        "liveHolders": 1,
+        "recoveryOrWakeText": "none"
+      }
+    },
+    {
+      "id": "l",
+      "name": "screenshot-sized image: a 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour",
+      "pass": true,
+      "skipped": false,
+      "ms": 1640,
+      "values": {
+        "fileBytes": 6787026,
+        "imageId": "4c50353d-1011-446e-b2b1-bb7952277fea",
+        "mediaType": "image/png",
+        "width": 2560,
+        "height": 1440,
+        "storedBytes": 6787026,
+        "blockBytes": 133713,
+        "sourceType": "base64",
+        "readToolCalls": 0
+      }
+    },
+    {
+      "id": "m",
+      "name": "release ends the session and the process; no process of this proof remains",
+      "pass": true,
+      "skipped": false,
+      "ms": 869,
+      "values": {
+        "status": "ended",
+        "tmuxServer": "none",
+        "processesAfterRelease": 0,
+        "coordMcpAfterRelease": 0,
+        "claudeProcessesAfterRelease": 0,
+        "processesAfterShutdown": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "mcp-precedence",
+      "text": "~/.claude.json defines a user-scope agent_console_coordination server that names the live runtime; the plugin's --mcp-config entry of the same name won: 1 coordination MCP server(s) started, all with the isolated runtime."
+    },
+    {
+      "id": "steer-shape",
+      "text": "A plain mid-turn message (deliveryMode steer) was recorded as attachment:queued_command (origin human, humanTurn true); the counting command had printed up to 30 of 30 when its result row was written, and the transcript has 1 Stop hook summary(ies) for this exchange, so the message was folded into the running turn only after the shell command finished (fold happens at the tool boundary, it does not shorten a running command)."
+    },
+    {
+      "id": "model-switch-rows",
+      "text": "A live profile switch (set_model) writes a \"/model <id>\" local-command row into the transcript (1 per switch); the Console timeline filters them out. The effort follows the profile too (request effort xhigh then high)."
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "backend shutdown",
+      "ok": true
+    },
+    {
+      "name": "leftover processes",
+      "ok": true,
+      "detail": "0 found, 0 needed SIGKILL"
+    },
+    {
+      "name": "private tmux server",
+      "ok": true
+    },
+    {
+      "name": "transcripts",
+      "ok": true,
+      "detail": "removed with the proof"
+    },
+    {
+      "name": "final process scan",
+      "ok": true,
+      "detail": "no lane process of this proof left"
+    },
+    {
+      "name": "remove temp root",
+      "ok": true
+    }
+  ],
+  "result": "pass",
+  "summary": {
+    "passed": 14,
+    "failed": 0,
+    "skipped": 0,
+    "cleanupFailed": 0
+  }
+}
