@@ -17,6 +17,7 @@ import type { StructuredProviderConfig } from '../../../config/schema.js';
 import {
   LineTransportNotRunningError,
   ResumeFailedError,
+  TransportBusyError,
   TransportUnavailableError,
   type LineTransport,
   type LineTransportFactory,
@@ -431,8 +432,9 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
    * After a backend restart: picks the thread up again when the app-server it ran in is still running behind its session host,
    * and resolves undefined when no host answers. It connects to a running host only (nothing is started, here or in the resume
    * that follows), then resumes the thread, which adopts a turn the thread is still running (see
-   * {@link CodexAppServerSession.adopt}). A host that runs but does not answer in time is left alone and reported as
-   * {@link TransportUnavailableError}: it is not "no survivor", because the turn may well be running in it.
+   * {@link CodexAppServerSession.adopt}). A host that runs but does not answer in time, or whose app-server is slow to answer the
+   * handshake check, is left alone and reported as {@link TransportUnavailableError}: it is not "no survivor", because the turn may well
+   * be running in it.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession | undefined> {
     try {
@@ -440,7 +442,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       return await this.resumeThread(nativeSessionId, options, true);
     } catch (error) {
       if (!(error instanceof LineTransportNotRunningError)) throw error;
-      if (error.reason === 'unreachable') throw new TransportUnavailableError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
+      if (error.reason === 'unreachable') throw new TransportBusyError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
       return undefined;
     }
   }
@@ -575,10 +577,12 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       throw toTransportError(error instanceof LineTransportSpawnError ? new JsonRpcSpawnError(argv[0] ?? '', error) : error);
     }
     const fresh = transportStartedFresh(transport);
-    // The lines the host replays are history: the client must see only what happens from now on.
+    // The lines the host replays are history: the client must see only what happens from now on. An attach-only start asks for the
+    // replay whether or not a record of the instance was saved (see `openHostTransport`), so it separates it as well: a replayed
+    // response would otherwise answer a request of the new connection, whose ids start at 1 again.
     let clientTransport: LineTransport = transport;
     let replay: ReplayedLines | undefined;
-    if (transport instanceof HostLineTransport && replayWanted) {
+    if (transport instanceof HostLineTransport && (replayWanted || attachOnly)) {
       const separated = await this.separateReplay(transport);
       clientTransport = separated.transport;
       replay = separated.replay;
@@ -607,6 +611,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
         await this.confirmInitialized(client);
       }
     } catch (error) {
+      if ((attachOnly || !fresh) && error instanceof JsonRpcTimeoutError) {
+        // A running app-server this call did not start (maybe busy, maybe swapped out) that is slow to answer is not broken: ending
+        // it would kill every turn and command it runs. Let go of the connection and report it busy; the next attempt reconnects.
+        await client.close().catch(() => undefined);
+        this.log.warn({ error: error.message }, 'a running codex app-server did not answer in time; it was left running');
+        throw new TransportBusyError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
+      }
       await client.close({ terminate: true }).catch(() => undefined); // the next start gets a clean process
       this.logStartFailure(client, error);
       throw toTransportError(error);

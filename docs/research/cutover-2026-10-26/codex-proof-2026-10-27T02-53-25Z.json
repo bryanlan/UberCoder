@@ -1,0 +1,291 @@
+{
+  "script": "scripts/prove-structured-codex.mjs",
+  "startedAt": "2026-10-27T02:53:25.485Z",
+  "finishedAt": "2026-10-27T02:54:53.272Z",
+  "revision": "59fde29",
+  "workingTree": [],
+  "codexVersion": "codex-cli 0.164.0",
+  "node": "v22.18.0",
+  "tempRoot": "/tmp/console-structured-proof-piOkSN",
+  "runtimeDir": "/tmp/console-structured-proof-piOkSN/runtime",
+  "port": 14390,
+  "threadId": "01a17b46-e5f4-7303-b937-687c19cd176f",
+  "sessionId": "cfa33d2f-99c1-4f15-9d05-5a1822d90633",
+  "pids": {
+    "appServerFirst": 647583,
+    "appServerGroup": [
+      647583,
+      647590
+    ],
+    "sessionHost": 647576,
+    "appServerAfterRestart": 647583
+  },
+  "models": {
+    "firstTurn": "gpt-6-luna xhigh",
+    "mediumTurn": "gpt-6.1-sol"
+  },
+  "steps": [
+    {
+      "id": "a",
+      "name": "project tree advertises the structured provider",
+      "pass": true,
+      "skipped": false,
+      "ms": 3,
+      "values": {
+        "structuredProviders": "codex"
+      }
+    },
+    {
+      "id": "b",
+      "name": "structured bind: thread id, no tmux session, app-server pid and environment",
+      "pass": true,
+      "skipped": false,
+      "ms": 739,
+      "values": {
+        "sessionId": "cfa33d2f-99c1-4f15-9d05-5a1822d90633",
+        "threadId": "01a17b46-e5f4-7303-b937-687c19cd176f",
+        "pid": 647583,
+        "hostPid": 647576,
+        "tmuxName": "structured:cfa33d2f-99c1-4f15-9d05-5a1822d90633",
+        "tmuxServer": "none",
+        "coordEnv": "ok",
+        "mcpPinned": "ok",
+        "processGroup": 647583,
+        "groupMembers": 2
+      }
+    },
+    {
+      "id": "c",
+      "name": "model profile: low applies before the first turn, with no restart",
+      "pass": true,
+      "skipped": false,
+      "ms": 274,
+      "values": {
+        "pid": 647583,
+        "screenModel": "gpt-6-luna xhigh"
+      }
+    },
+    {
+      "id": "d",
+      "name": "first message completes with an assistant reply",
+      "pass": true,
+      "skipped": false,
+      "ms": 4188,
+      "values": {
+        "turnId": "01a17b46-e7c1-7e21-ba53-4b0c7b1ed1cf",
+        "deliveryMode": "turn",
+        "lastResponseAt": "2026-10-27T02:53:30.719Z"
+      }
+    },
+    {
+      "id": "e",
+      "name": "rollout file exists, the index points at it, and the first turn ran on the low model",
+      "pass": true,
+      "skipped": false,
+      "ms": 5,
+      "values": {
+        "rollout": "rollout-2026-10-26T19-53-26-01a17b46-e5f4-7303-b937-687c19cd176f.jsonl",
+        "records": 19,
+        "model": "gpt-6-luna",
+        "effort": "xhigh"
+      }
+    },
+    {
+      "id": "f",
+      "name": "coordination: hook registered the thread and the agent called the MCP tool",
+      "pass": true,
+      "skipped": false,
+      "ms": 10208,
+      "values": {
+        "mcpProcesses": 1,
+        "assignmentId": "2c293f12-1fe9-4265-9a04-3cab8237dfd4",
+        "nativeSessionId": "01a17b46-e5f4-7303-b937-687c19cd176f",
+        "status": "waiting",
+        "lastSeenBefore": "2026-10-27T02:53:30.704Z",
+        "lastSeenAfter": "2026-10-27T02:53:40.788Z",
+        "mcpCallRecords": 4
+      }
+    },
+    {
+      "id": "g",
+      "name": "steer: a message sent mid-turn is delivered as a steer",
+      "pass": true,
+      "skipped": false,
+      "ms": 9834,
+      "values": {
+        "commandRunning": true,
+        "turnId": "01a17b47-1ffc-75a2-bbb9-b6954855116a",
+        "deliveryMode": "steer"
+      }
+    },
+    {
+      "id": "h",
+      "name": "Stop: Escape interrupts a running turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 7221,
+      "values": {
+        "commandRunning": true,
+        "commandPids": 1,
+        "idleAfterMs": 279,
+        "commandGoneAfterMs": 339,
+        "turnAborted": "interrupted"
+      }
+    },
+    {
+      "id": "h2",
+      "name": "question: request_user_input_async shows a card, the card route answers it, the answer reaches the model",
+      "pass": true,
+      "skipped": false,
+      "ms": 9123,
+      "values": {
+        "cardAfterMs": 5542,
+        "options": "Red/Blue",
+        "allowCustom": "true",
+        "turnWorkingWhileAsking": true,
+        "secondAnswerStatus": 404,
+        "answerToReplyMs": 3537,
+        "answerDelivered": "[{\"type\":\"input_text\",\"text\":\"Answer to your question: Color preference: Blue\"}]"
+      }
+    },
+    {
+      "id": "h3",
+      "name": "image: an attached PNG reaches the model as a local image item",
+      "pass": true,
+      "skipped": false,
+      "ms": 6585,
+      "values": {
+        "imageId": "d1430276-c319-4d72-8a65-c33bb0218b7f",
+        "mediaType": "image/png",
+        "rolloutRecordType": "message"
+      }
+    },
+    {
+      "id": "i",
+      "name": "manual sleep unloads the thread (screen reads asleep) and restore reloads it (new epoch)",
+      "pass": true,
+      "skipped": false,
+      "ms": 4773,
+      "values": {
+        "assignmentBefore": "waiting",
+        "manualSuspendedAt": "2026-10-27T02:54:14.009Z",
+        "pid": 647583,
+        "screenSequence": "Codex (app-server) asleep > Codex (app-server) idle > Codex (app-server) working > Codex (app-server) idle",
+        "epochChanged": true,
+        "manualSuspendedAfterResume": "cleared"
+      }
+    },
+    {
+      "id": "j",
+      "name": "model profile: medium reaches the provider on the next turn, then back to low",
+      "pass": true,
+      "skipped": false,
+      "ms": 1046,
+      "values": {
+        "model": "gpt-6.1-sol",
+        "stoppedMediumTurn": true,
+        "pid": 647583
+      }
+    },
+    {
+      "id": "k",
+      "name": "graceful backend restart: the app-server survives in its session host and serves the next turn",
+      "pass": true,
+      "skipped": false,
+      "ms": 5430,
+      "values": {
+        "statusAfterRestart": "bound",
+        "oldPid": 647583,
+        "newPid": 647583,
+        "samePid": true,
+        "hostPid": 647576,
+        "recordMatchesProc": true
+      }
+    },
+    {
+      "id": "k2",
+      "name": "graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it and ends its command, a message sent meanwhile steers it and is answered after it, and the next message completes on the same app-server",
+      "pass": false,
+      "skipped": false,
+      "ms": 19188,
+      "values": {
+        "commandRunning": true,
+        "commandPids": 1,
+        "continuationBeforeRestart": "unattended",
+        "firstPollHttp": 200,
+        "firstPollScreen": "Codex (app-server) working",
+        "firstPollWorking": "true",
+        "connectionEndedAfterFirstPoll": false,
+        "attachedAfterBootMs": 504,
+        "epochChanged": true,
+        "screenWhileCounting": "Codex (app-server) working",
+        "polls": 6,
+        "countSeenRunningForMs": 3713,
+        "idleAfterMs": 23
+      },
+      "error": "Timed out after 5 s: the counting command to end within 5 s of Stop"
+    },
+    {
+      "id": "l",
+      "name": "screenshot-sized image: a 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour",
+      "pass": true,
+      "skipped": false,
+      "ms": 7970,
+      "values": {
+        "fileBytes": 6786680,
+        "imageId": "baaadee5-44f3-4db6-9f97-d9e18461e25b",
+        "mediaType": "image/png",
+        "width": 2560,
+        "height": 1440,
+        "storedBytes": 6786680,
+        "sentBytes": 4007484,
+        "rolloutRecordType": "message"
+      }
+    },
+    {
+      "id": "m",
+      "name": "release ends the session; after the session host is ended no process from this proof remains",
+      "pass": true,
+      "skipped": false,
+      "ms": 537,
+      "values": {
+        "status": "ended",
+        "tmuxServer": "none",
+        "processesAfterRelease": 7,
+        "coordMcpAfterRelease": 1,
+        "hostSurvivedShutdown": true,
+        "processesAfterShutdown": 0,
+        "coordMcpAfterShutdown": 0
+      }
+    }
+  ],
+  "findings": [],
+  "cleanup": [
+    {
+      "name": "backend shutdown",
+      "ok": true
+    },
+    {
+      "name": "leftover processes",
+      "ok": true,
+      "detail": "0 found, 0 needed SIGKILL"
+    },
+    {
+      "name": "final process scan",
+      "ok": true,
+      "detail": "no lane process of this proof left"
+    },
+    {
+      "name": "remove temp root",
+      "ok": true
+    }
+  ],
+  "result": "fail",
+  "providerRetries": [],
+  "summary": {
+    "passed": 15,
+    "failed": 1,
+    "skipped": 0,
+    "cleanupFailed": 0
+  }
+}

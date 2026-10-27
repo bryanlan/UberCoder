@@ -13,6 +13,14 @@ const budgetKey = (id: string) => `run-recovery-budget:${id}`;
  * first). The attempt is not spent and the retry is scheduled again, unlike any other error, which leaves the
  * outcome uncertain and stops recovery.
  */
+/** Thrown by the submit callback when nothing was sent and sending the same prompt again would fail the same way. */
+export class RecoverySubmitRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RecoverySubmitRejectedError';
+  }
+}
+
 export class RecoverySubmitDeferredError extends Error {
   constructor(message = 'The recovery prompt was not sent.') {
     super(message);
@@ -311,6 +319,11 @@ export class RunRecovery {
           this.save(id, next);
           this.schedule(id, observation, next);
         }
+        return;
+      }
+      if (error instanceof RecoverySubmitRejectedError) {
+        // Nothing was sent and a retry would be refused the same way: a definite stop with that reason, not an uncertain one.
+        if (current && current.status !== 'stopped') this.save(id, { ...current, status: 'stopped', nextRetryAt: undefined, stoppedReason: error.message });
         return;
       }
       if (current && current.status !== 'stopped') this.save(id, { ...current, status: 'stopped', stoppedReason: 'Retry submission failed or its outcome is uncertain. Review the conversation before continuing.' });

@@ -275,7 +275,10 @@ export interface ThreadTurnsListResponse {
   backwardsCursor?: string | null;
 }
 
-/** One item of a thread, with the turn it belongs to. Oldest first unless `sortDirection` says otherwise. */
+/**
+ * One item of a thread, with the turn it belongs to. Oldest first unless `sortDirection` says otherwise. On codex-cli 0.164.0 only
+ * completed items are listed: a command still running in the turn is not (see `ThreadBackgroundTerminalsListParams`).
+ */
 export interface ThreadItemEntry {
   turnId: string;
   item: CodexThreadItem;
@@ -310,7 +313,12 @@ export interface ThreadUnsubscribeResponse {
   status: 'notLoaded' | 'notSubscribed' | 'unsubscribed';
 }
 
-/** Experimental (needs `experimentalApi: true`). */
+/**
+ * Experimental (needs `experimentalApi: true`). The thread's live terminals: on codex-cli 0.164.0 a running foreground command
+ * (`source: "unifiedExecStartup"`) is listed here with its item id and process id, and still is after `turn/interrupt` (the
+ * command keeps running until `terminate`). `thread/items/list` returns only completed items there, so this list is the only
+ * way to find the commands a turn left running.
+ */
 export interface ThreadBackgroundTerminalsListParams {
   threadId: string;
   cursor?: string | null;

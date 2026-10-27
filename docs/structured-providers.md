@@ -482,10 +482,15 @@ Contract errors (`types.ts`):
 
 - `PreviousTurnActiveError` (`previous_turn_active`): `sendTurn` while a turn runs.
 - `NotSentError` (`not_sent`): the request certainly never reached the provider. The session had ended, or the
-  connection was gone, before anything was written. The Claude plugin also uses it for the work done before the
-  write (a refused model switch, an unreadable image), so those messages are queued and tried again. Review round 2 (N3)
-  found the cost: a failure no retry can fix is retried every second for ever. A failure after the write is not this
-  error: its outcome is uncertain and the request is never replayed.
+  connection was gone, before anything was written. The host queues the message and tries again, for at most ten
+  minutes of not-sent attempts, then fails it with the last error. A failure after the write is not this error: its
+  outcome is uncertain and the request is never replayed.
+- `SendRejectedError`: nothing was sent and sending it again would fail the same way (a model or effort the CLI
+  refuses, an image file gone from the store). The host fails the message at once with the reason; in automatic
+  delivery it is a definite failure, not an uncertain outcome.
+- `TransportBusyError` (a `TransportUnavailableError`): `reattach` found the host running but it did not answer (the
+  connect was refused or no hello came back). The host leaves the row alone and asks again on each load, for up to
+  10 minutes, then settles the turn as lost.
 - `TurnNotActiveError` (`turn_not_active`, carries `turnId`): `steer` named a turn that already ended. The host sends
   the text as a new turn for this error only.
 - `RequestNotPendingError` (`request_not_pending`, carries `requestId`): `respond` named a request that is not open
@@ -668,13 +673,17 @@ the source of truth for field names):
   waits on user input (`waitingOnUserInput`). It is answered by id over the same relayed stdin (`replyToServerRequest`),
   because the app-server keeps waiting for the reply to that JSON-RPC id. A wait that no record explains cannot be
   answered; a notice tells the person to Stop. `dispose('shutdown')` leaves held questions held (answering them with
-  nothing would race the socket closing). Observed in the proof (step k2): Stop on an adopted turn ended the turn at
-  once, but the counting command, which had started before the restart, ran to the end of its 25 s count. The plugin
-  terminates a command (`thread/backgroundTerminals/terminate`) only when it saw that command's `item/started`, and an
-  adopted turn starts with an empty list of commands, so Stop has nothing to terminate (review round 2, N1; Codex does not
-  end a turn's command on `turn/interrupt` by itself). Two more limits from round 2: while adoption waits for the turn listing
-  the session keeps at most 4096 thread notifications and drops the rest (N5), and the manager declares the turn lost before
-  the "first event names the turn" fallback can run (N5); a slow host at adoption is treated as no survivor (N4).
+  nothing would race the socket closing). An adopted turn starts with the commands the thread is running: adoption reads
+  `thread/backgroundTerminals/list` (item id to process id) and tracks every live terminal on the adopted turn, so Stop
+  ends them as it ends the commands it saw start (Codex does not end a turn's command on `turn/interrupt` by itself).
+  `thread/items/list` is only a secondary source, because codex-cli 0.164.0 never lists a running command there
+  (`docs/research/codex-app-server-2026-10-26/background-terminals-probe.md`; the proof run of 2026-10-27 02:53 UTC on
+  `59fde29` failed k2 for that reason before this fix). While adoption waits for the turn listing the session keeps at most
+  4096 thread notifications but always keeps the turn, thread-status and server-request frames. A turn the listing does
+  not name is marked unidentified: the manager keeps the row working, a send is refused as a turn in progress, and Stop
+  re-lists the turns and interrupts the one running. A host that is unreachable at adoption is reported busy
+  (`TransportBusyError`) and the row is left alone for up to 10 minutes; a reattach whose handshake check times out
+  disconnects instead of terminating the shared app-server.
 - Connection loss: when the process ends on its own, every open session gets `session.state: 'error'` with
   the code `process_exited` and a message that names only how it ended (`exit code 1`, `signal SIGKILL`).
   The host writes the conversation status line "The provider connection ended (exit code 1). The session

@@ -2,9 +2,9 @@
 
 Date: 2026-10-26. Branch: `feature/structured-claude-cutover`, stacked on `feature/structured-provider-lane`
 (the Codex app-server lane, see `docs/structured-providers.md`). Status: Phase A is built and was proven against the
-real Claude and Codex CLIs on `e7e0a2a`, after review round 1. Review round 2 read that build and listed open items (see
-"Verification evidence" and "Review and fixes"). Deploying it and flipping the default are Bryan's live steps. Nothing in this document changes the running Console
-until those steps are executed.
+real Claude and Codex CLIs after review rounds 1 and 2, and review round 3 read the round 2 fixes; its findings are fixed on
+this branch (see "Verification evidence" and "Review and fixes"). Deploying it and flipping the default are Bryan's live
+steps. Nothing in this document changes the running Console until those steps are executed.
 
 ## Goal
 
@@ -465,20 +465,25 @@ The migration then converts idle rows on the next reconcile pass (the first pass
   400 MB process running for ever. `release` and `unload` do the same for a conversation that is not loaded (a survivor
   nobody adopted, or an adoption that failed), so idle sleep ends the process and not only the row marker. The shared Codex
   host is never swept.
-- **Slow hosts and dead groups.** A host that runs but did not answer in time is left alone and the open fails as
-  unavailable (see "Backend side"). The row is not protected yet: at adoption the manager has no "busy" result, so a slow
-  host still gets its running turn declared lost on the first poll (round 2, N4). The host ends the rest of the child's process group after the child exits (see
-  "Ending").
+- **Slow hosts and dead groups.** A host that runs but did not answer (the connect was refused or no hello came back) is
+  reported busy (`TransportBusyError`) and the open fails as unavailable (see "Backend side"). The manager leaves the row
+  alone and asks again on each load for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`), then settles the turn as lost with
+  "did not answer for 10 minutes". A handshake that fails after the connection was made is a plain failure, and the row is
+  reported absent with its reason. Stop on a busy row clears working and says the process could not be reached and may
+  still be running (round 2, N4; round 3, M3). The host ends the rest of the child's process group after the child exits
+  (see "Ending").
 - **Plugin fixes.** Frames that name only unknown uuids become a provider turn. An empty headless chat restarts under the
   same id. `resume` never starts a process beside a holder. A configured `CLAUDE_CODE_*` key passes through. See "Claude
   plugin design".
 - **Stop and queued steers.** Stop sends `cancel_queued: true`. The steers the CLI drops come back in the interrupt result
   (`cancelledSteerIds`). The plugin adds a notice, and the manager marks each queued message `failed` with "cancelled by Stop"
   (and adds one status line when a dropped message had no journal entry).
-- **Failures before the write.** An unreadable image or a refused `set_model` or effort change throws `NotSentError`, so the
-  message is queued and tried again and is not recorded as uncertain. Review round 2 (N3) found the cost: a failure that no
-  retry can fix (a model or effort the CLI refuses, an image file gone from the store) is retried every second for ever,
-  and later messages wait behind it.
+- **Failures before the write.** A failure a retry may fix (the process exited, or the connection was gone, before anything
+  was written) throws `NotSentError`: the message is queued and tried again for at most ten minutes of not-sent attempts
+  (the clock resets when the drain defers for another reason), then fails with the last error and "nothing was sent". A
+  failure no retry can fix (a model or effort the CLI refuses, an image file gone from the store) throws `SendRejectedError`:
+  the message fails at once with the reason, a direct send answers "Nothing was sent", and an automatic wake or recovery
+  prompt records a definite failure with that reason instead of an uncertain outcome (round 2, N3; round 3, L3 and L4).
 - **Questions.** An answer for a request that is not open (the CLI withdrew it, or its turn ended) throws
   `RequestNotPendingError`. The service closes the card and the route answers 404. A question that outlived a backend
   restart is shown again without a second status line or push and without moving recency. A held Codex question does not
@@ -703,12 +708,14 @@ this host. Web `vitest run` 215 passed. `npm run typecheck` and `npm run build` 
    text (no `Read` call in steps h and l). Codex reads the file itself and sent about 4.0 MB for the same large PNG.
 9. *Codex questions outside plan mode.* On `codex-cli` 0.164.0 in the default collaboration mode the model uses
    `request_user_input_async`. The tool returns `{"accepted":true}` at once and Codex raises no blocking request. The real frames were
-   captured: Codex emits an `agentMessage` item (`item/started`, then `item/completed`) with `delivery: 'async'`,
+   captured (`docs/research/cutover-2026-10-26/codex-async-question/run1.jsonl` and `run2.jsonl`, with the capture script): Codex emits an `agentMessage` item (`item/started`, then `item/completed`) with `delivery: 'async'`,
    `phase: 'final_answer'` and `questions: [{ title, options?: string[] }]`, with no `id` or `question` fields; the item id is the
    tool call id. The turn stays open while the model polls with `sleep`, and a plain user turn or a `turn/steer` ends it. The
    mapping at `e7e0a2a` expected another shape, so the proof run recorded here showed no card (round 2, N2). The plugin now maps
-   the real shape to a message-mode card. A blocking `item/tool/requestUserInput` needs plan mode. In earlier runs the turn
-   sometimes ended with the question as ordinary assistant text.
+   the real shape to a message-mode card, and the proof run of 2026-10-27 02:53 UTC on `59fde29` showed the card 5.5 s after
+   the call, answered it through the card route, and saw the answer reach the model as a steer (step h2). A blocking
+   `item/tool/requestUserInput` needs plan mode. In earlier runs the turn sometimes ended with the question as ordinary
+   assistant text.
 10. *Reattach after a backend restart.* A repeated `initialize` on a running process is accepted. The process keeps its pid and its
     place in the CLI registry (exactly one live holder, the host's child), and the reply's `session_state` tells the new backend
     whether it is mid-turn. A turn running across the restart was re-adopted within about 0.5 s (k2). This settles the two
@@ -719,6 +726,12 @@ this host. Web `vitest run` 215 passed. `npm run typecheck` and `npm run build` 
     it saw that command's `item/started`, and this command started before the restart. Round 2 traced it in the code: an
     adopted turn is created with an empty list of commands, so Stop has nothing to terminate, and Codex does not end a turn's
     command on `turn/interrupt` by itself. Step k2 passed only because its 20 s wait outlasted the rest of the 25 s count.
+    The round 2 fix read the turn's items (`thread/items/list`) for in-progress commands; the proof run of 2026-10-27 02:53 UTC
+    on `59fde29`, with k2 now requiring the command gone within 5 s, failed that step. A direct probe of codex-cli 0.164.0
+    (`docs/research/codex-app-server-2026-10-26/background-terminals-probe.md`) showed why: the item listing never contains a
+    running command, while `thread/backgroundTerminals/list` lists it (item id and process id, also for a foreground command)
+    and `thread/backgroundTerminals/terminate` ends it. Adoption now tracks every live terminal of the thread on the adopted
+    turn (round 3).
 12. *Timing on this host.* The first Claude turn (with the profile switch and the index lookup) took 7.5 s; a manual sleep, the
     restore and a one-word turn together about 3.3 s. In an earlier run the Codex medium model (`gpt-6.1-sol`) was rate limited
     once during the migration proof (a turn waited minutes); the proofs use the low profile where a stall would hide a defect.
@@ -729,13 +742,13 @@ this host. Web `vitest run` 215 passed. `npm run typecheck` and `npm run build` 
 Not proven by any run: `ExitPlanMode` under bypass, `priority: "now"` during running tools, streamed deltas,
 `--system-prompt-snapshot off` on a resume with authority text, TUI resume of a headless session and the reverse, a backend crash
 (as opposed to a graceful restart) with a running turn, the entry shape of `pending_permission_requests` (empty in every probe),
-whether the real CLI sends the background-task snapshot behind a repeated `initialize` (the plugin waits 1 s and goes on), the
-the corrected Codex message-mode card in a full proof run (the committed Codex evidence predates the mapping fix and the stricter
-step h2), a held Codex `requestUserInput` across a real restart and
-the replay of requests that arrived while no backend listened (0.164 offers only the async tool in the default mode, so only the
-fake covers them), re-adopting a held `AskUserQuestion` across a real restart, a message sent during an adopted Claude turn (fake
-only), `--session-id` beside a transcript that holds only preamble, slow-host behaviour at adoption, a history-bound Claude row
-without a profile (covered by unit tests) and the idle-sleep timer itself (the proofs sleep manually).
+whether the real CLI sends the background-task snapshot behind a repeated `initialize` (the plugin waits 1 s and goes on), a
+held Codex `requestUserInput` across a real restart and the replay of requests that arrived while no backend listened (0.164
+offers only the async tool in the default mode, so only the fake covers them), re-adopting a held `AskUserQuestion` across a real
+restart, `--session-id` beside a transcript that holds only preamble, slow-host behaviour at adoption, a history-bound Claude row
+without a profile (covered by unit tests) and the idle-sleep timer itself (the proofs sleep manually). The corrected Codex
+message-mode card (h2) and a message sent during an adopted Claude turn (Claude k2, phase 2) were proven by the runs of
+2026-10-27 on `59fde29`.
 
 ## Review and fixes
 
@@ -782,28 +795,51 @@ not fully fixed:
 Its verdict on `e7e0a2a`: not yet ready for Bryan's integration review. Fix N1 (with a stricter k2) and N3, and either make N2
 work or withdraw its claim (N2 has since been made to work). N4 to N10 can go to Bryan as listed open items.
 
-Open follow-ups (the N numbers are the round 2 numbers):
+**Round 3** was a third independent Opus read, of `8a5a785..59fde29` (`docs/research/cutover-2026-10-26/review-round-3.md`),
+beside the first full run on `59fde29` (2026-10-27 02:44 to 02:55 UTC: the server suite with only the three failures main
+already has, the web suite, the build, the Claude proof 14 of 14, the migration proof 9 of 9, and the Codex proof 15 of 16,
+k2 failing its new 5 s Stop rule). The review found N6, N9 and N10 fixed, N3 fixed with low residuals, N1, N2, N4, N5, N7 and
+N8 partial, and four medium problems: the docs still described the round 2 bugs as current (M1); the deleted-transcript guard
+missed every migrated row (M2); "busy" covered any transport failure and had no limit, so a row could read working for ever
+with Stop a no-op (M3); and the N1 fix had no fallback and was unproven (M4). The proof run proved M4 at the same time, and a
+direct probe of codex-cli 0.164.0 showed why (`docs/research/codex-app-server-2026-10-26/background-terminals-probe.md`):
+`thread/items/list` never lists a running command, `thread/backgroundTerminals/list` does, and terminate by that process id
+ends it. The round 2 proof evidence on `59fde29` is kept as `*-proof-2026-10-27T02-5*.json`.
 
-- N1, medium. After a restart, Codex Stop ends the turn but leaves its shell command running, because an adopted turn starts with
-  no record of the commands it started. Step k2 passed only because its wait outlasted the rest of the count.
-- N2, closed. The Codex async question made no card on `codex-cli` 0.164.0 at `e7e0a2a`, and step h2 passed anyway. The plugin now
-  maps the real item (finding 9), the service answers it with a steer or a user turn, and step h2 fails when Codex accepted a
-  question and no card appears. The committed Codex proof evidence predates this fix.
-- N3, low-medium. A failure before the write that no retry can fix (a refused model or effort, an image file gone from the
-  store) is retried every second for ever, and the queue stalls behind it.
-- N4, low-medium. A host that is slow at adoption still gets the row's running turn declared lost on the first poll.
-- N5, low. The Codex fallback that adopts an unlisted turn from its first event cannot save the row at the manager level. While
-  adoption waits for the turn listing, the plugin keeps 4096 thread notifications and drops the rest, which could include the
-  end of the turn.
-- N6, low. If the host's `status` reply times out while the Codex client reads the replay, the rest of the replay reaches the new
-  client as live output.
-- N7, low (decision). `resume` restarts under the same id any Claude chat whose transcript holds no conversation, not only a chat
-  that never ran a turn.
-- N8, low. Gaps in the k2 assertions: Codex Stop passes even when the command ends on its own; "no recovery prompt" proves
-  nothing for rows without an unattended assignment; neither proof sends a message during the adopted turn; exactly-once
-  terminals are not counted.
-- N9, low. The `started` flag on the line transports is set and tested, and nothing reads it.
-- N10, low. The Codex instance shares one start promise between attach-only starts and ordinary starts.
+Round 3 fixes:
+
+- N1 and M4. Adoption tracks every live background terminal of the thread on the adopted turn (item id to process id); the
+  item listing is a secondary source. Tracked and empty listings are logged at info, a failed terminal listing at warn. The
+  scripted app-server in the tests now models the real CLI (no in-progress items, the command in the terminal list).
+- L1. A reattach whose handshake check times out disconnects and reports busy instead of terminating the shared app-server.
+- L2. While a turn is unidentified, a send is refused as a turn in progress (the manager queues it) and Stop re-lists the
+  turns and interrupts the one running; the service passes an empty id for that case.
+- Found by the lane: an attach-only connection with no saved instance record took the host's replay as live lines, so a
+  stale response could answer a new request. Fixed and tested.
+- M3. Busy is `TransportBusyError`, raised by both plugins only when the host is unreachable. A busy run is bounded by
+  10 minutes, after which the row is settled as lost. Stop on a busy or unloaded working row clears working with a status
+  line.
+- M2. The migration writes the conversation-history record before a Claude row flips, and the first reconcile pass writes
+  it for every structured row with `lastResponseAt` (`TransportInstance.noteConversationHistory`, optional).
+- L4. A `SendRejectedError` in automatic delivery is `rejected`: wakes and continuations record a definite failure with the
+  reason, and recovery stops with that reason (`RecoverySubmitRejectedError`) instead of "outcome uncertain".
+- L3. The ten-minute not-sent failure names the last error and says nothing was sent; the clock resets when the drain
+  defers for another reason.
+- L5 and L6. The docs now say Codex message-mode cards do not come back after a restart (held server-request questions
+  do), and the captured frames are in `docs/research/cutover-2026-10-26/codex-async-question/`.
+- N8. Claude f and k2 and Codex h require the command gone within 5 s of Stop; each k2 counts the provider's turn-end
+  records (exactly one per turn) and checks the steered message is still unanswered 2 s into the count.
+- M1. The passages above and in `docs/structured-providers.md` and `docs/architecture.md` describe the current behaviour.
+
+Open follow-ups after round 3:
+
+- An ordinary (not attach-only) start against a used app-server that hangs reports busy until the 10-minute limit instead
+  of replacing it.
+- In the unknown-turn background path, a Stop that arrives before the background listing returns finds no commands.
+- Codex message-mode cards (async questions) are not shown again after a backend restart; the question text stays in the
+  conversation and a typed answer reaches the model.
+- `run-recovery` tests do not cover the recovery-path status line for a rejected prompt (the service and wake paths are
+  tested).
 - From earlier rounds: Claude `ExitPlanMode` under bypass, `priority: "now"` during tools, and `--system-prompt-snapshot off` on a
   resume; the real CLI's background-task snapshot behind a repeated `initialize` and the shape of `pending_permission_requests`
   entries; a backend crash with a running turn (every proof restarts the backend gracefully); and the migration's tmux check,
@@ -824,5 +860,6 @@ Open follow-ups (the N numbers are the round 2 numbers):
 C0 and C1 run in parallel; C2 after C0; C3 in parallel with C2; C4 last. Each lane has exclusive file
 ownership as in the Codex lane.
 
-State: C0 to C3 are built. C4 has the proofs, the docs and review rounds 1 and 2 done; the round 2 open items are listed under
-"Review and fixes". The live deploy and the flip are Bryan's steps, and Phase B waits for the real-use window.
+State: C0 to C3 are built. C4 has the proofs, the docs and review rounds 1 to 3 done, with the round 3 fixes in; the items
+still open are listed under "Review and fixes". The live deploy and the flip are Bryan's steps, and Phase B waits for the
+real-use window.

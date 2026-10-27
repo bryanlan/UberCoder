@@ -67,7 +67,7 @@ import {
 } from './screen-heuristics.js';
 import { isRecentTimestamp, nextIdleExpiryDecision, nextScreenWorkingState } from './working-state.js';
 import { OutputWatcherRegistry } from './output-watcher.js';
-import { RecoverySubmitDeferredError, RunRecovery } from './run-recovery.js';
+import { RecoverySubmitDeferredError, RecoverySubmitRejectedError, RunRecovery } from './run-recovery.js';
 import { TranscriptWatcherRegistry } from './transcript-watcher.js';
 import { SessionRuntimeRegistry, type SessionRuntimeState } from './session-runtime.js';
 import { planKeystrokeSend, type KeystrokeSendPayload } from './keystroke-transport.js';
@@ -85,6 +85,8 @@ const SESSION_COMPLETION_IDLE_MS = 60_000;
 const STRUCTURED_NOT_SENT_LIMIT_MS = 10 * 60_000;
 /** A provider process that runs but does not answer a survivor lookup this many times in a row is reported on the conversation. */
 const SURVIVOR_BUSY_REPORT_AFTER = 3;
+/** A session host that keeps not answering for this long is taken as lost: its row settles the way a dead connection settles it. */
+const SURVIVOR_BUSY_LIMIT_MS = 10 * 60_000;
 const QUEUED_PASTE_CONFIRMATION_MS = 30_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
@@ -417,8 +419,8 @@ export class SessionManager {
   private stopped = false;
   /** Set once the startup pass has looked for provider processes that outlived the previous backend. */
   private survivorsReattached = false;
-  /** Rows whose last survivor lookups found a provider process that runs but did not answer in time, by consecutive count. */
-  private readonly survivorBusyCounts = new Map<string, number>();
+  /** Rows whose last survivor lookups found a session host that runs but did not answer in time: when the run began and how many lookups it spans. */
+  private readonly survivorBusyRuns = new Map<string, { since: number; attempts: number }>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -560,6 +562,12 @@ export class SessionManager {
           const delivery = await this.structured.deliverAutomatic(this.mustGetSession(session.id), text);
           // Deferred means nothing was sent (not loaded, a turn running, or the transport's NotSentError): not an uncertain outcome.
           if (delivery.status === 'deferred') throw new RecoverySubmitDeferredError(delivery.reason);
+          // Rejected also sent nothing, but trying again fails the same way: the conversation says why, whatever the stop that follows says.
+          if (delivery.status === 'rejected') {
+            const reason = `Automatic recovery was not sent, and sending it again would fail the same way: ${delivery.reason}`;
+            this.appendStructuredStatus(session.id, reason);
+            throw new RecoverySubmitRejectedError(reason);
+          }
           if (delivery.status !== 'submitted') throw new Error(delivery.reason ?? 'The structured session did not accept the recovery prompt.');
         } else {
         if (await this.tmuxClient.getOption(session.tmuxSessionName, '@agent_console_session_id') !== session.id || !ownsRecovery()) throw new Error('Session ownership changed before recovery submission.');
@@ -977,6 +985,8 @@ export class SessionManager {
         runtime.submittedTurnAt = timestamp;
         let submissionInvoked = false, pasteStarted = false, composerConfirmed = ownsStagedNotice;
         let block: WakeBlock | undefined;
+        /** Why the transport refused the notice for good: nothing was sent, and sending it again fails the same way. */
+        let rejection: string | undefined;
         const requireSubmissionGuard = async () => {
           const owner = structured ? current!.id : await this.tmuxClient.getOption(current!.tmuxSessionName, '@agent_console_session_id');
           block = owner !== current!.id ? { code: 'ownership_changed', reason: 'The tmux session no longer belongs to this Console binding.' } : submissionBlock();
@@ -991,6 +1001,11 @@ export class SessionManager {
             if (delivery.status === 'deferred') {
               submissionInvoked = false;
               throw new Error(delivery.reason ?? 'The structured session is busy.');
+            }
+            if (delivery.status === 'rejected') {
+              submissionInvoked = false;
+              rejection = delivery.reason ?? 'The structured session refused the notice.';
+              throw new Error(rejection);
             }
             if (delivery.status === 'failed') throw new Error(delivery.reason ?? 'The structured session did not accept the notice.');
           }
@@ -1057,14 +1072,18 @@ export class SessionManager {
           // The durable attempt still prevents replay. A transport rejection
           // must not make the previous completed provider turn look running.
           if (runtime.submittedTurnAt === timestamp) runtime.submittedTurnAt = previousSubmittedTurnAt;
-          const deferred = !submissionInvoked && (!pasteStarted || composerConfirmed);
+          const deferred = !rejection && !submissionInvoked && (!pasteStarted || composerConfirmed);
           const reason = error instanceof Error ? error.message : 'Provider input failed.';
           saveAttempt(deferred ? 'deferred' : 'failed', reason, block);
-          this.appendEvent(current, { type: 'status', text: `Automatic ${peerResponse ? 'inbox' : 'work'} input ${deferred ? 'deferred before submission' : 'failed with uncertain delivery'}: ${reason}`, timestamp: nowIso() });
+          this.appendEvent(current, { type: 'status', timestamp: nowIso(), text: rejection
+            ? `Automatic ${peerResponse ? 'inbox' : 'work'} input was not sent, and sending it again would fail the same way: ${reason}`
+            : `Automatic ${peerResponse ? 'inbox' : 'work'} input ${deferred ? 'deferred before submission' : 'failed with uncertain delivery'}: ${reason}` });
           if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: deferred ? 'scheduled' : 'blocked',
-              reason: deferred ? `Continuation deferred before submission: ${reason}` : 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
+              reason: deferred ? `Continuation deferred before submission: ${reason}`
+                : rejection ? `Continuation was not sent and cannot be: ${reason}`
+                : 'Continuation delivery is uncertain. Review the conversation before enabling unattended work again.' };
             saveContinuation(this.db, recipient.id, control);
           }
           this.logger?.warn({ err: error, sessionId: current.id, block, deferred }, 'Assignment input did not complete; uncertain submissions will not be replayed.');
@@ -1098,7 +1117,7 @@ export class SessionManager {
     this.unsubscribeRealtimeEvents();
     await this.structured.shutdown();
     this.structuredMonitors.clear();
-    this.survivorBusyCounts.clear();
+    this.survivorBusyRuns.clear();
     await this.closeRawLogPipes(sessionsToDetach);
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
@@ -2676,8 +2695,10 @@ export class SessionManager {
       return;
     }
     const defer = (reason: string) => {
-      if (record.reason !== reason && this.inputQueue.get(sessionId, record.requestId)?.state === record.state) {
-        record = { ...record, reason };
+      // A wait for the session itself (asleep, suspended, not loadable) is not a run of refusals by the transport, so the
+      // clock that fails a message after 10 of them starts again once the session is back.
+      if ((record.reason !== reason || record.notSentSince !== undefined) && this.inputQueue.get(sessionId, record.requestId)?.state === record.state) {
+        record = { ...record, reason, notSentSince: undefined };
         this.saveQueuedInput(sessionId, record);
       }
     };
@@ -3908,7 +3929,7 @@ export class SessionManager {
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
     this.structuredMonitors.delete(session.id);
-    this.survivorBusyCounts.delete(session.id);
+    this.survivorBusyRuns.delete(session.id);
     let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false, pid: undefined };
     this.db.boundSessions.upsert(ended);
     if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
@@ -4139,6 +4160,9 @@ export class SessionManager {
     // Recovery is not cancelled here: a scheduled or running one made `classifyForStructuredMigration` refuse the row, and
     // recovery runs under this same command lock, so none can have started since.
     this.db.meta.set(peerWakeComposerKey(session.id), '');
+    // The conversation has history the structured transport never saw complete (Claude requires a transcript to move a row). Its
+    // record is written before the flip: a failure leaves the row on tmux for the next pass, and the write is idempotent.
+    this.structured.noteConversationHistory(session);
     const at = nowIso();
     const converted = this.db.boundSessions.setTransport(session.id, {
       tmuxSessionName: `${STRUCTURED_SESSION_NAME_PREFIX}${session.id}`,
@@ -4211,12 +4235,14 @@ export class SessionManager {
 
   /**
    * Adopts the provider process that survived for one row (the caller holds the row's command lock) and says what it found:
-   * `loaded` (the row is loaded afterwards), `absent` (no process answers for it) or `busy` (a process runs but did not answer in
-   * time). A turn the process is running becomes the row's turn (working, recency untouched); one that ended while no backend
-   * listened is reported by the plugin as the terminal it was. Nothing is started and nothing ends a process here. A `busy` row
-   * is left exactly as it is: its turn may well be running, so it is not declared lost, and the next load asks again.
+   * `loaded` (the row is loaded afterwards), `absent` (no process answers for it), `busy` (a session host runs but did not
+   * answer in time) or `unanswered` (it has not answered for `SURVIVOR_BUSY_LIMIT_MS`). A turn the process is running becomes
+   * the row's turn (working, recency untouched); one that ended while no backend listened is reported by the plugin as the
+   * terminal it was. Nothing is started and nothing ends a process here. A `busy` row is left exactly as it is: its turn may well
+   * be running, so it is not declared lost, and the next load asks again. `unanswered` ends that patience: the caller settles the
+   * row as lost, because a host that never answers is indistinguishable from a dead one, and Stop could not reach it either.
    */
-  private async adoptStructuredSurvivor(row: BoundSession): Promise<'loaded' | 'absent' | 'busy'> {
+  private async adoptStructuredSurvivor(row: BoundSession): Promise<'loaded' | 'absent' | 'busy' | 'unanswered'> {
     const projects = this.recoveryDependencies?.projectService;
     if (!projects || this.stopped) return 'absent';
     const current = this.db.boundSessions.getById(row.id);
@@ -4226,16 +4252,23 @@ export class SessionManager {
     const [adopted] = await this.structured.reattachSurvivors([{ session: current, cwd: project.path }]);
     if (!adopted) {
       if (!this.structured.survivorBusy(row.id)) {
-        this.survivorBusyCounts.delete(row.id);
+        this.survivorBusyRuns.delete(row.id);
         return 'absent';
       }
-      const count = (this.survivorBusyCounts.get(row.id) ?? 0) + 1;
-      this.survivorBusyCounts.set(row.id, count);
-      this.logger?.warn({ sessionId: row.id, attempts: count }, 'The provider process of a conversation did not answer in time; it was left alone.');
-      if (count === SURVIVOR_BUSY_REPORT_AFTER) this.appendStructuredStatus(row.id, 'The agent process is running but is slow to answer. The Console keeps trying.');
+      const run = this.survivorBusyRuns.get(row.id) ?? { since: Date.now(), attempts: 0 };
+      run.attempts += 1;
+      this.survivorBusyRuns.set(row.id, run);
+      if (Date.now() - run.since >= SURVIVOR_BUSY_LIMIT_MS) {
+        // The run stays until the row is settled (see `refreshStructuredSessionState`), so a lookup whose caller cannot settle it
+        // (the startup sweep) does not start another ten minutes.
+        this.logger?.warn({ sessionId: row.id, attempts: run.attempts, busyForMs: Date.now() - run.since }, 'The provider process of a conversation did not answer for too long; its turn is taken as lost.');
+        return 'unanswered';
+      }
+      this.logger?.warn({ sessionId: row.id, attempts: run.attempts }, 'The provider process of a conversation did not answer in time; it was left alone.');
+      if (run.attempts === SURVIVOR_BUSY_REPORT_AFTER) this.appendStructuredStatus(row.id, 'The agent process is running but is slow to answer. The Console keeps trying.');
       return 'busy';
     }
-    this.survivorBusyCounts.delete(row.id);
+    this.survivorBusyRuns.delete(row.id);
     let session = this.updateBoundSessionFields(row.id, { pid: this.structured.loadedPid(row.id) });
     await this.verifyNativeProcessEpoch(session);
     // The plugin's first events (an adopted turn, a terminal it found) are handled within this turn of the event loop.
@@ -4273,6 +4306,7 @@ export class SessionManager {
     if (this.survivorsReattached || !projects) return;
     this.survivorsReattached = true;
     const restorable = this.listRestorableSessions();
+    this.noteStructuredConversationHistory(restorable);
     try {
       // Asked again for each host, against the database as it is then: a conversation bound while the sweep runs owns its host.
       const ended = await this.structured.sweepOrphanHosts(id => {
@@ -4298,6 +4332,22 @@ export class SessionManager {
     // The process sends what it still has open (a snapshot of its background tasks) right behind the reply to the repeated
     // initialize. Let the event loop read it before the pass decides which idle conversations to put to sleep.
     if (adoptedAny) await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  /**
+   * A structured row that has had a response ran turns before the plugin kept its record of having history (an earlier build, or a
+   * row moved over from tmux before the move wrote it). Writing it now keeps a transcript the CLI deletes later from being taken
+   * for an empty chat. The write is idempotent, so every boot may repeat it. A failure on one row never stops the others.
+   */
+  private noteStructuredConversationHistory(rows: BoundSession[]): void {
+    for (const row of rows) {
+      if (row.transport !== 'structured' || !row.lastResponseAt) continue;
+      try {
+        this.structured.noteConversationHistory(row);
+      } catch (error) {
+        this.logger?.warn({ err: error, sessionId: row.id }, 'Recording that a structured conversation has history failed.');
+      }
+    }
   }
 
   private appendStructuredStatus(sessionId: string, text: string): void {
@@ -4409,13 +4459,16 @@ export class SessionManager {
   private async sendStructuredKeystrokes(session: BoundSession, payload: KeystrokeSendPayload): Promise<SessionCommandResult> {
     this.assertStructuredKeystrokes(payload);
     if (payload.keys?.[0] === 'Escape') {
-      let cancelledSteerIds: string[];
+      let stopped: Awaited<ReturnType<StructuredSessionService['interrupt']>>;
       try {
-        ({ cancelledSteerIds } = await this.structured.interrupt(session));
+        stopped = await this.structured.interrupt(session);
       } catch (error) {
         throw new SessionInputRejectedError(`Stop could not be delivered: ${error instanceof Error ? error.message : 'unknown error'}.`);
       }
-      this.markCancelledSteers(session, cancelledSteerIds);
+      // No loaded session: Stop reached nobody. A row that reads "working" would stay so for ever (a host that does not answer, a
+      // process not adopted yet), so it is cleared and the person is told the agent may still be running.
+      if (stopped.outcome === 'notLoaded') this.settleUnreachableStop(session.id);
+      this.markCancelledSteers(session, stopped.cancelledSteerIds);
       this.inputQueue.stage(session.id, undefined);
       const activityAt = nowIso();
       return sessionCommandResult(this.updateBoundSessionFields(session.id, { updatedAt: activityAt, lastActivityAt: activityAt }));
@@ -4423,6 +4476,23 @@ export class SessionManager {
     const live = await this.refreshSessionState(session, { resumeIdle: true });
     if (!live) throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     return await this.submitStructuredText(live, (payload.submittedText ?? payload.text)!.trim());
+  }
+
+  /**
+   * Stop on a conversation that is marked working but has no loaded session. The agent was not reached and may still be
+   * running; the next successful lookup of its process adopts a turn it is still running. No unattended recovery is started,
+   * because the person asked for the stop.
+   */
+  private settleUnreachableStop(sessionId: string): void {
+    const current = this.db.boundSessions.getById(sessionId);
+    if (!current?.isWorking) return;
+    this.clearWorkingExpiry(sessionId);
+    this.structuredMonitor(sessionId).reset();
+    this.survivorBusyRuns.delete(sessionId);
+    const stopped = this.updateBoundSessionFields(sessionId, { isWorking: false, updatedAt: nowIso() });
+    this.appendEvent(stopped, { type: 'status', text: 'Stop could not reach the agent process, which may still be running. The conversation is marked idle; the Console picks the process up again when it answers.', timestamp: nowIso() });
+    this.eventBus.emit({ type: 'session.updated', session: stopped });
+    this.publishStructuredScreen(sessionId);
   }
 
   /**
@@ -4487,7 +4557,7 @@ export class SessionManager {
         const since = record.notSentSince ?? nowIso();
         if (Date.now() - Date.parse(since) >= STRUCTURED_NOT_SENT_LIMIT_MS) {
           this.saveQueuedInput(sessionId, { ...sending, state: 'failed', notSentSince: since,
-            reason: 'The message could not be sent for 10 minutes. Check the conversation before sending it again.' });
+            reason: `The message could not be sent for ${STRUCTURED_NOT_SENT_LIMIT_MS / 60_000} minutes (${structuredStatusReason(error)}). Nothing was sent.` });
           return;
         }
         this.saveQueuedInput(sessionId, { ...record, notSentSince: since, reason: 'Waiting for the session to accept the message.' });
@@ -4565,6 +4635,7 @@ export class SessionManager {
       return undefined;
     }
     let alive = this.structured.alive(session);
+    let lostReason: string | undefined;
     if (!alive && session.isWorking && this.isSurvivorCandidate(session)) {
       // The backend restarted under this row's turn. Its provider process may still be running it, and a load of the row (the
       // screen poll, a queued message, a wake) can come before the first reconcile looks for survivors: ask before declaring
@@ -4574,13 +4645,17 @@ export class SessionManager {
         // A process that runs but is slow to answer may still be running the turn: leave the row as it is and ask again on the next load.
         if (outcome === 'busy') return undefined;
         alive = outcome === 'loaded';
+        if (outcome === 'unanswered') {
+          this.survivorBusyRuns.delete(session.id);
+          lostReason = `the agent process did not answer for ${SURVIVOR_BUSY_LIMIT_MS / 60_000} minutes`;
+        }
       } catch (error) {
         this.logger?.warn({ err: error, sessionId: session.id }, 'Reattaching a surviving provider process failed.');
       }
       session = this.db.boundSessions.getById(session.id) ?? session;
     }
     if (!alive) {
-      await this.settleLostStructuredTurn(session);
+      await this.settleLostStructuredTurn(session, lostReason);
       const current = this.db.boundSessions.getById(session.id);
       if (!current || current.status === 'releasing') return undefined;
       // Finished work keeps its restorable inbox; only an explicit selection or the guarded inbox wake reloads it.
@@ -4614,8 +4689,8 @@ export class SessionManager {
   }
 
   /** Nothing runs without a loaded thread: a row still marked working lost its turn with the connection. */
-  private async settleLostStructuredTurn(session: BoundSession): Promise<void> {
-    if (session.isWorking) await this.handleStructuredConnectionLoss(session, 'the previous connection ended while a turn was running');
+  private async settleLostStructuredTurn(session: BoundSession, reason = 'the previous connection ended while a turn was running'): Promise<void> {
+    if (session.isWorking) await this.handleStructuredConnectionLoss(session, reason);
   }
 
   private async handleStructuredConnectionLoss(session: BoundSession, reason?: string): Promise<void> {

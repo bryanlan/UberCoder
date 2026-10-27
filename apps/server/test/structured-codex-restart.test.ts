@@ -4,6 +4,7 @@ import { createCodexAppServerPlugin } from '../src/providers/transport/codex/ind
 import type { CodexAppServerInstance } from '../src/providers/transport/codex/app-server-instance.js';
 import {
   LineTransportNotRunningError,
+  PreviousTurnActiveError,
   RequestNotPendingError,
   TransportUnavailableError,
   type LineTransportFactory,
@@ -31,6 +32,7 @@ import {
   turnCompleted,
   turnObject,
   turnStarted,
+  userMessageItem,
   waitUntil,
   type FakeSetup,
 } from './helpers/codex-harness.js';
@@ -220,10 +222,16 @@ describe('A Codex turn that runs across a backend restart', () => {
 
 describe('Stop on a Codex turn adopted after a backend restart', () => {
   // Codex does not end a turn's command on `turn/interrupt`: the plugin ends the ones it saw start. A backend that adopts a turn did
-  // not see its commands start, so it asks the provider which ones the turn is running.
+  // not see its commands start, so it asks the provider which ones the thread has running. The scripted app-server models codex-cli
+  // 0.164.0 as probed on 2026-10-26: while a command runs, `thread/items/list` returns only completed items (no in-progress
+  // commandExecution) and `thread/backgroundTerminals/list` returns the command with its item id and process id.
   const entry = (item: Record<string, unknown>) => ({ turnId: TURN, item, startedAtMs: 1, completedAtMs: null });
-  const terminalOf = (itemId: string, processId: string) => ({ itemId, processId, command: 'sleep 30', cwd: '/work/project', osPid: 1, cpuPercent: null, rssKb: null });
+  const terminalOf = (itemId: string, processId: string) => ({ itemId, processId, command: 'sleep 30', cwd: '/work/project', osPid: null, cpuPercent: null, rssKb: null });
+  const terminalsList = (...terminals: Array<ReturnType<typeof terminalOf>>) => ({ result: { data: terminals, nextCursor: null } });
+  /** What the real CLI lists for the turn: its own message and the agent's, and no command that is still running. */
+  const completedOnly = () => ({ result: { data: [entry(userMessageItem('user-1', 'run a long command')), entry(agentMessageItem('msg-1', 'working'))], nextCursor: null } });
   const terminated = (fake: FakeSetup) => receivedRequests(fake.logFile, 'thread/backgroundTerminals/terminate').map((frame) => frame.params.processId).sort();
+  const infoMessages = (context: { logs: { info: Array<[object, string]> } }) => context.logs.info.map(([, message]) => message);
 
   /** A turn that started `cmd-1` (proc-1) before the backend went away; the next backend's provider answers with `extra`. */
   async function adoptWith(extra: Record<string, unknown>, turnEmissions: Record<string, unknown>[] = []) {
@@ -242,48 +250,43 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
     await fake.instance.dispose('shutdown');
     const next = trackNext(fake, restartBackend(fake));
     const resumed = await next.instance.resume(THREAD, OPEN_OPTIONS);
-    return { fake, resumed, log: new EventLog(resumed) };
+    return { fake, next, resumed, log: new EventLog(resumed) };
   }
 
-  it('ends the commands the turn was running, found by listing the turn\'s in-progress command items and the live terminals', async () => {
-    const { fake, resumed, log } = await adoptWith({
-      'thread/items/list': {
-        result: {
-          data: [
-            entry(agentMessageItem('msg-1', 'working')),
-            entry(commandItem('cmd-1', 'proc-1')),
-            entry(commandItem('cmd-2', 'proc-2', 'completed')), // finished: nothing to end
-            entry(commandItem('cmd-3', null)), // running, but the item has no process id: the terminal list supplies it
-          ],
-          nextCursor: null,
-        },
-      },
-      'thread/backgroundTerminals/list': { result: { data: [terminalOf('cmd-1', 'proc-1'), terminalOf('cmd-3', 'proc-3'), terminalOf('cmd-9', 'proc-9')], nextCursor: null } },
+  it('ends every command in the thread\'s live terminal list, though the item listing shows none running', async () => {
+    const { fake, next, resumed, log } = await adoptWith({
+      'thread/items/list': completedOnly(),
+      // proc-9 is a leftover of an earlier turn: it belongs to the thread, and Stop is what ends it.
+      'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-1', 'proc-1'), terminalOf('cmd-3', 'proc-3'), terminalOf('cmd-9', 'proc-9')),
     });
     expect(resumed.activeTurn).toBe(TURN);
-    // The provider was asked about the adopted turn only, and for the live terminals.
+    // The provider was asked about the adopted turn's items and for the live terminals, once each, before the session was handed out.
     expect(receivedRequests(fake.logFile, 'thread/items/list').map((frame) => frame.params)).toEqual([expect.objectContaining({ threadId: THREAD, turnId: TURN })]);
     expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/list')).toHaveLength(1);
+    expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 3, terminals: 3, items: 0 }), 'codex tracked the commands an adopted turn is running']]));
 
     await resumed.interrupt(TURN);
-    await waitUntil(() => terminated(fake).length >= 2, 5000, 'the commands to be ended');
-    // proc-9 belongs to no command of this turn and proc-2 already finished: only the turn's running commands are ended.
-    expect(terminated(fake)).toEqual(['proc-1', 'proc-3']);
+    await waitUntil(() => terminated(fake).length >= 3, 5000, 'the commands to be ended');
+    expect(terminated(fake)).toEqual(['proc-1', 'proc-3', 'proc-9']);
     expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
   });
 
-  it('ends the commands even when the provider can list only the items (no live terminal list)', async () => {
-    const { fake, resumed, log } = await adoptWith({
-      'thread/items/list': { result: { data: [entry(commandItem('cmd-1', 'proc-1'))], nextCursor: null } },
+  it('also ends the in-progress command items a CLI that lists them names, when it has no terminal list', async () => {
+    const { fake, next, resumed, log } = await adoptWith({
+      'thread/items/list': { result: { data: [entry(commandItem('cmd-4', 'proc-4')), entry(commandItem('cmd-2', 'proc-2', 'completed')), entry(commandItem('cmd-5', null))], nextCursor: null } },
     });
+    // The terminal list is unavailable (the fake says "method not found"): that is a warning, not "no commands".
+    expect(next.context.logs.warn.map(([, message]) => message)).toEqual(expect.arrayContaining(['codex thread/backgroundTerminals/list failed']));
+    expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ tracked: 1, terminals: null, items: 2 }), 'codex tracked the commands an adopted turn is running']]));
     await resumed.interrupt(TURN);
     await waitUntil(() => terminated(fake).length >= 1, 5000, 'the command to be ended');
-    expect(terminated(fake)).toEqual(['proc-1']);
+    expect(terminated(fake)).toEqual(['proc-4']); // finished, and unnamed, items are left alone
     await log.waitForType('turn.terminal');
   });
 
   it('still stops the turn when the provider can list nothing, and ends nothing it cannot name', async () => {
-    const { fake, resumed, log } = await adoptWith({}); // neither listing is answered: the fake says "method not found"
+    const { fake, next, resumed, log } = await adoptWith({}); // neither listing is answered: the fake says "method not found"
+    expect(infoMessages(next.context)).toEqual(expect.arrayContaining([expect.stringContaining('could not list the running commands of an adopted turn')]));
     await resumed.interrupt(TURN);
     expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
     await sleep(100);
@@ -291,11 +294,22 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
     expect(terminated(fake)).toEqual([]);
   });
 
+  it('tracks nothing and says so when the terminal list is empty, and Stop still interrupts the turn', async () => {
+    const { fake, next, resumed, log } = await adoptWith({ 'thread/items/list': completedOnly(), 'thread/backgroundTerminals/list': terminalsList() });
+    expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 0, terminals: 0 }), expect.stringContaining('found no running commands on an adopted turn')]]));
+    await resumed.interrupt(TURN);
+    expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+    expect(receivedRequests(fake.logFile, 'turn/interrupt')).toEqual([expect.objectContaining({ params: { threadId: THREAD, turnId: TURN } })]);
+    await sleep(100);
+    expect(terminated(fake)).toEqual([]);
+    expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/list')).toHaveLength(1); // nothing was tracked, so Stop asked no more
+  });
+
   it('does not end a command that finished while the turn was being adopted', async () => {
     const { fake, resumed, log } = await adoptWith({
+      'thread/items/list': completedOnly(),
       // The command's completion arrives before the answer to the listing, and the listing still names it (it was read earlier).
-      'thread/items/list': { emitBefore: [itemCompleted(THREAD, TURN, commandItem('cmd-1', 'proc-1', 'completed'))], result: { data: [entry(commandItem('cmd-1', 'proc-1'))], nextCursor: null } },
-      'thread/backgroundTerminals/list': { result: { data: [terminalOf('cmd-1', 'proc-1')], nextCursor: null } },
+      'thread/backgroundTerminals/list': { emitBefore: [itemCompleted(THREAD, TURN, commandItem('cmd-1', 'proc-1', 'completed'))], ...terminalsList(terminalOf('cmd-1', 'proc-1')) },
     });
     await resumed.interrupt(TURN);
     await log.waitForType('turn.terminal');
@@ -308,7 +322,8 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
       {
         'thread/turns/list': { error: { code: -32603, message: 'cannot list turns' } },
         // cmd-0 started before the restart and has not been mentioned since; cmd-1 starts again in the first event.
-        'thread/items/list': { result: { data: [entry(commandItem('cmd-0', 'proc-0')), entry(commandItem('cmd-1', 'proc-1'))], nextCursor: null } },
+        'thread/items/list': completedOnly(),
+        'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-0', 'proc-0'), terminalOf('cmd-1', 'proc-1')),
       },
       [itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'), 1500)],
     );
@@ -320,7 +335,7 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
     expect(resumed.turnUnidentified).toBe(false);
     expect(resumed.activeTurn).toBe(TURN);
 
-    await waitUntil(() => receivedRequests(fake.logFile, 'thread/items/list').length >= 1, 5000, 'the listing of the adopted turn');
+    await waitUntil(() => receivedRequests(fake.logFile, 'thread/backgroundTerminals/list').length >= 1, 5000, 'the listing of the live terminals');
     await sleep(100); // the answer is read in the background
     await resumed.interrupt(TURN);
     await waitUntil(() => terminated(fake).length >= 2, 5000, 'the commands to be ended');
@@ -336,6 +351,44 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
     const terminal = await log.waitForType('turn.terminal', 10_000);
     expect(terminal).toMatchObject({ turnId: TURN, status: 'completed' });
     expect(resumed.activeTurn).toBeUndefined();
+  });
+
+  describe('while the running turn is unidentified (no listing named it)', () => {
+    const unlisted = { error: { code: -32603, message: 'cannot list turns' } };
+
+    it('does not send a new turn into the running thread: the send is refused like a send into an active turn', async () => {
+      const { fake, resumed } = await adoptWith({ 'thread/turns/list': unlisted });
+      expect(resumed.turnUnidentified).toBe(true);
+      await expect(resumed.sendTurn({ text: 'hello' })).rejects.toBeInstanceOf(PreviousTurnActiveError);
+      expect(receivedRequests(fake.logFile, 'turn/start')).toHaveLength(1); // the first backend's only
+    });
+
+    it('lists the turns again at Stop, names the running turn, interrupts it and ends its commands', async () => {
+      const { fake, resumed, log } = await adoptWith({
+        'thread/turns/list': [unlisted, { result: { data: [turnObject(TURN, 'inProgress', 1790000001)], nextCursor: null, backwardsCursor: null } }],
+        'thread/items/list': completedOnly(),
+        'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-1', 'proc-1')),
+      });
+      expect(resumed.activeTurn).toBeUndefined();
+      expect(resumed.turnUnidentified).toBe(true);
+      await resumed.interrupt('no-turn-is-named-yet');
+      expect(receivedRequests(fake.logFile, 'thread/turns/list')).toHaveLength(2);
+      expect(receivedRequests(fake.logFile, 'turn/interrupt')).toEqual([expect.objectContaining({ params: { threadId: THREAD, turnId: TURN } })]);
+      expect(log.of('turn.started')).toEqual([{ type: 'turn.started', turnId: TURN, origin: 'provider', replay: false, adopted: true }]);
+      expect(resumed.turnUnidentified).toBe(false);
+      await waitUntil(() => terminated(fake).length >= 1, 5000, 'the command to be ended');
+      expect(terminated(fake)).toEqual(['proc-1']);
+      expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+    });
+
+    it('warns, tells the person and interrupts nothing when the turns still do not name it', async () => {
+      const { fake, next, resumed, log } = await adoptWith({ 'thread/turns/list': unlisted });
+      await resumed.interrupt('no-turn-is-named-yet');
+      expect(receivedRequests(fake.logFile, 'turn/interrupt')).toEqual([]);
+      expect(next.context.logs.warn.map(([, message]) => message)).toEqual(expect.arrayContaining([expect.stringContaining('Stop found no running turn to interrupt')]));
+      expect(log.of('notice').map((event) => event.text)).toEqual([expect.stringContaining('could not find the running turn to stop')]);
+      expect(resumed.turnUnidentified).toBe(true); // still not named: Stop can be tried again
+    });
   });
 });
 
@@ -509,10 +562,16 @@ describe('A host replay that does not reach back far enough', () => {
 
 describe('Reattaching to the Codex app-server after a backend restart', () => {
   /** A backend over the fake's host and database whose line transport factory is wrapped by `wrap`. */
-  function backendWith(fake: FakeSetup, wrap: (factory: LineTransportFactory) => LineTransportFactory): CodexAppServerInstance {
+  function backendWith(
+    fake: FakeSetup,
+    wrap: (factory: LineTransportFactory) => LineTransportFactory,
+    { timings = FAST_TIMINGS, savedInstance = true }: { timings?: typeof FAST_TIMINGS; savedInstance?: boolean } = {},
+  ): CodexAppServerInstance {
     const context = makeContext(fake.context.runtimeDir);
+    // The database is shared: this backend knows an earlier one connected, unless the record of it was lost.
+    if (savedInstance) for (const [key, value] of fake.context.metaStore) context.metaStore.set(key, value);
     context.lineTransport = wrap(hostTransportFactory(fake.hostRuntimeDir, context));
-    const plugin = createCodexAppServerPlugin({ timings: FAST_TIMINGS, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' });
+    const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' });
     const instance = plugin.create({ enabled: true, command: fake.command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
     cleanups.push(async () => {
       await instance.dispose('shutdown').catch(() => undefined);
@@ -550,6 +609,43 @@ describe('Reattaching to the Codex app-server after a backend restart', () => {
     await expect(slow.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
     expect(processStarts(fake)).toHaveLength(1); // the app-server that is running was neither replaced nor ended
     expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(0);
+  });
+
+  it('leaves an app-server alone that is slow to answer after the reattach, reports it busy, and adopts it on the next try', async () => {
+    const account = { result: { account: null, requiresOpenaiAuth: false } };
+    // The first `account/read` (the check that the server is initialized) answers after the plugin gave up; later ones answer at once.
+    const fake = track(setupFake({ handlers: { ...baseHandlers(THREAD), 'account/read': [{ ...account, delayMs: 2_000 }, account] } }, undefined, {}, { host: true }));
+    await fake.instance.start(OPEN_OPTIONS);
+    await fake.instance.dispose('shutdown');
+    const next = backendWith(fake, (factory) => factory, { timings: { ...FAST_TIMINGS, initializeTimeoutMs: 300 } });
+    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
+    // The app-server that runs the turns was neither ended nor replaced: it never saw its input close or a signal.
+    expect(readLog(fake.logFile).filter((entry) => entry.event === 'stdin-eof' || entry.event === 'sigterm')).toEqual([]);
+    expect(processStarts(fake)).toHaveLength(1);
+    expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(0);
+
+    const session = await next.reattach(THREAD, OPEN_OPTIONS);
+    expect(session?.nativeSessionId).toBe(THREAD);
+    expect(processStarts(fake)).toHaveLength(1);
+    expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(1);
+  });
+
+  it('does not let a response from the host replay answer the new connection when no record of the instance was saved', async () => {
+    const account = { result: { account: null, requiresOpenaiAuth: false } };
+    const fake = track(setupFake({ handlers: { ...baseHandlers(THREAD), 'account/read': [{ ...account, delayMs: 2_000 }, account] } }, undefined, {}, { host: true }));
+    await fake.instance.start(OPEN_OPTIONS);
+    await fake.instance.dispose('shutdown');
+    // The host still holds the first backend's answers (ids 1 to 3). An attach-only start asks for them all, saved record or not.
+    // The new connection's `account/read` is id 1 again: only its own, slow answer may satisfy it, so it times out and the app-server is left alone.
+    const next = backendWith(fake, (factory) => factory, { timings: { ...FAST_TIMINGS, initializeTimeoutMs: 300 }, savedInstance: false });
+    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
+    expect(readLog(fake.logFile).filter((entry) => entry.event === 'stdin-eof' || entry.event === 'sigterm')).toEqual([]);
+    expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(0);
+
+    const session = await next.reattach(THREAD, OPEN_OPTIONS);
+    expect(session?.nativeSessionId).toBe(THREAD);
+    expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(1);
+    expect(processStarts(fake)).toHaveLength(1);
   });
 
   it('does not make an ordinary start fail because an attach that found no host was in flight beside it', async () => {

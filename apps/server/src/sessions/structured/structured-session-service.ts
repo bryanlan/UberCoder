@@ -19,7 +19,8 @@ import {
   NotSentError,
   PreviousTurnActiveError,
   RequestNotPendingError,
-  TransportUnavailableError,
+  SendRejectedError,
+  TransportBusyError,
   TurnNotActiveError,
   type OpenOptions,
   type PluginContext,
@@ -118,8 +119,13 @@ export class StructuredRequestNotPendingError extends Error {
   constructor(message = 'That request is no longer waiting for an answer.') { super(message); this.name = 'StructuredRequestNotPendingError'; }
 }
 
+/**
+ * `deferred`: nothing was sent and a later try may work. `rejected`: nothing was sent and sending it again would fail the
+ * same way (a refused model or effort, an attachment that is gone), so `reason` says why and the caller must not retry or
+ * call the outcome uncertain. `failed`: the outcome is unknown, so it is never replayed.
+ */
 export interface AutomaticDelivery {
-  status: 'submitted' | 'deferred' | 'failed';
+  status: 'submitted' | 'deferred' | 'rejected' | 'failed';
   reason?: string;
   turnId?: string;
 }
@@ -345,9 +351,10 @@ export class StructuredSessionService {
       try {
         if (await lookup) adopted.push(candidate.session.id);
       } catch (error) {
-        // A provider process that runs but did not answer in time is not a process that is gone: the caller must not take the
-        // conversation's turn for lost (see `survivorBusy`).
-        if (error instanceof TransportUnavailableError) this.busySurvivors.add(candidate.session.id);
+        // A host that runs but did not answer in time is not a process that is gone: the caller must not take the
+        // conversation's turn for lost (see `survivorBusy`). Any other failure (a refused handshake, a timeout after the
+        // connection was made, an exit) is reported as the loss it is.
+        if (error instanceof TransportBusyError) this.busySurvivors.add(candidate.session.id);
         this.logger?.warn({ err: error, sessionId: candidate.session.id }, 'Reattaching a surviving provider process failed.');
       }
     }
@@ -355,8 +362,9 @@ export class StructuredSessionService {
   }
 
   /**
-   * The last `reattachSurvivors` for this conversation reached a provider process (or its session host) that did not answer in
-   * time, and so did not adopt it. The process may be running a turn; only a later lookup can tell. False after any other outcome.
+   * The last `reattachSurvivors` for this conversation reached a session host that runs but did not answer in time
+   * (`TransportBusyError`), and so did not adopt its process. The process may be running a turn; only a later lookup can tell.
+   * False after any other outcome, a failed handshake included. The caller bounds how long it keeps asking.
    */
   survivorBusy(sessionId: string): boolean {
     return this.busySurvivors.has(sessionId);
@@ -504,6 +512,17 @@ export class StructuredSessionService {
     await state.transport.close('release');
   }
 
+  /**
+   * Tells a plugin that guards a conversation's history that this row already has some: a row moved over from tmux, or one whose
+   * turns completed before the plugin kept its own record. Without it a resume that finds the saved history deleted would start
+   * the conversation again, empty, under the same id. Idempotent; a plugin without the guard ignores it.
+   */
+  noteConversationHistory(session: Pick<BoundSession, 'id' | 'provider' | 'conversationRef' | 'resumeConversationRef'>): void {
+    const nativeSessionId = session.resumeConversationRef ?? session.conversationRef;
+    if (nativeSessionId.startsWith('pending:')) return;
+    this.instanceFor(session.provider).noteConversationHistory?.(session.id, nativeSessionId);
+  }
+
   /** The conversation is over for good: the per-session providers' record of having completed a turn goes with it. */
   private forgetTurnRecords(session: Pick<BoundSession, 'id'> & Partial<Pick<BoundSession, 'provider'>>): void {
     for (const [provider, naming] of Object.entries(PER_SESSION_HOSTS) as Array<[ProviderId, NonNullable<(typeof PER_SESSION_HOSTS)[ProviderId]>]>) {
@@ -612,17 +631,23 @@ export class StructuredSessionService {
   /**
    * Stop. `cancelledSteerIds` are the steers that were queued behind the turn and that the provider dropped with it (the
    * `requestId` of the message that was sent as a steer): they were never delivered, and the owner marks them so.
+   * `notLoaded`: the conversation has no loaded session (asleep, not adopted yet, or its host did not answer), so Stop reached
+   * nobody and the provider may still be running a turn; the owner must not leave the row reading "working".
    */
-  async interrupt(session: Pick<BoundSession, 'id'>): Promise<{ outcome: 'interrupted' | 'idle'; cancelledSteerIds: string[] }> {
+  async interrupt(session: Pick<BoundSession, 'id'>): Promise<{ outcome: 'interrupted' | 'idle' | 'notLoaded'; cancelledSteerIds: string[] }> {
     const state = this.sessions.get(session.id);
-    const turnId = state?.activeTurnId;
-    if (!state || !turnId) return { outcome: 'idle', cancelledSteerIds: [] };
-    state.pendingInterrupt = { turnId, at: nowIso() };
+    if (!state?.loaded) return { outcome: 'notLoaded', cancelledSteerIds: [] };
+    // A turn the transport found running but could not name yet has no id here. Stop must still reach it, so the transport is
+    // asked for "the unidentified turn" with an empty id. No interrupt is pending for it: it has no id to match a terminal to.
+    const unidentified = state.activeTurnId === undefined && state.transport.turnUnidentified === true;
+    const turnId = unidentified ? '' : state.activeTurnId;
+    if (turnId === undefined) return { outcome: 'idle', cancelledSteerIds: [] };
+    if (!unidentified) state.pendingInterrupt = { turnId, at: nowIso() };
     let result: Awaited<ReturnType<TransportSession['interrupt']>>;
     try {
       result = await state.transport.interrupt(turnId);
     } catch (error) {
-      if (state.pendingInterrupt?.turnId === turnId) state.pendingInterrupt = undefined;
+      if (!unidentified && state.pendingInterrupt?.turnId === turnId) state.pendingInterrupt = undefined;
       throw error;
     }
     const cancelled = result && typeof result === 'object' && Array.isArray(result.cancelledSteerIds) ? result.cancelledSteerIds : [];
@@ -640,6 +665,8 @@ export class StructuredSessionService {
     } catch (error) {
       // Both refusals happened before anything was written, so the caller may try again later.
       if (error instanceof PreviousTurnActiveError || error instanceof NotSentError) return { status: 'deferred', reason: error.message };
+      // Nothing was written either, but a second try fails the same way: a definite failure, not an uncertain one.
+      if (error instanceof SendRejectedError) return { status: 'rejected', reason: structuredStatusReason(error) };
       return { status: 'failed', reason: errorMessage(error) };
     }
   }

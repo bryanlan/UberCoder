@@ -1,11 +1,13 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PendingRequestSummary, SessionEvent } from '@agent-console/shared';
 import { StructuredRequestNotFoundError } from '../src/sessions/session-manager.js';
 import type { StructuredQuestionNotice } from '../src/sessions/structured/pending-requests.js';
 import type { TransportEvent } from '../src/providers/transport/types.js';
 import type { FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
-import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
-import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
+import { claudeProvider, enableUnattendedRecovery, project, providerSettings } from './helpers/session-fixtures.js';
+import { eventLogLines, failReattach, recordHistoryNotes, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 // A turn can outlive a backend restart in the provider process that runs it (a Claude CLI, or the shared Codex app-server, each
 // behind its session host). The new backend must find it again instead of declaring it lost, on every path that loads the row,
@@ -23,9 +25,11 @@ function fixture(options: Parameters<typeof structuredSessionFixture>[0] = {}) {
   open.push(f);
   return f;
 }
+const historyNotes: Array<{ restore(): void }> = [];
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  for (const notes of historyNotes.splice(0)) notes.restore();
   for (const f of open.splice(0)) await f.cleanup();
 });
 
@@ -34,7 +38,7 @@ const lossLines = (f: StructuredSessionFixture, sessionId: string) =>
 const methods = (instance: { calls: Array<{ method: string }> } | undefined) => (instance?.calls ?? []).map(call => call.method);
 
 /** A bound row with a running turn (`turn-1`), then a new backend over the same database whose process survived running it. */
-async function runningThenRestarted(options: { plugin?: FakeTransportPluginOptions; survivorRunsTurn?: boolean; restart?: { survivorUnidentified?: string[]; reattachBusy?: number } } = {}) {
+async function runningThenRestarted(options: { plugin?: FakeTransportPluginOptions; survivorRunsTurn?: boolean; restart?: { survivorUnidentified?: string[] } } = {}) {
   const f = fixture({ plugin: options.plugin });
   const { session } = await f.bindNew();
   const native = session.conversationRef;
@@ -173,9 +177,10 @@ describe('A turn that did not survive a backend restart', () => {
 describe.each([
   ['a shared process (Codex)', undefined],
   ['a per-session process (Claude)', PER_SESSION],
-] as const)('A provider process that runs but does not answer in time (%s)', (_label, plugin) => {
+] as const)('A session host that runs but does not answer in time (%s)', (_label, plugin) => {
   it('is left alone: the row keeps its turn, no loss is written, and the next load that gets an answer adopts it', async () => {
-    const { f, session, native, backend, activityBefore } = await runningThenRestarted({ plugin, restart: { reattachBusy: 3 } });
+    const { f, session, native, backend, activityBefore } = await runningThenRestarted({ plugin });
+    failReattach('unreachable', 3);
 
     // The first poll after the deploy, and both lookups of the first reconcile pass (the survivor sweep and the row's own load),
     // find the process slow.
@@ -202,7 +207,8 @@ describe.each([
   });
 
   it('says so on the conversation only after the third failed lookup in a row, once', async () => {
-    const { f, session, backend } = await runningThenRestarted({ plugin, restart: { reattachBusy: 4 } });
+    const { f, session, backend } = await runningThenRestarted({ plugin });
+    failReattach('unreachable', 4);
     const slowLines = () => eventLogLines(f.row(session.id)).filter(line => /slow to answer/.test(line.text));
 
     await backend.manager.getSessionScreen(session.id);
@@ -224,7 +230,8 @@ describe.each([
   });
 
   it('does not run recovery or declare the turn lost for an unattended row, however many loads find the process slow', async () => {
-    const { f, session, backend } = await runningThenRestarted({ plugin, restart: { reattachBusy: 5 } });
+    const { f, session, backend } = await runningThenRestarted({ plugin });
+    failReattach('unreachable', 5);
     enableUnattendedRecovery(f.db, f.providerId as 'codex' | 'claude', session.conversationRef);
     for (let load = 0; load < 5; load += 1) await backend.manager.getSessionScreen(session.id);
     await settle();
@@ -232,6 +239,91 @@ describe.each([
     expect(lossLines(f, session.id)).toEqual([]);
     expect(f.row(session.id).isWorking).toBe(true);
     expect(methods(backend.plugin.instance)).not.toContain('sendTurn');
+  });
+
+  it('is not waited for for ever: after ten minutes the turn is settled as lost, and the line says the host did not answer', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin });
+    failReattach('unreachable', 100);
+    // Only the clock is faked; the event loop and the database run as usual.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    const unansweredLines = () => eventLogLines(f.row(session.id)).filter(line => /did not answer for 10 minutes/.test(line.text));
+
+    expect(await backend.manager.getSessionScreen(session.id)).toBeUndefined();
+    vi.setSystemTime(Date.now() + 9 * 60_000);
+    expect(await backend.manager.getSessionScreen(session.id)).toBeUndefined(); // still within the patience
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    vi.setSystemTime(Date.now() + 61_000);
+    await backend.manager.getSessionScreen(session.id);
+    await settle();
+    // Settled exactly as a lost turn is settled: working cleared, one "connection ended" line, here naming the silent host.
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(lossLines(f, session.id)).toHaveLength(1);
+    expect(unansweredLines()).toHaveLength(1);
+    expect(f.row(session.id).status).not.toBe('releasing');
+  });
+});
+
+describe.each([
+  ['a shared process (Codex)', undefined],
+  ['a per-session process (Claude)', PER_SESSION],
+] as const)('A provider process that was reached and then failed the handshake (%s)', (_label, plugin) => {
+  it('is not waited for: it is not "busy", so the turn is declared lost at once, with no slow-host line', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin });
+    failReattach('refused', 100);
+
+    await backend.manager.getSessionScreen(session.id);
+    await settle();
+    expect(backend.manager['structured'].survivorBusy(session.id)).toBe(false);
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(lossLines(f, session.id)).toHaveLength(1);
+    expect(lossLines(f, session.id)[0]!.text).toMatch(/previous connection ended while a turn was running/);
+    expect(eventLogLines(f.row(session.id)).some(line => /slow to answer/.test(line.text))).toBe(false);
+    // The row is looked up once for the lost turn, then restored the usual way (a resume), not left waiting.
+    expect(methods(backend.plugin.instance)).toEqual(['reattach', 'resume']);
+  });
+});
+
+describe('Stop on a conversation whose agent process cannot be reached', () => {
+  const stopLines = (f: StructuredSessionFixture, sessionId: string) =>
+    eventLogLines(f.row(sessionId)).filter(line => /Stop could not reach the agent process/.test(line.text));
+
+  it('clears "working" on a row whose host did not answer, and says the agent may still be running', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin: PER_SESSION });
+    failReattach('unreachable', 100);
+    expect(await backend.manager.getSessionScreen(session.id)).toBeUndefined();
+    expect(backend.manager['structured'].survivorBusy(session.id)).toBe(true);
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    const stopped = await backend.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(stopped.session.isWorking).toBe(false);
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(stopLines(f, session.id)).toHaveLength(1);
+    expect(stopLines(f, session.id)[0]!.text).toMatch(/may still be running/);
+    // Nothing was loaded to stop, and Stop is not a lost connection: no recovery, no loss line.
+    expect(methods(backend.plugin.instance)).toEqual(['reattach']);
+    expect(lossLines(f, session.id)).toEqual([]);
+  });
+
+  it('clears "working" on a row nothing has loaded yet, and does it once', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin: PER_SESSION });
+    expect(f.row(session.id).isWorking).toBe(true);
+    await backend.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(stopLines(f, session.id)).toHaveLength(1);
+    // A second Stop on an idle row says nothing more.
+    await backend.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(stopLines(f, session.id)).toHaveLength(1);
+  });
+
+  it('leaves a loaded row alone: Stop reaches the provider and the terminal ends the turn, with no unreachable line', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin: PER_SESSION });
+    await backend.manager.reconcileSessions();
+    await settle();
+    await backend.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(backend.plugin.instance!.sessions[0]!.calls.map(call => call.method)).toContain('interrupt');
+    expect(stopLines(f, session.id)).toEqual([]);
   });
 });
 
@@ -260,6 +352,27 @@ describe('A thread the app-server says is running a turn that no listing names',
     await settle();
     expect(f.row(session.id).isWorking).toBe(false);
     expect(lossLines(f, session.id)).toEqual([]);
+  });
+
+  it('is reached by Stop: the provider is asked to stop the unnamed turn (an empty id), and the row keeps reading working until it ends', async () => {
+    const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
+    await backend.manager.reconcileSessions();
+    await settle();
+    const adopted = backend.plugin.instance!.sessions[0]!;
+    expect(adopted.turnUnidentified).toBe(true);
+    expect(backend.manager['structured'].turnActive(session)).toBe(false); // no turn id yet, so the old Stop found nothing to stop
+
+    await backend.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(adopted.calls.filter(call => call.method === 'interrupt').map(call => call.args)).toEqual([['']]);
+    // The session is loaded, so this is not the "agent could not be reached" case: the turn ends through its own terminal.
+    expect(eventLogLines(f.row(session.id)).some(line => /Stop could not reach/.test(line.text))).toBe(false);
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    adopted.turnUnidentified = false;
+    adopted.push({ type: 'turn.started', turnId: 'turn-1', origin: 'provider', replay: false, adopted: true });
+    adopted.completeTurn('interrupted');
+    await settle();
+    expect(f.row(session.id).isWorking).toBe(false);
   });
 
   it('is still declared lost when the app-server has no turn for the thread at all', async () => {
@@ -526,5 +639,69 @@ describe('A question the model asked in a message', () => {
     // The person can try again.
     await f.manager.answerStructuredRequest(session.id, 'item:msg-1', { decision: 'answer', answers: { schema: ['Strict'] } });
     expect(f.row(session.id).pendingRequests).toBeUndefined();
+  });
+});
+
+// The structured Claude transport refuses to start a conversation over once its saved history is gone, and learns that a
+// conversation has history from a record the plugin writes when a turn completes. Rows that got their history elsewhere (moved
+// over from tmux) or before the record existed need it written for them. The record itself is covered by
+// `structured-claude-plugin` ("resume"); these tests cover that the host writes it.
+describe('The history of a conversation the structured transport did not run itself', () => {
+  function withHistoryNotes() {
+    const history = recordHistoryNotes();
+    historyNotes.push(history);
+    return history;
+  }
+
+  it('is recorded when a tmux conversation with a transcript moves over, and not for one that stays on tmux', async () => {
+    const history = withHistoryNotes();
+    const f = fixture({ plugin: PER_SESSION, manager: { defaultTransport: 'structured' } });
+    const bound = await f.manager.bindConversation({
+      project, provider: claudeProvider, providerSettings, conversationRef: 'claude-native-1', title: 'Claude work', kind: 'history', transport: 'tmux',
+    });
+    f.tmux.alive.delete(f.row(bound.id).tmuxSessionName);
+
+    // No transcript: the row stays on tmux, and nothing is recorded for it.
+    await f.manager.reconcileSessions();
+    expect(f.row(bound.id).transport).toBe('tmux');
+    expect(history.notes).toEqual([]);
+
+    // The first pass restored the dead tmux session; end it again so the row is converted without a live pane to guard.
+    f.tmux.alive.delete(f.row(bound.id).tmuxSessionName);
+    const transcript = path.join(f.root, 'claude-native-1.jsonl');
+    fs.writeFileSync(transcript, '{"type":"user"}\n');
+    f.db.conversationIndex.upsert({
+      ref: 'claude-native-1', kind: 'history', projectSlug: project.slug, provider: 'claude', title: 'Claude work',
+      updatedAt: new Date().toISOString(), transcriptPath: transcript, isBound: true, degraded: false,
+    });
+    await f.manager.reconcileSessions();
+    expect(f.row(bound.id)).toMatchObject({ transport: 'structured', conversationRef: 'claude-native-1' });
+    expect(history.notes).toEqual([{ conversationId: bound.id, nativeSessionId: 'claude-native-1' }]);
+  });
+
+  it('is recorded at boot for a structured row that has had a response, once per boot, and not for one that has not', async () => {
+    const history = withHistoryNotes();
+    const f = fixture({ plugin: PER_SESSION });
+    const answered = await f.bindNew();
+    const fresh = await f.bindNew();
+    f.db.sqlite.prepare('update bound_sessions set last_response_at=? where id=?').run(new Date().toISOString(), answered.session.id);
+
+    const backend = await f.restartBackend();
+    await backend.manager.reconcileSessions();
+    await settle();
+    expect(history.notes).toEqual([{ conversationId: answered.session.id, nativeSessionId: answered.session.conversationRef }]);
+    expect(history.notes.some(note => note.conversationId === fresh.session.id)).toBe(false);
+
+    await backend.manager.reconcileSessions(); // the pass that does this runs once per boot
+    expect(history.notes).toHaveLength(1);
+  });
+
+  it('is left to a plugin that has no such guard: a boot pass over its rows changes nothing and fails nothing', async () => {
+    const f = fixture(); // the shared-process fake has no history seam
+    const { session } = await f.bindNew();
+    f.db.sqlite.prepare('update bound_sessions set last_response_at=? where id=?').run(new Date().toISOString(), session.id);
+    const backend = await f.restartBackend();
+    await expect(backend.manager.reconcileSessions()).resolves.toBeUndefined();
+    expect(f.row(session.id)).toMatchObject({ status: 'bound', transport: 'structured' });
   });
 });

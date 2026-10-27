@@ -290,20 +290,35 @@ Opt-in installed-binary check: `AGENT_CONSOLE_REAL_CODEX=1 NODE_ENV=test npm run
 also runs a handshake against the host `codex app-server` (initialize, model list, account read). It opens no
 thread and spends no quota.
 
-Opt-in real proof: after `npm run build`, run
+Opt-in real Codex proof: after `npm run build`, run
 `env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log`.
 It starts an isolated backend (temp database, runtime and scratch git project, private tmux socket, free port
 in 14390-14399) with `structuredSessions.codex.enabled`, and drives one real structured Codex conversation
-through the HTTP API: bind, model profile, first reply, rollout and index path, hook registration and a
-coordination MCP call, mid-turn steer, Stop, a question (h2), an image (h3), manual sleep and restore, a medium-profile round
-trip, a graceful backend restart while idle (k) and during a running 25 s count (k2: the turn is re-adopted, Stop interrupts it
-and the next message completes on the same app-server), a screenshot-sized image over 5 MB (l) and release (m): 16 steps. Beyond the replies it checks, on the host: the app-server argv
-carries the coordination overrides and the app-server leads its own process group, an `agent-coord.mjs mcp`
-process of the proof's runtime exists during the coordination turn, the counting shell command is gone after Stop,
-the screen reads `asleep` while the thread is unloaded and the epoch changes on restore, and no process carrying
-the proof's runtime or temp root remains after release. It switches to the low profile before the first turn because the
-medium profile's model is sometimes rate limited (HTTP 429, Codex backs off for minutes); the evidence lists
-any such retries from Codex's own log. The question step (h2) asks Codex for a question through its `request_user_input`
+through the HTTP API in 16 steps. It needs the host Codex login, runs about fourteen short real turns (about 150 seconds when the
+provider is not rate limited), and removes its temp root and any app-server it started. Each step id and what it proves:
+
+- a. The project tree advertises `codex` as the structured provider.
+- b. The bind returns a thread UUID with the `structured:` name, no tmux session and no raw log. The app-server's environment names the proof's runtime and config (and no session id), its argv pins the coordination MCP server to this Console, it leads its own process group, and it is a child of its session host, whose record matches `/proc`.
+- c. The low model profile applies before the first turn, with no restart. The proof switches first because the medium profile's model is sometimes rate limited (HTTP 429, and Codex backs off for minutes); the evidence lists any such retries from Codex's own log.
+- d. The first message completes: `deliveryMode: turn`, a turn id, `lastResponseAt` set.
+- e. The rollout file exists under `~/.codex/sessions`, the index points at it, and the first turn ran on the low model.
+- f. The SessionStart hook registered the thread, an `agent-coord.mjs mcp` process of the proof's runtime ran during the turn, and the agent called the `agent_coordination` MCP tool.
+- g. A message sent mid-turn is delivered as a steer into the running turn (same turn id).
+- h. Stop (Escape): the row is idle within 15 s, the rollout records `turn_aborted` with reason `interrupted`, and the counting shell command is gone within 5 s of the Stop.
+- h2. Question: the card for a `request_user_input` question appears, the card route answers it, and the answer reaches the model (details below).
+- h3. An attached PNG reaches the model as a local image item.
+- i. Manual sleep unloads the thread (the screen reads `asleep`, a suspended row has no screen to poll, and a manual sleep is refused while the assignment is active); restore reloads it with a new epoch on the same app-server.
+- j. The medium profile reaches the provider on the next turn, then the low profile again, with no restart.
+- k. Graceful backend restart while idle: the app-server survives in its session host, the host record still matches `/proc`, and the same app-server serves the next turn.
+- k2. Graceful backend restart during a running 25 s count. The agent first marks its assignment unattended, so a recovery prompt the Console wrongly sent would really be sent. The first screen poll after boot reads working and writes no loss line, the thread is attached again to the surviving app-server within the first reconcile pass, and the row reads working while the count runs. Stop ends the adopted turn (idle within 15 s, rollout `turn_aborted`) and its shell command within 5 s, and the next message completes on the same app-server. A second restart during another count: a message sent then is delivered as a steer, is not answered while the count has been seen running for 2 s after the steer was accepted, and is answered after the count. Every turn started once and ended exactly once: the rollout holds `task_started` and one `task_complete` or `turn_aborted` per turn id, counted after Stop, after the next message and after the steered turn. No recovery or wake text reached the conversation and no loss line was written.
+- l. A 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour.
+- m. Release ends the session; after the session host is ended no process carrying the proof's runtime or temp root remains, and no tmux server was started.
+
+Stop rule: wherever a proof stops a turn that is running the counting shell command (Codex h and k2, Claude f and k2), the command
+must be gone within 5 s of the Stop, polled every 100 ms. The counts run 25 to 30 s, so a longer wait would let a command that Stop never reached
+finish on its own and pass. In the recorded runs the command ends in about 0.3 s.
+
+The question step (h2) asks Codex for a question through its `request_user_input`
 tool. On this Codex (0.164.0) the default collaboration mode offers the model the asynchronous tool: it returns
 `{accepted: true}`, raises no blocking request, and Codex emits an `agentMessage` item (`delivery: 'async'`, `questions` of
 `{ title, options? }`) while the turn stays open. The step waits for the message-mode card, checks its options, answers it
@@ -312,8 +327,7 @@ and that the reply names the chosen colour. It fails when Codex accepted the que
 finding and passes only when the model never made a call that Codex accepted. The image step (h3) sends a solid green PNG
 through the image route.
 The coordination MCP entry in `~/.codex/config.toml` pins the live runtime; the product overrides it in the
-app-server argv, and the proof relies on that (it adds no override of its own). It needs the host Codex login, runs about fourteen short
-real turns (about 150 seconds when the provider is not rate limited), and removes its temp root and any app-server it started. Step results print to stderr as
+app-server argv, and the proof relies on that (it adds no override of its own). Step results print to stderr as
 `PROOF` lines; the Fastify request log goes to stdout. Evidence JSON (step name, result, timing, thread id,
 model, pids; no message bodies) is written after every step to `test-results/structured-codex-proof/<timestamp>.json`.
 The rollout files it creates stay under `~/.codex/sessions`. Idle sleep after `idleUnloadMinutes` is covered by
@@ -325,24 +339,24 @@ It starts an isolated backend like the Codex proof (`structuredSessions.claude.e
 enabled for the scratch project; the bind names `transport: 'structured'`) and drives one real structured Claude conversation
 with the host's subscription login and the hooks already installed in `~/.claude/settings.json` (their helper path is the live
 checkout's `agent-coord.mjs`; the per-process `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG` redirect it to the proof's
-runtime). Fourteen steps: a. the tree advertises `claude`; b. the bind returns a UUID native id, the `structured:` name, a host
-record `<runtime>/structured/hosts/claude-<sessionId>.json` that matches `/proc`, and a process environment with the isolated
-runtime, config and its own `AGENT_CONSOLE_SESSION_ID`, plus a coordination MCP server carrying the isolated runtime (the
-user-scope MCP entry in `~/.claude.json` names the live one; the proof stops before any tool call if the plugin's entry did not
-win); c. the first message completes, the transcript exists under `~/.claude/projects/<escaped cwd>/<id>.jsonl` with
-`turnOrigin: human`, the index points at it, and the first turn ran on the low profile's model and effort after a switch from the
-launch model; d. the SessionStart hook registered the session in the isolated runtime and the agent called the
-`agent_coordination` MCP tool; e. steer (`deliveryMode: steer`, how the message lands in the transcript); f. Stop (idle
-within 15 s, same pid, interruption marker, shell command gone); g. an `AskUserQuestion` becomes a pending request that
-the card route answers and whose answer reaches the model; h. an attached PNG arrives as an image block and the model makes
-no `Read` call; i. medium then low
-profile on the next turn, with the model and effort in the API request records and no restart; j. manual sleep ends the
-process and restore resumes the same session id in a new one; k1. graceful backend restart while idle, the first reconcile pass
-adopts the process before any message and the same process answers the next turn; k2. graceful backend restart during a running
-25 s count, the first screen poll after boot reads working and writes no loss line, the turn is re-adopted, Stop interrupts it,
-the next message completes on the same process, and no recovery or wake text reaches the conversation; l. a 2560x1440 PNG above
-5 MB completes without an image error and the reply names its colour; m. release, and no `claude`, session host or
-`agent-coord.mjs mcp` of the proof remains. It runs about fifteen short turns (about 90 seconds when the provider is not slow). Evidence JSON (steps,
+runtime). It runs about fifteen short turns (about 90 seconds when the provider is not slow). Fourteen steps, each id and what it proves:
+
+- a. The project tree advertises `claude` as the structured provider.
+- b. The bind returns a UUID native id and the `structured:` name. The host record `<runtime>/structured/hosts/claude-<sessionId>.json` matches `/proc`, and the process environment holds the isolated runtime, config and its own `AGENT_CONSOLE_SESSION_ID`. A coordination MCP server carries the isolated runtime: the user-scope MCP entry in `~/.claude.json` names the live one, and the proof stops before any tool call if the plugin's entry did not win.
+- c. The first message completes. The transcript exists under `~/.claude/projects/<escaped cwd>/<id>.jsonl` with `turnOrigin: human`, the index points at it, and the first turn ran on the low profile's model and effort after a switch from the launch model.
+- d. The SessionStart hook registered the session in the isolated runtime, and the agent called the `agent_coordination` MCP tool.
+- e. A message sent mid-turn is delivered as a steer into the running turn (same turn id); the finding records how it lands in the transcript (a `queued_command` attachment, one Stop hook summary for the exchange).
+- f. Stop (Escape): the row is idle within 15 s, the pid is unchanged and alive, the transcript holds the interruption marker, and the counting shell command is gone within 5 s of the Stop.
+- g. An `AskUserQuestion` becomes a pending request that the card route answers and whose answer reaches the model (a finding when the tool is not offered).
+- h. An attached PNG arrives as an image block; a `Read` call by the model is recorded as a finding.
+- i. The medium and then the low profile reach the running process on the next turn, with the model and effort in the API request records, no restart, and no `/model` rows in the conversation timeline.
+- j. Manual sleep ends the process (and is refused while the assignment is active); restore resumes the same session id (`--resume`) in a new process with a new epoch.
+- k1. Graceful backend restart while idle: the first reconcile pass adopts the surviving process before any message, and the same process answers the next turn.
+- k2. Graceful backend restart during a running 25 s count. The agent first marks its assignment unattended, so a recovery prompt the Console wrongly sent would really be sent. The first screen poll after boot reads working and writes no loss line, the first reconcile pass adopts the surviving process (a new epoch), and the row reads working while the count runs. Stop ends the adopted turn (idle within 15 s, interruption marker in the transcript) and its shell command within 5 s, and the next message completes on the same process. A second restart during another count: a message sent then is delivered as a steer, is not answered while the count has been seen running for 2 s after the steer was accepted, and is answered after the count. Every turn ended exactly once: the transcript holds one Stop hook summary per completed turn and one interruption row for the stopped turn (a headless transcript has no `turn_duration` rows), counted after Stop, after the next message and after the steered turn. No recovery or wake text reached the conversation and no loss line was written.
+- l. A 2560x1440 PNG above 5 MB completes without an image error, and the reply names its dominant colour.
+- m. Release ends the session and the process; no `claude`, session host or `agent-coord.mjs mcp` of the proof remains, and no tmux server was started.
+
+The Stop rule above applies to f and k2. Evidence JSON (steps,
 findings, models, pids; no message bodies) goes to `test-results/structured-claude-proof/<timestamp>.json`. The transcript
 directory the CLI creates for the scratch project is removed after a passing run and kept, with its path in the evidence, after
 a failed one.
@@ -351,11 +365,18 @@ Opt-in real migration proof: after `npm run build`, run
 `env -u NODE_ENV node scripts/prove-structured-migration.mjs --run > /tmp/proof-migration-backend.log`.
 It starts an isolated backend with the installed tmux provider commands (pinned to the proof's runtime, as
 `prove-granted-launches.mjs` does), both structured lanes enabled and `defaultTransport: 'tmux'`, and creates one real tmux Codex
-chat and one real tmux Claude chat on a private tmux socket; each answers "TMUX" and is bound to its native conversation with an
-indexed transcript. It then rewrites the config to `defaultTransport: 'structured'`, closes and rebuilds the app, and checks the
-dry run (`GET /api/sessions/structured-migration`) and the first reconcile pass (5 s after start): both rows become
-`transport: structured` with `idle_suspended_at`, the sentinel name and the same native ids, the tmux sessions are gone and no
-process of the tmux phase survives. Each conversation then answers "MIGRATED" on the structured path in the same native
-conversation (history kept). Nine steps (step b2 records which coordination MCP server the tmux Claude started; its command is
-the installed one, without `--strict-mcp-config`), four short turns, about 35 seconds; evidence goes to
-`test-results/structured-migration-proof/<timestamp>.json`. Both proofs share `scripts/structured-proof-kit.mjs`.
+chat and one real tmux Claude chat on a private tmux socket. It then rewrites the config to `defaultTransport: 'structured'`, closes and
+rebuilds the app, and watches the first reconcile pass (5 s after start) move the rows. Nine steps, four short turns, about 35 seconds;
+no step stops a running turn, so the Stop rule does not apply. Each id and what it proves:
+
+- a. Both lanes are advertised while the default is tmux; a Codex chat and a Claude chat bind on tmux through the normal routes, and their tmux sessions exist on the private socket.
+- b. Each chat answers "TMUX", is bound to a native conversation, has an indexed transcript, and has processes carrying its session id.
+- b2. The Claude conversation registered in the proof's own runtime (SessionStart hook); it records which coordination MCP server the CLI started (the command is the installed one, without `--strict-mcp-config`).
+- c. Flip: the tmux sessions survive the backend closing, the config is rewritten, the app is rebuilt, and the dry run (`GET /api/sessions/structured-migration`) lists both rows as idle (a finding when the first pass had already moved them).
+- d. The first reconcile pass moves both rows to `transport: structured`, asleep (`idle_suspended_at`), with the sentinel name, no pid and raw log, and the same native conversation.
+- e. The tmux sessions are gone and no provider process of the tmux phase survives.
+- f. Codex answers "MIGRATED" on the structured path in the same thread, with history kept and the index still pointing at the same transcript.
+- g. Claude answers "MIGRATED" on the structured path in the same session (resumed by id), with history kept and the same transcript.
+- h. Release ends both structured conversations, and no process of this proof remains.
+
+Evidence goes to `test-results/structured-migration-proof/<timestamp>.json`. Both proofs share `scripts/structured-proof-kit.mjs`.

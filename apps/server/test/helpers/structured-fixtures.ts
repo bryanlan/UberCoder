@@ -3,6 +3,7 @@ import {
   PreviousTurnActiveError,
   RequestNotPendingError,
   ResumeFailedError,
+  TransportBusyError,
   TransportUnavailableError,
   TurnNotActiveError,
   type OpenOptions,
@@ -228,7 +229,7 @@ export class FakeTransportInstance implements TransportInstance {
   survivorTurns = new Map<string, string>();
   /** Native ids whose surviving process runs a turn the plugin cannot name: the adopted session says `turnUnidentified` and reports no turn. */
   survivorUnidentified = new Set<string>();
-  /** The next this-many `reattach` calls fail as a provider process that runs but does not answer in time (`TransportUnavailableError`), keeping the survivor. */
+  /** The next this-many `reattach` calls fail as a provider process that runs but did not answer (`TransportBusyError`), keeping the survivor. */
   reattachBusy = 0;
   private threadCounter = 0;
   private pidCounter = 0;
@@ -266,7 +267,7 @@ export class FakeTransportInstance implements TransportInstance {
     this.assertOpen();
     if (this.reattachBusy > 0) {
       this.reattachBusy -= 1;
-      throw new TransportUnavailableError('The running provider process did not answer in time. It was left alone.');
+      throw new TransportBusyError('The running provider process did not answer in time. It was left alone.');
     }
     const pid = this.survivors.get(nativeSessionId);
     if (pid === undefined) return undefined;

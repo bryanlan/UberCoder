@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import { FakeTransportInstance, FakeTransportPlugin, fakePluginContext, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
-import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
+import { eventLogLines, failReattach, recordHistoryNotes, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 // A per-session provider process (one Claude CLI per conversation) can outlive a backend restart behind its session host.
 // Nothing owns it until its conversation is used, so the first reconcile pass asks the plugin to adopt it. These tests drive
@@ -317,8 +317,9 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     await svc.shutdown();
   });
 
-  it('reports a process that runs but did not answer as busy, which is not the same as absent, and forgets it once the process answers', async () => {
-    const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321 }, reattachBusy: 1 });
+  it('reports a session host that runs but did not answer as busy, which is not the same as absent, and forgets it once the process answers', async () => {
+    const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321 } });
+    failReattach('unreachable', 1);
     const svc = service(plugin);
     expect(await svc.reattachSurvivors([{ session: row('c1', 'native-1'), cwd: '/tmp' }])).toEqual([]);
     expect(svc.survivorBusy('c1')).toBe(true);
@@ -333,6 +334,23 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     expect(await none.reattachSurvivors([{ session: row('c2', 'native-9'), cwd: '/tmp' }])).toEqual([]);
     expect(none.survivorBusy('c2')).toBe(false); // nothing runs for it
     await none.shutdown();
+  });
+
+  it('does not report a lookup that failed after the process was reached as busy: that is a loss with a reason, not a wait', async () => {
+    const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321, 'native-2': 4322 } });
+    const svc = service(plugin);
+    failReattach('refused', 1);
+    expect(await svc.reattachSurvivors([{ session: row('c1', 'native-1'), cwd: '/tmp' }])).toEqual([]);
+    expect(svc.survivorBusy('c1')).toBe(false);
+
+    // The same row that was busy is no longer so once a lookup fails another way.
+    failReattach('unreachable', 1);
+    expect(await svc.reattachSurvivors([{ session: row('c2', 'native-2'), cwd: '/tmp' }])).toEqual([]);
+    expect(svc.survivorBusy('c2')).toBe(true);
+    failReattach('refused', 1);
+    expect(await svc.reattachSurvivors([{ session: row('c2', 'native-2'), cwd: '/tmp' }])).toEqual([]);
+    expect(svc.survivorBusy('c2')).toBe(false);
+    await svc.shutdown();
   });
 
   it('keeps the record of completed turns through a sleep and ends it with the conversation', async () => {
@@ -379,5 +397,45 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     instance.reattach = undefined; // a plugin that cannot adopt survivors
     expect(await bareService.reattachSurvivors([{ session: row('c3', 'native-2'), cwd: '/tmp' }])).toEqual([]);
     await bareService.shutdown();
+  });
+});
+
+describe('StructuredSessionService.noteConversationHistory', () => {
+  function service(plugin: FakeTransportPlugin) {
+    const registry = new TransportPluginRegistry();
+    registry.register(plugin);
+    const context = fakePluginContext();
+    return new StructuredSessionService({
+      registry,
+      config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
+      createContext: () => context,
+      meta: context.meta,
+      callbacks: { onTurnStarted() {}, onItemCompleted() {}, onTurnTerminal() {}, onRequest() {}, onQuestion() {}, onRequestsChanged() {}, onSessionState() {}, appendStatus() {} },
+    });
+  }
+  const row = (id: string, conversationRef: string, resumeConversationRef?: string) =>
+    ({ id, provider: 'claude', conversationRef, ...(resumeConversationRef ? { resumeConversationRef } : {}), projectSlug: 'p' }) as never;
+
+  it('hands the plugin the row id and the native id the row resumes by, and skips a conversation with no native id yet', async () => {
+    const history = recordHistoryNotes();
+    try {
+      const svc = service(new FakeTransportPlugin({ ...PER_SESSION }));
+      svc.noteConversationHistory(row('c1', 'old-native', 'resume-native'));
+      svc.noteConversationHistory(row('c2', 'native-2'));
+      svc.noteConversationHistory(row('c3', 'pending:abc'));
+      expect(history.notes).toEqual([
+        { conversationId: 'c1', nativeSessionId: 'resume-native' },
+        { conversationId: 'c2', nativeSessionId: 'native-2' },
+      ]);
+      await svc.shutdown();
+    } finally {
+      history.restore();
+    }
+  });
+
+  it('is ignored by a plugin that has no such guard', async () => {
+    const svc = service(new FakeTransportPlugin({ ...PER_SESSION }));
+    expect(() => svc.noteConversationHistory(row('c1', 'native-1'))).not.toThrow();
+    await svc.shutdown();
   });
 });

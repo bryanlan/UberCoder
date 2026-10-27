@@ -6,7 +6,8 @@
 // API the web client uses: bind, send, coordination hook and MCP, steer, Stop, a question answered through the card
 // route (h2), an image turn (h3), model profile, manual sleep and restore, a graceful backend restart while idle (k: the
 // app-server, held by its session host, survives it and serves the next turn) and during a running turn (k2: the turn is
-// re-adopted, Stop interrupts it and the next message completes on the same app-server), a screenshot-sized image over 5 MB (l)
+// re-adopted, Stop interrupts it and ends its command within 5 s, a message sent meanwhile steers it, the next message completes on the
+// same app-server and every turn ends exactly once), a screenshot-sized image over 5 MB (l)
 // and release (m). The coordination MCP server is pinned to the proof's runtime by the product itself (the app-server argv), not
 // by this script; a backend crash is not exercised here. Real Codex turns run with the host's ChatGPT login; every prompt is one
 // short fixed sentence.
@@ -281,6 +282,41 @@ const send = async (text, extra = {}) => {
 };
 /** Wait until the turn is over and an assistant message carries the marker. */
 const waitForReply = marker => wait(`assistant reply containing ${marker}`, async () => (await idle()) && (await assistantHas(marker)));
+/**
+ * How the turns in the rollout from record `from` on began and ended. Codex writes `task_started` and then exactly one of `task_complete`
+ * or `turn_aborted` (a Stop) per turn id, so a turn that ended twice, or not at all, shows in these counts. `irregular` names every turn
+ * that did not begin once and end once. Only turns that began at or after `from` count: the end of an earlier turn can still be landing.
+ */
+const turnEndsSince = from => {
+  const turns = new Map();
+  for (const record of rolloutRecords().slice(from)) {
+    const type = record.type === 'event_msg' ? record.payload?.type : undefined;
+    if (type !== 'task_started' && type !== 'task_complete' && type !== 'turn_aborted') continue;
+    const id = typeof record.payload.turn_id === 'string' ? record.payload.turn_id : '(no turn id)';
+    const turn = turns.get(id) ?? { started: 0, ends: [] };
+    if (type === 'task_started') turn.started += 1; else turn.ends.push(type);
+    turns.set(id, turn);
+  }
+  const own = [...turns].filter(([, turn]) => turn.started > 0);
+  const ends = type => own.reduce((sum, [, turn]) => sum + turn.ends.filter(end => end === type).length, 0);
+  return {
+    turns: own.length, completed: ends('task_complete'), aborted: ends('turn_aborted'),
+    irregular: own.filter(([, turn]) => turn.started !== 1 || turn.ends.length !== 1).map(([id, turn]) => `${id.slice(0, 8)}: ${turn.started} start(s), ${turn.ends.join('+') || 'no end'}`),
+  };
+};
+/**
+ * Waits for the turn-end records `expected` names, lets the rollout settle for 2 s so a second end would have arrived, then requires exactly
+ * the expected turns and ends since record `from`: one end per turn, not zero and not two. The counts go into `values[key]`.
+ */
+const assertTurnEnds = async (label, from, expected, values, key) => {
+  const wanted = expected.completed + expected.aborted;
+  const found = () => { const seen = turnEndsSince(from); return seen.completed + seen.aborted; };
+  try { await wait(`${wanted} turn-end record(s) in the rollout (${label})`, () => found() >= wanted, 20_000, 250); } catch (error) { if (!/^Timed out/.test(error.message)) throw error; }
+  await sleep(2000);
+  const seen = turnEndsSince(from);
+  values[key] = `${seen.turns} turn(s), ${seen.completed} completed, ${seen.aborted} aborted`;
+  assert.deepEqual({ ...seen, irregular: seen.irregular.length }, { ...expected, irregular: 0 }, `Every turn must start once and end exactly once (${label}); the rollout holds ${JSON.stringify(seen)}, expected ${JSON.stringify(expected)}.`);
+};
 const toolCallsSince = (skip, pattern) => rolloutRecords().slice(skip).filter(record => {
   const type = record.payload?.type;
   return record.type !== 'turn_context' && /(?:function_call|custom_tool_call|local_shell_call|tool_call_begin|tool_call_end|exec_command)/.test(type ?? '')
@@ -509,7 +545,8 @@ try {
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
-    await wait('the counting command to end after Stop', () => commandPids.every(pid => !alive(pid)) && pgrep(marker).length === 0, 20_000, 250);
+    // Within 5 s, as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    await wait('the counting command to end within 5 s of Stop', () => commandPids.every(pid => !alive(pid)) && pgrep(marker).length === 0, 5_000, 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const abortRecord = await wait('the rollout to record the interrupted turn', () =>
       rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);
@@ -698,7 +735,7 @@ try {
     Object.assign(values, { oldPid, newPid, samePid: newPid === oldPid, hostPid: after.host.pid, recordMatchesProc: true });
   });
 
-  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it and ends its command, a message sent meanwhile steers it and is answered after it, and the next message completes on the same app-server', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it and ends its command, a message sent meanwhile steers it and is answered after it, the next message completes on the same app-server, and every turn ends exactly once', async values => {
     const control = await consoleControlTexts();
     const skip = rolloutRecords().length;
     const eventLog = eventLogPath();
@@ -796,10 +833,14 @@ try {
     assert.equal(abortRecord.payload.reason, 'interrupted');
     values.turnAborted = abortRecord.payload.reason;
     assert.equal((await sessionState()).isWorking, false);
+    // The adopted turn ended once, as an abort: not twice, and not also as a completion.
+    await assertTurnEnds('after Stop', skip, { turns: 1, completed: 0, aborted: 1 }, values, 'turnEndsAfterStop');
     // The next message gets its own reply from the same app-server.
     const resumedBefore = await countAssistant('RESUMED');
+    const resumedFrom = rolloutRecords().length;
     await send(PROMPTS.resumed);
     await wait('assistant reply containing RESUMED', async () => (await idle()) && (await countAssistant('RESUMED')) > resumedBefore);
+    await assertTurnEnds('after the resumed message', resumedFrom, { turns: 1, completed: 1, aborted: 0 }, values, 'turnEndsAfterResume');
     assert.equal(row().pid, oldPid, 'The same app-server must serve the resumed thread.');
     const afterStop = hostRecord();
     assert.equal(afterStop.host.pid, before.host.pid, 'The same session host must still hold it.');
@@ -810,17 +851,30 @@ try {
 
     // Phase 2: a message sent while a re-adopted turn runs is delivered to that turn as a steer (it does not start a second turn),
     // and is answered once the turn's work is done. The count is not stopped this time.
+    const steerFrom = rolloutRecords().length;
     const steerRun = await restartDuringCount('k2s', (key, value) => { values[`steer${key[0].toUpperCase()}${key.slice(1)}`] = value; });
     const followedBefore = await countAssistant('FOLLOWED');
     const followUp = await send(PROMPTS.followUp);
+    const acceptedAt = Date.now();
     values.followUpDelivery = followUp.record.deliveryMode;
     assert.equal(followUp.record.deliveryMode, 'steer', 'A message sent while the adopted turn runs must be delivered as a steer.');
     assert.equal(followUp.record.state, 'submitted');
     assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count must still be running when the message is sent.');
-    assert.equal(await countAssistant('FOLLOWED'), followedBefore, 'The steered message must not be answered while the count still runs.');
+    // "Not answered yet" proves nothing right after the send. Watch the count run for 2 s with the steer in, then look for a reply; the count must
+    // still be running when the look is over, or a reply would be allowed.
+    await wait('the count to be seen running 2 s after the steer was accepted', () => {
+      if (pgrep(countMarker('k2s')).length === 0) throw new Error(`The count ended ${Date.now() - acceptedAt} ms after the steer was accepted, before the 2 s the check needs; rerun.`);
+      return Date.now() - acceptedAt >= 2000;
+    }, 15_000, 250);
+    const repliesWhileCounting = await countAssistant('FOLLOWED');
+    assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count ended while the unanswered check ran, so the check proves nothing; rerun.');
+    values.followUpUnansweredForMs = Date.now() - acceptedAt;
+    assert.equal(repliesWhileCounting, followedBefore, 'The steered message must not be answered while the count still runs.');
     await wait('the counting command to finish by itself', () => pgrep(countMarker('k2s')).length === 0, 60_000, 250);
     await wait('assistant reply containing FOLLOWED', async () => (await idle()) && (await countAssistant('FOLLOWED')) > followedBefore);
     values.followUpAnswered = 'after the count';
+    // The steer joined the adopted turn: that turn started once and ended once, and the steer started no turn of its own.
+    await assertTurnEnds('after the steered turn', steerFrom, { turns: 1, completed: 1, aborted: 0 }, values, 'turnEndsAfterSteeredTurn');
     assert.equal(row().pid, steerRun.oldPid, 'The same app-server must answer the steered message.');
     const after = hostRecord();
     assert.equal(after.host.pid, steerRun.before.host.pid, 'The same session host must still hold it.');

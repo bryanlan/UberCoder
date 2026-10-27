@@ -17,6 +17,7 @@ import path from 'node:path';
 import {
   LineTransportNotRunningError,
   ResumeFailedError,
+  TransportBusyError,
   TransportUnavailableError,
   type LineTransport,
   type LineTransportFactory,
@@ -393,7 +394,8 @@ export class ClaudeInstance implements TransportInstance {
    * (a process that is not idle is in the middle of a turn, which the session then tracks as an adopted provider turn) and
    * the snapshot of its background tasks. One the earlier backend never spoke to is handshaken as a new launch, with its
    * SessionStart hook frames replayed. A host that runs but does not answer in time is left alone and reported as
-   * {@link TransportUnavailableError}; it is not "no survivor".
+   * {@link TransportBusyError}; it is not "no survivor". That is the only busy case: a handshake that fails after the
+   * connection was made (a refusal, a timeout, an exit) throws the ordinary error, so the caller treats the process as lost.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<ClaudeSession | undefined> {
     if (this.disposed) return undefined;
@@ -464,6 +466,15 @@ export class ClaudeInstance implements TransportInstance {
   private noteConversationRan(conversationId: string, sessionId: string): void {
     if (this.conversationRan(conversationId, sessionId)) return;
     this.context.meta.set(this.ranKey(conversationId), JSON.stringify({ sessionId, firstTurnCompletedAt: new Date().toISOString() }));
+  }
+
+  /**
+   * A conversation that has history this plugin never saw complete: a row moved over from tmux, or one whose turns completed
+   * before the record above existed. Without the record `resume` would take a transcript the CLI has since deleted (it removes
+   * old ones) for a chat that never ran, and relaunch it empty under the same id.
+   */
+  noteConversationHistory(conversationId: string, nativeSessionId: string): void {
+    this.noteConversationRan(conversationId, nativeSessionId);
   }
 
   private conversationRan(conversationId: string, sessionId: string): boolean {
@@ -583,7 +594,7 @@ export class ClaudeInstance implements TransportInstance {
     const none = (): undefined => {
       // A host that runs but did not answer: this is not "there is no survivor", and what a caller does with that (a launch,
       // which retires a host) would end a process that may be running a turn. Let the next use try again.
-      if (unreachable) throw new TransportUnavailableError('The running Claude process for this conversation did not answer in time. It was left alone; try again in a moment.');
+      if (unreachable) throw new TransportBusyError('The running Claude process for this conversation did not answer in time. It was left alone; try again in a moment.');
       // A launch record outlives its process when no backend saw the exit (a reboot, or a process that ended while the
       // backend was down). Dropping it here keeps a later `resume` from taking a dead launch for a survivor.
       if (nothingRuns) this.forgetLaunch(options.conversationId, sessionId);

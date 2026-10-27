@@ -4,7 +4,8 @@ import type { SessionCommandResult } from '../src/sessions/session-manager.js';
 import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
 import type { QueuedInputRecord } from '../src/sessions/input-queue.js';
 import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt.js';
-import { peerWakePaused } from '../src/coordination/wake.js';
+import { CoordinationService } from '../src/coordination/service.js';
+import { peerWakeAttemptKey, peerWakePaused, type PeerWakeAttempt } from '../src/coordination/wake.js';
 import { NotSentError, SendRejectedError, TurnNotActiveError } from '../src/providers/transport/types.js';
 import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
@@ -197,11 +198,39 @@ describe('Structured human input', () => {
     // Past 10 minutes of refusals the message fails, with the reason, and nothing retries it.
     age(10 * 60_000 + 1_000);
     await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('failed');
-    expect(record(f, session.id, requestId).reason).toMatch(/could not be sent for 10 minutes/);
+    // The reason keeps the last refusal and says nothing was sent; it does not send the person to check for a message that never left.
+    expect(record(f, session.id, requestId).reason).toMatch(/could not be sent for 10 minutes \(The fake connection is down\.\)\. Nothing was sent\./);
+    expect(record(f, session.id, requestId).reason).not.toMatch(/Check the conversation/);
     expect(f.row(session.id).queuedInputs?.find(item => item.requestId === requestId)).toMatchObject({ state: 'needs_review' });
     const attempts = f.calls(session.conversationRef, 'sendTurn').length;
     await new Promise(resolve => setTimeout(resolve, 1_300));
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(attempts);
+  });
+
+  it('does not count a wait for the session itself: while it is suspended or cannot be loaded, the run of refusals starts over', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    const thread = f.thread(session.conversationRef);
+    thread.sendTurn = async input => {
+      thread.calls.push({ method: 'sendTurn', args: [input] });
+      throw new NotSentError('The fake connection is down.');
+    };
+    const requestId = randomUUID();
+    await send(f, session.id, 'send me when you can', requestId);
+    expect(record(f, session.id, requestId).notSentSince).toBeTruthy();
+    // The run of refusals began almost 10 minutes ago.
+    f.db.meta.set(`session-input:${session.id}:${requestId}`, JSON.stringify({ ...record(f, session.id, requestId), notSentSince: new Date(Date.now() - 9.9 * 60_000).toISOString() }));
+
+    // Memory pressure puts the session to sleep: the message waits for the session, which is not a refusal by the transport.
+    f.db.boundSessions.setPressureSuspendedAt(session.id, new Date().toISOString());
+    await expect.poll(() => record(f, session.id, requestId).reason, { timeout: 5000, interval: 100 }).toBe('Waiting for the session to resume.');
+    expect(record(f, session.id, requestId).notSentSince).toBeUndefined();
+
+    // It comes back, and the transport refuses again: a new run starts instead of the old one failing the message at once.
+    f.db.boundSessions.setPressureSuspendedAt(session.id, undefined);
+    await expect.poll(() => record(f, session.id, requestId).notSentSince, { timeout: 5000, interval: 100 }).toBeTruthy();
+    expect(record(f, session.id, requestId)).toMatchObject({ state: 'queued', reason: 'Waiting for the session to accept the message.' });
+    expect(Date.now() - Date.parse(record(f, session.id, requestId).notSentSince!)).toBeLessThan(60_000);
   });
 
   it('does not count the wait for a running turn as refusals: the run of refusals starts again afterwards', async () => {
@@ -503,5 +532,53 @@ describe('Structured input that has no meaning without a terminal', () => {
     const { session } = await f.bindNew();
     expect(await f.manager.allowsLiteralSelectionKeystroke(session.id, '2')).toBe(false);
     expect(f.tmux.captureStartLines).toEqual([]);
+  });
+});
+
+describe('Automatic delivery of a message the provider refuses for good', () => {
+  const refusal = new SendRejectedError('The message could not be sent: set_model: Model opus-9 is not available');
+  const refuse = (f: StructuredSessionFixture, native: string) => {
+    const thread = f.thread(native);
+    thread.sendTurn = async input => {
+      thread.calls.push({ method: 'sendTurn', args: [input] });
+      throw refusal;
+    };
+  };
+
+  it('is a rejection that names its reason, not a deferral and not an uncertain failure', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    refuse(f, session.conversationRef);
+    const delivery = await f.manager['structured'].deliverAutomatic(f.row(session.id), 'wake up');
+    expect(delivery).toEqual({ status: 'rejected', reason: refusal.message });
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+
+    // The other refusals keep their meaning.
+    const thread = f.thread(session.conversationRef);
+    thread.sendTurn = async input => { thread.calls.push({ method: 'sendTurn', args: [input] }); throw new NotSentError('The fake connection is down.'); };
+    expect(await f.manager['structured'].deliverAutomatic(f.row(session.id), 'wake up')).toMatchObject({ status: 'deferred' });
+    thread.sendTurn = async input => { thread.calls.push({ method: 'sendTurn', args: [input] }); throw new Error('socket reset'); };
+    expect(await f.manager['structured'].deliverAutomatic(f.row(session.id), 'wake up')).toMatchObject({ status: 'failed', reason: 'socket reset' });
+  });
+
+  it('stops a peer wake with the reason and without calling the delivery uncertain, and never sends it again', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    const native = session.conversationRef;
+    refuse(f, native);
+    const service = new CoordinationService(f.db, { enabled: true, pilotPaths: [] }, () => { void f.manager.wakePendingAssignments(); });
+    const recipient = service.register({ provider: 'codex', nativeSessionId: native, token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
+    const sender = service.register({ provider: 'claude', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
+    const message = { priority: 'P1' as const, wakeReason: 'A critical assigned run is paused; answer now.', id: randomUUID(), recipientId: recipient, text: 'Please answer the question.' };
+    service.send(sender, message);
+    await f.manager.wakePendingAssignments();
+
+    const attempt = JSON.parse(f.db.meta.get(peerWakeAttemptKey(message.id))!) as PeerWakeAttempt;
+    expect(attempt).toMatchObject({ status: 'failed', reason: refusal.message });
+    const lines = eventLogLines(f.row(session.id)).filter(line => line.type === 'status').map(line => line.text);
+    expect(lines).toContain(`Automatic inbox input was not sent, and sending it again would fail the same way: ${refusal.message}`);
+    expect(lines.some(line => /uncertain delivery/.test(line))).toBe(false);
+    await f.manager.wakePendingAssignments();
+    expect(f.calls(native, 'sendTurn')).toHaveLength(1);
   });
 });

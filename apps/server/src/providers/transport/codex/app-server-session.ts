@@ -541,6 +541,8 @@ export class CodexAppServerSession implements TransportSession {
   async sendTurn(input: TurnInput): Promise<{ turnId: string }> {
     if (this.ended) throw new NotSentError('The Codex session has ended.');
     if (this.activeTurnId !== null || this.pendingStart !== null) throw new PreviousTurnActiveError();
+    // The thread is running a turn this session cannot name yet: a `turn/start` now would land in a running thread.
+    if (this.turnUnidentified) throw new PreviousTurnActiveError('The thread is running a turn that has not been identified yet.');
     const clientMessageId = input.clientMessageId ?? randomUUID();
     const params = buildTurnStartParams(this.nativeSessionId, input, this.policy, this.cwd, clientMessageId);
     let client: JsonRpcClient;
@@ -598,8 +600,13 @@ export class CodexAppServerSession implements TransportSession {
     }
   }
 
+  /**
+   * While the running turn is unidentified (see {@link turnUnidentified}) the caller has no turn id to give; any id this session
+   * does not know then means that turn, and it is looked up again here.
+   */
   async interrupt(turnId: string): Promise<void> {
     const record = this.turns.get(turnId);
+    if (!record && this.turnUnidentified) return this.interruptUnidentifiedTurn();
     if (!record || record.terminal || record.interrupt) return;
     // An interrupt cannot be delivered to a queued turn before it starts.
     await this.awaitStarted(record, this.host.timings.queuedStartWaitMs);
@@ -632,6 +639,25 @@ export class CodexAppServerSession implements TransportSession {
     this.terminateBackgroundCommands(record);
     if (record.terminal || !record.interrupt) return;
     record.interrupt.timer = setTimeout(() => this.interruptTimedOut(record), this.host.timings.interruptGraceMs);
+  }
+
+  /** Names the turn the thread runs (the listing at adoption could not), then stops it like any adopted turn. */
+  private async interruptUnidentifiedTurn(): Promise<void> {
+    const turns = await this.listRecentTurns();
+    if (this.ended) return;
+    // The first event may have named the turn while the listing was out.
+    if (this.activeTurnId !== null) return this.interrupt(this.activeTurnId);
+    if (!this.adoptUnknownTurn) return; // the thread went idle while the listing was out: there is nothing to stop
+    const running = turns.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
+    if (!running) {
+      this.host.log.warn({ threadId: this.nativeSessionId }, 'codex Stop found no running turn to interrupt on a thread that reports a turn it could not name');
+      this.notice('warn', 'Codex could not find the running turn to stop. Try again in a moment.');
+      return;
+    }
+    // Nothing waits between the check and the record, so no event can create a second record for this turn.
+    this.adoptUnknownTurn = false;
+    await this.adoptRunningTurn(running);
+    await this.interrupt(running.id);
   }
 
   /**
@@ -946,19 +972,27 @@ export class CodexAppServerSession implements TransportSession {
 
   /**
    * A turn found running was started by an earlier backend: this session never saw its commands start, so it cannot end them
-   * at Stop (Codex does not end a turn's command on `turn/interrupt`). Ask which commands the turn has running, read from its
-   * in-progress `commandExecution` items (the process id comes from the item, or from the thread's background terminals when
-   * the item has none), and track them like commands seen starting. Best effort: a provider that cannot list them leaves the
-   * turn with no tracked commands, as before, and the failure goes to the log.
+   * at Stop (Codex does not end a turn's command on `turn/interrupt`). The thread's live background terminals are the source:
+   * `thread/backgroundTerminals/list` returns a running command (foreground ones too) with its item id and process id, and
+   * every terminal it returns belongs to this thread, which runs one turn at a time, so each is tracked like a command seen
+   * starting (a leftover of an earlier turn is exactly what Stop should end). Verified on codex-cli 0.164.0: while a command ran
+   * in a turn, `thread/items/list` returned only completed items, so it cannot name a running command there. The turn's
+   * in-progress `commandExecution` items are still read as a second source, for a CLI that lists them. Best effort: a provider
+   * that cannot list leaves the turn with no tracked commands, and Stop then ends the turn only; both outcomes go to the log.
    */
   private async trackRunningCommands(record: TurnRecord): Promise<void> {
-    const [items, terminals] = await Promise.all([this.listRunningCommandItems(record.id), this.listTerminalProcesses()]);
+    const [terminals, items] = await Promise.all([this.listAdoptionTerminals(), this.listRunningCommandItems(record.id)]);
     if (this.ended || record.terminal) return;
-    for (const item of items) {
-      const processId = item.processId ?? terminals.get(item.id);
-      if (processId && !record.commands.has(item.id)) record.commands.set(item.id, processId);
+    // An `item/completed` that arrived meanwhile was held (or applied) in order; a command it removed is not added again here.
+    for (const terminal of terminals ?? []) {
+      if (typeof terminal.itemId === 'string' && typeof terminal.processId === 'string' && !record.commands.has(terminal.itemId)) record.commands.set(terminal.itemId, terminal.processId);
     }
-    if (items.length > 0) this.host.log.debug?.({ threadId: this.nativeSessionId, turnId: record.id, running: items.length, tracked: record.commands.size }, 'codex tracked the commands an adopted turn is running');
+    for (const item of items) {
+      if (item.processId && !record.commands.has(item.id)) record.commands.set(item.id, item.processId);
+    }
+    const fields = { threadId: this.nativeSessionId, turnId: record.id, tracked: record.commands.size, terminals: terminals?.length ?? null, items: items.length };
+    if (record.commands.size > 0) this.host.log.info(fields, 'codex tracked the commands an adopted turn is running');
+    else this.host.log.info(fields, terminals ? 'codex found no running commands on an adopted turn; Stop will end the turn but not any command it started' : 'codex could not list the running commands of an adopted turn; Stop will end the turn but not any command it started');
   }
 
   /** The in-progress commands of one turn, newest first. An error gives none. */
@@ -989,13 +1023,13 @@ export class CodexAppServerSession implements TransportSession {
     return found;
   }
 
-  /** The thread's live background terminals by item id. An error gives none. */
-  private async listTerminalProcesses(): Promise<Map<string, string>> {
+  /** The thread's live background terminals. A provider that cannot list them (or an error) gives undefined, which is not the same as none. */
+  private async listAdoptionTerminals(): Promise<CodexBackgroundTerminal[] | undefined> {
     try {
-      return new Map((await this.listBackgroundTerminals(Math.min(this.host.timings.requestTimeoutMs, ADOPTION_LISTING_TIMEOUT_MS))).map((terminal) => [terminal.itemId, terminal.processId]));
+      return await this.listBackgroundTerminals(Math.min(this.host.timings.requestTimeoutMs, ADOPTION_LISTING_TIMEOUT_MS));
     } catch (error) {
-      this.host.log.debug?.({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/backgroundTerminals/list failed');
-      return new Map();
+      this.host.log.warn({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/backgroundTerminals/list failed');
+      return undefined;
     }
   }
 

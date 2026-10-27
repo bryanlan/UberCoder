@@ -21,9 +21,11 @@ import {
   PreviousTurnActiveError,
   RequestNotPendingError,
   ResumeFailedError,
+  TransportBusyError,
   TransportUnavailableError,
   TurnNotActiveError,
   type LineTransport,
+  type LineTransportFactory,
   type LineTransportSpawn,
   type TransportEvent,
 } from '../src/providers/transport/types.js';
@@ -1368,6 +1370,40 @@ describe('resume', () => {
     expect(startEntries(setup.logFile)).toHaveLength(starts);
   });
 
+  it('does not start a conversation over that was recorded as having history without a turn completing here (a row moved over from tmux): once its transcript is gone it fails, and starts nothing', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    const transcript = writeTranscript(setup.configDir, setup.cwd, sessionId);
+    // The host knows the conversation has history because it moved the row over; no turn ever completed in this plugin.
+    expect(setup.context.metaStore.has('claude-turns:conversation-1')).toBe(false);
+    setup.instance.noteConversationHistory('conversation-1', sessionId);
+    expect(JSON.parse(setup.context.metaStore.get('claude-turns:conversation-1')!)).toMatchObject({ sessionId });
+
+    const session = setup.track(await setup.instance.resume(sessionId, setup.open()));
+    expect(startEntries(setup.logFile)[0]!.argv).toEqual(expect.arrayContaining(['--resume', sessionId]));
+    await session.unload();
+    await waitUntil(() => session.isEnded);
+
+    // The CLI deletes transcripts older than its retention: without the record this chat would be launched empty under its id.
+    fs.rmSync(transcript);
+    const starts = startEntries(setup.logFile).length;
+    const error = await setup.instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ResumeFailedError);
+    expect((error as Error).message).toMatch(/is gone/);
+    expect(startEntries(setup.logFile)).toHaveLength(starts);
+  });
+
+  it('records the history once: a second call, at every boot, keeps the first record', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    setup.instance.noteConversationHistory('conversation-1', sessionId);
+    const first = setup.context.metaStore.get('claude-turns:conversation-1');
+    await sleep(5);
+    setup.instance.noteConversationHistory('conversation-1', sessionId);
+    expect(setup.context.metaStore.get('claude-turns:conversation-1')).toBe(first);
+    // A record that names another native id is replaced: the conversation was restarted under a new one.
+    setup.instance.noteConversationHistory('conversation-1', 'another-session');
+    expect(JSON.parse(setup.context.metaStore.get('claude-turns:conversation-1')!)).toMatchObject({ sessionId: 'another-session' });
+  });
+
   it('starts over a conversation whose record of completed turns names another session', async () => {
     const setup = setupFake({ sessionStartHook: false });
     // A record for a different native id (the conversation was restarted under a new one) says nothing about this id.
@@ -1945,6 +1981,77 @@ describe('session host', () => {
       await events.done;
       await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the process to end');
       expect(context.metaStore.has('claude-launch:conversation-1')).toBe(false);
+    }, 30_000);
+
+    it('reports a session host that runs but did not answer as busy, and nothing else: it starts nothing and keeps the launch record', async () => {
+      const ref: { real?: LineTransportFactory; unreachable: boolean } = { unreachable: false };
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, {
+        host: true,
+        plugin: {
+          lineTransport: (request) => (ref.unreachable && (request as { attachOnly?: boolean }).attachOnly
+            ? Promise.reject(new LineTransportNotRunningError('did not answer', 'unreachable'))
+            : ref.real!(request)),
+        },
+      });
+      ref.real = setup.context.lineTransport!;
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await setup.instance.dispose('shutdown');
+      const { instance, context } = setup.restartBackend();
+      ref.unreachable = true;
+      const error = await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(TransportBusyError);
+      expect(error).toBeInstanceOf(TransportUnavailableError); // callers that only know "unavailable" still read it so
+      expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(processStartTicks(first.pid!)).toBeDefined();
+
+      // A host that is not there, or whose process ended, is "no survivor" and not busy.
+      ref.unreachable = false;
+      await terminateHost(setup.hostRuntimeDir, hostIdFor('conversation-1'), setup.context.log, { closeGraceMs: 300, termGraceMs: 300, staleTermGraceMs: 300 });
+      await waitUntil(() => processStartTicks(first.pid!) === undefined, 5000, 'the process to end');
+      expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
+    }, 30_000);
+
+    it('does not report a handshake that failed after the connection was made as busy: it is an ordinary failure, and the process is left running', async () => {
+      // The earlier backend's `initialize` was answered; this one never gets an answer to the repeated one.
+      const ref: { real?: LineTransportFactory; silent: boolean } = { silent: false };
+      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, {
+        host: true,
+        timings: { initializeTimeoutMs: 400 },
+        plugin: {
+          lineTransport: async (request) => {
+            const transport = await ref.real!(request);
+            if (!ref.silent || !(request as { attachOnly?: boolean }).attachOnly) return transport;
+            return new Proxy(transport, {
+              get(target, property) {
+                if (property === 'write') {
+                  return async (line: string) => {
+                    if ((JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype === 'initialize') return;
+                    return target.write(line);
+                  };
+                }
+                const value = Reflect.get(target, property, target) as unknown;
+                return typeof value === 'function' ? value.bind(target) : value;
+              },
+            });
+          },
+        },
+      });
+      ref.real = setup.context.lineTransport!;
+      const first = setup.track(await setup.instance.start(setup.open()));
+      await setup.instance.dispose('shutdown');
+      const { instance, context } = setup.restartBackend();
+      ref.silent = true;
+      const error = await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(TransportUnavailableError);
+      expect(error).not.toBeInstanceOf(TransportBusyError);
+      // The process was reached and is left running; nothing was started, and the record that finds it again stays.
+      expect(startEntries(setup.logFile)).toHaveLength(1);
+      expect(processStartTicks(first.pid!)).toBeDefined();
+      expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+      ref.silent = false;
+      const again = setup.track((await instance.reattach(first.nativeSessionId, setup.open()))!);
+      expect(again.pid).toBe(first.pid);
     }, 30_000);
 
     it('answers undefined, and starts nothing, when no process survived', async () => {

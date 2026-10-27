@@ -94,7 +94,7 @@ export interface TransportSession {
    * queued behind the turn reports the steers among them (`cancelledSteerIds`: the `clientMessageId` the host passed to
    * `steer`, or the message uuid when it passed none), so the host can show them as not delivered or send them again.
    */
-  interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }>;
+  interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }>; // while `turnUnidentified`, an id the session does not know (the host passes '') means that unnamed turn
   /** Answers a pending request. Rejects with {@link RequestNotPendingError} when the id is not open (never seen, withdrawn, or its turn ended). */
   respond(requestId: string, response: RequestResponse): Promise<void>;
   /**
@@ -180,8 +180,20 @@ export interface TransportInstance {
    * host, and resolves undefined when there is none. It never starts a process, never ends one it does not adopt, and
    * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
    * sleep, memory pressure and release can end survivors that nobody has used since the restart.
+   *
+   * It throws {@link TransportBusyError} only for a host that runs but did not answer (see there). Every other failure
+   * (a refused handshake, a timeout after the connection was made, a process that ended during the handshake) is an
+   * ordinary error: the host treats the process as lost and reports the reason.
    */
   reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
+  /**
+   * Per-session plugins that refuse to start a conversation over once its saved history is gone: records that the
+   * conversation already has history in the provider (a row moved over from the terminal transport, or one whose turns
+   * completed before the plugin kept this record), so a later `resume` that finds the history missing throws
+   * {@link ResumeFailedError} instead of launching it again, empty, under the same id. Idempotent. A plugin without such a
+   * guard leaves it out.
+   */
+  noteConversationHistory?(conversationId: string, nativeSessionId: string): void;
   alive(): Promise<{ pid?: number; connected: boolean }>;
   dispose(reason: 'shutdown' | 'restart'): Promise<void>; // shared: disconnect; never kills a process that other Consoles own
 }
@@ -302,5 +314,18 @@ export class TransportUnavailableError extends Error {
   constructor(message = 'The provider transport is unavailable.') {
     super(message);
     this.name = 'TransportUnavailableError';
+  }
+}
+
+/**
+ * `reattach` reached a session host that runs (it accepted no connection, or sent no welcome, in time) but did not answer, so
+ * its provider process may well be running a turn. Unlike every other reattach failure this is not "the process is gone": the
+ * host leaves the conversation as it is and asks again on the next load, for a bounded time. A failure after the connection
+ * was made (a refused handshake, a timeout, an exit) is a plain {@link TransportUnavailableError} or another error, never this.
+ */
+export class TransportBusyError extends TransportUnavailableError {
+  constructor(message = 'The provider process is running but did not answer in time.') {
+    super(message);
+    this.name = 'TransportBusyError';
   }
 }

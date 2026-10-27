@@ -7,7 +7,8 @@
 // API the web client uses: bind, send, transcript and index, coordination hook and MCP, steer, Stop, an AskUserQuestion
 // answered through the card route, an image turn, a live model/effort switch, manual sleep and restore, a graceful backend
 // restart while idle (k1) and during a running turn (k2: the `claude` process, held by its session host, survives it; the
-// turn is re-adopted, Stop interrupts it and the next message completes on the same process), a screenshot-sized image over
+// turn is re-adopted, Stop interrupts it and ends its command within 5 s, a message sent meanwhile steers it, the next message completes
+// on the same process and every turn ends exactly once), a screenshot-sized image over
 // 5 MB (l) and release (m). Real Claude turns run with the host's subscription login and the hooks already installed in Bryan's
 // `~/.claude/settings.json` (their helper path is the live checkout's `agent-coord.mjs`; the per-process `AGENT_COORD_RUNTIME` and
 // `AGENT_CONSOLE_CONFIG` the plugin sets redirect it to this proof's runtime, which step b and d check). Every prompt is one
@@ -151,6 +152,39 @@ const effortRequestsSince = skip => [...new Set(records().slice(skip)
   .filter(record => record.type === 'api-request' && (!record.querySource || record.querySource === 'sdk' || record.querySource === 'repl_main_thread'))
   .map(record => record.params?.output_config?.effort).filter(Boolean))];
 const hooksSince = skip => [...new Set(records().slice(skip).filter(record => record.type === 'attachment' && record.attachment?.type === 'hook_success').map(record => record.attachment.hookEvent))].sort();
+/** Escape writes this one user row and ends the turn (the Console's run monitor reads the same shape). */
+const isInterruptionRecord = entry => {
+  if (entry.type !== 'user' || entry.isSidechain === true) return false;
+  const parts = blocksOf(entry).filter(block => block.type === 'text');
+  return parts.length === 1 && /^\[Request interrupted by user(?: for tool use)?\]$/.test(String(parts[0].text).trim());
+};
+/** A submitted prompt: a user row with text, not a tool result, a meta row or an interruption. */
+const isPromptRecord = entry => entry.type === 'user' && entry.isSidechain !== true && entry.isMeta !== true && entry.isCompactSummary !== true
+  && !isInterruptionRecord(entry) && blocksOf(entry).some(block => block.type === 'text' && String(block.text).trim().length > 0);
+/**
+ * The turn-end rows of the transcript from record `from` on, counted from the first prompt in that window (the end of an earlier turn can still
+ * be landing). A completed turn writes one Stop hook summary (a headless transcript has no `turn_duration` rows); a stopped turn writes the
+ * interruption row and runs no Stop hook.
+ */
+const turnEndsSince = from => {
+  const rows = records().slice(from).filter(entry => entry.isSidechain !== true);
+  const first = rows.findIndex(isPromptRecord);
+  const own = first < 0 ? [] : rows.slice(first);
+  return { completed: own.filter(entry => entry.type === 'system' && entry.subtype === 'stop_hook_summary').length, interrupted: own.filter(isInterruptionRecord).length };
+};
+/**
+ * Waits for the turn-end rows `expected` names, lets the transcript settle for 2 s so a second end would have arrived, then requires exactly
+ * those since record `from`: one end per turn, not zero and not two. The counts go into `values[key]`.
+ */
+const assertTurnEnds = async (label, from, expected, values, key) => {
+  const wanted = expected.completed + expected.interrupted;
+  const found = () => { const seen = turnEndsSince(from); return seen.completed + seen.interrupted; };
+  try { await wait(`${wanted} turn-end row(s) in the transcript (${label})`, () => found() >= wanted, 20_000, 250); } catch (error) { if (!/^Timed out/.test(error.message)) throw error; }
+  await sleep(2000);
+  const seen = turnEndsSince(from);
+  values[key] = `${seen.completed} completed, ${seen.interrupted} interrupted`;
+  assert.deepEqual(seen, expected, `Every turn must end exactly once (${label}); the transcript holds ${seen.completed} Stop hook summary(ies) and ${seen.interrupted} interruption row(s), expected ${expected.completed} and ${expected.interrupted}.`);
+};
 
 /** Send one chat message the way the web client does and return the queue record it produced. */
 const send = async (text, extra = {}) => {
@@ -387,7 +421,8 @@ try {
     assert.equal(claudePid(), pid, 'The row pid must not change for an interrupt.');
     assert.ok(alive(pid), 'The claude process must survive an interrupt.');
     assert.equal(kit.hostRecord(hostId()).child.pid, pid, 'The host must still hold the same process.');
-    await wait('the counting command to end after Stop', () => commandPids.every(commandPid => !alive(commandPid)) && pgrep(countMarker('f')).length === 0, 20_000, 250);
+    // Within 5 s, as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    await wait('the counting command to end within 5 s of Stop', () => commandPids.every(commandPid => !alive(commandPid)) && pgrep(countMarker('f')).length === 0, 5_000, 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const marker = await wait('the transcript to record the interruption', () =>
       records().slice(skip).find(entry => entry.type === 'user' && /Request interrupted by user/i.test(textOf(entry) + blocksOf(entry).map(resultText).join('\n'))), 15_000, 500);
@@ -554,7 +589,7 @@ try {
     Object.assign(values, { oldPid, newPid: claudePid(), samePid: true, hostPid: after.host.pid, recordMatchesProc: true, liveHolders: holders.length });
   });
 
-  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, a message sent meanwhile steers it and is answered after it, and the next message completes on the same process', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, a message sent meanwhile steers it and is answered after it, the next message completes on the same process, and every turn ends exactly once', async values => {
     const control = await consoleControlTexts();
     const skip = records().length;
     const eventLog = eventLogPath();
@@ -637,19 +672,25 @@ try {
     values.idleAfterMs = Date.now() - stopped;
     assert.equal(claudePid(), oldPid, 'The row pid must not change for an interrupt.');
     assert.ok(alive(oldPid), 'The claude process must survive an interrupt.');
-    await wait('the counting command to end after Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 20_000, 250);
+    // Within 5 s: Stop ends the command's process group. The 25 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    await wait('the counting command to end within 5 s of Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 5_000, 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const marker = await wait('the transcript to record the interruption', () =>
       records().slice(skip).find(entry => entry.type === 'user' && /Request interrupted by user/i.test(textOf(entry) + blocksOf(entry).map(resultText).join('\n'))), 15_000, 500);
     values.interruptionMarker = textOf(marker).slice(0, 60) || 'in a tool_result';
     assert.equal((await sessionState()).isWorking, false);
+    // The adopted turn ended once, as an interruption: not twice, and not also as a completion.
+    await assertTurnEnds('after Stop', skip, { completed: 0, interrupted: 1 }, values, 'turnEndsAfterStop');
     // The next message gets its own reply from the same process.
+    const resumedFrom = records().length;
     await converse(PROMPTS.resumed, 'RESUMED');
+    await assertTurnEnds('after the resumed message', resumedFrom, { completed: 1, interrupted: 0 }, values, 'turnEndsAfterResume');
     assert.equal(claudePid(), oldPid, 'The same claude process must answer after the restart.');
     assertSameProcess(oldPid, before);
 
     // Phase 2: a message sent while a re-adopted turn runs is delivered to that turn as a steer (it does not start a second turn),
     // and is answered once the turn's work is done. The count is not stopped this time.
+    const steerFrom = records().length;
     const steerRun = await restartDuringCount('k2s', (key, value) => { values[`steer${key[0].toUpperCase()}${key.slice(1)}`] = value; });
     const followedBefore = await countAssistant('FOLLOWED');
     const followUp = await send(PROMPTS.followUp);
@@ -657,10 +698,21 @@ try {
     assert.equal(followUp.record.deliveryMode, 'steer', 'A message sent while the adopted turn runs must be delivered as a steer.');
     assert.equal(followUp.record.state, 'submitted');
     assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count must still be running when the message is sent.');
-    assert.equal(await countAssistant('FOLLOWED'), followedBefore, 'The steered message must not be answered while the count still runs.');
+    // "Not answered yet" proves nothing right after the send. Watch the count run for 2 s with the steer in, then look for a reply; the count must
+    // still be running when the look is over, or a reply would be allowed.
+    await wait('the count to be seen running 2 s after the steer was accepted', () => {
+      if (pgrep(countMarker('k2s')).length === 0) throw new Error(`The count ended ${Date.now() - followUp.sentAt} ms after the steer was accepted, before the 2 s the check needs; rerun.`);
+      return Date.now() - followUp.sentAt >= 2000;
+    }, 15_000, 250);
+    const repliesWhileCounting = await countAssistant('FOLLOWED');
+    assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count ended while the unanswered check ran, so the check proves nothing; rerun.');
+    values.followUpUnansweredForMs = Date.now() - followUp.sentAt;
+    assert.equal(repliesWhileCounting, followedBefore, 'The steered message must not be answered while the count still runs.');
     await wait('the counting command to finish by itself', () => pgrep(countMarker('k2s')).length === 0, 60_000, 250);
     await waitForReply('FOLLOWED', followedBefore);
     values.followUpAnswered = 'after the count';
+    // The steer joined the adopted turn: that turn ended once, and the steer started no turn of its own.
+    await assertTurnEnds('after the steered turn', steerFrom, { completed: 1, interrupted: 0 }, values, 'turnEndsAfterSteeredTurn');
     assert.equal(claudePid(), steerRun.oldPid, 'The same claude process must answer the steered message.');
     const { after, holders } = assertSameProcess(steerRun.oldPid, steerRun.before);
 

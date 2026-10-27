@@ -2,13 +2,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { vi, type MockInstance } from 'vitest';
 import type { BoundSession, ConversationSummary, SessionEvent } from '@agent-console/shared';
 import type { ProviderAdapter } from '../../src/providers/types.js';
 import { AppDatabase } from '../../src/db/database.js';
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { TransportPluginRegistry } from '../../src/providers/transport/registry.js';
+import { TransportBusyError, TransportUnavailableError, type TransportInstance } from '../../src/providers/transport/types.js';
 import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
-import { FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
+import { FakeTransportInstance, FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
 
 export const structuredSessionsConfig = {
   codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
@@ -84,16 +86,15 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   /**
    * A new backend process over the same database: fresh plugin instances, fresh tmux fake, no loaded threads. `survivors`
    * names the provider processes that outlived the old backend behind their session hosts (native id -> pid), and `survivorTurns`
-   * the turn each of them is running (native id -> turn id).
+   * the turn each of them is running (native id -> turn id). A lookup that fails comes from {@link failReattach}.
    */
-  const restartBackend = async (restart: { survivors?: Record<string, number>; survivorTurns?: Record<string, string>; survivorUnidentified?: string[]; reattachBusy?: number } = {}) => {
+  const restartBackend = async (restart: { survivors?: Record<string, number>; survivorTurns?: Record<string, string>; survivorUnidentified?: string[] } = {}) => {
     await manager.stop();
     const nextPlugin = new FakeTransportPlugin({
       ...options.plugin,
       ...(restart.survivors ? { survivors: restart.survivors } : {}),
       ...(restart.survivorTurns ? { survivorTurns: restart.survivorTurns } : {}),
       ...(restart.survivorUnidentified ? { survivorUnidentified: restart.survivorUnidentified } : {}),
-      ...(restart.reattachBusy ? { reattachBusy: restart.reattachBusy } : {}),
     });
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);
@@ -127,4 +128,37 @@ export async function settle(times = 4): Promise<void> {
 export function eventLogLines(session: BoundSession): Array<{ type: string; text: string }> {
   if (!session.eventLogPath || !fs.existsSync(session.eventLogPath)) return [];
   return fs.readFileSync(session.eventLogPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line) as { type: string; text: string });
+}
+
+let reattachSpy: MockInstance | undefined;
+
+/**
+ * Makes the next `times` `reattach` calls of any fake instance fail before they look for a survivor, which stays for a later call.
+ * `unreachable`: the session host runs but did not answer, which the real plugins report as {@link TransportBusyError}.
+ * `refused`: the host answered and the handshake that followed failed, which they report as a plain
+ * {@link TransportUnavailableError}. A later call replaces the earlier one. Undone by `vi.restoreAllMocks()`.
+ */
+export function failReattach(kind: 'unreachable' | 'refused', times: number): void {
+  reattachSpy?.mockRestore(); // the real method, not an earlier failure
+  const original = FakeTransportInstance.prototype.reattach;
+  let remaining = times;
+  reattachSpy = vi.spyOn(FakeTransportInstance.prototype, 'reattach').mockImplementation(async function (this: FakeTransportInstance, nativeSessionId, options) {
+    if (remaining <= 0) return original.call(this, nativeSessionId, options);
+    remaining -= 1;
+    this.calls.push({ method: 'reattach', args: [nativeSessionId, options] });
+    throw kind === 'unreachable'
+      ? new TransportBusyError('The running provider process did not answer in time. It was left alone.')
+      : new TransportUnavailableError('The running provider process refused the handshake.');
+  });
+}
+
+/**
+ * Gives every fake instance the optional history seam a per-session plugin has (`TransportInstance.noteConversationHistory`) and
+ * records its calls. `restore` takes the seam away again.
+ */
+export function recordHistoryNotes(): { notes: Array<{ conversationId: string; nativeSessionId: string }>; restore(): void } {
+  const notes: Array<{ conversationId: string; nativeSessionId: string }> = [];
+  const prototype = FakeTransportInstance.prototype as { noteConversationHistory?: TransportInstance['noteConversationHistory'] };
+  prototype.noteConversationHistory = (conversationId, nativeSessionId) => { notes.push({ conversationId, nativeSessionId }); };
+  return { notes, restore: () => { delete prototype.noteConversationHistory; } };
 }

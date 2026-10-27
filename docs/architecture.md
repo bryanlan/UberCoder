@@ -682,7 +682,10 @@ migration); this section is the summary.
   relayed stdin. An adopted turn keeps the row working without moving recency, Stop reaches it, and its terminal ends it once. A
   row with no survivor stays unloaded: it never reads as working, a scheduled recovery or half-restored row re-arms at boot, and
   the conversation resumes on its next use. The real-CLI proofs (step k2) restart the backend during a running turn for both
-  providers. Known gap: Codex Stop on an adopted turn does not end a command that started before the restart.
+  providers. Codex adoption reads the thread's live background terminals (`thread/backgroundTerminals/list`, item id to
+  process id), so Stop on an adopted turn also ends a command that started before the restart. On codex-cli 0.164.0 the item
+  listing never shows a running command, so the terminals are the only source (see
+  `docs/research/codex-app-server-2026-10-26/background-terminals-probe.md`).
 - Orphan hosts: at the first pass the manager also ends the session host and launch record of every per-session conversation
   that has no restorable structured row. Release and idle sleep end the host of a conversation that is not loaded. A released or
   forgotten conversation therefore cannot leave a Claude process running.

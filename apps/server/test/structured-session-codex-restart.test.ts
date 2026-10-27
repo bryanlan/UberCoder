@@ -11,7 +11,7 @@ import { TransportPluginRegistry } from '../src/providers/transport/registry.js'
 import { createLineTransportFactory, terminateHost } from '../src/providers/transport/line-transport.js';
 import {
   FAKE_APP_SERVER, FAST_TIMINGS, HOST_PROGRAM, agentMessageItem, baseHandlers, commandItem, itemCompleted, itemStarted, readLog, receivedRequests, serverRequest,
-  threadResult, turnCompleted, turnObject, turnStarted, waitUntil, writeScenario,
+  threadResult, turnCompleted, turnObject, turnStarted, userMessageItem, waitUntil, writeScenario,
 } from './helpers/codex-harness.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 import { eventLogLines } from './helpers/structured-session-fixture.js';
@@ -175,12 +175,14 @@ describe('A Codex turn that runs across a backend restart, through the host', ()
 });
 
 describe('A Codex turn found running after a backend restart, through the host', () => {
-  it('ends the command it was running when Stop reaches it: the new backend asks the app-server which commands are running', async () => {
-    const entry = { turnId: TURN, item: commandItem('cmd-1', 'proc-1'), startedAtMs: 1, completedAtMs: null };
+  it('ends the command it was running when Stop reaches it: the new backend asks the app-server which terminals are live', async () => {
+    // As codex-cli 0.164.0 answers while a command runs (probed 2026-10-26): the item listing holds completed items only, and the
+    // running command is in the thread's live terminals.
+    const entry = (item: Record<string, unknown>) => ({ turnId: TURN, item, startedAtMs: 1, completedAtMs: null });
     const f = await restartFixture({
       'turn/interrupt': { result: {} },
-      'thread/items/list': { result: { data: [entry], nextCursor: null } },
-      'thread/backgroundTerminals/list': { result: { data: [{ itemId: 'cmd-1', processId: 'proc-1', command: 'sleep 30', cwd: '/work', osPid: 1, cpuPercent: null, rssKb: null }], nextCursor: null } },
+      'thread/items/list': { result: { data: [entry(userMessageItem('user-1', 'run a long command')), entry(agentMessageItem('msg-1', 'working'))], nextCursor: null } },
+      'thread/backgroundTerminals/list': { result: { data: [{ itemId: 'cmd-1', processId: 'proc-1', command: 'sleep 30', cwd: '/work', osPid: null, cpuPercent: null, rssKb: null }], nextCursor: null } },
       'thread/backgroundTerminals/terminate': { result: { terminated: true } },
     }, {
       result: { turn: turnObject(TURN, 'inProgress', 1790000001) },
