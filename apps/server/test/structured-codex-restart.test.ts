@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createCodexAppServerPlugin } from '../src/providers/transport/codex/index.js';
-import type { CodexAppServerInstance } from '../src/providers/transport/codex/app-server-instance.js';
+import { APP_SERVER_UNRESPONSIVE_LIMIT_MS, type CodexAppServerInstance } from '../src/providers/transport/codex/app-server-instance.js';
+import { CodexRestartState } from '../src/providers/transport/codex/restart-state.js';
 import {
   LineTransportNotRunningError,
   PreviousTurnActiveError,
   RequestNotPendingError,
+  TransportBusyError,
   TransportUnavailableError,
   type LineTransportFactory,
   type TransportEvent,
@@ -35,6 +37,7 @@ import {
   userMessageItem,
   waitUntil,
   type FakeSetup,
+  type TestContext,
 } from './helpers/codex-harness.js';
 
 vi.setConfig({ testTimeout: 30_000 });
@@ -253,22 +256,101 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
     return { fake, next, resumed, log: new EventLog(resumed) };
   }
 
-  it('ends every command in the thread\'s live terminal list, though the item listing shows none running', async () => {
+  it('ends the adopted turn\'s own command and every live terminal nobody recorded, though the item listing shows none running', async () => {
     const { fake, next, resumed, log } = await adoptWith({
       'thread/items/list': completedOnly(),
-      // proc-9 is a leftover of an earlier turn: it belongs to the thread, and Stop is what ends it.
+      // cmd-1 was seen starting by the first backend. cmd-3 and cmd-9 started while no backend was attached, so no earlier turn can
+      // own them: they started during the adopted turn.
       'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-1', 'proc-1'), terminalOf('cmd-3', 'proc-3'), terminalOf('cmd-9', 'proc-9')),
     });
     expect(resumed.activeTurn).toBe(TURN);
     // The provider was asked about the adopted turn's items and for the live terminals, once each, before the session was handed out.
     expect(receivedRequests(fake.logFile, 'thread/items/list').map((frame) => frame.params)).toEqual([expect.objectContaining({ threadId: THREAD, turnId: TURN })]);
     expect(receivedRequests(fake.logFile, 'thread/backgroundTerminals/list')).toHaveLength(1);
-    expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 3, terminals: 3, items: 0 }), 'codex tracked the commands an adopted turn is running']]));
+    expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 3, leftAlone: 0, terminals: 3, items: 0 }), 'codex tracked the commands an adopted turn is running']]));
 
     await resumed.interrupt(TURN);
     await waitUntil(() => terminated(fake).length >= 3, 5000, 'the commands to be ended');
     expect(terminated(fake)).toEqual(['proc-1', 'proc-3', 'proc-9']);
     expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+  });
+
+  describe('when an earlier turn left a terminal running', () => {
+    const EARLIER = 'turn-0';
+    const recordedCommands = (context: TestContext): Record<string, Record<string, { processId: string; turnId: string }>> => JSON.parse(context.metaStore.get('structured-codex-commands') ?? '{}');
+
+    /** Turn 0 starts a dev server, does not wait for it and ends. Turn 1 starts a build. The backend then restarts in the middle of turn 1. */
+    async function adoptAfterEarlierTurn(extra: Record<string, unknown>) {
+      const fake = track(setupFake({
+        handlers: {
+          ...baseHandlers(THREAD),
+          'thread/resume': { result: activeThread() },
+          'thread/turns/list': turnsList(turnObject(TURN, 'inProgress', 1790000001)),
+          'thread/backgroundTerminals/terminate': { result: { terminated: true } },
+          'turn/interrupt': { result: {}, emitAfter: [turnCompleted(THREAD, TURN, 'interrupted', null, 50)] },
+          'turn/start': [
+            { result: { turn: turnObject(EARLIER, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, EARLIER), itemStarted(THREAD, EARLIER, commandItem('cmd-dev', 'proc-dev')), turnCompleted(THREAD, EARLIER, 'completed', null, 50)] },
+            { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))] },
+          ],
+          ...extra,
+        },
+      }, undefined, {}, { host: true }));
+      const session = await fake.instance.start(OPEN_OPTIONS);
+      const first = new EventLog(session);
+      await session.sendTurn({ text: 'start the dev server' });
+      await first.waitForType('turn.terminal');
+      await session.sendTurn({ text: 'run the build' });
+      await waitUntil(() => recordedCommands(fake.context)[THREAD]?.['cmd-1'], 5000, 'the build command to be recorded');
+      await fake.instance.dispose('shutdown');
+      const next = trackNext(fake, restartBackend(fake));
+      const resumed = await next.instance.resume(THREAD, OPEN_OPTIONS);
+      return { fake, next, resumed, log: new EventLog(resumed) };
+    }
+
+    it('leaves it running at Stop, and ends the adopted turn\'s command and the terminals nobody recorded', async () => {
+      const { fake, next, resumed, log } = await adoptAfterEarlierTurn({
+        'thread/items/list': completedOnly(),
+        'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-dev', 'proc-dev'), terminalOf('cmd-1', 'proc-1'), terminalOf('cmd-3', 'proc-3')),
+      });
+      expect(resumed.activeTurn).toBe(TURN);
+      // The first backend saw the dev server start in turn 0, so the listing does not make it a command of the adopted turn.
+      expect(recordedCommands(next.context)[THREAD]).toEqual({ 'cmd-dev': { processId: 'proc-dev', turnId: EARLIER }, 'cmd-1': { processId: 'proc-1', turnId: TURN }, 'cmd-3': { processId: 'proc-3', turnId: TURN } });
+      expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 2, leftAlone: 1, terminals: 3 }), 'codex tracked the commands an adopted turn is running']]));
+
+      await resumed.interrupt(TURN);
+      await waitUntil(() => terminated(fake).length >= 2, 5000, 'the commands to be ended');
+      await log.waitForType('turn.terminal');
+      await sleep(100);
+      expect(terminated(fake)).toEqual(['proc-1', 'proc-3']);
+    });
+
+    it('is not ended either when it is the only terminal listed, and Stop still interrupts the turn', async () => {
+      const { fake, next, resumed, log } = await adoptAfterEarlierTurn({
+        'thread/items/list': completedOnly(),
+        'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-dev', 'proc-dev')),
+      });
+      expect(next.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 0, leftAlone: 1, terminals: 1 }), expect.stringContaining('found no running commands on an adopted turn')]]));
+      await resumed.interrupt(TURN);
+      expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
+      await sleep(100);
+      expect(terminated(fake)).toEqual([]);
+    });
+
+    it('is left alone by a third backend that adopts the same turn', async () => {
+      const first = await adoptAfterEarlierTurn({
+        'thread/items/list': completedOnly(),
+        'thread/backgroundTerminals/list': terminalsList(terminalOf('cmd-dev', 'proc-dev'), terminalOf('cmd-1', 'proc-1')),
+      });
+      await first.next.instance.dispose('shutdown');
+      // Another backend adopts the same turn: what the second one recorded is what the third one reads.
+      const third = trackNext(first.fake, restartBackend({ ...first.fake, context: first.next.context }));
+      const resumed = await third.instance.resume(THREAD, OPEN_OPTIONS);
+      expect(third.context.logs.info).toEqual(expect.arrayContaining([[expect.objectContaining({ turnId: TURN, tracked: 1, leftAlone: 1 }), 'codex tracked the commands an adopted turn is running']]));
+      await resumed.interrupt(TURN);
+      await waitUntil(() => terminated(first.fake).length >= 1, 5000, 'the command to be ended');
+      await sleep(100);
+      expect(terminated(first.fake)).toEqual(['proc-1']);
+    });
   });
 
   it('also ends the in-progress command items a CLI that lists them names, when it has no terminal list', async () => {
@@ -381,13 +463,43 @@ describe('Stop on a Codex turn adopted after a backend restart', () => {
       expect((await log.waitForType('turn.terminal')).status).toBe('interrupted');
     });
 
-    it('warns, tells the person and interrupts nothing when the turns still do not name it', async () => {
+    it('warns, tells the person and interrupts nothing when the listing fails again, and keeps refusing sends', async () => {
       const { fake, next, resumed, log } = await adoptWith({ 'thread/turns/list': unlisted });
       await resumed.interrupt('no-turn-is-named-yet');
       expect(receivedRequests(fake.logFile, 'turn/interrupt')).toEqual([]);
       expect(next.context.logs.warn.map(([, message]) => message)).toEqual(expect.arrayContaining([expect.stringContaining('Stop found no running turn to interrupt')]));
       expect(log.of('notice').map((event) => event.text)).toEqual([expect.stringContaining('could not find the running turn to stop')]);
-      expect(resumed.turnUnidentified).toBe(true); // still not named: Stop can be tried again
+      // A listing that failed says nothing about the thread: still not named, Stop can be tried again, and a send would land in a running turn.
+      expect(resumed.turnUnidentified).toBe(true);
+      await expect(resumed.sendTurn({ text: 'hello' })).rejects.toBeInstanceOf(PreviousTurnActiveError);
+      expect(receivedRequests(fake.logFile, 'turn/start')).toHaveLength(1);
+    });
+
+    it('tells the person once however often Stop finds no running turn', async () => {
+      const { fake, next, resumed, log } = await adoptWith({ 'thread/turns/list': unlisted });
+      await resumed.interrupt('no-turn-is-named-yet');
+      await resumed.interrupt('no-turn-is-named-yet');
+      await resumed.interrupt('no-turn-is-named-yet');
+      expect(receivedRequests(fake.logFile, 'thread/turns/list')).toHaveLength(4); // the adoption's, then one per Stop
+      expect(log.of('notice')).toHaveLength(1);
+      expect(next.context.logs.warn.filter(([, message]) => message.includes('Stop found no running turn to interrupt'))).toHaveLength(3); // the log keeps every attempt
+      expect(resumed.turnUnidentified).toBe(true);
+    });
+
+    it('stops treating the turn as unidentified when the listing works and shows no running turn, so sends are accepted again', async () => {
+      const { fake, resumed, log } = await adoptWith({ 'thread/turns/list': [unlisted, turnsList()] });
+      expect(resumed.turnUnidentified).toBe(true);
+      await expect(resumed.sendTurn({ text: 'hello' })).rejects.toBeInstanceOf(PreviousTurnActiveError);
+      await resumed.interrupt('no-turn-is-named-yet');
+      expect(receivedRequests(fake.logFile, 'turn/interrupt')).toEqual([]);
+      expect(resumed.turnUnidentified).toBe(false);
+      expect(log.of('notice').map((event) => event.text)).toEqual([expect.stringContaining('no running turn on this thread')]);
+      // No `thread/status/changed` is needed: the send goes through.
+      await expect(resumed.sendTurn({ text: 'hello' })).resolves.toEqual({ turnId: TURN });
+      expect(receivedRequests(fake.logFile, 'turn/start')).toHaveLength(2);
+      // A second Stop has nothing left to say.
+      await resumed.interrupt('no-turn-is-named-yet');
+      expect(log.of('notice')).toHaveLength(1);
     });
   });
 });
@@ -562,17 +674,19 @@ describe('A host replay that does not reach back far enough', () => {
 
 describe('Reattaching to the Codex app-server after a backend restart', () => {
   /** A backend over the fake's host and database whose line transport factory is wrapped by `wrap`. */
+  const backendContexts = new Map<CodexAppServerInstance, TestContext>();
   function backendWith(
     fake: FakeSetup,
     wrap: (factory: LineTransportFactory) => LineTransportFactory,
-    { timings = FAST_TIMINGS, savedInstance = true }: { timings?: typeof FAST_TIMINGS; savedInstance?: boolean } = {},
+    { timings = FAST_TIMINGS, savedInstance = true, now }: { timings?: typeof FAST_TIMINGS; savedInstance?: boolean; now?: () => number } = {},
   ): CodexAppServerInstance {
     const context = makeContext(fake.context.runtimeDir);
     // The database is shared: this backend knows an earlier one connected, unless the record of it was lost.
     if (savedInstance) for (const [key, value] of fake.context.metaStore) context.metaStore.set(key, value);
     context.lineTransport = wrap(hostTransportFactory(fake.hostRuntimeDir, context));
-    const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' });
+    const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9', ...(now ? { now } : {}) });
     const instance = plugin.create({ enabled: true, command: fake.command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
+    backendContexts.set(instance, context);
     cleanups.push(async () => {
       await instance.dispose('shutdown').catch(() => undefined);
     });
@@ -618,7 +732,7 @@ describe('Reattaching to the Codex app-server after a backend restart', () => {
     await fake.instance.start(OPEN_OPTIONS);
     await fake.instance.dispose('shutdown');
     const next = backendWith(fake, (factory) => factory, { timings: { ...FAST_TIMINGS, initializeTimeoutMs: 300 } });
-    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
+    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
     // The app-server that runs the turns was neither ended nor replaced: it never saw its input close or a signal.
     expect(readLog(fake.logFile).filter((entry) => entry.event === 'stdin-eof' || entry.event === 'sigterm')).toEqual([]);
     expect(processStarts(fake)).toHaveLength(1);
@@ -638,7 +752,7 @@ describe('Reattaching to the Codex app-server after a backend restart', () => {
     // The host still holds the first backend's answers (ids 1 to 3). An attach-only start asks for them all, saved record or not.
     // The new connection's `account/read` is id 1 again: only its own, slow answer may satisfy it, so it times out and the app-server is left alone.
     const next = backendWith(fake, (factory) => factory, { timings: { ...FAST_TIMINGS, initializeTimeoutMs: 300 }, savedInstance: false });
-    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportUnavailableError);
+    await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
     expect(readLog(fake.logFile).filter((entry) => entry.event === 'stdin-eof' || entry.event === 'sigterm')).toEqual([]);
     expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(0);
 
@@ -646,6 +760,141 @@ describe('Reattaching to the Codex app-server after a backend restart', () => {
     expect(session?.nativeSessionId).toBe(THREAD);
     expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(1);
     expect(processStarts(fake)).toHaveLength(1);
+  });
+
+  describe('when the app-server stays silent behind a healthy host', () => {
+    const SHORT = { ...FAST_TIMINGS, initializeTimeoutMs: 300 };
+    const account = { result: { account: null, requiresOpenaiAuth: false } };
+    /** The signs that the app-server was told to end: its input closed or a signal. */
+    const endedProcesses = (fake: FakeSetup) => readLog(fake.logFile).filter((entry) => entry.event === 'stdin-eof' || entry.event === 'sigterm');
+
+    /** An app-server that was used by an earlier backend and then stops answering `account/read`, the handshake check of every later start. */
+    async function silentBackend(accountReads: unknown) {
+      const fake = track(setupFake({ handlers: { ...baseHandlers(THREAD), 'account/read': accountReads } }, undefined, {}, { host: true }));
+      await fake.instance.start(OPEN_OPTIONS);
+      await fake.instance.dispose('shutdown');
+      const clock = { now: 1_000_000 };
+      const next = backendWith(fake, (factory) => factory, { timings: SHORT, now: () => clock.now });
+      return { fake, clock, next };
+    }
+
+    it('reports busy and leaves it running while the first silence is younger than the limit', async () => {
+      const { fake, clock, next } = await silentBackend({ noResponse: true });
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      clock.now += APP_SERVER_UNRESPONSIVE_LIMIT_MS - 1;
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      expect(endedProcesses(fake)).toEqual([]);
+      expect(processStarts(fake)).toHaveLength(1);
+      expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(0);
+    });
+
+    it('ends it at the first timeout after the limit and starts a new one in the same call, so the caller\'s open succeeds', async () => {
+      const { fake, clock, next } = await silentBackend({ noResponse: true });
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      clock.now += APP_SERVER_UNRESPONSIVE_LIMIT_MS;
+      const session = await next.resume(THREAD, OPEN_OPTIONS);
+      expect(session.nativeSessionId).toBe(THREAD);
+      expect(processStarts(fake)).toHaveLength(2);
+      expect(endedProcesses(fake).length).toBeGreaterThan(0); // the silent process was told to end
+      expect(receivedRequests(fake.logFile, 'thread/resume')).toHaveLength(1);
+      expect(backendContexts.get(next)!.logs.warn.map(([, message]) => message)).toEqual(expect.arrayContaining([expect.stringContaining('has not answered for longer than the limit')]));
+      // The new process is the one in use: a later start finds it working, and the run of timeouts is over.
+      expect((await next.start(OPEN_OPTIONS)).nativeSessionId).toBe(THREAD);
+      expect(processStarts(fake)).toHaveLength(2);
+    });
+
+    it('counts the silence from the first timeout of the run, not from the latest', async () => {
+      const { fake, clock, next } = await silentBackend({ noResponse: true });
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        clock.now += APP_SERVER_UNRESPONSIVE_LIMIT_MS / 4 - 1; // each timeout is recent, the run is not
+        await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      }
+      expect(processStarts(fake)).toHaveLength(1);
+      clock.now += 4; // the run is now as old as the limit
+      expect((await next.resume(THREAD, OPEN_OPTIONS)).nativeSessionId).toBe(THREAD);
+      expect(processStarts(fake)).toHaveLength(2);
+    });
+
+    it('starts a new run after an answer, however old the first timeout was', async () => {
+      // The first read hangs, the second answers, the third hangs again.
+      const { fake, clock, next } = await silentBackend([{ noResponse: true }, account, { noResponse: true }]);
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      clock.now += APP_SERVER_UNRESPONSIVE_LIMIT_MS - 1000;
+      await next.resume(THREAD, OPEN_OPTIONS); // answered: the run is over
+      await next.dispose('restart'); // the next use connects (and checks) again
+      clock.now += 2000; // older than the limit since the first timeout
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      expect(endedProcesses(fake)).toEqual([]);
+      expect(processStarts(fake)).toHaveLength(1);
+    });
+
+    it('never ends it for an attach-only start, however old, and does not count that start toward the run', async () => {
+      const { fake, clock, next } = await silentBackend({ noResponse: true });
+      await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      clock.now += 10 * APP_SERVER_UNRESPONSIVE_LIMIT_MS;
+      await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      expect(endedProcesses(fake)).toEqual([]);
+      expect(processStarts(fake)).toHaveLength(1);
+      // The first ordinary timeout begins the run: it is not already old.
+      await expect(next.resume(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      expect(endedProcesses(fake)).toEqual([]);
+      expect(processStarts(fake)).toHaveLength(1);
+    });
+  });
+
+  describe('request ids across the connections of one instance', () => {
+    it('never repeat, so a late or replayed answer to an abandoned connection cannot settle a request of the next', async () => {
+      const account = { result: { account: null, requiresOpenaiAuth: false } };
+      // The app-server never answers the check; the test plays the answers.
+      const fake = track(setupFake({ handlers: { ...baseHandlers(THREAD), 'account/read': { noResponse: true } } }, undefined, {}, { host: true }));
+      await fake.instance.start(OPEN_OPTIONS);
+      await fake.instance.dispose('shutdown');
+
+      // Sees every request a connection writes and can hand it a line as if the host had delivered it.
+      const written: Array<{ connection: number; id: number; method: string }> = [];
+      const listeners: Array<Set<(line: string, seq?: number) => void>> = [];
+      const next = backendWith(fake, (factory) => async (spawn) => {
+        const transport = await factory(spawn) as unknown as { write(line: string): Promise<void>; onLine(listener: (line: string, seq?: number) => void): () => void };
+        const connection = listeners.push(new Set());
+        const write = transport.write.bind(transport);
+        transport.write = (line) => {
+          const frame = JSON.parse(line) as { id?: number; method?: string };
+          if (typeof frame.id === 'number') written.push({ connection, id: frame.id, method: String(frame.method) });
+          return write(line);
+        };
+        const onLine = transport.onLine.bind(transport);
+        transport.onLine = (listener) => {
+          listeners[connection - 1]!.add(listener);
+          const off = onLine(listener);
+          return () => { listeners[connection - 1]!.delete(listener); off(); };
+        };
+        return transport as never;
+      }, { timings: { ...FAST_TIMINGS, initializeTimeoutMs: 800 } });
+      const deliver = (connection: number, frame: unknown): void => {
+        for (const listener of [...listeners[connection - 1]!]) listener(JSON.stringify(frame));
+      };
+
+      // The first connection asks and gets no answer in time.
+      await expect(next.reattach(THREAD, OPEN_OPTIONS)).rejects.toBeInstanceOf(TransportBusyError);
+      const abandoned = written.find((entry) => entry.connection === 1 && entry.method === 'account/read')!;
+
+      // The second connection asks; the app-server's late answer to the first connection's request arrives meanwhile.
+      let settled = false;
+      const second = next.reattach(THREAD, OPEN_OPTIONS).finally(() => { settled = true; });
+      await waitUntil(() => written.find((entry) => entry.connection === 2 && entry.method === 'account/read'), 5000, 'the second check');
+      const check = written.find((entry) => entry.connection === 2 && entry.method === 'account/read')!;
+      expect(check.id).toBeGreaterThan(abandoned.id);
+      deliver(2, { id: abandoned.id, ...account });
+      await sleep(150);
+      expect(settled).toBe(false); // the late answer was not taken for the answer to this request
+      deliver(2, { id: check.id, ...account });
+      expect((await second)?.nativeSessionId).toBe(THREAD);
+
+      const ids = written.map((entry) => entry.id);
+      expect(new Set(ids).size).toBe(ids.length); // no id was used twice, by any connection
+      expect(ids).toEqual([...ids].sort((a, b) => a - b));
+    });
   });
 
   it('does not make an ordinary start fail because an attach that found no host was in flight beside it', async () => {
@@ -737,6 +986,80 @@ describe('The host replay, told apart by sequence number', () => {
     separated.transport.onLine((line) => void live.push(line));
     emit(5);
     expect(live).toEqual(['line-4', 'line-5']);
+  });
+});
+
+describe('The record of which turn started a Codex command', () => {
+  // Codex lists a thread's running terminals without the turn that started them. Each backend that is attached writes down who
+  // started what, so the next one can tell the adopted turn's commands from the ones earlier turns left running.
+  const KEY = 'structured-codex-commands';
+  const recorded = (fake: FakeSetup): Record<string, Record<string, { processId: string; turnId: string }>> => JSON.parse(fake.context.metaStore.get(KEY) ?? '{}');
+
+  it('is written when a command starts and removed when it completes', async () => {
+    const fake = track(setupFake({
+      handlers: {
+        ...baseHandlers(THREAD),
+        'turn/start': { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1')), itemCompleted(THREAD, TURN, commandItem('cmd-1', 'proc-1', 'completed'), 700)] },
+      },
+    }));
+    const { log } = await startTurn(fake);
+    await waitUntil(() => fake.context.metaStore.get(KEY), 5000, 'the record');
+    expect(recorded(fake)).toEqual({ [THREAD]: { 'cmd-1': { processId: 'proc-1', turnId: TURN } } });
+    await log.waitForType('item.completed');
+    expect(fake.context.metaStore.has(KEY)).toBe(false);
+  });
+
+  it('is removed when a command that outlived its turn completes, though the turn is gone by then', async () => {
+    const fake = track(setupFake({
+      handlers: {
+        ...baseHandlers(THREAD),
+        'turn/start': { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-dev', 'proc-dev')), turnCompleted(THREAD, TURN, 'completed', null, 50), itemCompleted(THREAD, TURN, commandItem('cmd-dev', 'proc-dev', 'completed'), 800)] },
+      },
+    }));
+    const { log } = await startTurn(fake);
+    await log.waitForType('turn.terminal');
+    expect(recorded(fake)[THREAD]).toEqual({ 'cmd-dev': { processId: 'proc-dev', turnId: TURN } }); // the dev server runs on after its turn
+    await waitUntil(() => !fake.context.metaStore.has(KEY), 5000, 'the record to be removed');
+  });
+
+  it('is dropped when the thread is released or unloaded, and kept when the backend only shuts down', async () => {
+    const startCommand = async () => {
+      const fake = track(setupFake({
+        handlers: {
+          ...baseHandlers(THREAD),
+          'turn/start': { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))] },
+        },
+      }));
+      const { session } = await startTurn(fake);
+      await waitUntil(() => fake.context.metaStore.get(KEY), 5000, 'the record');
+      return { fake, session };
+    };
+    const released = await startCommand();
+    await released.session.close('release');
+    expect(released.fake.context.metaStore.has(KEY)).toBe(false);
+
+    const unloaded = await startCommand();
+    await unloaded.session.unload!();
+    expect(unloaded.fake.context.metaStore.has(KEY)).toBe(false);
+
+    const shutdown = await startCommand();
+    await shutdown.session.close('shutdown');
+    expect(recorded(shutdown.fake)[THREAD]).toEqual({ 'cmd-1': { processId: 'proc-1', turnId: TURN } });
+  });
+
+  it('keeps one thread\'s commands apart from another\'s and forgets all of them with the process', () => {
+    const state = new CodexRestartState(makeContext('/unused').meta);
+    state.noteCommand('thread-a', 'cmd-1', { processId: 'proc-1', turnId: 'turn-a' });
+    state.noteCommand('thread-a', 'cmd-2', { processId: 'proc-2', turnId: 'turn-a' });
+    state.noteCommand('thread-b', 'cmd-1', { processId: 'proc-9', turnId: 'turn-b' });
+    state.forgetCommand('thread-a', 'cmd-1');
+    expect(state.commands('thread-a')).toEqual({ 'cmd-2': { processId: 'proc-2', turnId: 'turn-a' } });
+    expect(state.commands('thread-b')).toEqual({ 'cmd-1': { processId: 'proc-9', turnId: 'turn-b' } });
+    state.dropThreadCommands('thread-a');
+    expect(state.commands('thread-a')).toEqual({});
+    expect(state.commands('thread-b')).not.toEqual({});
+    state.reset(); // the process ended or was replaced
+    expect(state.commands('thread-b')).toEqual({});
   });
 });
 

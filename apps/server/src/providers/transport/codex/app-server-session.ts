@@ -49,7 +49,7 @@ import {
   type TurnStartParams,
 } from './protocol.js';
 import { redactFreeText } from './redact.js';
-import type { HeldQuestionRecord } from './restart-state.js';
+import type { CommandRecord, HeldQuestionRecord } from './restart-state.js';
 import {
   accumulateTurnTokenUsage,
   completeTurnTokenUsage,
@@ -125,6 +125,18 @@ export interface CodexSessionHost {
   readonly questions: {
     save(record: HeldQuestionRecord): void;
     remove(requestId: string): void;
+  };
+  /**
+   * The commands this thread's turns started, by item id, kept in the Console database: Codex says which background terminals
+   * run but not which turn started them, so a backend that adopts a turn after a restart reads who owned each from here.
+   */
+  readonly commands: {
+    recorded(threadId: string): Record<string, CommandRecord>;
+    note(threadId: string, itemId: string, record: CommandRecord): void;
+    /** The command ended. */
+    forget(threadId: string, itemId: string): void;
+    /** The thread was released: its terminals ended with it, so nothing is left to record. */
+    drop(threadId: string): void;
   };
 }
 
@@ -498,6 +510,8 @@ export class CodexAppServerSession implements TransportSession {
   private activeFlags: string[];
   /** The thread was running a turn when this session attached and no listing named it: the first event of an unknown turn is that turn. */
   private adoptUnknownTurn = false;
+  /** A Stop already told the person that no running turn could be found while the thread's turn was unidentified. Reset when the thread is found to run an unnamed turn again. */
+  private unlistedTurnNoticed = false;
   /** Questions the model asked in a message (`request_user_input_async`), already announced. Bounded. */
   private readonly messageQuestions = new Set<string>();
 
@@ -648,10 +662,18 @@ export class CodexAppServerSession implements TransportSession {
     // The first event may have named the turn while the listing was out.
     if (this.activeTurnId !== null) return this.interrupt(this.activeTurnId);
     if (!this.adoptUnknownTurn) return; // the thread went idle while the listing was out: there is nothing to stop
-    const running = turns.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
+    const running = turns?.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
     if (!running) {
-      this.host.log.warn({ threadId: this.nativeSessionId }, 'codex Stop found no running turn to interrupt on a thread that reports a turn it could not name');
-      this.notice('warn', 'Codex could not find the running turn to stop. Try again in a moment.');
+      this.host.log.warn({ threadId: this.nativeSessionId, listed: turns !== undefined }, 'codex Stop found no running turn to interrupt on a thread that reports a turn it could not name');
+      // A listing that worked and shows no running turn settles it: the turn is over, and sends must not stay refused for a
+      // `thread/status/changed` that may already have passed. A listing that failed settles nothing, so the flag stays.
+      if (turns !== undefined) this.adoptUnknownTurn = false;
+      // Once per unidentified period: a person pressing Stop again learns nothing new.
+      if (!this.unlistedTurnNoticed) {
+        this.unlistedTurnNoticed = true;
+        if (turns === undefined) this.notice('warn', 'Codex could not find the running turn to stop. Try again in a moment.');
+        else this.notice('warn', 'Codex shows no running turn on this thread, so there is nothing to stop.');
+      }
       return;
     }
     // Nothing waits between the check and the record, so no event can create a second record for this turn.
@@ -689,12 +711,16 @@ export class CodexAppServerSession implements TransportSession {
   async unload(): Promise<void> {
     if (this.ended) return;
     await this.unsubscribe();
+    this.host.commands.drop(this.nativeSessionId);
     this.endLocal();
   }
 
   async close(reason: 'release' | 'shutdown' | 'error'): Promise<void> {
     if (!this.ended) {
-      if (reason === 'release') await this.unsubscribe();
+      if (reason === 'release') {
+        await this.unsubscribe();
+        this.host.commands.drop(this.nativeSessionId);
+      }
       this.endLocal();
     }
     await Promise.allSettled([...this.cleanupJobs]);
@@ -936,19 +962,23 @@ export class CodexAppServerSession implements TransportSession {
   private async adoptTurns(trackedTurnId: string | undefined): Promise<void> {
     const active = this.threadStatus === 'active';
     if (!active && !trackedTurnId) return;
-    const turns = await this.listRecentTurns();
+    // A listing that fails is taken for one that names nothing: the first event of the running turn then identifies it.
+    const turns = (await this.listRecentTurns()) ?? [];
     const tracked = trackedTurnId ? turns.find((turn) => turn.id === trackedTurnId) : undefined;
     // The turn the previous backend followed ended while nobody listened: its terminal has not been reported.
     if (tracked && tracked.status !== 'inProgress') this.adoptEndedTurn(tracked);
     const running = turns.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
     if (running) await this.adoptRunningTurn(running);
-    else if (active && this.activeTurnId === null) this.adoptUnknownTurn = true;
+    else if (active && this.activeTurnId === null) {
+      this.adoptUnknownTurn = true;
+      this.unlistedTurnNoticed = false;
+    }
     // A marker that names a turn the server no longer lists, or one that is not running: nothing is left to follow.
     if (trackedTurnId && this.activeTurnId === null) this.host.noteTurn(this.nativeSessionId, undefined);
   }
 
-  /** The newest turns of the thread, newest first. A server that cannot list them (or an error) gives none. */
-  private async listRecentTurns(): Promise<CodexTurn[]> {
+  /** The newest turns of the thread, newest first. Undefined when the listing failed, which is not the same as a thread with no turns. */
+  private async listRecentTurns(): Promise<CodexTurn[] | undefined> {
     try {
       const response = await callCodex(
         this.host.client(),
@@ -959,7 +989,7 @@ export class CodexAppServerSession implements TransportSession {
       return Array.isArray(response?.data) ? response.data.filter((turn) => typeof turn?.id === 'string') : [];
     } catch (error) {
       this.host.log.debug?.({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/turns/list failed');
-      return [];
+      return undefined;
     }
   }
 
@@ -972,27 +1002,44 @@ export class CodexAppServerSession implements TransportSession {
 
   /**
    * A turn found running was started by an earlier backend: this session never saw its commands start, so it cannot end them
-   * at Stop (Codex does not end a turn's command on `turn/interrupt`). The thread's live background terminals are the source:
-   * `thread/backgroundTerminals/list` returns a running command (foreground ones too) with its item id and process id, and
-   * every terminal it returns belongs to this thread, which runs one turn at a time, so each is tracked like a command seen
-   * starting (a leftover of an earlier turn is exactly what Stop should end). Verified on codex-cli 0.164.0: while a command ran
-   * in a turn, `thread/items/list` returned only completed items, so it cannot name a running command there. The turn's
-   * in-progress `commandExecution` items are still read as a second source, for a CLI that lists them. Best effort: a provider
-   * that cannot list leaves the turn with no tracked commands, and Stop then ends the turn only; both outcomes go to the log.
+   * at Stop (Codex does not end a turn's command on `turn/interrupt`). The live ones come from `thread/backgroundTerminals/list`,
+   * which returns every running command of the thread (foreground ones too) with its item id and process id, but not the turn
+   * that started it. Stop must end the adopted turn's commands and not the terminals that earlier turns left running on purpose
+   * (a dev server), so ownership comes from the record each backend wrote when it saw the command start (`host.commands`). A
+   * listed terminal is tracked unless the record names another turn. A terminal with no record is tracked: while a turn runs, a
+   * backend was attached for every turn before it, so a terminal nobody recorded started during this one. Verified on codex-cli
+   * 0.164.0: while a command ran in a turn, `thread/items/list` returned only completed items, so it cannot name a running
+   * command there. The turn's in-progress `commandExecution` items are still read as a second source, for a CLI that lists them.
+   * Best effort: a provider that cannot list leaves the turn with no tracked commands, and Stop then ends the turn only; both
+   * outcomes go to the log.
    */
   private async trackRunningCommands(record: TurnRecord): Promise<void> {
     const [terminals, items] = await Promise.all([this.listAdoptionTerminals(), this.listRunningCommandItems(record.id)]);
     if (this.ended || record.terminal) return;
+    const owners = this.host.commands.recorded(this.nativeSessionId);
+    let earlierTurns = 0;
     // An `item/completed` that arrived meanwhile was held (or applied) in order; a command it removed is not added again here.
     for (const terminal of terminals ?? []) {
-      if (typeof terminal.itemId === 'string' && typeof terminal.processId === 'string' && !record.commands.has(terminal.itemId)) record.commands.set(terminal.itemId, terminal.processId);
+      if (typeof terminal.itemId !== 'string' || typeof terminal.processId !== 'string' || record.commands.has(terminal.itemId)) continue;
+      const owner = owners[terminal.itemId];
+      if (owner && owner.turnId !== record.id) {
+        earlierTurns += 1;
+        continue;
+      }
+      this.trackCommand(record, terminal.itemId, terminal.processId);
     }
     for (const item of items) {
-      if (item.processId && !record.commands.has(item.id)) record.commands.set(item.id, item.processId);
+      if (item.processId && !record.commands.has(item.id)) this.trackCommand(record, item.id, item.processId);
     }
-    const fields = { threadId: this.nativeSessionId, turnId: record.id, tracked: record.commands.size, terminals: terminals?.length ?? null, items: items.length };
+    const fields = { threadId: this.nativeSessionId, turnId: record.id, tracked: record.commands.size, leftAlone: earlierTurns, terminals: terminals?.length ?? null, items: items.length };
     if (record.commands.size > 0) this.host.log.info(fields, 'codex tracked the commands an adopted turn is running');
     else this.host.log.info(fields, terminals ? 'codex found no running commands on an adopted turn; Stop will end the turn but not any command it started' : 'codex could not list the running commands of an adopted turn; Stop will end the turn but not any command it started');
+  }
+
+  /** Remembers the command for Stop and writes who owns it down, so the next backend can tell it from an earlier turn's. */
+  private trackCommand(record: TurnRecord, itemId: string, processId: string): void {
+    record.commands.set(itemId, processId);
+    this.host.commands.note(this.nativeSessionId, itemId, { processId, turnId: record.id });
   }
 
   /** The in-progress commands of one turn, newest first. An error gives none. */
@@ -1101,6 +1148,7 @@ export class CodexAppServerSession implements TransportSession {
 
   private onThreadClosed(): void {
     // The server unloaded the thread (its terminals died with it). A turn still open can never finish.
+    this.host.commands.drop(this.nativeSessionId);
     const active = this.activeTurnId ? this.turns.get(this.activeTurnId) : undefined;
     if (active && !active.terminal) {
       this.ensureStarted(active);
@@ -1376,15 +1424,15 @@ export class CodexAppServerSession implements TransportSession {
     const record = this.recordFor(turnId, 'item/started', params);
     if (!record) return;
     this.ensureStarted(record);
-    if (item.type === 'commandExecution' && typeof item.processId === 'string' && typeof item.id === 'string') {
-      record.commands.set(item.id, item.processId);
-    }
+    if (item.type === 'commandExecution' && typeof item.processId === 'string' && typeof item.id === 'string') this.trackCommand(record, item.id, item.processId);
   }
 
   private onItemCompleted(params: CodexNotificationMap['item/completed']): void {
     const turnId = asString(params?.turnId);
     const item = params?.item;
     if (!turnId || !isRecord(item) || typeof item.id !== 'string' || typeof item.type !== 'string') return;
+    // Before the turn is looked up: a background command outlives the turn that started it and ends after that turn's record is gone.
+    if (item.type === 'commandExecution') this.host.commands.forget(this.nativeSessionId, item.id);
     const record = this.recordFor(turnId, 'item/completed', params);
     if (!record) return;
     this.ensureStarted(record);

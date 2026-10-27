@@ -347,9 +347,8 @@ export interface TransportInstance {
    * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
    * sleep, memory pressure and release can end survivors that nobody has used since the restart.
    *
-   * It throws {@link TransportBusyError} only for a host that runs but did not answer (see there). Every other failure
-   * (a refused handshake, a timeout after the connection was made, a process that ended during the handshake) is an
-   * ordinary error: the host treats the process as lost and reports the reason.
+   * It throws {@link TransportBusyError} for a host or process that runs but did not answer in time, and nothing else (the
+   * rule is stated there). Every other failure is an ordinary error: the host treats the process as lost and reports the reason.
    */
   reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
   /**
@@ -484,10 +483,13 @@ export class TransportUnavailableError extends Error {
 }
 
 /**
- * `reattach` reached a session host that runs (it accepted no connection, or sent no welcome, in time) but did not answer, so
- * its provider process may well be running a turn. Unlike every other reattach failure this is not "the process is gone": the
- * host leaves the conversation as it is and asks again on the next load, for a bounded time. A failure after the connection
- * was made (a refused handshake, a timeout, an exit) is a plain {@link TransportUnavailableError} or another error, never this.
+ * `reattach` found the conversation's session host, or the provider process behind it, running but not answering in time, so a
+ * turn may well be running in it. This is the one rule both plugins follow:
+ * - busy (this error): the host accepted no connection or sent no welcome in time, or the handshake with a process this call
+ *   did not start timed out after the connection was made. The caller leaves the conversation as it is and asks again on the
+ *   next load, for a bounded time; it never starts a replacement.
+ * - no process (`reattach` resolves undefined): the connection was refused, or the host or its process is gone.
+ * - plain failure with its reason: a refused handshake, a protocol error, or a process that exited during the handshake.
  */
 export class TransportBusyError extends TransportUnavailableError {
   constructor(message = 'The provider process is running but did not answer in time.') {
@@ -513,9 +515,11 @@ Contract errors (`types.ts`):
 - `SendRejectedError` (`send_rejected`): nothing was sent and sending it again would fail the same way (a model or effort the CLI
   refuses, an image file gone from the store). The host fails the message at once with the reason; in automatic
   delivery it is a definite failure, not an uncertain outcome.
-- `TransportBusyError` (a `TransportUnavailableError`): `reattach` found the host running but it did not answer (the
-  connect was refused or no hello came back). The host leaves the row alone and asks again on each load, for up to
-  10 minutes, then settles the turn as lost.
+- `TransportBusyError` (a `TransportUnavailableError`): `reattach` found the host, or the provider behind it, running
+  but it did not answer in time (the connect or the hello timed out, or the handshake after connecting timed out). A
+  refused connect is "no process" (the row is absent); a refusal, a protocol error or an exit during the handshake is a
+  plain failure with its reason. The host leaves a busy row alone and asks again on each load, for up to 10 minutes, then
+  settles the turn as lost.
 - `TurnNotActiveError` (`turn_not_active`, carries `turnId`): `steer` named a turn that already ended. The host sends
   the text as a new turn for this error only.
 - `RequestNotPendingError` (`request_not_pending`, carries `requestId`): `respond` named a request that is not open
@@ -754,7 +758,7 @@ Line numbers are from `main` at `af009e3`.
 | `drainQueuedInputInternal` (2357), `sendInputInternal` (2151), `sendKeystrokesInternal` (2582) | Human text plus Enter: if no turn is running, `sendTurn`; if a turn is running and the plugin can steer, `steer`; journal `queued -> submitting -> submitted` with `turnId`. Escape: `interrupt` the active turn. Other keys, Text Bypass text-only and literal selection tokens: 409 with a clear message. `allowsLiteralSelectionKeystroke` (3568) returns false. See Input and delivery rules below. |
 | `drainAssignments` (648-846) | Replace the tmux liveness/owner/screen/submit block with `deliverAutomatic(session, prompt)` returning `submitted | deferred | failed`; keep attempt records, follow-ups, continuation bookkeeping and `status` events in SM. Guard order unchanged: working, queued input, manual pause, run failure. `deferred` means nothing was sent; `failed` means the outcome is uncertain (see Input and delivery rules). |
 | RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `deferred` delivery (nothing was sent: the transport's `NotSentError`, a turn that started first, an unloaded thread) throws `RecoverySubmitDeferredError`; RunRecovery then gives the attempt back and schedules the retry one backoff step later, inside the same 10-minute recovery window, instead of stopping as "outcome uncertain". Only a `failed` delivery or another error stops recovery as uncertain. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
-| `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `alive ? turnActive : false`: a thread that is not loaded runs nothing, so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
+| `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `turnRunning(session)` (a named or a still unnamed turn on a loaded thread; a thread that is not loaded runs nothing), so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
 | `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot, except survivors: the first pass ends session hosts no conversation owns, then `reattachSurvivors` adopts every awake per-session row and every shared-process (Codex) row still marked working (see below). The same lookup runs before loss handling on every path that loads a working row (screen poll, queued message, wake), so a poll that comes before the first pass cannot declare a surviving turn lost. Only a row the provider has no turn for loses it with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
 | `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `background_work`, `queued_input`. |
 | `reconcileSessions`, `defaultTransportFor`, `migrateTmuxRowToStructured` (lane C2) | While `structuredSessions.defaultTransport` is `structured`, each restorable tmux row of a provider whose lane is on is classified and, when idle or dead, flipped to a sleeping structured row (`BoundSessionsRepo.setTransport`); a live tmux session is stopped like idle sleep and confirmed dead first. `structuredMigrationReport()` is the dry run, served at `GET /api/sessions/structured-migration`. A bind that names no transport takes `defaultTransportFor(provider)`. See `docs/structured-cutover.md`. |

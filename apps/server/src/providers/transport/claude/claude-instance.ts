@@ -215,6 +215,8 @@ export function toTransportError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+const BUSY_MESSAGE = 'The running Claude process for this conversation did not answer in time. It was left alone; try again in a moment.';
+
 /** What the handshake found out about the process. */
 interface Found {
   /** The requests the process already had open (reattach only). */
@@ -394,8 +396,9 @@ export class ClaudeInstance implements TransportInstance {
    * (a process that is not idle is in the middle of a turn, which the session then tracks as an adopted provider turn) and
    * the snapshot of its background tasks. One the earlier backend never spoke to is handshaken as a new launch, with its
    * SessionStart hook frames replayed. A host that runs but does not answer in time is left alone and reported as
-   * {@link TransportBusyError}; it is not "no survivor". That is the only busy case: a handshake that fails after the
-   * connection was made (a refusal, a timeout, an exit) throws the ordinary error, so the caller treats the process as lost.
+   * {@link TransportBusyError}; it is not "no survivor". So is a process that was connected but did not answer the handshake
+   * in time. A handshake that fails some other way (a refusal, a protocol error, an exit) throws the ordinary error, so the
+   * caller treats the process as lost.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<ClaudeSession | undefined> {
     if (this.disposed) return undefined;
@@ -558,7 +561,7 @@ export class ClaudeInstance implements TransportInstance {
     // A fresh channel means the process was just started (or never used); otherwise a process from an earlier backend,
     // already initialized and possibly in the middle of a turn, was found again.
     const fresh = transportStartedFresh(transport);
-    return this.bringUp(transport, fresh, mode, sessionId, options, configDir, argv, extra.transcriptPath);
+    return this.bringUp(transport, fresh, false, mode, sessionId, options, configDir, argv, extra.transcriptPath);
   }
 
   /** `reattach`, with the instance's `opening` guard held: connect to the survivor, check the one-writer rule, run the handshake. */
@@ -594,7 +597,7 @@ export class ClaudeInstance implements TransportInstance {
     const none = (): undefined => {
       // A host that runs but did not answer: this is not "there is no survivor", and what a caller does with that (a launch,
       // which retires a host) would end a process that may be running a turn. Let the next use try again.
-      if (unreachable) throw new TransportBusyError('The running Claude process for this conversation did not answer in time. It was left alone; try again in a moment.');
+      if (unreachable) throw new TransportBusyError(BUSY_MESSAGE);
       // A launch record outlives its process when no backend saw the exit (a reboot, or a process that ended while the
       // backend was down). Dropping it here keeps a later `resume` from taking a dead launch for a survivor.
       if (nothingRuns) this.forgetLaunch(options.conversationId, sessionId);
@@ -618,17 +621,18 @@ export class ClaudeInstance implements TransportInstance {
       await transport.close().catch(() => undefined); // let go; the survivor keeps running
       throw new ClaudeSessionHeldError(sessionId, holder.pid);
     }
-    return this.bringUp(transport, fresh, 'resume', sessionId, options, configDir, argv, locateTranscripts(configDir, options.cwd, sessionId)[0]);
+    return this.bringUp(transport, fresh, true, 'resume', sessionId, options, configDir, argv, locateTranscripts(configDir, options.cwd, sessionId)[0]);
   }
 
   /**
    * Wraps a connected channel in a session and runs the handshake. The channel is a new process (`fresh`) or one an
    * earlier backend already initialized. Records the launch before the handshake, so a backend that dies right after
-   * still finds the process again.
+   * still finds the process again. `attachOnly`: this call only connects to a process (a reattach) and starts none.
    */
   private async bringUp(
     transport: LineTransport,
     fresh: boolean,
+    attachOnly: boolean,
     mode: 'new' | 'resume',
     sessionId: string,
     options: ClaudeOpenOptions,
@@ -670,11 +674,18 @@ export class ClaudeInstance implements TransportInstance {
     } catch (error) {
       stopWatching();
       this.sessions.delete(sessionId);
-      if (fresh) {
+      // A process this call did not start that is slow to answer is not broken, and may be running a turn: it is busy (the rule
+      // is on `TransportBusyError`). A process this call did start that does not answer is a failed launch.
+      const busy = !startupResult && error instanceof ClaudeControlTimeoutError && (attachOnly || !fresh);
+      if (fresh && !busy) {
         await session.close('error').catch(() => undefined);
       } else {
         // Do not end a process that may be running a turn for the person; let go of it.
         await session.detach().catch(() => undefined);
+      }
+      if (busy) {
+        this.log.warn({ pid: client.pid, error: errorText(error) }, 'a running claude process did not answer the handshake in time; it was left running');
+        throw new TransportBusyError(BUSY_MESSAGE);
       }
       throw this.startupError(error, mode, sessionId, startupResult, client);
     }

@@ -295,6 +295,20 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     await svc.shutdown();
   });
 
+  it('sends Stop to a turn the transport already knows while its turn.started has not come through the channel yet', async () => {
+    const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321 } });
+    const svc = service(plugin);
+    await svc.reattachSurvivors([{ session: row('c1', 'native-1'), cwd: '/tmp' }]);
+    const transport = plugin.instance!.sessions.find(thread => thread.nativeSessionId === 'native-1')!;
+    // The plugin named the turn (an adoption from its first event, or a send that just returned) but the service has not
+    // read the event yet: Stop must still reach that turn instead of reporting idle and dropping.
+    transport.adoptedTurn = 'turn-late';
+    const result = await svc.interrupt({ id: 'c1' });
+    expect(result.outcome).toBe('interrupted');
+    expect(transport.calls.filter(call => call.method === 'interrupt').map(call => call.args[0])).toEqual(['turn-late']);
+    await svc.shutdown();
+  });
+
   it('answers a use of the conversation only after the survivor lookup, so a resume never starts a second process', async () => {
     const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321 } });
     const svc = service(plugin);

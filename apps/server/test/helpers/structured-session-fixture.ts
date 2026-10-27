@@ -134,9 +134,9 @@ let reattachSpy: MockInstance | undefined;
 
 /**
  * Makes the next `times` `reattach` calls of any fake instance fail before they look for a survivor, which stays for a later call.
- * `unreachable`: the session host runs but did not answer, which the real plugins report as {@link TransportBusyError}.
- * `refused`: the host answered and the handshake that followed failed, which they report as a plain
- * {@link TransportUnavailableError}. A later call replaces the earlier one. Undone by `vi.restoreAllMocks()`.
+ * `unreachable`: the session host, or the provider behind it, runs but did not answer in time, which the real plugins report as
+ * {@link TransportBusyError}. `refused`: the host answered and the handshake that followed failed (a refusal, a protocol error
+ * or an exit), which they report as a plain {@link TransportUnavailableError}. A later call replaces the earlier one. Undone by `vi.restoreAllMocks()`.
  */
 export function failReattach(kind: 'unreachable' | 'refused', times: number): void {
   reattachSpy?.mockRestore(); // the real method, not an earlier failure

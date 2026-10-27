@@ -351,9 +351,9 @@ export class StructuredSessionService {
       try {
         if (await lookup) adopted.push(candidate.session.id);
       } catch (error) {
-        // A host that runs but did not answer in time is not a process that is gone: the caller must not take the
-        // conversation's turn for lost (see `survivorBusy`). Any other failure (a refused handshake, a timeout after the
-        // connection was made, an exit) is reported as the loss it is.
+        // A host or process that runs but did not answer in time is not a process that is gone: the caller must not take the
+        // conversation's turn for lost (see `survivorBusy`). Any other failure (a refused handshake, a protocol error, an
+        // exit) is reported as the loss it is.
         if (error instanceof TransportBusyError) this.busySurvivors.add(candidate.session.id);
         this.logger?.warn({ err: error, sessionId: candidate.session.id }, 'Reattaching a surviving provider process failed.');
       }
@@ -362,8 +362,8 @@ export class StructuredSessionService {
   }
 
   /**
-   * The last `reattachSurvivors` for this conversation reached a session host that runs but did not answer in time
-   * (`TransportBusyError`), and so did not adopt its process. The process may be running a turn; only a later lookup can tell.
+   * The last `reattachSurvivors` for this conversation found its session host or process running but not answering in time
+   * (`TransportBusyError`, the rule is stated there), and so did not adopt its process. The process may be running a turn; only a later lookup can tell.
    * False after any other outcome, a failed handshake included. The caller bounds how long it keeps asking.
    */
   survivorBusy(sessionId: string): boolean {
@@ -430,6 +430,14 @@ export class StructuredSessionService {
   turnUnidentified(session: Pick<BoundSession, 'id'>): boolean {
     const state = this.sessions.get(session.id);
     return state?.loaded === true && state.transport.turnUnidentified === true;
+  }
+
+  /**
+   * A turn is running, named or not. Every "is this row busy?" decision asks this: a turn the transport found running but could
+   * not name yet is still running, and ending the session, restarting it or clearing "working" under it would lose that turn.
+   */
+  turnRunning(session: Pick<BoundSession, 'id'>): boolean {
+    return this.turnActive(session) || this.turnUnidentified(session);
   }
 
   /**
@@ -640,7 +648,9 @@ export class StructuredSessionService {
     // A turn the transport found running but could not name yet has no id here. Stop must still reach it, so the transport is
     // asked for "the unidentified turn" with an empty id. No interrupt is pending for it: it has no id to match a terminal to.
     const unidentified = state.activeTurnId === undefined && state.transport.turnUnidentified === true;
-    const turnId = unidentified ? '' : state.activeTurnId;
+    // The transport may already know a turn whose `turn.started` has not come through the channel yet (an adoption from a
+    // first event, or a send that just returned): Stop must reach that turn too, not report idle and drop.
+    const turnId = unidentified ? '' : (state.activeTurnId ?? state.transport.activeTurn);
     if (turnId === undefined) return { outcome: 'idle', cancelledSteerIds: [] };
     if (!unidentified) state.pendingInterrupt = { turnId, at: nowIso() };
     let result: Awaited<ReturnType<TransportSession['interrupt']>>;

@@ -181,9 +181,8 @@ export interface TransportInstance {
    * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
    * sleep, memory pressure and release can end survivors that nobody has used since the restart.
    *
-   * It throws {@link TransportBusyError} only for a host that runs but did not answer (see there). Every other failure
-   * (a refused handshake, a timeout after the connection was made, a process that ended during the handshake) is an
-   * ordinary error: the host treats the process as lost and reports the reason.
+   * It throws {@link TransportBusyError} for a host or process that runs but did not answer in time, and nothing else (the
+   * rule is stated there). Every other failure is an ordinary error: the host treats the process as lost and reports the reason.
    */
   reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
   /**
@@ -318,10 +317,13 @@ export class TransportUnavailableError extends Error {
 }
 
 /**
- * `reattach` reached a session host that runs (it accepted no connection, or sent no welcome, in time) but did not answer, so
- * its provider process may well be running a turn. Unlike every other reattach failure this is not "the process is gone": the
- * host leaves the conversation as it is and asks again on the next load, for a bounded time. A failure after the connection
- * was made (a refused handshake, a timeout, an exit) is a plain {@link TransportUnavailableError} or another error, never this.
+ * `reattach` found the conversation's session host, or the provider process behind it, running but not answering in time, so a
+ * turn may well be running in it. This is the one rule both plugins follow:
+ * - busy (this error): the host accepted no connection or sent no welcome in time, or the handshake with a process this call
+ *   did not start timed out after the connection was made. The caller leaves the conversation as it is and asks again on the
+ *   next load, for a bounded time; it never starts a replacement.
+ * - no process (`reattach` resolves undefined): the connection was refused, or the host or its process is gone.
+ * - plain failure with its reason: a refused handshake, a protocol error, or a process that exited during the handshake.
  */
 export class TransportBusyError extends TransportUnavailableError {
   constructor(message = 'The provider process is running but did not answer in time.') {

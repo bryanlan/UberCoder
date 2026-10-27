@@ -884,7 +884,7 @@ describe('codex instance and session against a scripted app-server', () => {
     /** A session over a stub host, with one turn the server started; `client` decides how the connection behaves. */
     function stubSession(client: () => unknown) {
       const log = { info: () => undefined, warn: () => undefined, debug: () => undefined };
-      const host = { log, timings: { ...DEFAULT_TIMINGS, queuedStartWaitMs: 50 }, client, rateLimits: () => undefined, release: () => undefined, noteTurn: () => undefined, questions: { save: () => undefined, remove: () => undefined } } as unknown as CodexSessionHost;
+      const host = { log, timings: { ...DEFAULT_TIMINGS, queuedStartWaitMs: 50 }, client, rateLimits: () => undefined, release: () => undefined, noteTurn: () => undefined, questions: { save: () => undefined, remove: () => undefined }, commands: { recorded: () => ({}), note: () => undefined, forget: () => undefined, drop: () => undefined } } as unknown as CodexSessionHost;
       const session = new CodexAppServerSession({ threadId: THREAD, transcriptPath: null, cwd: '/work', policy: OPEN_OPTIONS.policy, host });
       session.handleNotification('turn/started', { threadId: THREAD, turn: turnObject(TURN, 'inProgress', 1) });
       return session;

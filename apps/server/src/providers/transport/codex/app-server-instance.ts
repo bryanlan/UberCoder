@@ -8,7 +8,7 @@
 // thread no session owns (subagent children, late events) are counted and logged at debug level and never merged
 // into another session. When the process ends or the connection to its host drops, every open session sees
 // `session.state: 'error'` and then `'stopped'`, and the next use connects again (a new process only when the old
-// one is gone).
+// one is gone, or has failed the handshake check for APP_SERVER_UNRESPONSIVE_LIMIT_MS).
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -37,7 +37,7 @@ import {
   type ManagedLineTransport,
 } from '../line-transport.js';
 import { isArchivedThreadError } from './errors.js';
-import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, type JsonRpcExit, type JsonRpcId, type JsonRpcNotification } from './jsonrpc.js';
+import { describeExit, exitReason, JsonRpcClient, JsonRpcExitError, JsonRpcRequestError, JsonRpcSpawnError, JsonRpcTimeoutError, requestIdCounter, type JsonRpcExit, type JsonRpcId, type JsonRpcNotification } from './jsonrpc.js';
 import {
   callCodex,
   INITIALIZED_NOTIFICATION,
@@ -63,7 +63,7 @@ import {
   type CodexTimings,
 } from './app-server-session.js';
 import { currentBootId, processStartTicks } from './process-lifetime.js';
-import { CodexRestartState } from './restart-state.js';
+import { CodexRestartState, type CommandRecord } from './restart-state.js';
 import { mergeRateLimits, type CodexRateLimitSnapshot } from './usage.js';
 
 /**
@@ -79,10 +79,18 @@ export interface CodexPluginOptions {
   baseEnv?: NodeJS.ProcessEnv;
   /** Reported to Codex as the client version. Defaults to the server package version. */
   clientVersion?: string;
+  /** The clock for {@link APP_SERVER_UNRESPONSIVE_LIMIT_MS}, in milliseconds. Defaults to `Date.now`. */
+  now?: () => number;
 }
 
 /** What the backend knows of the app-server it is connected to: `{ pid, startTicks, bootId, startedAt, version }`. The session host's record file, not this, decides which process is adopted or ended. */
 export const INSTANCE_META_KEY = 'structured-instance:codex';
+/**
+ * How long a running app-server may fail the handshake check before the next ordinary start replaces it. Until then a timeout
+ * only lets go of the connection and reports busy: the process may just be slow, and ending it ends every turn and command it runs.
+ * A process that stays silent for this long is taken for hung.
+ */
+export const APP_SERVER_UNRESPONSIVE_LIMIT_MS = 5 * 60_000;
 /** Identity of the session host that holds the shared app-server. */
 const HOST_ID = 'codex';
 const CLIENT_NAME = 'agent_console';
@@ -286,6 +294,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private readonly context: PluginContext;
   private readonly baseEnv: NodeJS.ProcessEnv;
   private readonly clientVersion: string;
+  private readonly now: () => number;
   private readonly openTransport: LineTransportFactory;
   private readonly sessions = new Map<string, CodexAppServerSession>();
   /** What the next backend needs to pick up the app-server's work (questions, running turns, replay cursor), kept in the database. */
@@ -296,6 +305,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private cursorTimer: NodeJS.Timeout | undefined;
   private lastSavedSeq = -1;
   private clientRef: JsonRpcClient | undefined;
+  /**
+   * One id counter for every client of this instance. After a timeout the app-server can still answer the abandoned connection's
+   * request; ids that restarted at 1 would let that answer settle a request of the next connection.
+   */
+  private readonly nextRequestId = requestIdCounter();
+  /** When the first of the current run of handshake timeouts on ordinary starts happened (see {@link APP_SERVER_UNRESPONSIVE_LIMIT_MS}). A successful handshake ends the run. */
+  private unresponsiveSince: number | undefined;
   /** The start of the connection in flight, and whether it may only attach to a running host. */
   private starting: { promise: Promise<JsonRpcClient>; attachOnly: boolean } | undefined;
   private rateLimitSnapshot: CodexRateLimitSnapshot | undefined;
@@ -313,6 +329,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.baseEnv = options.baseEnv ?? process.env;
     this.clientVersion = options.clientVersion ?? packageVersion();
+    this.now = options.now ?? Date.now;
     this.restart = new CodexRestartState(context.meta);
     this.openTransport = context.lineTransport ?? createStdioLineTransportFactory({ log: { warn: (fields, message) => context.log.warn(fields, message) } });
   }
@@ -351,6 +368,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   readonly questions = {
     save: (record: Parameters<CodexRestartState['saveQuestion']>[0]): void => this.restart.saveQuestion(record),
     remove: (requestId: string): void => this.restart.removeQuestion(requestId),
+  };
+
+  readonly commands = {
+    recorded: (threadId: string): ReturnType<CodexRestartState['commands']> => this.restart.commands(threadId),
+    note: (threadId: string, itemId: string, record: CommandRecord): void => this.restart.noteCommand(threadId, itemId, record),
+    forget: (threadId: string, itemId: string): void => this.restart.forgetCommand(threadId, itemId),
+    drop: (threadId: string): void => this.restart.dropThreadCommands(threadId),
   };
 
   // -------------------------------------------------------------------------------------------------------
@@ -433,8 +457,9 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
    * and resolves undefined when no host answers. It connects to a running host only (nothing is started, here or in the resume
    * that follows), then resumes the thread, which adopts a turn the thread is still running (see
    * {@link CodexAppServerSession.adopt}). A host that runs but does not answer in time, or whose app-server is slow to answer the
-   * handshake check, is left alone and reported as {@link TransportUnavailableError}: it is not "no survivor", because the turn may well
-   * be running in it.
+   * handshake check, is left alone and reported as {@link TransportBusyError}: it is not "no survivor", because the turn may well
+   * be running in it. The rule is stated on {@link TransportBusyError} in `../types.ts`. This call never ends the process, however long
+   * it stays silent; an ordinary start does after {@link APP_SERVER_UNRESPONSIVE_LIMIT_MS}.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession | undefined> {
     try {
@@ -587,7 +612,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       clientTransport = separated.transport;
       replay = separated.replay;
     }
-    const client = new JsonRpcClient(clientTransport, { log: this.log, defaultRequestTimeoutMs: this.timings.requestTimeoutMs });
+    const client = new JsonRpcClient(clientTransport, { log: this.log, defaultRequestTimeoutMs: this.timings.requestTimeoutMs, nextRequestId: this.nextRequestId });
     client.onNotification((notification) => this.onNotification(client, notification));
     for (const method of THREAD_SERVER_REQUESTS) {
       client.handleRequest(method, (params, request) => {
@@ -614,14 +639,25 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       if ((attachOnly || !fresh) && error instanceof JsonRpcTimeoutError) {
         // A running app-server this call did not start (maybe busy, maybe swapped out) that is slow to answer is not broken: ending
         // it would kill every turn and command it runs. Let go of the connection and report it busy; the next attempt reconnects.
-        await client.close().catch(() => undefined);
-        this.log.warn({ error: error.message }, 'a running codex app-server did not answer in time; it was left running');
-        throw new TransportBusyError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
+        // An attach-only start never ends it (the caller bounds its own wait). An ordinary start does once the process has stayed
+        // silent for the limit, or every Codex conversation would fail busy for as long as a hung process lives.
+        const silentForMs = attachOnly ? undefined : this.noteUnresponsive();
+        if (silentForMs === undefined || silentForMs < APP_SERVER_UNRESPONSIVE_LIMIT_MS) {
+          await client.close().catch(() => undefined);
+          this.log.warn({ error: error.message }, 'a running codex app-server did not answer in time; it was left running');
+          throw new TransportBusyError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
+        }
+        this.log.warn({ silentForMs, limitMs: APP_SERVER_UNRESPONSIVE_LIMIT_MS, error: error.message }, 'the codex app-server has not answered for longer than the limit; ending it and starting a new one');
+        await client.close({ terminate: true }).catch(() => undefined);
+        this.unresponsiveSince = undefined;
+        return this.startClient(false); // this call started the process, so a timeout in it ends it and fails (it is not another busy run)
       }
       await client.close({ terminate: true }).catch(() => undefined); // the next start gets a clean process
+      this.unresponsiveSince = undefined;
       this.logStartFailure(client, error);
       throw toTransportError(error);
     }
+    this.unresponsiveSince = undefined;
     this.processOutlivesClose = transportOutlivesClose(transport);
     this.hostTransport = transport instanceof HostLineTransport ? transport : undefined;
     this.hostStartTicks = this.hostTransport?.pid !== undefined ? processStartTicks(this.hostTransport.pid) : undefined;
@@ -817,6 +853,13 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       if (/not initialized/i.test(error.message)) await this.initialize(client);
       // Any other refusal (a server without account support) still proves the server is initialized.
     }
+  }
+
+  /** Records a handshake timeout on an ordinary start and returns how long the process has been silent: the age of the first timeout of the run. */
+  private noteUnresponsive(): number {
+    const now = this.now();
+    this.unresponsiveSince ??= now;
+    return now - this.unresponsiveSince;
   }
 
   /** A process that ended while starting: the error that reaches the conversation names only how it ended; the redacted stderr tail goes to the log. */

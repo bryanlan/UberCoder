@@ -2012,8 +2012,8 @@ describe('session host', () => {
       expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
     }, 30_000);
 
-    it('does not report a handshake that failed after the connection was made as busy: it is an ordinary failure, and the process is left running', async () => {
-      // The earlier backend's `initialize` was answered; this one never gets an answer to the repeated one.
+    /** A restarted backend whose repeated `initialize` goes unanswered: the earlier backend's was answered, this one's is swallowed. */
+    function setupSilentRepeat(): { setup: FakeSetup; silence: (on: boolean) => void } {
       const ref: { real?: LineTransportFactory; silent: boolean } = { silent: false };
       const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, {
         host: true,
@@ -2038,20 +2038,43 @@ describe('session host', () => {
         },
       });
       ref.real = setup.context.lineTransport!;
+      return { setup, silence: (on) => { ref.silent = on; } };
+    }
+
+    it('reports a handshake that timed out after the connection was made as busy: the process is left running, and the next attempt adopts it', async () => {
+      const { setup, silence } = setupSilentRepeat();
       const first = setup.track(await setup.instance.start(setup.open()));
       await setup.instance.dispose('shutdown');
       const { instance, context } = setup.restartBackend();
-      ref.silent = true;
+      silence(true);
       const error = await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(TransportUnavailableError);
-      expect(error).not.toBeInstanceOf(TransportBusyError);
+      expect(error).toBeInstanceOf(TransportBusyError);
+      expect(error).toBeInstanceOf(TransportUnavailableError); // callers that only know "unavailable" still read it so
       // The process was reached and is left running; nothing was started, and the record that finds it again stays.
+      expect(instance.openSessionIds).toEqual([]);
       expect(startEntries(setup.logFile)).toHaveLength(1);
       expect(processStartTicks(first.pid!)).toBeDefined();
       expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
-      ref.silent = false;
+      silence(false);
       const again = setup.track((await instance.reattach(first.nativeSessionId, setup.open()))!);
       expect(again.pid).toBe(first.pid);
+    }, 30_000);
+
+    it('does not report a process that exited during the handshake as busy: it is an ordinary failure with its reason', async () => {
+      const { setup, silence } = setupSilentRepeat();
+      const first = setup.track(await setup.instance.start(setup.open()));
+      const pid = first.pid!;
+      await setup.instance.dispose('shutdown');
+      const { instance } = setup.restartBackend();
+      silence(true);
+      const attempt = instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+      await sleep(100); // inside the 400 ms the repeated `initialize` is given
+      process.kill(pid, 'SIGKILL');
+      const error = await attempt;
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(TransportBusyError);
+      expect((error as Error).message).toMatch(/exited while resuming/);
+      expect(instance.openSessionIds).toEqual([]);
     }, 30_000);
 
     it('answers undefined, and starts nothing, when no process survived', async () => {

@@ -22,6 +22,17 @@ import Database from 'better-sqlite3';
 
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * The time left of a window that began at `since` (a `Date.now()` taken just before the action the window follows), as the
+ * timeout of a `wait`. The checks made in between use the window up, so a wait that counts from its own start would stretch it.
+ * Fails at once when they already did.
+ */
+export const windowLeft = (label, since, windowMs) => {
+  const left = since + windowMs - Date.now();
+  if (left <= 0) throw new Error(`${label}: the ${windowMs} ms window had run out ${-left} ms before this check began.`);
+  return left;
+};
+
 // ---- images ------------------------------------------------------------------------------------------------
 const pngChunk = (type, data) => {
   const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);

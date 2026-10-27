@@ -522,7 +522,7 @@ export class SessionManager {
         if (session.transport === 'structured') {
           // The thread must be loaded on a live connection with no turn running; reload it after an exit.
           if (!this.structured.alive(session) && !await this.restoreSession(session)) return 'The original provider conversation could not be restored.';
-          if (this.structured.turnActive(session)) return 'The provider is busy, has an unsent draft, or needs your input.';
+          if (this.structured.turnRunning(session)) return 'The provider is busy, has an unsent draft, or needs your input.';
           return this.hasUnattendedWork(session) ? undefined : 'Unattended recovery requires unfinished work.';
         }
         const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
@@ -915,7 +915,7 @@ export class SessionManager {
           || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt || current.pressureSuspendedAt
           || composer?.status === 'retiring'
           || (composer?.status === 'staged' && !ownsStagedNotice)
-          || (structured ? (!this.structured.alive(current) || this.structured.turnActive(current))
+          || (structured ? (!this.structured.alive(current) || this.structured.turnRunning(current))
             : (!screen.inputActive || (screen.inputText.trim() && !ownsStagedNotice) || sessionScreenShowsWorking(screen) || screenIsStartingUp(screen)
               || screenShowsInteractiveSelectionHint(screen) || screenShowsQueuedMessageHint(screen)
               || (current.provider === 'codex' ? !screen.model : !screenLooksReadyForLiteralPrompt(screen))))) return;
@@ -1226,7 +1226,8 @@ export class SessionManager {
     // A structured turn can only run while its thread is loaded, so the transport's own state is authoritative.
     // A thread that is not loaded runs nothing, whatever its rollout last said: an unfinished rollout after a
     // restart must not read as working (it would block wakes and show a busy row that nothing is driving).
-    if (this.structured.alive({ id: sessionId })) return this.structured.turnActive({ id: sessionId });
+    // A turn the transport found running but could not name yet counts: clearing "working" under it would lose it.
+    if (this.structured.alive({ id: sessionId })) return this.structured.turnRunning({ id: sessionId });
     const session = this.db.boundSessions.getById(sessionId);
     if (session?.transport === 'structured') return false;
     const run = this.runRecovery.getRunState(sessionId);
@@ -1429,7 +1430,7 @@ export class SessionManager {
             const alive = await this.providerAlive(current);
             if (alive === undefined) return;
             if (alive && current.transport === 'structured') {
-              if (this.structured.turnActive(current)) return;
+              if (this.structured.turnRunning(current)) return;
             } else if (alive) {
               const screen = await this.captureSessionScreen(current, false);
               const hasProviderFooter = /^gpt-\d/i.test(screen.status) || /bypass permissions on/i.test(screen.status);
@@ -2129,7 +2130,7 @@ export class SessionManager {
       requireRestartAuthority();
       if (session.transport === 'structured') {
         // As on tmux, a grant never stops work in progress: a human's running turn must finish first.
-        if (this.structured.turnActive(session)) throw new SessionInputRejectedError('Restart is waiting for the current work to finish.');
+        if (this.structured.turnRunning(session)) throw new SessionInputRejectedError('Restart is waiting for the current work to finish.');
         // Drop the thread so the reload below starts a fresh epoch, and forget the old turns' run state.
         await this.structured.unload(session);
         this.structuredMonitors.get(session.id)?.reset();
@@ -3736,7 +3737,7 @@ export class SessionManager {
       if (!current || !current.shouldRestore || current.status !== 'bound' || current.modelProfileRequest
         || current.manualSuspendedAt || current.pressureSuspendedAt || current.conversationRef.startsWith('pending:')) return 'busy';
       if (mode !== 'idle' && this.hasActiveCoordinationAssignment(session)) return 'assignment';
-      if (this.structured.turnActive(session)) return 'turn_running';
+      if (this.structured.turnRunning(session)) return 'turn_running';
       // The tmux path refuses while the screen shows background work; this is the same rule for a headless process that
       // reports shell commands or subagents it left running. Ending the process would kill them.
       if (this.structured.hasBackgroundWork(session)) return 'background_work';
@@ -3887,7 +3888,7 @@ export class SessionManager {
 
     if (session.transport === 'structured') {
       try {
-        if (this.structured.turnActive(session)) await this.structured.interrupt(session).catch(() => undefined);
+        if (this.structured.turnRunning(session)) await this.structured.interrupt(session).catch(() => undefined);
         await this.structured.release(session);
       } catch (error) {
         retainBindingAfterFailure('Failed to release the structured session cleanly. The conversation remains available.');
@@ -4279,7 +4280,8 @@ export class SessionManager {
         // The turn the row says is running may have ended while no backend was listening, and nothing announces that. The
         // working-state expiry clears the flag after an idle window unless the process reports a turn by then. A shared
         // process can be in the same position: its thread is running a turn it could not name yet, which its first event
-        // will (the plugin says so with `turnUnidentified`); only a thread with no turn at all is lost.
+        // will (the plugin says so with `turnUnidentified`, and the expiry keeps the row working until it does); only a
+        // thread with no turn at all is lost.
         this.scheduleWorkingExpiry(session.id, nowIso());
       } else {
         // The shared process was asked about the thread and has no turn for it: the turn is lost the way a dead connection loses it.
@@ -4751,7 +4753,7 @@ export class SessionManager {
     const current = this.db.boundSessions.getById(staleSession.id);
     const availableBeforeBytes = this.availableMemoryBytes();
     if (!current || !this.isPressureSuspendable(current) || availableBeforeBytes === undefined || availableBeforeBytes >= threshold) return false;
-    if (!this.structured.alive(current) || this.structured.turnActive(current)) return false;
+    if (!this.structured.alive(current) || this.structured.turnRunning(current)) return false;
     await this.structured.unload(current);
     this.stopWatching(current.id);
     this.runtimes.clearEphemeral(current.id);
@@ -4768,7 +4770,7 @@ export class SessionManager {
   }
 
   private async applyStructuredModelProfile(session: BoundSession, request: Extract<ModelProfileRequest, { state: 'queued' }>): Promise<void> {
-    if (this.structured.turnActive(session)) {
+    if (this.structured.turnRunning(session)) {
       this.deferModelProfileRequest(session, request, 'turn_running');
       return;
     }
@@ -4831,7 +4833,7 @@ export class SessionManager {
     // Output from a failed turn that is stopped does not move recency, as with terminal output.
     if (!(session.runFailure && session.runFailure.status !== 'retrying')) {
       this.updateBoundSessionFields(sessionId, {
-        updatedAt: at, lastActivityAt: at, lastOutputAt: at, isWorking: this.structured.turnActive(session),
+        updatedAt: at, lastActivityAt: at, lastOutputAt: at, isWorking: this.structured.turnRunning(session),
       });
       this.scheduleWorkingExpiry(sessionId, at);
     }

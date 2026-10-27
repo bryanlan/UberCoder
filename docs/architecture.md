@@ -682,7 +682,11 @@ migration); this section is the summary.
   `thread/resume`, the thread's recent turns and the host's replay buffer, and a held question is answered by id over the same
   relayed stdin. An adopted turn keeps the row working without moving recency, Stop reaches it, and its terminal ends it once. A
   row with no survivor stays unloaded: it never reads as working, a scheduled recovery or half-restored row re-arms at boot, and
-  the conversation resumes on its next use. The real-CLI proofs (step k2) restart the backend during a running turn for both
+  the conversation resumes on its next use. A survivor whose host or process is running but did not answer in time is
+  "busy": the row is left as it is and asked again on each load for up to 10 minutes, then its turn is settled as lost with
+  "did not answer for 10 minutes"; Stop on such a row clears working and writes "Stop could not reach the agent process,
+  which may still be running". A shared Codex app-server that keeps timing out its handshake on ordinary starts is replaced
+  after 5 minutes. The real-CLI proofs (step k2) restart the backend during a running turn for both
   providers. Codex adoption reads the thread's live background terminals (`thread/backgroundTerminals/list`, item id to
   process id), so Stop on an adopted turn also ends a command that started before the restart. On codex-cli 0.164.0 the item
   listing never shows a running command, so the terminals are the only source (see

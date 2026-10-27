@@ -74,6 +74,11 @@ export interface JsonRpcLogger {
 export interface JsonRpcClientOptions {
   log?: JsonRpcLogger;
   defaultRequestTimeoutMs?: number;
+  /**
+   * Gives the id of the next request. The default counts from 1 for this client alone. A caller that opens several clients
+   * to one server passes one shared counter, so a late reply to an abandoned client can never match a request of the next.
+   */
+  nextRequestId?: () => number;
 }
 
 /** The server answered a request with a JSON-RPC error. */
@@ -177,6 +182,12 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   return typeof value === 'object' && value !== null && typeof (value as { then?: unknown }).then === 'function';
 }
 
+/** A counter of request ids: 1, 2, 3, ... */
+export function requestIdCounter(): () => number {
+  let last = 0;
+  return () => (last += 1);
+}
+
 // eslint-disable-next-line no-control-regex
 const ANSI_PATTERN = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 
@@ -191,7 +202,7 @@ export class JsonRpcClient {
   private readonly exitHandlers = new Set<(exit: JsonRpcExit) => void>();
   private readonly requestHandlers = new Map<string, JsonRpcServerRequestHandler>();
   private readonly defaultTimeoutMs: number;
-  private nextId = 1;
+  private readonly nextRequestId: () => number;
   private activeServerRequests = 0;
   private closing = false;
   private closePromise: Promise<void> | undefined;
@@ -203,6 +214,7 @@ export class JsonRpcClient {
     this.transport = transport;
     this.log = options.log ?? {};
     this.defaultTimeoutMs = options.defaultRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.nextRequestId = options.nextRequestId ?? requestIdCounter();
     transport.onLine((line) => this.handleLine(line));
     transport.onExit((info) => this.finish(info));
   }
@@ -230,8 +242,7 @@ export class JsonRpcClient {
         reject(this.exitError(false));
         return;
       }
-      const id = this.nextId;
-      this.nextId += 1;
+      const id = this.nextRequestId();
       const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
       const entry: PendingRequest = {
         method,

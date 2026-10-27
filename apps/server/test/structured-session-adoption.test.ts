@@ -354,6 +354,35 @@ describe('A thread the app-server says is running a turn that no listing names',
     expect(lossLines(f, session.id)).toEqual([]);
   });
 
+  it('keeps the row working past the working expiry and refuses idle sleep, while the turn is unnamed', async () => {
+    const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
+    await backend.manager.reconcileSessions();
+    await settle();
+    const adopted = backend.plugin.instance!.sessions[0]!;
+    expect(adopted.turnUnidentified).toBe(true);
+    expect(backend.manager['structured'].turnActive(session)).toBe(false);
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    // Only the clock is faked. Past the 60 s idle window, the expiry fires for a row whose last output is that old.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    vi.setSystemTime(Date.now() + 61_000);
+    const manager = backend.manager as unknown as {
+      handleWorkingIdleExpiry(sessionId: string, expectedHeartbeatAt: string): Promise<void>;
+      suspensionBlockReason(row: unknown, mode: 'idle'): Promise<string | undefined>;
+    };
+    await manager.handleWorkingIdleExpiry(session.id, f.row(session.id).lastOutputAt ?? '');
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(await manager.suspensionBlockReason(f.row(session.id), 'idle')).toBe('turn_running');
+
+    // Once the first event names the turn and it ends, the row is idle as usual.
+    adopted.turnUnidentified = false;
+    adopted.push({ type: 'turn.started', turnId: 'turn-1', origin: 'provider', replay: false, adopted: true });
+    adopted.completeTurn('completed');
+    await settle();
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(lossLines(f, session.id)).toEqual([]);
+  });
+
   it('is reached by Stop: the provider is asked to stop the unnamed turn (an empty id), and the row keeps reading working until it ends', async () => {
     const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
     await backend.manager.reconcileSessions();

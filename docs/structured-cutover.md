@@ -2,9 +2,9 @@
 
 Date: 2026-10-26. Branch: `feature/structured-claude-cutover`, stacked on `feature/structured-provider-lane`
 (the Codex app-server lane, see `docs/structured-providers.md`). Status: Phase A is built and was proven against the
-real Claude and Codex CLIs after review rounds 1 and 2, and review round 3 read the round 2 fixes; its findings are fixed on
-this branch (see "Verification evidence" and "Review and fixes"). Deploying it and flipping the default are Bryan's live
-steps. Nothing in this document changes the running Console until those steps are executed.
+real Claude and Codex CLIs after each of four review rounds (the round 3 run on `b2e6e5e` passed all three proofs; the
+round 4 fixes were run again, see "Verification evidence"). Deploying it and flipping the default are Bryan's live steps.
+Nothing in this document changes the running Console until those steps are executed.
 
 ## Goal
 
@@ -456,7 +456,7 @@ The migration then converts idle rows on the next reconcile pass (the first pass
     stdin. The details are in `docs/structured-providers.md`, "Restart adoption". Verified on the real app-server (proof
     step k2): the thread was attached again about 0.5 s after boot on the same app-server (new epoch), the first poll read
     working and wrote no loss line, Stop interrupted the turn (idle after 19 ms, rollout `turn_aborted: interrupted`), and the
-    next message completed on the same pid with no recovery or wake text. One gap: the counting command was gone only 19.9 s
+    next message completed on the same pid with no recovery or wake text. One gap at the time (fixed in round 3): the counting command was gone only 19.9 s
     after Stop, when its 25 s count ran out (finding 11).
   - A shared row that is working but whose thread runs no turn loses it the way a dead connection does: status line,
     `isWorking=false`, and RunRecovery `process_exited` for unattended work.
@@ -465,12 +465,16 @@ The migration then converts idle rows on the next reconcile pass (the first pass
   400 MB process running for ever. `release` and `unload` do the same for a conversation that is not loaded (a survivor
   nobody adopted, or an adoption that failed), so idle sleep ends the process and not only the row marker. The shared Codex
   host is never swept.
-- **Slow hosts and dead groups.** A host that runs but did not answer (the connect was refused or no hello came back) is
-  reported busy (`TransportBusyError`) and the open fails as unavailable (see "Backend side"). The manager leaves the row
-  alone and asks again on each load for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`), then settles the turn as lost with
-  "did not answer for 10 minutes". A handshake that fails after the connection was made is a plain failure, and the row is
-  reported absent with its reason. Stop on a busy row clears working and says the process could not be reached and may
-  still be running (round 2, N4; round 3, M3). The host ends the rest of the child's process group after the child exits
+- **Slow hosts and dead groups.** Busy (`TransportBusyError`) means the host, or the provider behind it, is running but
+  did not answer in time: the connect or the hello timed out, or the handshake after connecting (Claude's repeated
+  `initialize`, Codex's `account/read`) timed out. A refused connect means the host is gone and the row is reported absent;
+  a refusal, a protocol error or a process exit during the handshake is a plain failure with its reason, and the row's turn
+  is settled as lost with the generic loss line (the reason goes to the log). The manager leaves a busy row alone and asks
+  again on each load for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`), then settles the turn as lost with "did not answer
+  for 10 minutes". Stop on a busy row clears working and says the process could not be reached and may still be running
+  (round 2, N4; round 3, M3; round 4, R4-3 and R4-4). For the shared Codex app-server an ordinary start keeps reporting
+  busy for consecutive handshake timeouts up to `APP_SERVER_UNRESPONSIVE_LIMIT_MS` (5 minutes), then ends the app-server
+  and starts a fresh one (round 4, R4-1); an attach-only reattach never ends it. The host ends the rest of the child's process group after the child exits
   (see "Ending").
 - **Plugin fixes.** Frames that name only unknown uuids become a provider turn. An empty headless chat restarts under the
   same id. `resume` never starts a process beside a holder. A configured `CLAUDE_CODE_*` key passes through. See "Claude
@@ -779,8 +783,8 @@ message-mode card (h2) and a message sent during an adopted Claude turn (Claude 
   app-server was declared lost, recovery was sent into it, Stop did nothing, and an open question wedged it. A reattached
   Claude process was adopted without its running turn, so Stop did nothing and a suspend ended the process mid-turn.
 - Both are fixed in `e7e0a2a` (see "Re-adoption across restarts and the other fixes") and proven on the real CLIs by step k2 of
-  the Claude and Codex proofs. For Codex one part is not fixed: Stop on a re-adopted turn does not end a command that started
-  before the restart (round 2, N1).
+  the Claude and Codex proofs. For Codex one part stayed open until round 3: Stop on a re-adopted turn did not end a command
+  that started before the restart (round 2, N1; fixed and proven on `b2e6e5e`).
 
 The other round 1 findings were fixed in `e7e0a2a`; round 2 confirmed each one except where it says otherwise below.
 
@@ -836,9 +840,9 @@ Round 3 fixes:
   turns and interrupts the one running; the service passes an empty id for that case.
 - Found by the lane: an attach-only connection with no saved instance record took the host's replay as live lines, so a
   stale response could answer a new request. Fixed and tested.
-- M3. Busy is `TransportBusyError`, raised by both plugins only when the host is unreachable. A busy run is bounded by
-  10 minutes, after which the row is settled as lost. Stop on a busy or unloaded working row clears working with a status
-  line.
+- M3. Busy is `TransportBusyError`, raised by both plugins when the host or the provider did not answer in time (see "Slow
+  hosts and dead groups"; round 4 aligned the two plugins). A busy run is bounded by 10 minutes, after which the row is
+  settled as lost. Stop on a busy or unloaded working row clears working with a status line.
 - M2. The migration writes the conversation-history record before a Claude row flips, and the first reconcile pass writes
   it for every structured row with `lastResponseAt` (`TransportInstance.noteConversationHistory`, optional).
 - L4. A `SendRejectedError` in automatic delivery is `rejected`: wakes and continuations record a definite failure with the
@@ -853,9 +857,37 @@ Round 3 fixes:
 
 Open follow-ups after round 3:
 
-- An ordinary (not attach-only) start against a used app-server that hangs reports busy until the 10-minute limit instead
-  of replacing it.
 - In the unknown-turn background path, a Stop that arrives before the background listing returns finds no commands.
+- The exactly-once turn-end counters in the proofs read the provider's records; a Console that handled one turn end twice
+  (two completion lines, a second recency move) would still pass them.
+- A message whose not-sent refusals alternate with "waiting for the session" deferrals never reaches the ten-minute cap; it
+  waits, and nothing is sent twice (round 4, L3 residual, by design).
+- After Stop or the 10-minute settle, the next screen poll restores the row and can meet the same silent host, so the person
+  may see an error row ("did not answer in time; try again in a moment") until the reconcile pass adopts the process again.
+
+**Round 4** was a fourth read, of `59fde29..b2e6e5e` (`docs/research/cutover-2026-10-26/review-round-4.md`), beside the
+round 3 run. It found M2, M4/N1, L1's replay change, L4 and L6 fixed, M3 fixed for Claude, no tmux regression, no proof
+assertion that could fail on a correct system, and no high finding. Two medium items and four low ones are fixed on this
+branch:
+
+- R4-1. The L1 fix had removed the only path that replaced a hung shared app-server, so every Codex conversation would fail
+  busy for ever. An ordinary start now keeps reporting busy for consecutive handshake timeouts up to 5 minutes
+  (`APP_SERVER_UNRESPONSIVE_LIMIT_MS`), then ends the app-server and starts a fresh one; attach-only never ends it.
+- R4-2. After a restart, Stop ended every live background terminal of the thread, including a process an earlier turn left
+  running on purpose (Codex gives terminals no turn id). The plugin now records which turn started each command (meta
+  `structured-codex-commands`, one record per thread with item id to process id and turn id, written on `item/started`,
+  pruned on `item/completed`, dropped on release or unload and kept across a backend shutdown) and at adoption leaves the
+  terminals recorded under another turn alone; an unrecorded terminal counts as the adopted turn's, because a backend was
+  attached for every earlier turn (the assumption fails only if several turns ran while no backend was attached). Verified by a second probe: Codex kills the process group of a completed
+  command, so an earlier turn can leave a process behind only as a background terminal that is still in progress.
+- R4-3 and R4-4. One busy rule for both plugins (above); the contract text in `types.ts` says the same, and the Claude
+  handshake timeout at reattach is busy instead of lost. The Codex tests assert the busy class, not only the base class.
+- R4-5. JSON-RPC request ids no longer restart at 1 per connection: one counter per instance, so a late reply to an
+  abandoned connection cannot resolve the next connection's request.
+- R4-6 and the L2 and N8 leftovers. The working expiry treats an unidentified turn as working; a Stop whose re-listing
+  succeeds and finds no turn clears the unidentified flag (sends are accepted again) and the warn notice is raised once per
+  period; the 5 s Stop window in the proofs starts at Stop, not at idle; the `run-recovery` doc comments sit on their own
+  classes; the round 3 and 4 reports are in `docs/research/cutover-2026-10-26/`.
 - Codex message-mode cards (async questions) are not shown again after a backend restart; the question text stays in the
   conversation and a typed answer reaches the model.
 - `run-recovery` tests do not cover the recovery-path status line for a rejected prompt (the service and wake paths are

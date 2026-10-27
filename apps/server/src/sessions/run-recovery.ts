@@ -8,11 +8,6 @@ export const RECOVERY_PROMPT = 'Automatic recovery after a transient provider fa
 const cancellationKey = (id: string) => `run-recovery-cancelled:${id}`;
 const budgetKey = (id: string) => `run-recovery-budget:${id}`;
 
-/**
- * `submit` throws this when it certainly sent nothing (the provider connection was not there, or a turn was running
- * first). The attempt is not spent and the retry is scheduled again, unlike any other error, which leaves the
- * outcome uncertain and stops recovery.
- */
 /** Thrown by the submit callback when nothing was sent and sending the same prompt again would fail the same way. */
 export class RecoverySubmitRejectedError extends Error {
   constructor(message: string) {
@@ -21,6 +16,11 @@ export class RecoverySubmitRejectedError extends Error {
   }
 }
 
+/**
+ * `submit` throws this when it certainly sent nothing (the provider connection was not there, or a turn was running
+ * first). The attempt is not spent and the retry is scheduled again, unlike any other error, which leaves the
+ * outcome uncertain and stops recovery.
+ */
 export class RecoverySubmitDeferredError extends Error {
   constructor(message = 'The recovery prompt was not sent.') {
     super(message);

@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, scryptSync } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, installExitBackstop, endProofProcesses, scanProofProcesses, summarizeProcesses } from './structured-proof-kit.mjs';
+import { windowLeft, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, installExitBackstop, endProofProcesses, scanProofProcesses, summarizeProcesses } from './structured-proof-kit.mjs';
 
 if (!process.argv.includes('--run')) {
   process.stderr.write('Use --run to opt into a real Codex app-server proof (several short turns on the host login). Run `npm run build` first.\n');
@@ -545,8 +545,9 @@ try {
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
-    // Within 5 s, as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
-    await wait('the counting command to end within 5 s of Stop', () => commandPids.every(pid => !alive(pid)) && pgrep(marker).length === 0, 5_000, 100);
+    // Within 5 s of Stop (not of idle), as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    const gone = 'the counting command to end within 5 s of Stop';
+    await wait(gone, () => commandPids.every(pid => !alive(pid)) && pgrep(marker).length === 0, windowLeft(gone, stopped, 5_000), 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const abortRecord = await wait('the rollout to record the interrupted turn', () =>
       rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);
@@ -826,7 +827,8 @@ try {
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
     assert.equal(row().pid, oldPid, 'The row pid must not change for an interrupt.');
-    await wait('the counting command to end within 5 s of Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 5_000, 100);
+    const gone = 'the counting command to end within 5 s of Stop';
+    await wait(gone, () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, windowLeft(gone, stopped, 5_000), 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const abortRecord = await wait('the rollout to record the interrupted turn', () =>
       rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);

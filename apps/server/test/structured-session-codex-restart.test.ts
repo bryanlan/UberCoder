@@ -202,6 +202,42 @@ describe('A Codex turn found running after a backend restart, through the host',
     expect(receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate')[0]!.params).toEqual({ threadId: THREAD, processId: 'proc-1' });
   });
 
+  it('leaves a terminal an earlier turn left running when Stop reaches the adopted turn, and ends only that turn\'s commands', async () => {
+    const entry = (item: Record<string, unknown>) => ({ turnId: TURN, item, startedAtMs: 1, completedAtMs: null });
+    const terminal = (itemId: string, processId: string) => ({ itemId, processId, command: 'sleep 30', cwd: '/work', osPid: null, cpuPercent: null, rssKb: null });
+    const f = await restartFixture({
+      'turn/interrupt': { result: {} },
+      'thread/items/list': { result: { data: [entry(userMessageItem('user-1', 'run the build')), entry(agentMessageItem('msg-1', 'working'))], nextCursor: null } },
+      // The dev server turn 0 left running, the build turn 1 runs, and a command that started while no backend was attached.
+      'thread/backgroundTerminals/list': { result: { data: [terminal('cmd-dev', 'proc-dev'), terminal('cmd-1', 'proc-1'), terminal('cmd-2', 'proc-2')], nextCursor: null } },
+      'thread/backgroundTerminals/terminate': { result: { terminated: true } },
+    }, [
+      {
+        result: { turn: turnObject('turn-0', 'inProgress', 1790000001) },
+        emitAfter: [turnStarted(THREAD, 'turn-0'), itemStarted(THREAD, 'turn-0', commandItem('cmd-dev', 'proc-dev')), turnCompleted(THREAD, 'turn-0', 'completed', null, 100)],
+      },
+      {
+        result: { turn: turnObject(TURN, 'inProgress', 1790000001) },
+        emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))],
+      },
+    ]);
+    await f.first.manager.sendInput(f.session.id, 'start the dev server');
+    await waitUntil(() => f.row().lastResponseAt, 10_000, 'the first turn to end');
+    await waitUntil(() => !f.row().isWorking, 5_000, 'the first turn to end');
+    await f.first.manager.sendInput(f.session.id, 'run the build');
+    await waitUntil(() => f.row().isWorking, 5_000, 'the second turn to start');
+    await waitUntil(() => (JSON.parse(f.db.meta.get('structured-codex-commands') ?? '{}') as Record<string, Record<string, unknown>>)[THREAD]?.['cmd-1'], 5_000, 'the build command to be recorded');
+    await f.first.manager.stop();
+
+    const second = f.backend();
+    await second.manager.reconcileSessions();
+    expect(f.row().isWorking).toBe(true);
+    await second.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    await waitUntil(() => receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate').length >= 2, 5_000, 'the commands to be ended');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate').map(frame => frame.params.processId).sort()).toEqual(['proc-1', 'proc-2']);
+  });
+
   it('is not declared lost when the app-server says the thread is running but no listing names the turn: the first event adopts it', async () => {
     const f = await restartFixture({ 'thread/turns/list': { error: { code: -32603, message: 'cannot list turns' } } }, {
       result: { turn: turnObject(TURN, 'inProgress', 1790000001) },
