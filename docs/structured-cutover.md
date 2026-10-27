@@ -614,7 +614,19 @@ tmux chat does, and calls none of their tools.
 
 ## Verification evidence
 
-**Round 4 run (current).** On `dd3c615` (the review round 4 fixes), 2026-10-27 04:02 to 04:13 UTC, the same sequence as the
+**Round 5 run (current).** On `52ee445` (the review round 5 fixes), 2026-10-27 04:43 to 04:55 UTC, the same sequence: the
+server suite (106 files, 2473 tests; the only failures are the three `main` failures), the web suite (19 files, 215 tests),
+`npm run build`, then the three proofs with the Stop poll starting at Stop, no process left behind:
+
+- `claude-proof-2026-10-27T04-49-43Z.json`: 14 of 14. Step f: the command gone 163 ms after Stop. Step k2: adopted 505 ms
+  after boot; the count gone 171 ms after Stop; one interrupted turn-end after Stop; the steer unanswered 2.07 s into the
+  count and answered after it.
+- `codex-proof-2026-10-27T04-51-49Z.json`: 16 of 16. Step h: the command gone 158 ms after Stop. Step k2: attached 689 ms
+  after boot; the count gone 175 ms after Stop; one aborted turn-end after Stop; the steer unanswered 2.14 s into the
+  count and answered after it.
+- `migration-proof-2026-10-27T04-54-08Z.json`: 9 of 9.
+
+**Round 4 run.** On `dd3c615` (the review round 4 fixes), 2026-10-27 04:02 to 04:13 UTC, the same sequence as the
 round 3 run: the server suite (105 files, 2448 tests; the three `main` failures plus one `claude-run-state` test, "protects
 paused sessions, input waits, native drafts, ownership and memory limits", that failed under load and passed alone right
 after), the web suite (19 files, 215 tests), `npm run build`, then the three proofs, no process left behind:
