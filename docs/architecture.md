@@ -685,10 +685,12 @@ migration); this section is the summary.
   the conversation resumes on its next use. A survivor whose host or process is running but did not answer in time is
   "busy": the row is left as it is and asked again on each load for up to 10 minutes, then its turn is settled as lost with
   "did not answer for 10 minutes"; Stop on such a row clears working and writes "Stop could not reach the agent process,
-  which may still be running". A provider that keeps timing out on ordinary opens (its handshake, a silent session host,
-  or for Codex three request timeouts in a row on a live connection) is reported busy for 5 minutes, counted by the plugin
-  across backend-side retries, then ended together with its session host and replaced in the same call (Codex starts a
-  fresh app-server, Claude relaunches the chat with `--resume`); an attach-only reattach never ends a process. The real-CLI
+  which may still be running". A provider that keeps timing out on ordinary opens (its handshake, or a silent session host)
+  is reported busy for 5 minutes, counted by the plugin across backend-side retries, then ended together with its session
+  host and replaced in the same call (Codex starts a fresh app-server; Claude relaunches in the open's own mode, `--resume`
+  when a transcript exists); an attach-only reattach never ends a busy process. Three request timeouts in a row on a live
+  Codex connection close that connection without ending the app-server (the loaded rows see a connection loss and are
+  picked up on their next load), so the next open runs the bounded check. The real-CLI
   proofs (step k2) restart the backend during a running turn for both providers. Codex adoption reads the thread's live background terminals (`thread/backgroundTerminals/list`, item id to
   process id), so Stop on an adopted turn also ends a command that started before the restart. On codex-cli 0.164.0 the item
   listing never shows a running command, so the terminals are the only source (see

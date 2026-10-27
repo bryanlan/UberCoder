@@ -424,6 +424,16 @@ describe('codex JSON-RPC client over a fake app-server', () => {
       expect(runs.slice(5)).toEqual([[1, 'late'], [0, undefined]]);
     });
 
+    it('takes a notification as a sign of life too: the run ends when the app-server streams another thread\'s event', async () => {
+      const runs: Array<[number, string | undefined]> = [];
+      const chatty = { ...handlers, chatter: { noResponse: true, emitAfter: [{ delayMs: 5, frame: { method: 'thread/status/changed', params: { threadId: 'other', status: { type: 'idle' } } } }] } };
+      const { client } = await spawnClient({ handlers: chatty }, { client: { onTimeoutRun: (consecutive, method) => void runs.push([consecutive, method]) } });
+      await handshake(client);
+      await timedOut(client, 'hang');
+      await timedOut(client, 'chatter'); // the notification arrives before the request gives up
+      expect(runs).toEqual([[1, 'hang'], [0, 'thread/status/changed'], [1, 'chatter']]);
+    });
+
     it('is not broken by a callback that throws', async () => {
       const { client } = await spawnClient({ handlers }, { client: { onTimeoutRun: () => { throw new Error('boom'); } } });
       await handshake(client);

@@ -1043,6 +1043,9 @@ describe('The record of which turn started a Codex command', () => {
     const unloaded = await startCommand();
     await unloaded.session.unload!();
     expect(recorded(unloaded.fake)[THREAD]).toEqual({ 'cmd-1': { processId: 'proc-1', turnId: TURN } });
+    // The service unloads before it releases: the release must still drop the record of the ended session.
+    await unloaded.session.close('release');
+    expect(unloaded.fake.context.metaStore.has(KEY)).toBe(false);
 
     const shutdown = await startCommand();
     await shutdown.session.close('shutdown');

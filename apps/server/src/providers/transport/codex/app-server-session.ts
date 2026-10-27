@@ -718,11 +718,10 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   async close(reason: 'release' | 'shutdown' | 'error'): Promise<void> {
+    // The record goes with the release even after an unload (the service unloads first): the thread is over for good.
+    if (reason === 'release') this.host.commands.drop(this.nativeSessionId);
     if (!this.ended) {
-      if (reason === 'release') {
-        await this.unsubscribe();
-        this.host.commands.drop(this.nativeSessionId);
-      }
+      if (reason === 'release') await this.unsubscribe();
       this.endLocal();
     }
     await Promise.allSettled([...this.cleanupJobs]);

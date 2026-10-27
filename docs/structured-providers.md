@@ -506,16 +506,20 @@ export class TransportUnavailableError extends Error {
  *   one: the plugin handles it (Claude adopts the process with an unknown turn state; Codex treats "already initialized" as success).
  *
  * What the caller does with busy:
- * - `reattach` (attach-only) never ends the process: it lets go of it and reports busy. The session manager leaves a busy survivor
- *   alone for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`) and then takes its turn for lost.
+ * - `reattach` (attach-only) never ends a process it found busy: it lets go of it and reports busy. The session manager leaves a
+ *   busy survivor alone for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`) and then takes its turn for lost. (A Claude survivor that
+ *   never ran a turn and fails its launch checks on reattach is ended as a failed launch; that is not the busy case.)
  * - An ordinary `start`/`resume` reports busy while the process keeps timing out, and once the first timeout of the run is 5 minutes
  *   old (`APP_SERVER_UNRESPONSIVE_LIMIT_MS`, `CLAUDE_UNRESPONSIVE_LIMIT_MS`) the next timeout ends the process and its session host and
- *   replaces it in the same call. Both plugins count the no-hello case of an ordinary open in the same run: past the limit they end
- *   the silent session host and its process group from the host record (`PluginContext.endHost`, or the host runtime record),
- *   because no connection can end them. Codex also counts request timeouts on a live connection: three in a row
- *   (`LIVE_CLIENT_TIMEOUT_LIMIT`), or one past the limit, close that connection without ending the process, so the next use goes
- *   through the handshake check. A successful handshake, an answer (a late one too), or a failure that is not a timeout, ends the
- *   run. The run and the JSON-RPC request-id counter are kept by the plugin, not the instance, because the service drops an
+ *   replaces it in the same call (Codex starts a fresh app-server; Claude relaunches in the open's own mode, `--resume` when a
+ *   transcript exists). Both plugins count the no-hello case of an ordinary open in the same run: past the limit they end the silent
+ *   session host and its process group through `PluginContext.endHost`, because no connection can end them. Codex also counts
+ *   request timeouts on a live connection: three in a row (`LIVE_CLIENT_TIMEOUT_LIMIT`), or one past the limit, close that
+ *   connection without ending the process (the loaded rows see a connection loss and are picked up again on their next load), so
+ *   the next use goes through the handshake check. A successful handshake, any frame on a live connection (an answer, a late one
+ *   too, or a notification), or a failure that is not a timeout, ends the run; a late answer to a timed-out handshake is never
+ *   seen, because that connection is closed. The run is in memory, so a backend restart starts it again. The run and the JSON-RPC
+ *   request-id counter are kept by the plugin, not the instance, because the service drops an
  *   instance that never connected after every failed open.
  */
 export class TransportBusyError extends TransportUnavailableError {

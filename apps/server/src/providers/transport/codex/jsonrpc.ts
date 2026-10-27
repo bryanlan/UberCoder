@@ -415,6 +415,12 @@ export class JsonRpcClient {
     this.log.debug?.(this.describeFrame('in', frame, line.length), 'codex protocol');
     const method = frame.method;
     if (typeof method === 'string') {
+      // A notification or a server request is a sign of life like an answer: a run of request timeouts ends with it, so a busy
+      // but working app-server that still streams another thread's events is not dropped.
+      if (this.timeoutRun > 0) {
+        this.timeoutRun = 0;
+        this.reportTimeoutRun(method);
+      }
       if (isJsonRpcId(frame.id)) {
         this.stats.serverRequests += 1;
         this.handleServerRequest(frame.id, method, frame.params);

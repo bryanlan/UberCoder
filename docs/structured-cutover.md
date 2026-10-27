@@ -2,8 +2,8 @@
 
 Date: 2026-10-26. Branch: `feature/structured-claude-cutover`, stacked on `feature/structured-provider-lane`
 (the Codex app-server lane, see `docs/structured-providers.md`). Status: Phase A is built and was proven against the
-real Claude and Codex CLIs after each of four review rounds (the round 3 run on `b2e6e5e` passed all three proofs; the
-round 4 fixes were run again, see "Verification evidence"). Deploying it and flipping the default are Bryan's live steps.
+real Claude and Codex CLIs after each of six review rounds (the runs on `b2e6e5e`, `dd3c615` and `52ee445` passed all three
+proofs, see "Verification evidence"). Deploying it and flipping the default are Bryan's live steps.
 Nothing in this document changes the running Console until those steps are executed.
 
 ## Goal
@@ -478,9 +478,10 @@ The migration then converts idle rows on the next reconcile pass (the first pass
   on a live connection (`LIVE_CLIENT_TIMEOUT_LIMIT`), count toward one run kept by the plugin (per Console for Codex, per
   conversation for Claude) that outlives a dropped instance; while the run is younger than 5 minutes
   (`APP_SERVER_UNRESPONSIVE_LIMIT_MS`, `CLAUDE_UNRESPONSIVE_LIMIT_MS`) the open reports busy, and the first timeout past it
-  ends the process and its session host (`PluginContext.endHost` or the host record) and replaces it in the same call
-  (Codex starts a fresh app-server, Claude relaunches with `--resume`); an answer, even a late one, ends the run; an
-  attach-only reattach never counts and never ends anything (round 4, R4-1; round 5, R5-1 and R5-5). The host ends the
+  ends the process and its session host (`PluginContext.endHost`) and replaces it in the same call (Codex starts a fresh
+  app-server, Claude relaunches in the open's own mode, `--resume` when a transcript exists); any frame on a live connection
+  ends the run (a late answer to a timed-out handshake is never seen, and a backend restart starts the run again); an
+  attach-only reattach never counts and never ends a busy process (round 4, R4-1; round 5, R5-1 and R5-5; round 6). The host ends the
   rest of the child's process group after the child exits (see "Ending").
 - **Plugin fixes.** Frames that name only unknown uuids become a provider turn. An empty headless chat restarts under the
   same id. `resume` never starts a process beside a holder. A configured `CLAUDE_CODE_*` key passes through. See "Claude
@@ -898,7 +899,7 @@ branch:
 - R4-2. After a restart, Stop ended every live background terminal of the thread, including a process an earlier turn left
   running on purpose (Codex gives terminals no turn id). The plugin now records which turn started each command (meta
   `structured-codex-commands`, one record per thread with item id to process id and turn id, written on `item/started`,
-  pruned on `item/completed`, dropped on release or unload and kept across a backend shutdown) and at adoption leaves the
+  pruned on `item/completed`, dropped on release and kept across an unload and a backend shutdown) and at adoption leaves the
   terminals recorded under another turn alone; an unrecorded terminal counts as the adopted turn's. That holds while a
   backend was attached when each earlier terminal started; it fails for a terminal started while no backend listened by a
   turn that then ended before the next backend attached, and on the first deploy of this build, when no records exist yet
@@ -914,6 +915,7 @@ branch:
   succeeds and finds no turn clears the unidentified flag (sends are accepted again) and the warn notice is raised once per
   period; the 5 s Stop window in the proofs starts at Stop, not at idle; the `run-recovery` doc comments sit on their own
   classes; the round 3 and 4 reports are in `docs/research/cutover-2026-10-26/`.
+
 **Round 5** was a fifth read, of `f54460f..dd3c615` (`docs/research/cutover-2026-10-26/review-round-5.md`), beside the
 round 4 run. It found R4-2's main path, R4-3/R4-4, the L2 call sites, the Stop fallback and the N8 window correct, no tmux
 regression, no high finding, and one medium one: the R4-1 replacement never fired in the running service, because the
@@ -942,8 +944,11 @@ starts on a live connection never reached the handshake check. Fixed on this bra
 
 Open follow-ups after rounds 3 to 5:
 
-- An ordinary Codex open with no recorded app-server makes a plain connect, so a silent host in that one state fails as a
-  plain error instead of busy (the next open, with the record written, is bounded).
+- An ordinary open with no recorded process (Codex: no app-server record; Claude: no launch record) makes a plain connect, so
+  a silent host in that state fails as a plain error instead of busy, with no bound; a failed plain connect writes no record.
+- A dropped live Codex connection (three request timeouts in a row) gives every loaded Codex row a connection-loss line;
+  their turns keep running and are picked up on the next load. In the short window while that socket closes, a new open
+  on the same instance reconnects while the service is dropping the instance, so one conversation can see a failed open.
 - The line transport has no "retire a silent host" request; the Codex plugin ends such a host through the host record
   itself. A `retireUnresponsive` option on `LineTransportRequest` would be the cleaner shape.
 - The command ownership record cannot cover a terminal started while no backend listened by a turn that ended before the
