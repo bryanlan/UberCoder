@@ -1,0 +1,269 @@
+{
+  "script": "scripts/prove-structured-migration.mjs",
+  "startedAt": "2026-10-27T04:13:04.665Z",
+  "finishedAt": "2026-10-27T04:13:38.253Z",
+  "revision": "dd3c615",
+  "workingTree": [],
+  "node": "v22.18.0",
+  "tempRoot": "/tmp/console-structured-migration-proof-R4D76S",
+  "runtimeDir": "/tmp/console-structured-migration-proof-R4D76S/runtime",
+  "port": 14390,
+  "codexVersion": "codex-cli 0.164.0",
+  "claudeVersion": "2.1.311 (Claude Code)",
+  "rows": {
+    "codex": {
+      "sessionId": "dd4c19b1-43dc-41e1-b5cc-b055db5c484d",
+      "tmuxName": "ac-codex-demo-10efc728ab",
+      "tmuxCommandAdditions": "--dangerously-bypass-hook-trust and the coordination -c overrides (pin the MCP server to this runtime)",
+      "nativeId": "01a17b8f-e08c-7f63-a04e-da53c2ba2576",
+      "panePid": 859912,
+      "tmuxPhaseProcesses": 3,
+      "transcript": "~/.codex/sessions/2026/10/26/rollout-2026-10-26T21-13-09-01a17b8f-e08c-7f63-a04e-da53c2ba2576.jsonl",
+      "structuredPid": 861189
+    },
+    "claude": {
+      "sessionId": "6e756474-c865-40e8-a37b-fb147282fef3",
+      "tmuxName": "ac-claude-demo-1acfde084a",
+      "tmuxCommandAdditions": "none (the installed command)",
+      "nativeId": "5f7c326b-c1e4-4659-bd2e-39a508202e15",
+      "panePid": 859610,
+      "tmuxPhaseProcesses": 2,
+      "transcript": "~/.claude/projects/-tmp-console-structured-migration-proof-R4D76S-projects-demo/5f7c326b-c1e4-4659-bd2e-39a508202e15.jsonl",
+      "mcpRuntime": "isolated (the per-session --mcp-config won)",
+      "structuredPid": 861647
+    }
+  },
+  "pids": {},
+  "steps": [
+    {
+      "id": "a",
+      "name": "tmux phase: a Codex chat and a Claude chat bind on tmux through the normal routes",
+      "pass": true,
+      "skipped": false,
+      "ms": 2524,
+      "values": {
+        "codexSession": "0ff0288c-a235-4a50-903f-3645df4b5b82",
+        "codexTmux": "ac-codex-demo-10efc728ab",
+        "claudeSession": "6e756474-c865-40e8-a37b-fb147282fef3",
+        "claudeTmux": "ac-claude-demo-1acfde084a"
+      }
+    },
+    {
+      "id": "b",
+      "name": "tmux phase: each chat answers TMUX, is bound to a native conversation and is indexed",
+      "pass": true,
+      "skipped": false,
+      "ms": 12575,
+      "values": {
+        "codexFirstTurnRebind": "0ff0288c-a235-4a50-903f-3645df4b5b82 -> dd4c19b1-43dc-41e1-b5cc-b055db5c484d",
+        "codexNative": "01a17b8f-e08c-7f63-a04e-da53c2ba2576",
+        "codexPanePid": 859912,
+        "codexProcesses": 3,
+        "claudeNative": "5f7c326b-c1e4-4659-bd2e-39a508202e15",
+        "claudePanePid": 859610,
+        "claudeProcesses": 2
+      }
+    },
+    {
+      "id": "b2",
+      "name": "tmux phase: the Claude conversation registered in the proof's own runtime (SessionStart hook); which coordination MCP server the CLI started",
+      "pass": true,
+      "skipped": false,
+      "ms": 31,
+      "values": {
+        "claudeMcpServers": 1,
+        "claudeMcpRuntime": "isolated (the per-session --mcp-config won)",
+        "claudeRegisteredInIsolatedRuntime": true,
+        "claudeAssignmentStatus": "waiting"
+      }
+    },
+    {
+      "id": "c",
+      "name": "flip: config edited to defaultTransport structured, backend restarted; the dry run lists both rows as idle",
+      "pass": true,
+      "skipped": false,
+      "ms": 221,
+      "values": {
+        "secondsAfterBoot": 0.1,
+        "providers": "codex,claude",
+        "structuredRows": 0,
+        "idle": 2,
+        "dead": 0,
+        "working": 0,
+        "noTranscript": 0
+      }
+    },
+    {
+      "id": "d",
+      "name": "reconcile moves both rows: transport structured, asleep, sentinel name, identity unchanged",
+      "pass": true,
+      "skipped": false,
+      "ms": 6684,
+      "values": {
+        "codexIdleSuspendedAt": "2026-10-27T04:13:25.848Z",
+        "claudeIdleSuspendedAt": "2026-10-27T04:13:25.522Z",
+        "outcomesAfter": "{}",
+        "structuredRows": 2
+      }
+    },
+    {
+      "id": "e",
+      "name": "the tmux sessions are gone and no provider process of the tmux phase survives",
+      "pass": true,
+      "skipped": false,
+      "ms": 130,
+      "values": {
+        "codexTmuxPhaseProcessesAlive": 0,
+        "claudeTmuxPhaseProcessesAlive": 0,
+        "processesWithProofRuntime": 0,
+        "tmuxSessions": 0
+      }
+    },
+    {
+      "id": "f",
+      "name": "Codex answers MIGRATED on the structured path in the same thread",
+      "pass": true,
+      "skipped": false,
+      "ms": 7093,
+      "values": {
+        "pid": 861189,
+        "nativeId": "01a17b8f-e08c-7f63-a04e-da53c2ba2576",
+        "lastResponseAt": "2026-10-27T04:13:33.575Z",
+        "historyKept": true,
+        "hostPid": 861178,
+        "appServerPid": 861189
+      }
+    },
+    {
+      "id": "g",
+      "name": "Claude answers MIGRATED on the structured path in the same session (resumed by id)",
+      "pass": true,
+      "skipped": false,
+      "ms": 2756,
+      "values": {
+        "pid": 861647,
+        "nativeId": "5f7c326b-c1e4-4659-bd2e-39a508202e15",
+        "lastResponseAt": "2026-10-27T04:13:36.772Z",
+        "historyKept": true,
+        "claudeFlags": "--model,--effort",
+        "model": "claude-opus-5-5"
+      }
+    },
+    {
+      "id": "h",
+      "name": "release ends both structured conversations; no process of this proof remains",
+      "pass": true,
+      "skipped": false,
+      "ms": 994,
+      "values": {
+        "processesAfterShutdown": 0,
+        "coordMcpAfterShutdown": 0
+      }
+    }
+  ],
+  "findings": [
+    {
+      "id": "migration-mcp-precedence",
+      "text": "Without --strict-mcp-config the tmux Claude started 1 coordination MCP server(s), all with the isolated runtime: the per-session --mcp-config won over the user-scope entry of ~/.claude.json."
+    }
+  ],
+  "cleanup": [
+    {
+      "name": "backend shutdown",
+      "ok": true
+    },
+    {
+      "name": "leftover processes",
+      "ok": true,
+      "detail": "0 found, 0 needed SIGKILL"
+    },
+    {
+      "name": "private tmux server",
+      "ok": true
+    },
+    {
+      "name": "transcripts",
+      "ok": true,
+      "detail": "removed with the proof"
+    },
+    {
+      "name": "final process scan",
+      "ok": true,
+      "detail": "no lane process of this proof left"
+    },
+    {
+      "name": "remove temp root",
+      "ok": true
+    }
+  ],
+  "result": "pass",
+  "migrationReportBefore": {
+    "defaultTransport": "structured",
+    "providers": [
+      "codex",
+      "claude"
+    ],
+    "structuredRows": 0,
+    "outcomes": {
+      "dead": 0,
+      "idle": 2,
+      "working": 0,
+      "queuedInput": 0,
+      "modelRequest": 0,
+      "pending": 0,
+      "noTranscript": 0,
+      "recovering": 0,
+      "launchFlags": 0,
+      "notBound": 0,
+      "unverified": 0,
+      "externalOwner": 0,
+      "providerOff": 0
+    },
+    "rows": [
+      {
+        "id": "6e756474-c865-40e8-a37b-fb147282fef3",
+        "provider": "claude",
+        "projectSlug": "demo",
+        "title": "TMUX",
+        "outcome": "idle"
+      },
+      {
+        "id": "dd4c19b1-43dc-41e1-b5cc-b055db5c484d",
+        "provider": "codex",
+        "projectSlug": "demo",
+        "title": "Reply with the single word TMUX.",
+        "outcome": "idle"
+      }
+    ]
+  },
+  "migrationReportAfter": {
+    "defaultTransport": "structured",
+    "providers": [
+      "codex",
+      "claude"
+    ],
+    "structuredRows": 2,
+    "outcomes": {
+      "dead": 0,
+      "idle": 0,
+      "working": 0,
+      "queuedInput": 0,
+      "modelRequest": 0,
+      "pending": 0,
+      "noTranscript": 0,
+      "recovering": 0,
+      "launchFlags": 0,
+      "notBound": 0,
+      "unverified": 0,
+      "externalOwner": 0,
+      "providerOff": 0
+    },
+    "rows": []
+  },
+  "summary": {
+    "passed": 9,
+    "failed": 0,
+    "skipped": 0,
+    "cleanupFailed": 0
+  }
+}

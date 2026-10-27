@@ -608,7 +608,20 @@ tmux chat does, and calls none of their tools.
 
 ## Verification evidence
 
-**Round 3 run (current).** On `b2e6e5e` (the review round 3 fixes), 2026-10-27 03:24 to 03:35 UTC, `claude` 2.1.310,
+**Round 4 run (current).** On `dd3c615` (the review round 4 fixes), 2026-10-27 04:02 to 04:13 UTC, the same sequence as the
+round 3 run: the server suite (105 files, 2448 tests; the three `main` failures plus one `claude-run-state` test, "protects
+paused sessions, input waits, native drafts, ownership and memory limits", that failed under load and passed alone right
+after), the web suite (19 files, 215 tests), `npm run build`, then the three proofs, no process left behind:
+
+- `claude-proof-2026-10-27T04-08-36Z.json`: 14 of 14. Step f: the command gone 334 ms after Stop. Step k2: adopted 532 ms
+  after boot; Stop ended the count 329 ms after Escape; one interrupted turn-end after Stop, one completed after the next
+  message; the steer during the re-adopted turn was unanswered 2.09 s into the count and answered after it.
+- `codex-proof-2026-10-27T04-10-43Z.json`: 16 of 16. Step h: the command gone 330 ms after Stop. Step k2: attached 557 ms
+  after boot; Stop ended the count 186 ms after Escape; one aborted turn-end after Stop, one completed after the next
+  message; the steer was unanswered 2.11 s into the count and answered after it.
+- `migration-proof-2026-10-27T04-13-04Z.json`: 9 of 9.
+
+**Round 3 run.** On `b2e6e5e` (the review round 3 fixes), 2026-10-27 03:24 to 03:35 UTC, `claude` 2.1.310,
 `codex-cli` 0.164.0: the full server suite (105 files, 2430 tests; the only failures are the three `claude-ready-lifecycle`
 and `claude-run-state` tests that fail on `main` too), the web suite (19 files, 215 tests), `npm run build`, then the three
 proofs one at a time with the tightened assertions, no process left behind:
