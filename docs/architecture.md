@@ -631,7 +631,8 @@ migration); this section is the summary.
   `agentMessage` item with `delivery: 'async'` and `questions` of `{ title, options? }`, and the turn stays open while the model
   polls. It becomes a message-mode card: nothing waits on the answer, so the answer is sent as an ordinary message that steers
   the open turn. A question the Console cannot show raises a warning notice. The stored list is deleted at boot and comes back
-  through re-adoption.
+  through re-adoption (held server-request questions only: a Codex message-mode card from an async question is not shown again
+  after a restart, though its text stays in the conversation and a typed answer reaches the model).
   Approvals, `ExitPlanMode` and MCP elicitations are declined.
 - Identity: the thread id is known at `thread/start`, so the binding is written with it at once and the
   pending alias is adopted immediately. A shared process cannot carry a per-session
