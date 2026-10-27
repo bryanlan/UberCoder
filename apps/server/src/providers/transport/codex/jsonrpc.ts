@@ -79,6 +79,13 @@ export interface JsonRpcClientOptions {
    * to one server passes one shared counter, so a late reply to an abandoned client can never match a request of the next.
    */
   nextRequestId?: () => number;
+  /**
+   * Called with the number of requests in a row that have timed out on this client, each time one more does (`method` is that
+   * request's). Any answer ends the run and calls it with 0: a JSON-RPC error is an answer, and so is a late reply to a request
+   * that gave up waiting (`method` is then absent), because either shows the server is working. What a run means is the caller's
+   * to decide; the client only counts.
+   */
+  onTimeoutRun?: (consecutive: number, method?: string) => void;
 }
 
 /** The server answered a request with a JSON-RPC error. */
@@ -203,6 +210,8 @@ export class JsonRpcClient {
   private readonly requestHandlers = new Map<string, JsonRpcServerRequestHandler>();
   private readonly defaultTimeoutMs: number;
   private readonly nextRequestId: () => number;
+  private readonly onTimeoutRun: ((consecutive: number, method?: string) => void) | undefined;
+  private timeoutRun = 0;
   private activeServerRequests = 0;
   private closing = false;
   private closePromise: Promise<void> | undefined;
@@ -215,6 +224,7 @@ export class JsonRpcClient {
     this.log = options.log ?? {};
     this.defaultTimeoutMs = options.defaultRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.nextRequestId = options.nextRequestId ?? requestIdCounter();
+    this.onTimeoutRun = options.onTimeoutRun;
     transport.onLine((line) => this.handleLine(line));
     transport.onExit((info) => this.finish(info));
   }
@@ -229,6 +239,11 @@ export class JsonRpcClient {
 
   get exitInfo(): JsonRpcExit | undefined {
     return this.finished;
+  }
+
+  /** True from the moment {@link close} is called, before the channel has ended: no new request should be sent on this client. */
+  get closeRequested(): boolean {
+    return this.closePromise !== undefined;
   }
 
   /** Last bytes of stderr with ANSI colour codes removed. Diagnostics only; never parse it. */
@@ -255,6 +270,8 @@ export class JsonRpcClient {
         entry.timer = setTimeout(() => {
           this.pending.delete(id);
           reject(new JsonRpcTimeoutError(method, timeoutMs));
+          this.timeoutRun += 1;
+          this.reportTimeoutRun(method);
         }, timeoutMs);
       }
       this.pending.set(id, entry);
@@ -328,6 +345,15 @@ export class JsonRpcClient {
         resolve(true);
       });
     });
+  }
+
+  /** Runs inside a timer or a read handler, so a throwing callback must never escape. */
+  private reportTimeoutRun(method: string | undefined): void {
+    try {
+      this.onTimeoutRun?.(this.timeoutRun, method);
+    } catch (error) {
+      this.log.warn?.({ ...(method ? { method } : {}), error: error instanceof Error ? error.message : String(error) }, 'codex timeout handler threw');
+    }
   }
 
   private writeFrame(frame: Record<string, unknown>): Promise<void> {
@@ -414,6 +440,10 @@ export class JsonRpcClient {
 
   private handleResponse(id: JsonRpcId, frame: Record<string, unknown>): void {
     const entry = typeof id === 'number' ? this.pending.get(id) : undefined;
+    if (this.timeoutRun > 0) {
+      this.timeoutRun = 0;
+      this.reportTimeoutRun(entry?.method);
+    }
     if (!entry || typeof id !== 'number') {
       this.log.debug?.({ id }, 'codex app-server answered a request nobody waits for');
       return;

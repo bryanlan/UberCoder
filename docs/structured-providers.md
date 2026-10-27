@@ -347,8 +347,11 @@ export interface TransportInstance {
    * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
    * sleep, memory pressure and release can end survivors that nobody has used since the restart.
    *
-   * It throws {@link TransportBusyError} for a host or process that runs but did not answer in time, and nothing else (the
-   * rule is stated there). Every other failure is an ordinary error: the host treats the process as lost and reports the reason.
+   * It throws {@link TransportBusyError} for a host or process that runs but did not answer in time (no hello, or a timed-out
+   * handshake), and for no other failure. It is attach-only, so it never ends the process it is waiting for, however long that
+   * stays silent: the caller bounds its own wait (the session manager: up to 10 minutes). An ordinary `start`/`resume` is the call that ends
+   * and replaces a process that keeps timing out (the rule is stated on {@link TransportBusyError}). Every other failure is an
+   * ordinary error: the host treats the process as lost and reports the reason.
    */
   reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
   /**
@@ -383,6 +386,12 @@ export interface PluginContext {
    * outlive the backend; a plugin that finds none runs its child directly over stdio (tests and embedding).
    */
   lineTransport?: LineTransportFactory;
+  /**
+   * Present with `lineTransport`. Ends the session host with this id and the provider process group behind it from the host's own
+   * record, without connecting as a client: through its socket when it answers, otherwise by signal, each gated by the recorded pid,
+   * start time and boot. For a host that runs but no longer sends a welcome, which no connection can end the process through.
+   */
+  endHost?(hostId: string, graces?: { closeGraceMs?: number; termGraceMs?: number; staleTermGraceMs?: number }): Promise<void>;
 }
 
 /** `sendTurn` was called while the previous turn on the same session is still running. */
@@ -483,13 +492,31 @@ export class TransportUnavailableError extends Error {
 }
 
 /**
- * `reattach` found the conversation's session host, or the provider process behind it, running but not answering in time, so a
- * turn may well be running in it. This is the one rule both plugins follow:
- * - busy (this error): the host accepted no connection or sent no welcome in time, or the handshake with a process this call
- *   did not start timed out after the connection was made. The caller leaves the conversation as it is and asks again on the
- *   next load, for a bounded time; it never starts a replacement.
- * - no process (`reattach` resolves undefined): the connection was refused, or the host or its process is gone.
- * - plain failure with its reason: a refused handshake, a protocol error, or a process that exited during the handshake.
+ * The conversation's session host, or the provider process behind it, is running but did not answer in time, so a turn may well
+ * be running in it. One rule, followed by both plugins:
+ * - busy (this error), thrown by `reattach` and by an ordinary `start`/`resume`:
+ *   - no hello: the session host accepted no connection or sent no welcome in time. `reattach` throws it; so do Claude's `resume`,
+ *     whose lookup for the process it recorded is an attach-only connect, and Codex's ordinary `start`/`resume` when it reconnects
+ *     to a recorded app-server. Only an ordinary open with no recorded process makes a plain connect, which fails with an ordinary
+ *     {@link TransportUnavailableError} that says the session host did not answer.
+ *   - a timed-out handshake on a process this call did not start (Codex `account/read` or `initialize`, Claude's repeated `initialize`).
+ *   A fresh process that this call started and that times out is a failed launch, not busy.
+ * - no process (`reattach` resolves undefined): the connection was refused, or the session host or its process is gone.
+ * - plain failure with its reason: an exit or a protocol error during the handshake. A refusal of the repeated `initialize` is not
+ *   one: the plugin handles it (Claude adopts the process with an unknown turn state; Codex treats "already initialized" as success).
+ *
+ * What the caller does with busy:
+ * - `reattach` (attach-only) never ends the process: it lets go of it and reports busy. The session manager leaves a busy survivor
+ *   alone for up to 10 minutes (`SURVIVOR_BUSY_LIMIT_MS`) and then takes its turn for lost.
+ * - An ordinary `start`/`resume` reports busy while the process keeps timing out, and once the first timeout of the run is 5 minutes
+ *   old (`APP_SERVER_UNRESPONSIVE_LIMIT_MS`, `CLAUDE_UNRESPONSIVE_LIMIT_MS`) the next timeout ends the process and its session host and
+ *   replaces it in the same call. Both plugins count the no-hello case of an ordinary open in the same run: past the limit they end
+ *   the silent session host and its process group from the host record (`PluginContext.endHost`, or the host runtime record),
+ *   because no connection can end them. Codex also counts request timeouts on a live connection: three in a row
+ *   (`LIVE_CLIENT_TIMEOUT_LIMIT`), or one past the limit, close that connection without ending the process, so the next use goes
+ *   through the handshake check. A successful handshake, an answer (a late one too), or a failure that is not a timeout, ends the
+ *   run. The run and the JSON-RPC request-id counter are kept by the plugin, not the instance, because the service drops an
+ *   instance that never connected after every failed open.
  */
 export class TransportBusyError extends TransportUnavailableError {
   constructor(message = 'The provider process is running but did not answer in time.') {
@@ -703,8 +730,10 @@ the source of truth for field names):
   because the app-server keeps waiting for the reply to that JSON-RPC id. A wait that no record explains cannot be
   answered; a notice tells the person to Stop. `dispose('shutdown')` leaves held questions held (answering them with
   nothing would race the socket closing). An adopted turn starts with the commands the thread is running: adoption reads
-  `thread/backgroundTerminals/list` (item id to process id) and tracks every live terminal on the adopted turn, so Stop
-  ends them as it ends the commands it saw start (Codex does not end a turn's command on `turn/interrupt` by itself).
+  `thread/backgroundTerminals/list` (item id to process id) and tracks on the adopted turn every live terminal that the
+  plugin's ownership record (`structured-codex-commands`, written from `item/started`) does not assign to another turn, so
+  Stop ends them as it ends the commands it saw start and leaves an earlier turn's terminal alone (Codex does not end a
+  turn's command on `turn/interrupt` by itself).
   `thread/items/list` is only a secondary source, because codex-cli 0.164.0 never lists a running command there
   (`docs/research/codex-app-server-2026-10-26/background-terminals-probe.md`; the proof run of 2026-10-27 02:53 UTC on
   `59fde29` failed k2 for that reason before this fix). While adoption waits for the turn listing the session keeps at most

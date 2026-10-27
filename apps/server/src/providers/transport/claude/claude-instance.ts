@@ -5,7 +5,9 @@
 // backend restart; `hostId` is `claude-<conversationId>`) and fall back to a plain stdio child when the host gives
 // none. A backend restart finds the process still running behind its host: `resume` then reattaches (with the argv
 // the process was launched with, recorded in plugin meta, because the host is keyed by it) instead of spawning, and
-// `reattach` adopts such a survivor without ever starting a process when there is none.
+// `reattach` adopts such a survivor without ever starting a process when there is none. A survivor that keeps timing out on
+// the handshake of ordinary opens (or whose session host sends no welcome) is reported busy, and replaced once the first
+// timeout is CLAUDE_UNRESPONSIVE_LIMIT_MS old.
 // After a spawn they run the handshake: an `initialize` control request (carrying the appended system prompt,
 // so it stays out of `ps`), the launch checks, and only then hand over a ready {@link ClaudeSession}. Nothing here
 // makes a model call: `probe` and the handshake only read what `initialize` answers.
@@ -92,7 +94,30 @@ export interface ClaudePluginOptions {
   requireHooks?: boolean;
   /** Refuse a launch on an API key instead of the subscription login. Defaults to true. */
   requireSubscriptionLogin?: boolean;
+  /** The clock for {@link CLAUDE_UNRESPONSIVE_LIMIT_MS}, in milliseconds. Defaults to `Date.now`. */
+  now?: () => number;
 }
+
+/**
+ * How long a running Claude process may keep failing the handshake of ordinary opens before the next ordinary open ends and
+ * replaces it. Until then a timeout only lets go of the connection and reports busy: the process may just be slow, and ending it
+ * ends the turn and the commands it runs. A process that stays silent for this long is taken for hung. A reattach (attach-only)
+ * never ends a process. The same bound as the Codex app-server's (`APP_SERVER_UNRESPONSIVE_LIMIT_MS`).
+ */
+export const CLAUDE_UNRESPONSIVE_LIMIT_MS = 5 * 60_000;
+
+/**
+ * Per conversation: when the first of a run of consecutive handshake timeouts on ordinary opens happened. The plugin owns it, not
+ * an instance, because the service drops an instance that never connected after every failed open and the run must outlive that.
+ */
+export type ClaudeUnresponsiveRuns = Map<string, number>;
+
+/**
+ * How a call reached the process behind its handshake: `reattach` (the attach-only entry, which never ends a process),
+ * `survivor` (an ordinary `resume` found the process it recorded still running), or `launch` (an ordinary start or resume
+ * that spawned, or reconnected to, a host).
+ */
+type OpenKind = 'reattach' | 'survivor' | 'launch';
 
 /** Variables that carry the identity of whatever started this process; the child must not inherit them. */
 const SCRUBBED_EXACT = new Set(['CLAUDECODE', 'TMUX', 'TMUX_PANE', 'CODEX_THREAD_ID']);
@@ -238,12 +263,14 @@ export class ClaudeInstance implements TransportInstance {
   private readonly factory: LineTransportFactory;
   private readonly requireHooks: boolean;
   private readonly requireSubscriptionLogin: boolean;
+  private readonly now: () => number;
+  private readonly unresponsiveRuns: ClaudeUnresponsiveRuns;
   private readonly sessions = new Map<string, ClaudeSession>();
   /** Session ids being launched right now: a second launch of the same id would be a second writer. */
   private readonly opening = new Set<string>();
   private disposed = false;
 
-  constructor(config: ClaudeStructuredConfig, context: PluginContext, options: ClaudePluginOptions = {}) {
+  constructor(config: ClaudeStructuredConfig, context: PluginContext, options: ClaudePluginOptions, unresponsiveRuns: ClaudeUnresponsiveRuns) {
     this.config = config;
     this.context = context;
     this.log = context.log;
@@ -253,6 +280,8 @@ export class ClaudeInstance implements TransportInstance {
     this.factory = options.lineTransport ?? context.lineTransport ?? createStdioLineTransportFactory({ log: context.log });
     this.requireHooks = options.requireHooks ?? context.coordination !== undefined;
     this.requireSubscriptionLogin = options.requireSubscriptionLogin ?? true;
+    this.now = options.now ?? Date.now;
+    this.unresponsiveRuns = unresponsiveRuns;
   }
 
   /** Sessions with a live process, by native id. */
@@ -349,7 +378,7 @@ export class ClaudeInstance implements TransportInstance {
       // when this plugin recorded how it was launched and the host answers for exactly that command line. Only a
       // connection that starts nothing is made here: a process started beside a holder would be a second writer.
       if (this.disposed) throw new TransportUnavailableError('The Claude instance was shut down.');
-      const survivor = await this.adoptSurvivor(nativeSessionId, claude, recorded.argv);
+      const survivor = await this.adoptSurvivor(nativeSessionId, claude, recorded.argv, 'survivor');
       if (survivor) return survivor;
     }
     // The CLI does not stop two processes writing one transcript, so this is the only check there is. A holder that is
@@ -397,8 +426,11 @@ export class ClaudeInstance implements TransportInstance {
    * the snapshot of its background tasks. One the earlier backend never spoke to is handshaken as a new launch, with its
    * SessionStart hook frames replayed. A host that runs but does not answer in time is left alone and reported as
    * {@link TransportBusyError}; it is not "no survivor". So is a process that was connected but did not answer the handshake
-   * in time. A handshake that fails some other way (a refusal, a protocol error, an exit) throws the ordinary error, so the
-   * caller treats the process as lost.
+   * in time. A handshake that fails some other way (a protocol error, an exit) throws the ordinary error, so the caller treats
+   * the process as lost; a refusal of the repeated `initialize` is not one, the process is adopted with an unknown turn state.
+   * This call never ends a process, however long it stays silent: its caller bounds its own wait. An ordinary `resume` that
+   * finds the same process (or a session host that sends no welcome) and keeps timing out does end it, after
+   * {@link CLAUDE_UNRESPONSIVE_LIMIT_MS}.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<ClaudeSession | undefined> {
     if (this.disposed) return undefined;
@@ -408,15 +440,15 @@ export class ClaudeInstance implements TransportInstance {
     if (!recorded || !argvNamesSession(recorded.argv, nativeSessionId)) return undefined;
     const loaded = this.sessions.get(nativeSessionId);
     if (loaded && !loaded.isEnded) throw new ClaudeSessionHeldError(nativeSessionId, loaded.pid ?? process.pid);
-    return this.adoptSurvivor(nativeSessionId, claude, recorded.argv);
+    return this.adoptSurvivor(nativeSessionId, claude, recorded.argv, 'reattach');
   }
 
   /** `attachSurvivor` with the instance's `opening` guard held: two connections to one conversation's process are never made at once. */
-  private async adoptSurvivor(sessionId: string, options: ClaudeOpenOptions, argv: string[]): Promise<ClaudeSession | undefined> {
+  private async adoptSurvivor(sessionId: string, options: ClaudeOpenOptions, argv: string[], kind: 'reattach' | 'survivor'): Promise<ClaudeSession | undefined> {
     if (this.opening.has(sessionId)) throw new ClaudeSessionHeldError(sessionId, process.pid);
     this.opening.add(sessionId);
     try {
-      return await this.attachSurvivor(sessionId, options, argv);
+      return await this.attachSurvivor(sessionId, options, argv, kind);
     } finally {
       this.opening.delete(sessionId);
     }
@@ -561,11 +593,14 @@ export class ClaudeInstance implements TransportInstance {
     // A fresh channel means the process was just started (or never used); otherwise a process from an earlier backend,
     // already initialized and possibly in the middle of a turn, was found again.
     const fresh = transportStartedFresh(transport);
-    return this.bringUp(transport, fresh, false, mode, sessionId, options, configDir, argv, extra.transcriptPath);
+    const session = await this.bringUp(transport, fresh, 'launch', mode, sessionId, options, configDir, argv, extra.transcriptPath);
+    // A hung process was ended (see `bringUp`): this call starts the one that replaces it, in the same mode. Its handshake is
+    // a fresh launch's, which ends and fails on a timeout instead of looping.
+    return session ?? this.launchProcess(mode, sessionId, options, configDir, extra);
   }
 
   /** `reattach`, with the instance's `opening` guard held: connect to the survivor, check the one-writer rule, run the handshake. */
-  private async attachSurvivor(sessionId: string, options: ClaudeOpenOptions, argv: string[]): Promise<ClaudeSession | undefined> {
+  private async attachSurvivor(sessionId: string, options: ClaudeOpenOptions, argv: string[], kind: 'reattach' | 'survivor'): Promise<ClaudeSession | undefined> {
     const configDir = this.configDirFor(options);
     const env = buildClaudeEnv({ base: this.baseEnv, configEnv: this.config.env, optionsEnv: options.env, conversationId: options.conversationId, home: this.home });
     const request: LineTransportRequest = {
@@ -594,10 +629,18 @@ export class ClaudeInstance implements TransportInstance {
         throw toTransportError(error);
       }
     };
-    const none = (): undefined => {
-      // A host that runs but did not answer: this is not "there is no survivor", and what a caller does with that (a launch,
-      // which retires a host) would end a process that may be running a turn. Let the next use try again.
-      if (unreachable) throw new TransportBusyError(BUSY_MESSAGE);
+    const none = async (): Promise<undefined> => {
+      if (unreachable) {
+        // A host that runs but did not answer: this is not "there is no survivor", and what a caller does with that (a launch,
+        // which retires a host) would end a process that may be running a turn. Let the next use try again. An ordinary open counts
+        // the silence toward the same run as a handshake timeout, and past the limit ends the host and its process: `resume` then
+        // goes on to launch. A reattach never gets there.
+        if (kind === 'survivor' && this.noteUnresponsive(options.conversationId) >= CLAUDE_UNRESPONSIVE_LIMIT_MS) {
+          await this.endUnresponsiveHost(options, sessionId);
+          return undefined;
+        }
+        throw new TransportBusyError(BUSY_MESSAGE);
+      }
       // A launch record outlives its process when no backend saw the exit (a reboot, or a process that ended while the
       // backend was down). Dropping it here keeps a later `resume` from taking a dead launch for a survivor.
       if (nothingRuns) this.forgetLaunch(options.conversationId, sessionId);
@@ -621,25 +664,45 @@ export class ClaudeInstance implements TransportInstance {
       await transport.close().catch(() => undefined); // let go; the survivor keeps running
       throw new ClaudeSessionHeldError(sessionId, holder.pid);
     }
-    return this.bringUp(transport, fresh, true, 'resume', sessionId, options, configDir, argv, locateTranscripts(configDir, options.cwd, sessionId)[0]);
+    // Undefined when this was an ordinary open that ended a hung process: there is no survivor now, and `resume` goes on to launch.
+    return this.bringUp(transport, fresh, kind, 'resume', sessionId, options, configDir, argv, locateTranscripts(configDir, options.cwd, sessionId)[0]);
+  }
+
+  /**
+   * An ordinary open found the conversation's session host running but silent (it sent no welcome) for longer than
+   * {@link CLAUDE_UNRESPONSIVE_LIMIT_MS}. There is no connection to end the process through, so the host and its process group are
+   * ended from the host's own record, as a release would, and the launch record that named them goes with them.
+   */
+  private async endUnresponsiveHost(options: ClaudeOpenOptions, sessionId: string): Promise<void> {
+    const hostId = hostIdFor(options.conversationId);
+    const endHost = this.context.endHost;
+    if (!endHost) throw new TransportUnavailableError(`The session host ${hostId} has not answered for longer than ${CLAUDE_UNRESPONSIVE_LIMIT_MS / 60_000} minutes and cannot be ended from here.`);
+    this.log.warn({ hostId, limitMs: CLAUDE_UNRESPONSIVE_LIMIT_MS }, 'the claude session host has not answered for longer than the limit; ending it and its process and starting a new one');
+    await endHost(hostId, { closeGraceMs: this.timings.closeGraceMs, termGraceMs: this.timings.termGraceMs });
+    this.forgetLaunch(options.conversationId, sessionId);
+    this.unresponsiveRuns.delete(options.conversationId);
   }
 
   /**
    * Wraps a connected channel in a session and runs the handshake. The channel is a new process (`fresh`) or one an
    * earlier backend already initialized. Records the launch before the handshake, so a backend that dies right after
-   * still finds the process again. `attachOnly`: this call only connects to a process (a reattach) and starts none.
+   * still finds the process again. `kind` says how the call got here ({@link OpenKind}).
+   *
+   * A handshake that times out on a process this call did not start is busy. On an ordinary open (not `reattach`) it also counts
+   * toward {@link CLAUDE_UNRESPONSIVE_LIMIT_MS} (so does a host that sends no welcome, see `endUnresponsiveHost`): a timeout after the limit ends the process and its host and resolves undefined,
+   * and the caller starts the replacement in the same call. A successful handshake, or a failure that is not such a timeout, ends the run.
    */
   private async bringUp(
     transport: LineTransport,
     fresh: boolean,
-    attachOnly: boolean,
+    kind: OpenKind,
     mode: 'new' | 'resume',
     sessionId: string,
     options: ClaudeOpenOptions,
     configDir: string,
     argv: string[],
     transcriptPath: string | undefined,
-  ): Promise<ClaudeSession> {
+  ): Promise<ClaudeSession | undefined> {
     const client = new StreamJsonClient({ transport, log: this.log, label: 'claude', controlTimeoutMs: this.timings.controlTimeoutMs });
     // A resume that fails at startup answers with a zeroed error result and exits, without ever replying to `initialize`.
     let startupResult: ClaudeResultFrame | undefined;
@@ -676,7 +739,20 @@ export class ClaudeInstance implements TransportInstance {
       this.sessions.delete(sessionId);
       // A process this call did not start that is slow to answer is not broken, and may be running a turn: it is busy (the rule
       // is on `TransportBusyError`). A process this call did start that does not answer is a failed launch.
-      const busy = !startupResult && error instanceof ClaudeControlTimeoutError && (attachOnly || !fresh);
+      const busy = !startupResult && error instanceof ClaudeControlTimeoutError && (kind !== 'launch' || !fresh);
+      if (!busy) {
+        this.unresponsiveRuns.delete(options.conversationId); // another failure ends the run of timeouts
+      } else if (kind !== 'reattach') {
+        const silentForMs = this.noteUnresponsive(options.conversationId);
+        if (silentForMs >= CLAUDE_UNRESPONSIVE_LIMIT_MS) {
+          // A reattach never gets here: its caller bounds its own wait. An ordinary open ends the process, or every retry would
+          // fail busy for as long as a hung CLI lives (nothing else ends a conversation's process while its row is in error).
+          this.log.warn({ pid: client.pid, silentForMs, limitMs: CLAUDE_UNRESPONSIVE_LIMIT_MS, error: errorText(error) }, 'the claude process has not answered for longer than the limit; ending it and starting a new one');
+          await session.close('error').catch(() => undefined); // ends the process and its host, like a release
+          this.unresponsiveRuns.delete(options.conversationId);
+          return undefined;
+        }
+      }
       if (fresh && !busy) {
         await session.close('error').catch(() => undefined);
       } else {
@@ -690,6 +766,7 @@ export class ClaudeInstance implements TransportInstance {
       throw this.startupError(error, mode, sessionId, startupResult, client);
     }
     stopWatching();
+    this.unresponsiveRuns.delete(options.conversationId); // it answered
     session.announce();
     // A process found in the middle of a turn: the turn is ours to track from here, before anything else is adopted, so the
     // requests it still has open belong to it, Stop reaches it, and its `result` ends it.
@@ -735,6 +812,14 @@ export class ClaudeInstance implements TransportInstance {
     // An absent state (an older CLI) is taken as idle: a turn that is not there could never be ended.
     const state = typeof body.session_state === 'string' ? body.session_state : 'idle';
     return { pending: reply.pending_permission_requests, running: state === 'idle' ? 'idle' : 'running' };
+  }
+
+  /** Records a handshake timeout on an ordinary open and returns how long the conversation's process has been silent: the age of the first timeout of the run. */
+  private noteUnresponsive(conversationId: string): number {
+    const now = this.now();
+    const since = this.unresponsiveRuns.get(conversationId) ?? now;
+    this.unresponsiveRuns.set(conversationId, since);
+    return now - since;
   }
 
   /** SessionStart hook frames precede the `initialize` reply; a slow hook gets a short grace. */

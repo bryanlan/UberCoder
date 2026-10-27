@@ -148,7 +148,10 @@ export class CodexRestartState {
     this.writeCommands(all);
   }
 
-  /** The thread was unloaded from the app-server, and its terminals ended with it. */
+  /**
+   * The conversation was released, or the server closed the thread and its terminals ended with it. Not for an unload: Codex keeps
+   * the thread and its terminals for about 30 minutes after the last subscriber leaves, and a later backend still needs who owns them.
+   */
   dropThreadCommands(threadId: string): void {
     const all = this.allCommands();
     if (!(threadId in all)) return;

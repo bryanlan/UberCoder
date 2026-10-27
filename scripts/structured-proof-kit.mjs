@@ -23,14 +23,17 @@ import Database from 'better-sqlite3';
 export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * The time left of a window that began at `since` (a `Date.now()` taken just before the action the window follows), as the
- * timeout of a `wait`. The checks made in between use the window up, so a wait that counts from its own start would stretch it.
- * Fails at once when they already did.
+ * Starts polling `predicate` now and returns a promise for the milliseconds from `since` (a `Date.now()` taken just before the action
+ * the window follows, such as Stop) to the first true read. The window is `windowMs` from `since`, not from this call, and the polling
+ * runs alongside whatever the caller awaits next, so a slow wait cannot use the window up. The caller awaits the promise afterwards; a
+ * timeout surfaces there. `wait` is the proof's own (it stops on Ctrl-C).
  */
-export const windowLeft = (label, since, windowMs) => {
+export const pollWithinWindow = (wait, label, predicate, since, windowMs, intervalMs = 100) => {
   const left = since + windowMs - Date.now();
-  if (left <= 0) throw new Error(`${label}: the ${windowMs} ms window had run out ${-left} ms before this check began.`);
-  return left;
+  if (left <= 0) throw new Error(`${label}: the ${windowMs} ms window had run out ${-left} ms before polling began.`);
+  const elapsed = wait(label, predicate, left, intervalMs).then(() => Date.now() - since);
+  elapsed.catch(() => undefined); // surfaced where it is awaited; until then it must not be an unhandled rejection
+  return elapsed;
 };
 
 // ---- images ------------------------------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import {
   EventLog,
   itemCompleted,
   itemStarted,
+  notification,
   OPEN_OPTIONS,
   readLog,
   receivedRequests,
@@ -1022,7 +1023,7 @@ describe('The record of which turn started a Codex command', () => {
     await waitUntil(() => !fake.context.metaStore.has(KEY), 5000, 'the record to be removed');
   });
 
-  it('is dropped when the thread is released or unloaded, and kept when the backend only shuts down', async () => {
+  it('is dropped when the thread is released, and kept when it is unloaded or the backend only shuts down', async () => {
     const startCommand = async () => {
       const fake = track(setupFake({
         handlers: {
@@ -1038,13 +1039,36 @@ describe('The record of which turn started a Codex command', () => {
     await released.session.close('release');
     expect(released.fake.context.metaStore.has(KEY)).toBe(false);
 
+    // Codex keeps an unloaded thread and its terminals for about 30 minutes: a dev server an earlier turn left running is still there.
     const unloaded = await startCommand();
     await unloaded.session.unload!();
-    expect(unloaded.fake.context.metaStore.has(KEY)).toBe(false);
+    expect(recorded(unloaded.fake)[THREAD]).toEqual({ 'cmd-1': { processId: 'proc-1', turnId: TURN } });
 
     const shutdown = await startCommand();
     await shutdown.session.close('shutdown');
     expect(recorded(shutdown.fake)[THREAD]).toEqual({ 'cmd-1': { processId: 'proc-1', turnId: TURN } });
+  });
+
+  it('is dropped when the server closes the thread, whether a session still holds it or it was unloaded earlier', async () => {
+    const startCommand = async (closedAfterMs: number) => {
+      const fake = track(setupFake({
+        handlers: {
+          ...baseHandlers(THREAD),
+          'turn/start': { result: { turn: turnObject(TURN, 'inProgress', 1790000001) }, emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1')), notification('thread/closed', { threadId: THREAD }, closedAfterMs)] },
+        },
+      }));
+      const { session } = await startTurn(fake);
+      await waitUntil(() => fake.context.metaStore.get(KEY), 5000, 'the record');
+      return { fake, session };
+    };
+    const held = await startCommand(300);
+    await waitUntil(() => !held.fake.context.metaStore.has(KEY), 5000, 'the record to be dropped with a session attached');
+
+    // The thread was unloaded first (the session is gone); the server closes it about 30 minutes later, here 1.5 s.
+    const unloaded = await startCommand(1_500);
+    await unloaded.session.unload!();
+    expect(recorded(unloaded.fake)[THREAD]).toEqual({ 'cmd-1': { processId: 'proc-1', turnId: TURN } });
+    await waitUntil(() => !unloaded.fake.context.metaStore.has(KEY), 5000, 'the record to be dropped with no session attached');
   });
 
   it('keeps one thread\'s commands apart from another\'s and forgets all of them with the process', () => {

@@ -383,6 +383,46 @@ describe('A thread the app-server says is running a turn that no listing names',
     expect(lossLines(f, session.id)).toEqual([]);
   });
 
+  it('watches the unnamed turn: the expiry looks again every 60 s, and once the unnamed period ends with no terminal the next expiry clears working', async () => {
+    const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
+    await backend.manager.reconcileSessions();
+    await settle();
+    const adopted = backend.plugin.instance!.sessions[0]!;
+    expect(adopted.turnUnidentified).toBe(true);
+    const manager = backend.manager as unknown as { handleWorkingIdleExpiry(sessionId: string, expectedHeartbeatAt: string): Promise<void> };
+
+    // Only the clock is faked; the expiry's own timers are real and called through, and the test runs their callbacks itself.
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const rearmedAfter = async (run: () => Promise<void>): Promise<() => void> => {
+      const before = timers.mock.calls.length;
+      await run();
+      const armed = timers.mock.calls.slice(before).filter(([, delay]) => typeof delay === 'number' && delay >= 60_000 && delay <= 61_000);
+      expect(armed).toHaveLength(1); // one look-again, a window (60 s) away
+      return armed[0]![0] as () => void;
+    };
+
+    // The expiry fires for a row whose last output is old: the turn is still unnamed, so the row stays working and the expiry re-arms.
+    vi.setSystemTime(Date.now() + 61_000);
+    let fire = await rearmedAfter(() => manager.handleWorkingIdleExpiry(session.id, f.row(session.id).lastOutputAt ?? ''));
+    expect(f.row(session.id).isWorking).toBe(true);
+    // And again after the next window.
+    vi.setSystemTime(Date.now() + 61_000);
+    const before = timers.mock.calls.length;
+    fire();
+    await settle();
+    fire = timers.mock.calls.slice(before).filter(([, delay]) => typeof delay === 'number' && delay >= 60_000 && delay <= 61_000)[0]![0] as () => void;
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    // The thread goes idle with the turn's terminal never seen: the flag clears, nothing else tells the manager.
+    adopted.turnUnidentified = false;
+    expect(backend.manager['structured'].turnRunning(session)).toBe(false);
+    vi.setSystemTime(Date.now() + 61_000);
+    fire(); // the re-armed expiry; it hands over to one more look that settles the row
+    await vi.waitFor(() => expect(f.row(session.id).isWorking).toBe(false));
+    expect(lossLines(f, session.id)).toEqual([]);
+  });
+
   it('is reached by Stop: the provider is asked to stop the unnamed turn (an empty id), and the row keeps reading working until it ends', async () => {
     const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
     await backend.manager.reconcileSessions();

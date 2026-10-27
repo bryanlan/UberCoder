@@ -4,16 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import sharp from 'sharp';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildClaudeArgv, buildClaudeEnv, ClaudeLaunchRefusedError, ClaudeSessionHeldError, createClaudePlugin, type ClaudeOpenOptions } from '../src/providers/transport/claude/index.js';
+import { buildClaudeArgv, buildClaudeEnv, CLAUDE_UNRESPONSIVE_LIMIT_MS, ClaudeLaunchRefusedError, ClaudeSessionHeldError, createClaudePlugin, type ClaudeOpenOptions, type ClaudePluginOptions } from '../src/providers/transport/claude/index.js';
 import { ClaudeSession, DEFAULT_TIMINGS as DEFAULT_CLAUDE_TIMINGS } from '../src/providers/transport/claude/claude-session.js';
-import { hostIdFor } from '../src/providers/transport/claude/claude-instance.js';
+import { hostIdFor, type ClaudeInstance } from '../src/providers/transport/claude/claude-instance.js';
 import { assistantRateLimitEvidence, classifyResult, failureFromApiRetry, newTurnEvidence } from '../src/providers/transport/claude/errors.js';
 import type { ClaudeResultFrame } from '../src/providers/transport/claude/protocol.js';
 import { StreamJsonClient, ClaudeControlError, ClaudeControlTimeoutError, ClaudeExitError } from '../src/providers/transport/claude/stream-json.js';
 import { ClaudeRateLimitTracker, contextFromUsageResponse, contextMaxFromModelUsage, contextUsedFromResultUsage } from '../src/providers/transport/claude/usage.js';
 import { escapeProjectDir, findSessionHolder } from '../src/providers/transport/claude/transcript.js';
 import { processStartTicks } from '../src/providers/transport/codex/process-lifetime.js';
-import { createStdioLineTransportFactory, terminateHost } from '../src/providers/transport/line-transport.js';
+import { createStdioLineTransportFactory, terminateHost, transportStartedFresh } from '../src/providers/transport/line-transport.js';
 import {
   LineTransportNotRunningError,
   NotSentError,
@@ -35,6 +35,7 @@ import {
   cleanupAll,
   EventLog,
   FAKE_CLAUDE,
+  FAST_TIMINGS,
   makeContext,
   QUESTION_INPUT,
   rateLimitEvent,
@@ -2012,33 +2013,39 @@ describe('session host', () => {
       expect(await instance.reattach(first.nativeSessionId, setup.open())).toBeUndefined();
     }, 30_000);
 
-    /** A restarted backend whose repeated `initialize` goes unanswered: the earlier backend's was answered, this one's is swallowed. */
-    function setupSilentRepeat(): { setup: FakeSetup; silence: (on: boolean) => void } {
-      const ref: { real?: LineTransportFactory; silent: boolean } = { silent: false };
-      const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, {
-        host: true,
-        timings: { initializeTimeoutMs: 400 },
-        plugin: {
-          lineTransport: async (request) => {
-            const transport = await ref.real!(request);
-            if (!ref.silent || !(request as { attachOnly?: boolean }).attachOnly) return transport;
-            return new Proxy(transport, {
-              get(target, property) {
-                if (property === 'write') {
-                  return async (line: string) => {
-                    if ((JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype === 'initialize') return;
-                    return target.write(line);
-                  };
-                }
-                const value = Reflect.get(target, property, target) as unknown;
-                return typeof value === 'function' ? value.bind(target) : value;
-              },
-            });
+    /** Wraps a factory so that a process reached again (one an earlier client already wrote to) never sees the repeated `initialize`: it is swallowed while `silent()` is true. */
+    function silenceRepeatedInitialize(real: LineTransportFactory, silent: () => boolean): LineTransportFactory {
+      return async (request) => {
+        const transport = await real(request);
+        if (!silent() || transportStartedFresh(transport)) return transport;
+        return new Proxy(transport, {
+          get(target, property) {
+            if (property === 'write') {
+              return async (line: string) => {
+                if ((JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype === 'initialize') return;
+                return target.write(line);
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === 'function' ? value.bind(target) : value;
           },
-        },
-      });
+        });
+      };
+    }
+
+    /**
+     * A restarted backend whose repeated `initialize` goes unanswered (`silence`): the earlier backend's was answered, this one's is
+     * swallowed. Or whose session host sends no welcome to an attach-only connect (`noHello`), which is how the plugin finds a survivor.
+     */
+    function setupSilentRepeat(plugin: Partial<ClaudePluginOptions> = {}, scenario: Scenario = { sessionsDir: 'auto', sessionStartHook: false }): { setup: FakeSetup; silence: (on: boolean) => void; noHello: (on: boolean) => void } {
+      const ref: { real?: LineTransportFactory; silent: boolean; noHello: boolean } = { silent: false, noHello: false };
+      const withoutHello: LineTransportFactory = (request) => ref.noHello && (request as { attachOnly?: boolean }).attachOnly
+        ? Promise.reject(new LineTransportNotRunningError('did not answer', 'unreachable'))
+        : ref.real!(request);
+      const silenced = silenceRepeatedInitialize(withoutHello, () => ref.silent);
+      const setup = setupFake(scenario, { host: true, timings: { initializeTimeoutMs: 400 }, plugin: { ...plugin, lineTransport: silenced } });
       ref.real = setup.context.lineTransport!;
-      return { setup, silence: (on) => { ref.silent = on; } };
+      return { setup, silence: (on) => { ref.silent = on; }, noHello: (on) => { ref.noHello = on; } };
     }
 
     it('reports a handshake that timed out after the connection was made as busy: the process is left running, and the next attempt adopts it', async () => {
@@ -2076,6 +2083,253 @@ describe('session host', () => {
       expect((error as Error).message).toMatch(/exited while resuming/);
       expect(instance.openSessionIds).toEqual([]);
     }, 30_000);
+
+    describe('a process that keeps timing out', () => {
+      const LIMIT = CLAUDE_UNRESPONSIVE_LIMIT_MS;
+
+      /** A conversation that ran, has a transcript, and whose process outlived its backend: the restarted backend's `resume` finds it. */
+      async function survivorOf(clock: { t: number }) {
+        const silent = setupSilentRepeat({ now: () => clock.t });
+        const first = silent.setup.track(await silent.setup.instance.start(silent.setup.open()));
+        writeTranscript(silent.setup.configDir, silent.setup.cwd, first.nativeSessionId);
+        const pid = first.pid!;
+        await silent.setup.instance.dispose('shutdown');
+        const { instance, context } = silent.setup.restartBackend();
+        // What the Console gives a plugin to end a host that no connection can reach.
+        const ended: string[] = [];
+        context.endHost = async (hostId, graces) => {
+          ended.push(hostId);
+          await terminateHost(silent.setup.hostRuntimeDir, hostId, context.log, graces);
+        };
+        return { ...silent, first, pid, instance, context, ended };
+      }
+
+      const replaced = (context: { logs: { warn: Array<[object, string]> } }): boolean => context.logs.warn.some(([, message]) => /longer than the limit/.test(message));
+
+      it('keeps reporting busy to an ordinary resume while the run is younger than the limit, then ends the process and starts a replacement in the same call', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, silence, first, pid, instance, context } = await survivorOf(clock);
+        silence(true);
+
+        const open = (): Promise<unknown> => instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+        expect(await open()).toBeInstanceOf(TransportBusyError); // the first timeout starts the run
+        clock.t += LIMIT - 1_000;
+        expect(await open()).toBeInstanceOf(TransportBusyError); // the run is 1 s short of the limit
+        // Each time the process was let go of, not ended: no second start, the record that finds it again stays.
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+        expect(replaced(context)).toBe(false);
+
+        clock.t += 2_000; // the next timeout is past the limit
+        const second = setup.track((await instance.resume(first.nativeSessionId, setup.open())) as ClaudeSession);
+        const events = new EventLog(second);
+        expect(replaced(context)).toBe(true);
+        expect(second.pid).not.toBe(pid);
+        await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the hung process to end');
+        const starts = startEntries(setup.logFile);
+        expect(starts).toHaveLength(2);
+        expect(starts[1]!.argv).toEqual(expect.arrayContaining(['--resume', first.nativeSessionId]));
+        // The replacement is a working conversation, recorded for the next restart.
+        const { turnId } = await second.sendTurn({ text: 'hello again' });
+        expect((await events.waitForTerminal(turnId)).status).toBe('completed');
+        expect(JSON.parse(context.metaStore.get('claude-launch:conversation-1')!).argv).toEqual(expect.arrayContaining(['--resume', first.nativeSessionId]));
+      }, 30_000);
+
+      it('never ends the process for an attach-only reattach, however long it stays silent, and does not count it toward the run', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, silence, first, pid, instance, context } = await survivorOf(clock);
+        silence(true);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          clock.t += LIMIT + 60_000;
+          expect(await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        }
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+        expect(replaced(context)).toBe(false);
+
+        // Those timeouts started no run: the first ordinary resume is busy, however late it comes.
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(replaced(context)).toBe(false);
+      }, 30_000);
+
+      it('ends the run at a successful handshake: a later timeout starts a new one', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, silence, first, pid, instance, context } = await survivorOf(clock);
+        silence(true);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        clock.t += 60_000;
+        silence(false);
+        const adopted = await instance.resume(first.nativeSessionId, setup.open());
+        expect(adopted.pid).toBe(pid); // the process answered: it is the survivor, adopted
+        await (adopted as ClaudeSession).detach(); // let go, still running
+        clock.t += LIMIT; // the first timeout is now older than the limit, but the run it began ended with the answer
+        silence(true);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+        expect(replaced(context)).toBe(false);
+      }, 30_000);
+
+      it('keeps the run in the plugin: a new instance continues it', async () => {
+        const clock = { t: 1_000_000 };
+        const ref: { silent: boolean } = { silent: false };
+        const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });
+        const real = setup.context.lineTransport!;
+        const plugin = createClaudePlugin({
+          timings: { ...FAST_TIMINGS, initializeTimeoutMs: 400 },
+          baseEnv: { PATH: process.env.PATH },
+          homeDir: setup.home,
+          lineTransport: silenceRepeatedInitialize(real, () => ref.silent),
+          now: () => clock.t,
+        });
+        const create = (): ClaudeInstance => plugin.create({ enabled: true, command: setup.command, idleUnloadMinutes: 60, env: {} }, setup.context) as ClaudeInstance;
+        const first = setup.track(await setup.instance.start(setup.open()));
+        writeTranscript(setup.configDir, setup.cwd, first.nativeSessionId);
+        const pid = first.pid!;
+        await setup.instance.dispose('shutdown');
+
+        ref.silent = true;
+        const before = create();
+        expect(await before.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        await before.dispose('restart'); // the service drops an instance that never connected
+        expect(processStartTicks(pid)).toBeDefined();
+
+        clock.t += LIMIT + 1_000;
+        const after = create();
+        const second = setup.track(await after.resume(first.nativeSessionId, setup.open()));
+        expect(second.pid).not.toBe(pid);
+        await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the hung process to end');
+        expect(startEntries(setup.logFile)).toHaveLength(2);
+        await after.dispose('shutdown');
+      }, 30_000);
+
+      it('counts a session host that sends no welcome toward the run: busy within the window, then the host and its process are ended and a replacement starts in the same call', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, noHello, first, pid, instance, context, ended } = await survivorOf(clock);
+        noHello(true);
+
+        const open = (): Promise<unknown> => instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+        expect(await open()).toBeInstanceOf(TransportBusyError); // the first silence starts the run
+        clock.t += LIMIT - 1_000;
+        expect(await open()).toBeInstanceOf(TransportBusyError); // 1 s short of the limit
+        expect(ended).toEqual([]);
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+
+        clock.t += 2_000;
+        const second = setup.track((await instance.resume(first.nativeSessionId, setup.open())) as ClaudeSession);
+        const events = new EventLog(second);
+        expect(ended).toEqual([hostIdFor('conversation-1')]);
+        expect(context.logs.warn.some(([, message]) => /session host has not answered for longer than the limit/.test(message))).toBe(true);
+        expect(second.pid).not.toBe(pid);
+        await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the silent host\'s process to end');
+        const starts = startEntries(setup.logFile);
+        expect(starts).toHaveLength(2);
+        expect(starts[1]!.argv).toEqual(expect.arrayContaining(['--resume', first.nativeSessionId]));
+        const { turnId } = await second.sendTurn({ text: 'hello again' });
+        expect((await events.waitForTerminal(turnId)).status).toBe('completed');
+        expect(JSON.parse(context.metaStore.get('claude-launch:conversation-1')!).argv).toEqual(expect.arrayContaining(['--resume', first.nativeSessionId]));
+      }, 30_000);
+
+      it.each([
+        ['a handshake timeout, then a silent host', 'handshake', 'hello'],
+        ['a silent host, then a handshake timeout', 'hello', 'handshake'],
+      ] as const)('shares one run between both kinds of silence: %s', async (_label, firstKind, secondKind) => {
+        const clock = { t: 1_000_000 };
+        const { setup, silence, noHello, first, pid, instance, context, ended } = await survivorOf(clock);
+        const only = (kind: 'handshake' | 'hello'): void => { silence(kind === 'handshake'); noHello(kind === 'hello'); };
+
+        only(firstKind);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        clock.t += LIMIT + 1_000;
+        only(secondKind); // the other kind of silence, past the limit measured from the first
+        const second = setup.track((await instance.resume(first.nativeSessionId, setup.open())) as ClaudeSession);
+        expect(second.pid).not.toBe(pid);
+        await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the silent process to end');
+        expect(startEntries(setup.logFile)).toHaveLength(2);
+        expect(ended).toEqual(secondKind === 'hello' ? [hostIdFor('conversation-1')] : []); // a handshake timeout ends it through its own connection
+        expect(context.logs.warn.some(([, message]) => /longer than the limit/.test(message))).toBe(true);
+      }, 30_000);
+
+      it('never ends a silent host for an attach-only reattach, and does not count it toward the run', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, noHello, first, pid, instance, context, ended } = await survivorOf(clock);
+        noHello(true);
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          clock.t += LIMIT + 60_000;
+          expect(await instance.reattach(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        }
+        expect(ended).toEqual([]);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(context.metaStore.has('claude-launch:conversation-1')).toBe(true);
+        // Those silences started no run: the first ordinary resume is busy, however late it comes.
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        expect(ended).toEqual([]);
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+      }, 30_000);
+
+      it('ends the run when the host answers again: a later silence starts a new one', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, noHello, first, pid, instance, ended } = await survivorOf(clock);
+        noHello(true);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        clock.t += 60_000;
+        noHello(false);
+        const adopted = await instance.resume(first.nativeSessionId, setup.open());
+        expect(adopted.pid).toBe(pid);
+        await (adopted as ClaudeSession).detach();
+        clock.t += LIMIT;
+        noHello(true);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        expect(ended).toEqual([]);
+        expect(processStartTicks(pid)).toBeDefined();
+      }, 30_000);
+
+      it('fails plainly, and leaves the host alone, when it is past the limit and the Console gave the plugin no way to end a host', async () => {
+        const clock = { t: 1_000_000 };
+        const { setup, noHello, first, pid, instance, context } = await survivorOf(clock);
+        delete context.endHost;
+        noHello(true);
+        expect(await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        clock.t += LIMIT + 1_000;
+        const error = await instance.resume(first.nativeSessionId, setup.open()).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(TransportUnavailableError);
+        expect(error).not.toBeInstanceOf(TransportBusyError);
+        expect((error as Error).message).toMatch(/cannot be ended from here/);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+      }, 30_000);
+
+      it('also bounds an ordinary launch that reconnects to a running host without a launch record', async () => {
+        const clock = { t: 1_000_000 };
+        const sessionId = '12345678-1234-4234-8234-123456789abd';
+        // No session registry here: the CLI's own registry would name the running process as a holder and stop the launch first.
+        const { setup, silence } = setupSilentRepeat({ now: () => clock.t }, { sessionStartHook: false });
+        writeTranscript(setup.configDir, setup.cwd, sessionId);
+        const first = setup.track(await setup.instance.resume(sessionId, setup.open())); // launched with --resume, as the replacement will be
+        const pid = first.pid!;
+        await setup.instance.dispose('shutdown');
+        const { instance, context } = setup.restartBackend();
+        context.metaStore.delete('claude-launch:conversation-1');
+        silence(true);
+
+        expect(await instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught)).toBeInstanceOf(TransportBusyError);
+        expect(processStartTicks(pid)).toBeDefined();
+        expect(startEntries(setup.logFile)).toHaveLength(1);
+
+        clock.t += LIMIT + 1_000;
+        const second = setup.track(await instance.resume(sessionId, setup.open()));
+        expect(second.pid).not.toBe(pid);
+        await waitUntil(() => processStartTicks(pid) === undefined, 5000, 'the hung process to end');
+        expect(startEntries(setup.logFile)).toHaveLength(2);
+        expect(startEntries(setup.logFile)[1]!.argv).toEqual(expect.arrayContaining(['--resume', sessionId]));
+        expect(replaced(context)).toBe(true);
+      }, 30_000);
+    });
 
     it('answers undefined, and starts nothing, when no process survived', async () => {
       const setup = setupFake({ sessionsDir: 'auto', sessionStartHook: false }, { host: true });

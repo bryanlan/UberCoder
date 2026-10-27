@@ -31,7 +31,7 @@ if (!process.argv.includes('--run')) {
   process.exit(2);
 }
 
-const { createProofKit, windowLeft, sleep, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText } = await import('./structured-proof-kit.mjs');
+const { createProofKit, pollWithinWindow, sleep, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText } = await import('./structured-proof-kit.mjs');
 const { CLAUDE_COST_PROFILES } = await import('@agent-console/shared');
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
@@ -415,16 +415,15 @@ try {
     await send(countPrompt('f'));
     const commandPids = await countingStarted('f', values);
     const stopped = Date.now();
+    // Within 5 s of Stop, polled from Stop alongside the idle wait (a slow idle must not use the window up), as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    const commandGone = pollWithinWindow(wait, 'the counting command to end within 5 s of Stop', () => commandPids.every(commandPid => !alive(commandPid)) && pgrep(countMarker('f')).length === 0, stopped, 5_000);
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
     assert.equal(claudePid(), pid, 'The row pid must not change for an interrupt.');
     assert.ok(alive(pid), 'The claude process must survive an interrupt.');
     assert.equal(kit.hostRecord(hostId()).child.pid, pid, 'The host must still hold the same process.');
-    // Within 5 s of Stop (not of idle), as in k2: the 30 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
-    const gone = 'the counting command to end within 5 s of Stop';
-    await wait(gone, () => commandPids.every(commandPid => !alive(commandPid)) && pgrep(countMarker('f')).length === 0, windowLeft(gone, stopped, 5_000), 100);
-    values.commandGoneAfterMs = Date.now() - stopped;
+    values.commandGoneAfterMs = await commandGone;
     const marker = await wait('the transcript to record the interruption', () =>
       records().slice(skip).find(entry => entry.type === 'user' && /Request interrupted by user/i.test(textOf(entry) + blocksOf(entry).map(resultText).join('\n'))), 15_000, 500);
     values.interruptionMarker = textOf(marker).slice(0, 60) || 'in a tool_result';
@@ -668,15 +667,14 @@ try {
     const stopRun = await restartDuringCount('k2', (key, value) => { values[key] = value; }, { unattended: true });
     const { oldPid, before, stillCounting } = stopRun;
     const stopped = Date.now();
+    // Within 5 s of Stop, polled from Stop alongside the idle wait (a slow idle must not use the window up): Stop ends the command's process group. The 25 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    const commandGone = pollWithinWindow(wait, 'the counting command to end within 5 s of Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, stopped, 5_000);
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
     assert.equal(claudePid(), oldPid, 'The row pid must not change for an interrupt.');
     assert.ok(alive(oldPid), 'The claude process must survive an interrupt.');
-    // Within 5 s of Stop (not of idle): Stop ends the command's process group. The 25 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
-    const gone = 'the counting command to end within 5 s of Stop';
-    await wait(gone, () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, windowLeft(gone, stopped, 5_000), 100);
-    values.commandGoneAfterMs = Date.now() - stopped;
+    values.commandGoneAfterMs = await commandGone;
     const marker = await wait('the transcript to record the interruption', () =>
       records().slice(skip).find(entry => entry.type === 'user' && /Request interrupted by user/i.test(textOf(entry) + blocksOf(entry).map(resultText).join('\n'))), 15_000, 500);
     values.interruptionMarker = textOf(marker).slice(0, 60) || 'in a tool_result';

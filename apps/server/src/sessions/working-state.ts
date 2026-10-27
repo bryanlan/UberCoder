@@ -92,10 +92,19 @@ export function nextIdleExpiryDecision(
     now: string;
     idleMs: number;
     turnIsWorking?: boolean;
+    /**
+     * The provider says a turn is running that the transport has not named (structured sessions only). Its terminal event may
+     * never come: the unnamed period can end by the thread going idle, with the turn's own end dropped. So the expiry looks again
+     * after an idle window instead of ending, and the first look after the period ends settles the row.
+     */
+    turnUnidentified?: boolean;
   },
 ): IdleExpiryDecision {
-  if (input.turnIsWorking === true || (session.runFailure && session.runFailure.status !== 'retrying')) {
+  if (session.runFailure && session.runFailure.status !== 'retrying') {
     return { action: 'clear' };
+  }
+  if (input.turnIsWorking === true) {
+    return input.turnUnidentified ? { action: 'reschedule', heartbeatAt: input.now } : { action: 'clear' };
   }
   if (!session.isWorking && (input.turnIsWorking !== false || !session.lastOutputAt || session.lastOutputAt === session.lastCompletedAt)) {
     return { action: 'clear' };

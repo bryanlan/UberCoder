@@ -21,6 +21,7 @@ import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import { TransportPluginRegistry } from '../providers/transport/registry.js';
 import { NotSentError, PreviousTurnActiveError, SendRejectedError, type LineTransportFactory, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
+import { terminateHost } from '../providers/transport/line-transport.js';
 import {
   StructuredBusyError,
   StructuredRequestNotPendingError,
@@ -462,6 +463,10 @@ export class SessionManager {
       set: (key, value) => this.db.meta.set(key, value),
       delete: (key) => { this.db.sqlite.prepare('delete from meta where key = ?').run(key); },
     };
+    const hosts = {
+      runtimeDir: this.runtimeDir,
+      log: { info: (bindings: object, message: string) => this.logger?.info?.(bindings, message), warn: (bindings: object, message: string) => this.logger?.warn(bindings, message) },
+    };
     this.structured = new StructuredSessionService({
       registry: options.transportPlugins ?? new TransportPluginRegistry(),
       config: options.structuredSessions ?? {},
@@ -469,10 +474,7 @@ export class SessionManager {
       authorityContext: options.launchAuthorityContext,
       meta: structuredMeta,
       logger: this.logger ? { warn: (bindings, message) => this.logger?.warn(bindings, message) } : undefined,
-      hosts: {
-        runtimeDir: this.runtimeDir,
-        log: { info: (bindings, message) => this.logger?.info?.(bindings, message), warn: (bindings, message) => this.logger?.warn(bindings, message) },
-      },
+      hosts,
       createContext: (pluginId) => {
         const pluginRuntimeDir = path.join(this.runtimeDir, 'structured', pluginId);
         fs.mkdirSync(pluginRuntimeDir, { recursive: true });
@@ -486,7 +488,7 @@ export class SessionManager {
             warn: (bindings, message) => this.logger?.warn(bindings, message),
           },
           meta: structuredMeta,
-          ...(options.lineTransport ? { lineTransport: options.lineTransport } : {}),
+          ...(options.lineTransport ? { lineTransport: options.lineTransport, endHost: (hostId, graces) => terminateHost(hosts.runtimeDir, hostId, hosts.log, graces) } : {}),
         };
       },
       callbacks: {
@@ -5423,6 +5425,8 @@ export class SessionManager {
         now: nowIso(),
         idleMs: SESSION_COMPLETION_IDLE_MS,
         turnIsWorking: this.providerTurnIsWorking(sessionId),
+        // A named turn ends with its terminal event; an unnamed one may end without one (see the input's doc), so it is watched.
+        turnUnidentified: this.structured.turnUnidentified({ id: sessionId }) && !this.structured.turnActive({ id: sessionId }),
       });
       if (decision.action === 'reschedule') {
         this.scheduleWorkingExpiry(sessionId, decision.heartbeatAt);

@@ -34,6 +34,7 @@ import {
   JsonRpcReplyError,
   JsonRpcRequestError,
   JsonRpcTimeoutError,
+  type JsonRpcClientOptions,
   type JsonRpcExit,
   type JsonRpcNotification,
 } from '../src/providers/transport/codex/jsonrpc.js';
@@ -366,14 +367,14 @@ describe('codex request building', () => {
 
 // ---------------------------------------------------------------------------------------------------------
 describe('codex JSON-RPC client over a fake app-server', () => {
-  async function spawnClient(scenario: Record<string, unknown>, options: { maxLineBytes?: number } = {}) {
+  async function spawnClient(scenario: Record<string, unknown>, options: { maxLineBytes?: number; client?: JsonRpcClientOptions } = {}) {
     const dir = makeTempDir('codex-rpc-');
     const { scenarioPath, logFile } = writeScenario(dir, scenario);
     const transport = await StdioLineTransport.spawn(
       { argv: [process.execPath, FAKE_APP_SERVER, scenarioPath], cwd: dir, env: { PATH: process.env.PATH ?? '' }, closeGraceMs: 300, termGraceMs: 300 },
       { maxLineBytes: options.maxLineBytes },
     );
-    const client = new JsonRpcClient(transport);
+    const client = new JsonRpcClient(transport, options.client);
     cleanups.push(async () => {
       await client.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -393,6 +394,42 @@ describe('codex JSON-RPC client over a fake app-server', () => {
     await expect(client.request('broken', {})).rejects.toMatchObject({ name: 'JsonRpcRequestError', code: -32602, message: 'bad params', method: 'broken' });
     await expect(client.request('nope', {})).rejects.toBeInstanceOf(JsonRpcRequestError);
     expect(receivedFrames(logFile).filter((frame) => frame.id !== undefined).map((frame) => frame.id)).toEqual([1, 2, 3, 4]);
+  });
+
+  describe('the run of requests that timed out', () => {
+    const handlers = {
+      hang: { noResponse: true },
+      late: { delayMs: 300, result: {} },
+      ok: { result: {} },
+      broken: { error: { code: -32602, message: 'bad params' } },
+    };
+    const timedOut = (client: JsonRpcClient, method: string) => expect(client.request(method, {}, { timeoutMs: 60 })).rejects.toBeInstanceOf(JsonRpcTimeoutError);
+
+    it('counts requests in a row that time out, and any answer ends the run: a result, an error, or a late reply to a request that gave up', async () => {
+      const runs: Array<[number, string | undefined]> = [];
+      const { client } = await spawnClient({ handlers }, { client: { onTimeoutRun: (consecutive, method) => void runs.push([consecutive, method]) } });
+      await handshake(client);
+      await timedOut(client, 'hang');
+      await timedOut(client, 'hang');
+      expect(runs).toEqual([[1, 'hang'], [2, 'hang']]);
+      await client.request('ok', {});
+      expect(runs.slice(2)).toEqual([[0, 'ok']]);
+
+      await timedOut(client, 'hang');
+      await expect(client.request('broken', {})).rejects.toBeInstanceOf(JsonRpcRequestError); // the server answered, with an error
+      expect(runs.slice(3)).toEqual([[1, 'hang'], [0, 'broken']]);
+
+      await timedOut(client, 'late');
+      await waitUntil(() => runs.length === 7, 5000, 'the late reply'); // nobody waits for it, but the server is working
+      expect(runs.slice(5)).toEqual([[1, 'late'], [0, undefined]]);
+    });
+
+    it('is not broken by a callback that throws', async () => {
+      const { client } = await spawnClient({ handlers }, { client: { onTimeoutRun: () => { throw new Error('boom'); } } });
+      await handshake(client);
+      await timedOut(client, 'hang');
+      await expect(client.request('ok', {})).resolves.toEqual({});
+    });
   });
 
   it('marks a request refused after the process ended as not sent, and one cut off mid-flight as sent', async () => {

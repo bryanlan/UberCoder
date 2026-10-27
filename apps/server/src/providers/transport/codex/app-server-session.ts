@@ -135,7 +135,10 @@ export interface CodexSessionHost {
     note(threadId: string, itemId: string, record: CommandRecord): void;
     /** The command ended. */
     forget(threadId: string, itemId: string): void;
-    /** The thread was released: its terminals ended with it, so nothing is left to record. */
+    /**
+     * The conversation was released: its record is no longer needed. An unload does not drop it: Codex keeps the thread and its
+     * terminals for about 30 minutes after the last subscriber leaves. The instance drops it when the server closes the thread.
+     */
     drop(threadId: string): void;
   };
 }
@@ -710,8 +713,7 @@ export class CodexAppServerSession implements TransportSession {
 
   async unload(): Promise<void> {
     if (this.ended) return;
-    await this.unsubscribe();
-    this.host.commands.drop(this.nativeSessionId);
+    await this.unsubscribe(); // the command record stays: the thread and its terminals outlive the unsubscribe (see `commands.drop`)
     this.endLocal();
   }
 
@@ -1018,7 +1020,9 @@ export class CodexAppServerSession implements TransportSession {
     if (this.ended || record.terminal) return;
     const owners = this.host.commands.recorded(this.nativeSessionId);
     let earlierTurns = 0;
-    // An `item/completed` that arrived meanwhile was held (or applied) in order; a command it removed is not added again here.
+    // A command the record already tracks is skipped. On the adopt path an `item/completed` that arrives meanwhile is held until this
+    // returns, so it removes the command afterwards. The background path holds nothing: a completion applied during the listing can be
+    // undone by a stale listing here, and Stop's own listing then leaves that command out (it is no longer live).
     for (const terminal of terminals ?? []) {
       if (typeof terminal.itemId !== 'string' || typeof terminal.processId !== 'string' || record.commands.has(terminal.itemId)) continue;
       const owner = owners[terminal.itemId];
@@ -1147,8 +1151,8 @@ export class CodexAppServerSession implements TransportSession {
   }
 
   private onThreadClosed(): void {
-    // The server unloaded the thread (its terminals died with it). A turn still open can never finish.
-    this.host.commands.drop(this.nativeSessionId);
+    // The server unloaded the thread (its terminals died with it). A turn still open can never finish. The command record is
+    // dropped by the instance, which sees this frame also for a thread that has no session (see `onNotification`).
     const active = this.activeTurnId ? this.turns.get(this.activeTurnId) : undefined;
     if (active && !active.terminal) {
       this.ensureStarted(active);
