@@ -38,6 +38,8 @@ const RUN_TAG = randomBytes(4).toString('hex');
 /** A counting command that carries a unique marker, so its process can be found (and shown gone) on the host. */
 const countMarker = tag => `proof-${tag}-${RUN_TAG}`;
 const countPrompt = (tag, to = 30) => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
+/** The counting command, after a coordination `update` that marks the assignment unattended (a message from the person pauses it, so the agent sets it in the same turn). */
+const unattendedCountPrompt = (tag, to = 30) => `First call the agent_coordination MCP tool with action update and continuation unattended. After that call succeeds, run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
 const PROMPTS = {
   first: 'Reply with exactly the single word PONG.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
@@ -50,6 +52,7 @@ const PROMPTS = {
   settle: 'Reply with the single word SETTLED.',
   restored: 'Reply with the single word RESTORED.',
   resumed: 'Reply with the single word RESUMED.',
+  followUp: 'When your current work is finished, reply with exactly the single word FOLLOWED.',
 };
 const TURN_TIMEOUT_MS = 240_000;
 
@@ -89,6 +92,11 @@ const idle = async () => (await sessionState()).isWorking !== true;
 const indexRow = () => kit.db.prepare('select transcript_path from conversation_index where project_slug = ? and provider = ? and ref = ?').get('demo', 'claude', nativeId);
 const assignment = () => kit.db.prepare('select * from coordination_assignments where provider = ? and native_session_id = ?').get('claude', nativeId);
 const epoch = () => kit.db.prepare('select value from meta where key = ?').get(`structured-epoch:${sessionId}`)?.value;
+/** The continuation state the Console keeps for an assignment (`unattended` lets RunRecovery act on a lost turn). */
+const continuationOf = id => {
+  const found = kit.db.prepare('select value from meta where key = ?').get(`assignment-continuation:${id}`);
+  return found ? JSON.parse(found.value) : undefined;
+};
 const queueRecord = requestId => {
   const found = kit.db.prepare('select value from meta where key = ?').get(`session-input:${sessionId}:${requestId}`);
   return found ? JSON.parse(found.value) : undefined;
@@ -546,62 +554,83 @@ try {
     Object.assign(values, { oldPid, newPid: claudePid(), samePid: true, hostPid: after.host.pid, recordMatchesProc: true, liveHolders: holders.length });
   });
 
-  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, the next message completes on the same process', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, a message sent meanwhile steers it and is answered after it, and the next message completes on the same process', async values => {
     const control = await consoleControlTexts();
     const skip = records().length;
-    const oldPid = claudePid();
-    const before = kit.hostRecord(hostId());
-    assert.equal(before.child.pid, oldPid);
-    const counting = await send(countPrompt('k2', 25));
-    assert.equal(counting.record.deliveryMode, 'turn');
-    const commandPids = await countingStarted('k2', values);
-    const countSeenAt = Date.now();
-    const epochBefore = epoch();
     const eventLog = eventLogPath();
     const eventsBeforeShutdown = readEventLog(eventLog).size;
-    await kit.shutdown();
-    await sleep(1000);
-    assert.ok(alive(oldPid), 'The claude process must survive the backend.');
-    assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
-    assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
-    // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
-    const eventsFrom = readEventLog(eventLog).size;
-    await kit.boot();
-    const bootedAt = Date.now();
-    // Before any message and before the first reconcile pass (5 s after start): the row the database holds, then the first screen
-    // poll that an open web page makes. That poll must not write the loss line a turn that ended with its connection would get.
-    const stored = row();
-    assert.equal(stored.status, 'bound');
-    assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
-    assert.equal(stored.conversation_ref, nativeId);
-    const samples = [];
-    const httpStatuses = new Set();
-    const poll = async () => {
-      const response = await call('GET', `/api/sessions/${sessionId}/screen`);
-      samples.push(response.body?.session?.isWorking === true);
-      httpStatuses.add(response.status);
-      return response;
+
+    /**
+     * Starts a 25 s count, restarts the backend while it runs, and returns once the new backend has adopted the turn and the row has
+     * read working for as long as the count ran. `put` records evidence values. `unattended`: the agent marks its assignment
+     * unattended first, so that a recovery prompt the Console wrongly fired (it declares a running turn lost) would really be sent.
+     */
+    const restartDuringCount = async (tag, put, { unattended = false } = {}) => {
+      const oldPid = claudePid();
+      const before = kit.hostRecord(hostId());
+      assert.equal(before.child.pid, oldPid);
+      const counting = await send(unattended ? unattendedCountPrompt(tag, 25) : countPrompt(tag, 25));
+      assert.equal(counting.record.deliveryMode, 'turn');
+      const seen = {};
+      const commandPids = await countingStarted(tag, seen);
+      put('commandPids', seen.commandPids);
+      if (unattended) {
+        const marked = await wait('the agent to mark the assignment unattended', () => { const found = assignment(); const state = found && continuationOf(found.id); return state?.continuation === 'unattended' ? state : undefined; }, 60_000, 250);
+        put('continuationBeforeRestart', marked.continuation);
+      }
+      const countSeenAt = Date.now();
+      const epochBefore = epoch();
+      await kit.shutdown();
+      await sleep(1000);
+      assert.ok(alive(oldPid), 'The claude process must survive the backend.');
+      assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
+      assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
+      // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
+      const eventsFrom = readEventLog(eventLog).size;
+      await kit.boot();
+      const bootedAt = Date.now();
+      // Before any message and before the first reconcile pass (5 s after start): the row the database holds, then the first screen
+      // poll that an open web page makes. That poll must not write the loss line a turn that ended with its connection would get.
+      const stored = row();
+      assert.equal(stored.status, 'bound');
+      assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
+      assert.equal(stored.conversation_ref, nativeId);
+      const samples = [];
+      const httpStatuses = new Set();
+      const poll = async () => {
+        const response = await call('GET', `/api/sessions/${sessionId}/screen`);
+        samples.push(response.body?.session?.isWorking === true);
+        httpStatuses.add(response.status);
+        return response;
+      };
+      const firstPoll = await poll();
+      const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
+      put('firstPollHttp', firstPoll.status);
+      put('firstPollScreen', firstPoll.body?.screen?.status ?? 'none');
+      put('firstPollWorking', String(samples[0]));
+      put('connectionEndedAfterFirstPoll', lostAfterFirstPoll.length > 0);
+      assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
+      // Loaded (adopted) within the first reconcile pass, with no message sent.
+      await wait('the surviving process to be adopted by the first reconcile pass', async () => { await poll(); return epoch() !== epochBefore; }, 12_000, 500);
+      put('adoptedAfterBootMs', Date.now() - bootedAt);
+      assert.equal(claudePid(), oldPid, 'The adopted process is the one that survived.');
+      assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === before.host.pid), [oldPid], 'Adoption must not start a second process.');
+      // The turn is still running, so the row must read as working for as long as the count runs.
+      let lastPoll;
+      for (let index = 0; index < 4; index += 1) { await sleep(500); lastPoll = await poll(); }
+      put('screenWhileCounting', lastPoll.body?.screen?.status ?? 'none');
+      put('polls', samples.length);
+      const notWorking = samples.filter(working => !working).length;
+      assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join('/')}) while the count was still running.`);
+      const stillCounting = pgrep(countMarker(tag));
+      put('countSeenRunningForMs', Date.now() - countSeenAt);
+      assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${Date.now() - countSeenAt} ms after it was seen running, so the adopted turn could not be tested; rerun.`);
+      return { oldPid, before, stillCounting };
     };
-    const firstPoll = await poll();
-    const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
-    Object.assign(values, { firstPollHttp: firstPoll.status, firstPollScreen: firstPoll.body?.screen?.status ?? 'none', firstPollWorking: String(samples[0]), connectionEndedAfterFirstPoll: lostAfterFirstPoll.length > 0 });
-    assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
-    // Loaded (adopted) within the first reconcile pass, with no message sent.
-    await wait('the surviving process to be adopted by the first reconcile pass', async () => { await poll(); return epoch() !== epochBefore; }, 12_000, 500);
-    values.adoptedAfterBootMs = Date.now() - bootedAt;
-    assert.equal(claudePid(), oldPid, 'The adopted process is the one that survived.');
-    assert.deepEqual(kit.procEntries().filter(pid => kit.parentOf(pid) === before.host.pid), [oldPid], 'Adoption must not start a second process.');
-    // The turn is still running, so the row must read as working for as long as the count runs.
-    let lastPoll;
-    for (let index = 0; index < 4; index += 1) { await sleep(500); lastPoll = await poll(); }
-    values.screenWhileCounting = lastPoll.body?.screen?.status ?? 'none';
-    values.polls = samples.length;
-    const notWorking = samples.filter(working => !working).length;
-    assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join("/")}) while the count was still running.`);
-    const stillCounting = pgrep(countMarker('k2'));
-    values.countSeenRunningForMs = Date.now() - countSeenAt;
-    assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${values.countSeenRunningForMs} ms after it was seen running, so Stop could not be tested; rerun.`);
-    // Stop reaches the re-adopted turn: idle within 15 s, same process, the command ends, the transcript records the interruption.
+
+    // Phase 1: Stop reaches the re-adopted turn: idle within 15 s, same process, the command ends, the transcript records the interruption.
+    const stopRun = await restartDuringCount('k2', (key, value) => { values[key] = value; }, { unattended: true });
+    const { oldPid, before, stillCounting } = stopRun;
     const stopped = Date.now();
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
@@ -617,7 +646,24 @@ try {
     // The next message gets its own reply from the same process.
     await converse(PROMPTS.resumed, 'RESUMED');
     assert.equal(claudePid(), oldPid, 'The same claude process must answer after the restart.');
-    const { after, holders } = assertSameProcess(oldPid, before);
+    assertSameProcess(oldPid, before);
+
+    // Phase 2: a message sent while a re-adopted turn runs is delivered to that turn as a steer (it does not start a second turn),
+    // and is answered once the turn's work is done. The count is not stopped this time.
+    const steerRun = await restartDuringCount('k2s', (key, value) => { values[`steer${key[0].toUpperCase()}${key.slice(1)}`] = value; });
+    const followedBefore = await countAssistant('FOLLOWED');
+    const followUp = await send(PROMPTS.followUp);
+    values.followUpDelivery = followUp.record.deliveryMode;
+    assert.equal(followUp.record.deliveryMode, 'steer', 'A message sent while the adopted turn runs must be delivered as a steer.');
+    assert.equal(followUp.record.state, 'submitted');
+    assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count must still be running when the message is sent.');
+    assert.equal(await countAssistant('FOLLOWED'), followedBefore, 'The steered message must not be answered while the count still runs.');
+    await wait('the counting command to finish by itself', () => pgrep(countMarker('k2s')).length === 0, 60_000, 250);
+    await waitForReply('FOLLOWED', followedBefore);
+    values.followUpAnswered = 'after the count';
+    assert.equal(claudePid(), steerRun.oldPid, 'The same claude process must answer the steered message.');
+    const { after, holders } = assertSameProcess(steerRun.oldPid, steerRun.before);
+
     // Nothing the Console sends on its own (recovery, wake) reached the conversation, and no loss line was written at any point.
     const events = readEventLog(eventLog, eventsBeforeShutdown).entries;
     assert.deepEqual(lostTurnStatusLines(events), [], 'No lost-turn status line may be written for a turn that survived the restart.');

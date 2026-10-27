@@ -17,6 +17,8 @@ export interface QueuedInputRecord {
   /** Structured sessions: the provider turn that received the message, and whether it started or steered one. */
   turnId?: string;
   deliveryMode?: 'turn' | 'steer';
+  /** Structured sessions: when the transport first refused this message before writing it, in an unbroken run of such refusals. */
+  notSentSince?: string;
 }
 
 /** The same delta is used for transport and native paste confirmation. */

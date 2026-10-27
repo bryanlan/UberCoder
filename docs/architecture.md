@@ -601,7 +601,8 @@ migration); this section is the summary.
   takes its child with it. A recorded child left without its host is ended through its recorded group before a new
   host starts; every signal is gated on pid, start ticks and boot id. A bounded output buffer lets a client that kept a
   cursor replay what it missed; a backend that connects fresh asks for live output only and reads the rest from the
-  provider's own record. See `docs/structured-cutover.md`, "Session host relay".
+  provider's own record. The host also ends what is left in the child's process group once the child exits, and a host that
+  runs but answers slowly is left alone and not replaced. See `docs/structured-cutover.md`, "Session host relay".
 - Claude plugin: `providers/transport/claude/` drives `claude --output-format stream-json --input-format stream-json`
   directly (no SDK package) and declares `processModel: 'per-session'`: one process per conversation, behind its own
   host, started lazily. The Console mints the session id (`--session-id`, later `--resume <id>`), so there is no
@@ -612,7 +613,7 @@ migration); this section is the summary.
   `ps`. Human text is sent with `origin: human`; a message sent mid-turn folds into the running turn at the next tool
   boundary (it does not shorten a running shell command); Stop is an `interrupt` control request and the process
   survives it; a profile change is applied live (`set_model`, effort) with no restart; images are base64 blocks in front of
-  the text. A launch that shows no `SessionStart` hook (the CLI came up in bare mode) or runs on an API key is refused.
+  the text, fitted to the API limits first (see Images below). A launch that shows no `SessionStart` hook (the CLI came up in bare mode) or runs on an API key is refused.
   Durable history is the CLI's own transcript under `~/.claude/projects`, so transcript parsing, search and recency are
   unchanged. The one-writer rule (the CLI does not refuse two processes on one transcript) is enforced by the plugin
   through its table of open sessions, the host record and the CLI's live-process registry `~/.claude/sessions/<pid>.json`. Findings from the real-CLI proof
@@ -620,14 +621,18 @@ migration); this section is the summary.
 - Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
   A server request that still arrives (command, file or permission approval, MCP form) is declined and
   recorded as a status event. There is no approval UI.
-- Questions: a question the agent asks the person (Claude `AskUserQuestion`, Codex `item/tool/requestUserInput`) is
-  kept instead of declined. The service stores it under the session's `structuredRequestsKey` meta record, the
-  bound-sessions repository projects it onto the row as `pendingRequests`, the conversation pane shows it as a card
-  (`PendingQuestionCard`) with the options and a typed answer, and `POST /api/sessions/:id/requests/:requestId` answers
-  it exactly once (a second answer is refused). The turn waits for the answer, so a new question also goes out through
-  the grant push channel. Questions of an earlier connection are dropped at boot, because the connection that raised
-  them is gone. Codex raises a blocking question only in some collaboration modes; in the default mode the model
-  asks in ordinary text and the person answers with a normal message.
+- Questions: a question the agent asks the person is kept instead of declined. The service stores it under the session's
+  `structuredRequestsKey` meta record, the bound-sessions repository projects it onto the row as `pendingRequests`, the
+  conversation pane shows it as a card (`PendingQuestionCard`) with the options and a typed answer, and
+  `POST /api/sessions/:id/requests/:requestId` answers it exactly once (a second answer, or an answer to a question the
+  provider withdrew, is a 404). A Claude `AskUserQuestion` and a Codex `item/tool/requestUserInput` are live: the provider
+  waits for the answer, so a new question also goes out through the grant push channel. A Codex question the model asks in a
+  message (`request_user_input_async`, the only form `codex-cli` 0.164.0 offers in the default mode) arrives as an
+  `agentMessage` item with `delivery: 'async'` and `questions` of `{ title, options? }`, and the turn stays open while the model
+  polls. It becomes a message-mode card: nothing waits on the answer, so the answer is sent as an ordinary message that steers
+  the open turn. A question the Console cannot show raises a warning notice. The stored list is deleted at boot and comes back
+  through re-adoption.
+  Approvals, `ExitPlanMode` and MCP elicitations are declined.
 - Identity: the thread id is known at `thread/start`, so the binding is written with it at once and the
   pending alias is adopted immediately. A shared process cannot carry a per-session
   `AGENT_CONSOLE_SESSION_ID`; hooks and the coordination MCP identify the thread by its id and
@@ -658,19 +663,29 @@ migration); this section is the summary.
   Working rows, rows with queued input and Claude rows without a transcript wait and are retried.
   `GET /api/sessions/structured-migration` is the dry run. `scripts/prove-structured-migration.mjs` runs the whole move
   against real tmux Codex and Claude chats. See `docs/structured-cutover.md`.
-- Images: the existing attachment flow feeds both providers (Codex `localImage`, Claude base64 image blocks). The route
-  still appends its "inspect the attached files" envelope to the text, which the structured path sends too, so a model may
-  also open the stored file (one redundant tool call; see `docs/structured-cutover.md`, finding 8).
+- Images: the existing attachment flow feeds both providers (Codex `localImage`, Claude base64 image blocks), and only files
+  directly in the image store are accepted. Codex reads the file itself. For Claude, `claude/image-fit.ts` (sharp) sends an
+  image that already fits unchanged and otherwise scales it to a 1568 px long edge and about 3.4 MB, because the API rejects an
+  image above 5 MB (PNG stays PNG, everything else becomes JPEG). The route's "inspect the attached files" line is dropped from
+  the text sent to a transport that attaches images natively, so the model does not open the stored file a second time; the
+  image rows stay in the message.
 - Limits: pressure suspension skips rows on a shared process (it cannot be suspended per thread);
   the recovery and launch memory floors still apply. Streamed assistant text is not shipped: display is driven by
   the provider transcript, as for tmux.
-- Restart behavior: with the relay (the production path) provider processes outlive a backend restart or crash. A
-  plain stdio child (tests, or a plugin given no factory) ends with the backend. A turn that was running when the
-  backend went down is not followed by the new backend (it asks the host for live output only); its result is read from
-  the provider's own record. After a restart an unloaded row never reads as working, and a scheduled recovery or a
-  half-restored row re-arms at boot. A per-session process that survived behind its host is adopted by the first
-  reconcile pass (`reattachSurvivors`, which never starts a process), so idle sleep, pressure suspension and release own
-  it again before anyone writes to the conversation; the real-CLI proof checks that the same process then answers.
+- Restart behavior: with the relay (the production path) provider processes outlive a backend restart or crash. A plain stdio
+  child (tests, or a plugin given no factory) ends with the backend. A new backend finds a surviving process again and does not
+  declare its turn lost. At the first reconcile pass the manager adopts every awake per-session row and every shared-process
+  (Codex) row still marked working through the plugin's `reattach`, which never starts a process. The same lookup runs before loss
+  handling on any path that loads a working row, so a screen poll that comes before the first pass cannot write the loss line.
+  Claude learns what the process is doing from the reply to a repeated `initialize` (`session_state`). Codex learns it from
+  `thread/resume`, the thread's recent turns and the host's replay buffer, and a held question is answered by id over the same
+  relayed stdin. An adopted turn keeps the row working without moving recency, Stop reaches it, and its terminal ends it once. A
+  row with no survivor stays unloaded: it never reads as working, a scheduled recovery or half-restored row re-arms at boot, and
+  the conversation resumes on its next use. The real-CLI proofs (step k2) restart the backend during a running turn for both
+  providers. Known gap: Codex Stop on an adopted turn does not end a command that started before the restart.
+- Orphan hosts: at the first pass the manager also ends the session host and launch record of every per-session conversation
+  that has no restorable structured row. Release and idle sleep end the host of a conversation that is not loaded. A released or
+  forgotten conversation therefore cannot leave a Claude process running.
 
 ## Provider run failures and bounded recovery
 

@@ -55,12 +55,6 @@ export interface LineTransportExit {
 export interface ManagedLineTransport extends LineTransport {
   /** True when the provider process keeps running after `close()` without `terminate` (a session host holds it). */
   readonly outlivesClose: boolean;
-  /**
-   * True when the factory call that returned this channel started the provider process (a stdio child always; a session
-   * host only when this call started it). False for a channel to a host that was already running: its output so far
-   * belongs to whoever started it, so it is never replayed to this client unless the host was never written to.
-   */
-  readonly started: boolean;
   /** Last bytes of the provider's stderr with ANSI colour codes removed. Diagnostics only; never parse it. */
   stderrTail(): string;
   onExit(listener: (info: LineTransportExit) => void): () => void;
@@ -105,11 +99,6 @@ export function transportStartedFresh(transport: LineTransport): boolean {
   return transport instanceof HostLineTransport ? !transport.info.everWrote : true;
 }
 
-/** True when the factory call that returned this channel started the provider process (see {@link ManagedLineTransport.started}). */
-export function transportWasStarted(transport: LineTransport): boolean {
-  return (transport as Partial<ManagedLineTransport>).started !== false;
-}
-
 // eslint-disable-next-line no-control-regex
 const ANSI_PATTERN = /\u001B\[[0-9;?]*[ -/]*[@-~]/g;
 
@@ -120,19 +109,22 @@ function wait(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------------------------------------
 // Shared listener handling
 
+/** A line listener. `seq` is the session host's sequence number of the line; a stdio channel has none. */
+type LineListener = (line: string, seq?: number) => void;
+
 abstract class LineChannel {
-  private readonly lineListeners = new Set<(line: string) => void>();
+  private readonly lineListeners = new Set<LineListener>();
   private readonly exitListeners = new Set<(info: LineTransportExit) => void>();
-  private queued: string[] = [];
+  private queued: Array<{ line: string; seq: number | undefined }> = [];
   private finishedResolvers: Array<() => void> = [];
   protected finished: LineTransportExit | undefined;
 
-  onLine(listener: (line: string) => void): () => void {
+  onLine(listener: LineListener): () => void {
     this.lineListeners.add(listener);
     if (this.queued.length > 0) {
       const queued = this.queued;
       this.queued = [];
-      for (const line of queued) this.callLine(listener, line);
+      for (const { line, seq } of queued) this.callLine(listener, line, seq);
     }
     return () => this.lineListeners.delete(listener);
   }
@@ -147,12 +139,12 @@ abstract class LineChannel {
     return () => this.exitListeners.delete(listener);
   }
 
-  protected deliverLine(line: string): void {
+  protected deliverLine(line: string, seq?: number): void {
     if (this.lineListeners.size === 0) {
-      this.queued.push(line);
+      this.queued.push({ line, seq });
       return;
     }
-    for (const listener of [...this.lineListeners]) this.callLine(listener, line);
+    for (const listener of [...this.lineListeners]) this.callLine(listener, line, seq);
   }
 
   protected finishWith(info: LineTransportExit): void {
@@ -182,9 +174,9 @@ abstract class LineChannel {
     });
   }
 
-  private callLine(listener: (line: string) => void, line: string): void {
+  private callLine(listener: LineListener, line: string, seq: number | undefined): void {
     try {
-      listener(line);
+      listener(line, seq);
     } catch {
       // The listener owns its own errors; one line never stops the stream.
     }
@@ -202,7 +194,6 @@ export interface StdioLineTransportOptions {
 
 export class StdioLineTransport extends LineChannel implements ManagedLineTransport {
   readonly outlivesClose = false;
-  readonly started = true;
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly log: NonNullable<StdioLineTransportOptions['log']>;
@@ -439,8 +430,6 @@ function connectSocket(socketPath: string, timeoutMs: number): Promise<net.Socke
 
 export class HostLineTransport extends LineChannel implements ManagedLineTransport {
   readonly outlivesClose = true;
-  /** Set by the factory when it started the host behind this channel (see {@link ManagedLineTransport.started}). A bare `connect` reaches a host somebody else started. */
-  started = false;
   /** Set when the host could no longer replay everything after `sinceSeq`: the newest line it still held was this one. */
   gap: { firstSeq: number } | undefined;
 
@@ -596,7 +585,7 @@ export class HostLineTransport extends LineChannel implements ManagedLineTranspo
     if (!isRecord(message)) return;
     if (typeof message.seq === 'number' && typeof message.line === 'string') {
       this.lastSeqSeen = message.seq;
-      this.deliverLine(message.line);
+      this.deliverLine(message.line, message.seq);
       return;
     }
     switch (message.type) {
@@ -848,7 +837,6 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
             log.info({ hostId: request.hostId, hostPid: transport.info.hostPid, childPid: transport.info.childPid }, 'session host started');
             host.removeAllListeners('exit');
             host.unref();
-            transport.started = true;
             return transport;
           } catch (error) {
             if (error instanceof LineTransportSpawnError) throw error;

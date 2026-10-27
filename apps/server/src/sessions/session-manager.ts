@@ -20,7 +20,7 @@ import { LastUserInputCache, readLastUserInput } from './last-user-input.js';
 import { parseSessionScreenSnapshot } from './session-screen.js';
 import { checkTmuxLiveness } from './tmux-health.js';
 import { TransportPluginRegistry } from '../providers/transport/registry.js';
-import { NotSentError, PreviousTurnActiveError, type LineTransportFactory, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
+import { NotSentError, PreviousTurnActiveError, SendRejectedError, type LineTransportFactory, type PluginContext, type ProviderFailure } from '../providers/transport/types.js';
 import {
   StructuredBusyError,
   StructuredRequestNotPendingError,
@@ -81,6 +81,10 @@ import { expireMessages, messagePolicy, migrateMessagePolicies } from '../coordi
 import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
+/** A queued structured message that the transport keeps refusing before it writes anything fails after this long. */
+const STRUCTURED_NOT_SENT_LIMIT_MS = 10 * 60_000;
+/** A provider process that runs but does not answer a survivor lookup this many times in a row is reported on the conversation. */
+const SURVIVOR_BUSY_REPORT_AFTER = 3;
 const QUEUED_PASTE_CONFIRMATION_MS = 30_000;
 const TEXT_ENTRY_STARTUP_SETTLE_WAIT_MS = 1_800;
 const CLAUDE_RESUME_READY_WAIT_MS = 15_000;
@@ -413,6 +417,8 @@ export class SessionManager {
   private stopped = false;
   /** Set once the startup pass has looked for provider processes that outlived the previous backend. */
   private survivorsReattached = false;
+  /** Rows whose last survivor lookups found a provider process that runs but did not answer in time, by consecutive count. */
+  private readonly survivorBusyCounts = new Map<string, number>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -1092,6 +1098,7 @@ export class SessionManager {
     this.unsubscribeRealtimeEvents();
     await this.structured.shutdown();
     this.structuredMonitors.clear();
+    this.survivorBusyCounts.clear();
     await this.closeRawLogPipes(sessionsToDetach);
     for (const sessionId of [...this.outputWatchers.keys()]) {
       this.stopWatching(sessionId);
@@ -3901,6 +3908,7 @@ export class SessionManager {
     this.stopWatching(session.id);
     this.runtimes.clearEphemeral(session.id);
     this.structuredMonitors.delete(session.id);
+    this.survivorBusyCounts.delete(session.id);
     let ended: BoundSession = { ...releasing, status: 'ended', updatedAt: nowIso(), isWorking: false, pid: undefined };
     this.db.boundSessions.upsert(ended);
     if (session.manualSuspendedAt) ended = this.db.boundSessions.setManualSuspendedAt(session.id, undefined) ?? ended;
@@ -4202,28 +4210,43 @@ export class SessionManager {
   }
 
   /**
-   * Adopts the provider process that survived for one row (the caller holds the row's command lock) and returns whether the row
-   * is loaded afterwards. A turn the process is running becomes the row's turn (working, recency untouched); one that ended while
-   * no backend listened is reported by the plugin as the terminal it was. Nothing is started and nothing ends a process here.
+   * Adopts the provider process that survived for one row (the caller holds the row's command lock) and says what it found:
+   * `loaded` (the row is loaded afterwards), `absent` (no process answers for it) or `busy` (a process runs but did not answer in
+   * time). A turn the process is running becomes the row's turn (working, recency untouched); one that ended while no backend
+   * listened is reported by the plugin as the terminal it was. Nothing is started and nothing ends a process here. A `busy` row
+   * is left exactly as it is: its turn may well be running, so it is not declared lost, and the next load asks again.
    */
-  private async adoptStructuredSurvivor(row: BoundSession): Promise<boolean> {
+  private async adoptStructuredSurvivor(row: BoundSession): Promise<'loaded' | 'absent' | 'busy'> {
     const projects = this.recoveryDependencies?.projectService;
-    if (!projects || this.stopped) return false;
+    if (!projects || this.stopped) return 'absent';
     const current = this.db.boundSessions.getById(row.id);
-    if (!this.isSurvivorCandidate(current)) return false;
+    if (!this.isSurvivorCandidate(current)) return 'absent';
     const project = await projects.getProjectBySlug(current.projectSlug);
-    if (!project || this.stopped) return false;
+    if (!project || this.stopped) return 'absent';
     const [adopted] = await this.structured.reattachSurvivors([{ session: current, cwd: project.path }]);
-    if (!adopted) return false;
+    if (!adopted) {
+      if (!this.structured.survivorBusy(row.id)) {
+        this.survivorBusyCounts.delete(row.id);
+        return 'absent';
+      }
+      const count = (this.survivorBusyCounts.get(row.id) ?? 0) + 1;
+      this.survivorBusyCounts.set(row.id, count);
+      this.logger?.warn({ sessionId: row.id, attempts: count }, 'The provider process of a conversation did not answer in time; it was left alone.');
+      if (count === SURVIVOR_BUSY_REPORT_AFTER) this.appendStructuredStatus(row.id, 'The agent process is running but is slow to answer. The Console keeps trying.');
+      return 'busy';
+    }
+    this.survivorBusyCounts.delete(row.id);
     let session = this.updateBoundSessionFields(row.id, { pid: this.structured.loadedPid(row.id) });
     await this.verifyNativeProcessEpoch(session);
     // The plugin's first events (an adopted turn, a terminal it found) are handled within this turn of the event loop.
     await new Promise<void>((resolve) => setImmediate(resolve));
     session = this.mustGetSession(row.id);
     if (session.isWorking && !this.structured.turnActive(session)) {
-      if (this.structured.processModel(session.provider) === 'per-session') {
+      if (this.structured.processModel(session.provider) === 'per-session' || this.structured.turnUnidentified(session)) {
         // The turn the row says is running may have ended while no backend was listening, and nothing announces that. The
-        // working-state expiry clears the flag after an idle window unless the process reports a turn by then.
+        // working-state expiry clears the flag after an idle window unless the process reports a turn by then. A shared
+        // process can be in the same position: its thread is running a turn it could not name yet, which its first event
+        // will (the plugin says so with `turnUnidentified`); only a thread with no turn at all is lost.
         this.scheduleWorkingExpiry(session.id, nowIso());
       } else {
         // The shared process was asked about the thread and has no turn for it: the turn is lost the way a dead connection loses it.
@@ -4235,7 +4258,7 @@ export class SessionManager {
     session = this.mustGetSession(row.id);
     this.eventBus.emit({ type: 'session.updated', session });
     this.publishStructuredScreen(session.id);
-    return true;
+    return 'loaded';
   }
 
   /**
@@ -4266,7 +4289,7 @@ export class SessionManager {
       if (!this.isSurvivorCandidate(row)) continue;
       try {
         await this.runtimes.run(row.id, 'reattachSurvivor', async () => {
-          if (await this.adoptStructuredSurvivor(row)) adoptedAny = true;
+          if (await this.adoptStructuredSurvivor(row) === 'loaded') adoptedAny = true;
         });
       } catch (error) {
         this.logger?.warn({ err: error, sessionId: row.id }, 'Reattaching a surviving provider process failed.');
@@ -4358,7 +4381,7 @@ export class SessionManager {
 
   private structuredInputError(error: unknown): unknown {
     if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof NotSentError
-      || error instanceof StructuredUnavailableError || error instanceof StructuredUnsupportedError) {
+      || error instanceof StructuredUnavailableError || error instanceof StructuredUnsupportedError || error instanceof SendRejectedError) {
       return new SessionInputRejectedError(`${error.message} Nothing was sent.`);
     }
     return error;
@@ -4449,14 +4472,30 @@ export class SessionManager {
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
       const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));
       this.inputQueue.stage(sessionId, undefined);
-      this.saveQueuedInput(sessionId, { ...sending, state: 'submitted', turnId: sent.turnId, deliveryMode: sent.mode, recordedUserInput });
+      this.saveQueuedInput(sessionId, { ...sending, state: 'submitted', turnId: sent.turnId, deliveryMode: sent.mode, recordedUserInput, notSentSince: undefined });
     } catch (error) {
       if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
-      if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError || error instanceof NotSentError
-        || error instanceof StructuredUnavailableError) {
-        // The transport refused before sending anything, so the message can wait for the next attempt.
-        this.saveQueuedInput(sessionId, { ...record, reason: error instanceof StructuredBusyError
+      if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError) {
+        // A turn is running: the message waits for it, however long it takes.
+        this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined, reason: error instanceof StructuredBusyError
           ? 'Waiting for the running turn to finish.' : 'Waiting for the session to accept the message.' });
+        return;
+      }
+      if (error instanceof NotSentError || error instanceof StructuredUnavailableError) {
+        // The transport refused before sending anything (the connection was lost, or a request to the provider timed out), so
+        // the message can wait for the next attempt. It cannot wait for ever: a run of refusals that lasts too long fails it.
+        const since = record.notSentSince ?? nowIso();
+        if (Date.now() - Date.parse(since) >= STRUCTURED_NOT_SENT_LIMIT_MS) {
+          this.saveQueuedInput(sessionId, { ...sending, state: 'failed', notSentSince: since,
+            reason: 'The message could not be sent for 10 minutes. Check the conversation before sending it again.' });
+          return;
+        }
+        this.saveQueuedInput(sessionId, { ...record, notSentSince: since, reason: 'Waiting for the session to accept the message.' });
+        return;
+      }
+      if (error instanceof SendRejectedError) {
+        // Nothing was written and a retry would fail the same way (a refused model, an image that cannot be read): the person decides.
+        this.saveQueuedInput(sessionId, { ...sending, state: 'failed', reason: error.message });
         return;
       }
       this.saveQueuedInput(sessionId, { ...sending, state: 'failed', reason: error instanceof StructuredUnsupportedError
@@ -4531,7 +4570,10 @@ export class SessionManager {
       // screen poll, a queued message, a wake) can come before the first reconcile looks for survivors: ask before declaring
       // the turn lost, on every path that loads the row.
       try {
-        alive = await this.adoptStructuredSurvivor(session);
+        const outcome = await this.adoptStructuredSurvivor(session);
+        // A process that runs but is slow to answer may still be running the turn: leave the row as it is and ask again on the next load.
+        if (outcome === 'busy') return undefined;
+        alive = outcome === 'loaded';
       } catch (error) {
         this.logger?.warn({ err: error, sessionId: session.id }, 'Reattaching a surviving provider process failed.');
       }

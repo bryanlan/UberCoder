@@ -42,17 +42,20 @@ const RUN_TAG = randomBytes(4).toString('hex');
 /** A counting command that carries a unique marker, so its process can be found (and shown gone) on the host. */
 const countMarker = tag => `proof-${tag}-${RUN_TAG}`;
 const countPrompt = (tag, to = 30) => `Run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
+/** The counting command, after a coordination `update` that marks the assignment unattended (a message from the person pauses it, so the agent sets it in the same turn). */
+const unattendedCountPrompt = (tag, to = 30) => `First call the agent_coordination MCP tool with action update and continuation unattended. After that call succeeds, run exactly this shell command and wait for it to finish before replying: echo ${countMarker(tag)}; for i in $(seq 1 ${to}); do echo $i; sleep 1; done`;
 const PROMPTS = {
   first: 'Reply with exactly the single word PONG and nothing else.',
   coordination: 'Call the agent_coordination MCP tool with action status. If the call succeeded, reply with exactly the single word REGISTERED and nothing else.',
   steer: 'Stop counting now and reply with the single word STEERED.',
-  question: 'Use the request_user_input tool to ask me which color I prefer, with options red and blue. After I answer, reply with exactly the single word of the color I chose.',
+  question: 'Ask me which color I prefer, red or blue, using your request_user_input tool with a title and options, then wait for my answer. After I answer, reply with exactly the single word of the color I chose.',
   image: 'What color is the attached image? Reply with one word.',
   bigImage: 'What is the dominant color of the attached image? Reply with one word.',
   model: 'Reply with the single word MODEL.',
   settle: 'Reply with the single word SETTLED.',
   restored: 'Reply with the single word RESTORED.',
   resumed: 'Reply with the single word RESUMED.',
+  followUp: 'When your current work is finished, reply with exactly the single word FOLLOWED.',
 };
 const TURN_TIMEOUT_MS = 180_000;
 
@@ -244,6 +247,11 @@ const queueRecord = requestId => {
 const idle = async () => (await sessionState()).isWorking !== true;
 const eventLogPath = () => row()?.event_log_path;
 const epoch = () => db.prepare('select value from meta where key = ?').get(`structured-epoch:${sessionId}`)?.value;
+/** The continuation state the Console keeps for an assignment (`unattended` lets RunRecovery act on a lost turn). */
+const continuationOf = id => {
+  const found = db.prepare('select value from meta where key = ?').get(`assignment-continuation:${id}`);
+  return found ? JSON.parse(found.value) : undefined;
+};
 /** Collects the `session.screen-updated` events of the session from the event stream the web client listens to. */
 const watchScreens = async () => {
   const response = await app.inject({ method: 'GET', url: '/api/events', headers, payloadAsStream: true });
@@ -510,58 +518,70 @@ try {
     values.turnAborted = abortRecord.payload.reason;
   });
 
-  await step('h2', 'question: a request_user_input becomes a pending request, the card route answers it, the answer reaches the model', async values => {
+  await step('h2', 'question: request_user_input_async shows a card, the card route answers it, the answer reaches the model', async values => {
+    // codex-cli 0.164 in the default collaboration mode offers the model `request_user_input_async`: the tool answers {"accepted":true}
+    // at once and Codex raises no blocking request. The question reaches the Console as an assistant message item with `delivery: 'async'`
+    // and `questions: [{ title, options }]`; the turn stays open while the model polls, and the person's answer is an ordinary message.
     const skip = rolloutRecords().length;
-    const before = await countAssistant('blue');
     await send(PROMPTS.question);
     let sawWorking = false;
     const sentAt = Date.now();
-    const outcome = await wait('a pending question, the end of the turn, or 60 s of waiting with no question', async () => {
+    const outcome = await wait('a question card, the end of the turn, or 90 s with no card', async () => {
       const state = await sessionState();
-      if (state.pendingRequests?.length) return { kind: 'question', request: state.pendingRequests[0], working: state.isWorking };
+      if (state.pendingRequests?.length) return { kind: 'question', request: state.pendingRequests[0], working: state.isWorking === true };
       if (state.isWorking === true) sawWorking = true;
       if (sawWorking && state.isWorking !== true) return { kind: 'ended' };
-      if (sawWorking && Date.now() - sentAt > 60_000) return { kind: 'stalled' };
+      if (Date.now() - sentAt > 90_000) return { kind: 'none' };
       return undefined;
     }, 150_000, 250);
     if (outcome.kind !== 'question') {
-      // Codex offers a blocking question to the model only in some modes; if it did not, that is a finding about Codex, not a failure.
       const records = rolloutRecords().slice(skip);
       const calls = records.filter(record => record.payload?.type === 'function_call' && /request_user_input/.test(record.payload.name ?? ''));
-      const outputs = records.filter(record => record.payload?.type === 'function_call_output' && calls.some(call => call.payload.call_id === record.payload.call_id)).map(record => String(record.payload.output).slice(0, 80));
+      const outputs = records.filter(record => record.payload?.type === 'function_call_output' && calls.some(call => call.payload.call_id === record.payload.call_id)).map(record => String(record.payload.output).slice(0, 120));
       const names = [...new Set(calls.map(record => record.payload.name))];
-      const sleeps = records.filter(record => record.payload?.type === 'function_call' && record.payload.name === 'sleep').length;
-      if (outcome.kind === 'stalled') {
-        await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
-        await wait('the stalled turn to stop', idle, 20_000, 250);
-        values.stoppedStalledTurn = true;
-      }
-      values.requestUserInputOffered = 'no question reached the Console';
       values.outcome = outcome.kind;
       values.toolNames = names.join(',') || 'none';
       values.toolAttempts = calls.length;
       values.toolOutputs = outputs.join(' | ');
-      values.sleepCalls = sleeps;
-      finding('request-user-input', `In the default collaboration mode Codex ${evidence.codexVersion} offered the model the tool ${names.join(', ') || '(none)'} (${calls.length} call(s); outputs: ${outputs.join(' | ') || 'none'}), not a blocking item/tool/requestUserInput: no pending request reached the Console. `
-        + `The turn ${outcome.kind === 'ended' ? 'ended, leaving the question to the conversation text' : `stayed open for 60 s while the model polled with ${sleeps} sleep call(s) for an answer, and Stop ended it`}; the question itself is only in the tool call, so a person may not see it.`);
-      return;
+      if (outcome.kind === 'none') {
+        await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
+        await wait('the waiting turn to stop', idle, 20_000, 250);
+        values.stoppedWaitingTurn = true;
+      }
+      if (!outputs.some(output => /"accepted"\s*:\s*true/.test(output))) {
+        // The model never made a call Codex accepted (for example it named a field the tool does not have), so no question was asked
+        // and there is nothing for the Console to show. That is a finding about the model's call, not about the Console.
+        finding('request-user-input', `Codex ${evidence.codexVersion} never accepted a request_user_input call from the model (tool ${names.join(', ') || '(none)'}, ${calls.length} call(s); outputs: ${outputs.join(' | ') || 'none'}), so no question was asked and the card could not be exercised.`);
+        return;
+      }
+      assert.fail(`Codex accepted the question (${outputs.join(' | ')}) but no card reached the Console (${outcome.kind === 'ended' ? 'the turn ended first' : 'none within 90 s'}).`);
     }
     const request = outcome.request;
     assert.equal(request.kind, 'question');
-    assert.equal(outcome.working, true, 'The turn is blocked on the question: the session must read as working.');
+    assert.equal(request.responseMode, 'message', 'An async question is answered as a message, not through a held request.');
     assert.ok(request.questions.length >= 1, 'The pending request must carry its question.');
     const question = request.questions[0];
     const labels = question.options.map(option => option.label);
     const blue = labels.find(label => /blue/i.test(label));
     assert.ok(blue && labels.some(label => /red/i.test(label)), `The options must offer red and blue (saw ${labels.join(', ')}).`);
+    values.cardAfterMs = Date.now() - sentAt;
     values.options = labels.join('/');
     values.allowCustom = String(question.allowCustom ?? false);
+    values.turnWorkingWhileAsking = outcome.working;
+    // The question text itself is an assistant message that names both colors; count the replies from here on.
+    const beforeAnswer = await countAssistant('blue');
+    const answeredAt = Date.now();
     const answered = await api('POST', `/api/sessions/${sessionId}/requests/${request.requestId}`, { decision: 'answer', answers: { [question.id]: [blue] } });
     assert.equal(answered.session.pendingRequests?.length ?? 0, 0, 'The answered question must leave the row.');
     const second = await call('POST', `/api/sessions/${sessionId}/requests/${request.requestId}`, { decision: 'answer', answers: { [question.id]: [blue] } });
     assert.ok(second.status >= 400, 'A second answer to the same question must be refused.');
-    await wait('assistant reply containing blue', async () => (await idle()) && (await countAssistant('blue')) > before);
     values.secondAnswerStatus = second.status;
+    await wait('the model to receive the answer and reply blue', async () => (await idle()) && (await countAssistant('blue')) > beforeAnswer, 90_000, 250);
+    values.answerToReplyMs = Date.now() - answeredAt;
+    // The rollout holds the answer as a user message after the question, so the reply answers it rather than the model guessing.
+    const received = rolloutRecords().slice(skip).find(record => record.payload?.type === 'message' && record.payload.role === 'user' && JSON.stringify(record).includes('Answer to your question'));
+    assert.ok(received, 'The rollout shows no user message carrying the answer.');
+    values.answerDelivered = JSON.stringify(received.payload.content).slice(0, 120);
   });
 
   await step('h3', 'image: an attached PNG reaches the model as a local image item', async values => {
@@ -678,74 +698,98 @@ try {
     Object.assign(values, { oldPid, newPid, samePid: newPid === oldPid, hostPid: after.host.pid, recordMatchesProc: true });
   });
 
-  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it, the next message completes on the same app-server', async values => {
+  await step('k2', 'graceful backend restart during a running turn: the turn is re-adopted, Stop interrupts it and ends its command, a message sent meanwhile steers it and is answered after it, and the next message completes on the same app-server', async values => {
     const control = await consoleControlTexts();
     const skip = rolloutRecords().length;
-    const oldPid = row().pid;
-    const before = hostRecord();
-    assert.equal(before.child.pid, oldPid);
-    const oldGroup = groupMembers(oldPid);
-    const counting = await send(countPrompt('k2', 25));
-    assert.equal(counting.record.deliveryMode, 'turn');
-    await countingStarted(skip, values);
-    const commandPids = await wait('the counting command to be running', () => { const found = pgrep(countMarker('k2')); return found.length ? found : undefined; }, 30_000, 250);
-    values.commandPids = commandPids.length;
-    const countSeenAt = Date.now();
-    const epochBefore = epoch();
     const eventLog = eventLogPath();
     const eventsBeforeShutdown = readEventLog(eventLog).size;
-    await shutdown();
-    await sleep(1000);
-    assert.ok(alive(oldPid), 'The app-server must survive the backend.');
-    assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
-    assert.ok(oldGroup.every(pid => alive(pid)), 'Every process of the app-server group must survive the backend.');
-    assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
-    // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
-    const eventsFrom = readEventLog(eventLog).size;
-    await boot();
-    const bootedAt = Date.now();
-    // Before any message: the row the database holds, then the first screen poll that an open web page makes. That poll must not
-    // write the loss line a turn that ended with its connection would get, and must not send recovery into the running turn.
-    const stored = row();
-    assert.equal(stored.status, 'bound');
-    assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
-    assert.equal(stored.conversation_ref, threadId);
-    const samples = [];
-    const httpStatuses = new Set();
-    let screenStatus;
-    const poll = async () => {
-      const response = await call('GET', `/api/sessions/${sessionId}/screen`);
-      samples.push(response.body?.session?.isWorking === true);
-      httpStatuses.add(response.status);
-      screenStatus = response.body?.screen?.status ?? 'none';
-      return response;
+
+    /**
+     * Starts a 25 s count, restarts the backend while it runs, and returns once the new backend has attached to the app-server and the
+     * row has read working for as long as the count ran. `put` records evidence values. `unattended`: the agent marks its assignment
+     * unattended first, so that a recovery prompt the Console wrongly fired (it declares a running turn lost) would really be sent.
+     */
+    const restartDuringCount = async (tag, put, { unattended = false } = {}) => {
+      const oldPid = row().pid;
+      const before = hostRecord();
+      assert.equal(before.child.pid, oldPid);
+      const oldGroup = groupMembers(oldPid);
+      const callsFrom = rolloutRecords().length;
+      const counting = await send(unattended ? unattendedCountPrompt(tag, 25) : countPrompt(tag, 25));
+      assert.equal(counting.record.deliveryMode, 'turn');
+      const seen = {};
+      await countingStarted(callsFrom, seen);
+      put('commandRunning', seen.commandRunning);
+      const commandPids = await wait('the counting command to be running', () => { const found = pgrep(countMarker(tag)); return found.length ? found : undefined; }, 30_000, 250);
+      put('commandPids', commandPids.length);
+      if (unattended) {
+        const marked = await wait('the agent to mark the assignment unattended', () => { const found = assignment(); const state = found && continuationOf(found.id); return state?.continuation === 'unattended' ? state : undefined; }, 60_000, 250);
+        put('continuationBeforeRestart', marked.continuation);
+      }
+      const countSeenAt = Date.now();
+      const epochBefore = epoch();
+      await shutdown();
+      await sleep(1000);
+      assert.ok(alive(oldPid), 'The app-server must survive the backend.');
+      assert.ok(alive(before.host.pid), 'The session host must survive the backend.');
+      assert.ok(oldGroup.every(pid => alive(pid)), 'Every process of the app-server group must survive the backend.');
+      assert.ok(commandPids.some(pid => alive(pid)), 'The counting command must keep running while the backend is down.');
+      // The first poll is judged on what the new backend writes; the whole window (shutdown included) is checked at the end.
+      const eventsFrom = readEventLog(eventLog).size;
+      await boot();
+      const bootedAt = Date.now();
+      // Before any message: the row the database holds, then the first screen poll that an open web page makes. That poll must not
+      // write the loss line a turn that ended with its connection would get, and must not send recovery into the running turn.
+      const stored = row();
+      assert.equal(stored.status, 'bound');
+      assert.equal(stored.should_restore, 1, 'The binding must stay restorable after a restart.');
+      assert.equal(stored.conversation_ref, threadId);
+      const samples = [];
+      const httpStatuses = new Set();
+      let screenStatus;
+      const poll = async () => {
+        const response = await call('GET', `/api/sessions/${sessionId}/screen`);
+        samples.push(response.body?.session?.isWorking === true);
+        httpStatuses.add(response.status);
+        screenStatus = response.body?.screen?.status ?? 'none';
+        return response;
+      };
+      const firstPoll = await poll();
+      const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
+      put('firstPollHttp', firstPoll.status);
+      put('firstPollScreen', screenStatus);
+      put('firstPollWorking', String(samples[0]));
+      put('connectionEndedAfterFirstPoll', lostAfterFirstPoll.length > 0);
+      assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
+      // Attached again (loaded, not asleep) within the first reconcile pass, to the app-server that survived.
+      await wait('the thread to be attached again', async () => { const response = await poll(); return response.status === 200 && !/asleep$/.test(screenStatus); }, 12_000, 500);
+      put('attachedAfterBootMs', Date.now() - bootedAt);
+      put('epochChanged', epoch() !== epochBefore);
+      assert.equal(row().pid, oldPid, 'The thread is served by the app-server that survived.');
+      assert.deepEqual(procEntries().filter(pid => parentOf(pid) === before.host.pid), [oldPid], 'Attaching must not start a second app-server.');
+      // The turn is still running, so the row must read as working for as long as the count runs.
+      for (let index = 0; index < 4; index += 1) { await sleep(500); await poll(); }
+      put('screenWhileCounting', screenStatus);
+      put('polls', samples.length);
+      const notWorking = samples.filter(working => !working).length;
+      assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join('/')}) while the count was still running.`);
+      const stillCounting = pgrep(countMarker(tag));
+      put('countSeenRunningForMs', Date.now() - countSeenAt);
+      assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${Date.now() - countSeenAt} ms after it was seen running, so the adopted turn could not be tested; rerun.`);
+      return { oldPid, before, stillCounting };
     };
-    const firstPoll = await poll();
-    const lostAfterFirstPoll = lostTurnStatusLines(readEventLog(eventLog, eventsFrom).entries);
-    Object.assign(values, { firstPollHttp: firstPoll.status, firstPollScreen: screenStatus, firstPollWorking: String(samples[0]), connectionEndedAfterFirstPoll: lostAfterFirstPoll.length > 0 });
-    assert.deepEqual(lostAfterFirstPoll, [], `The first screen poll after the restart wrote a lost-turn status line: ${lostAfterFirstPoll.join(' | ')}`);
-    // Attached again (loaded, not asleep) within the first reconcile pass, to the app-server that survived.
-    await wait('the thread to be attached again', async () => { const response = await poll(); return response.status === 200 && !/asleep$/.test(screenStatus); }, 12_000, 500);
-    values.attachedAfterBootMs = Date.now() - bootedAt;
-    values.epochChanged = epoch() !== epochBefore;
-    assert.equal(row().pid, oldPid, 'The thread is served by the app-server that survived.');
-    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === before.host.pid), [oldPid], 'Attaching must not start a second app-server.');
-    // The turn is still running, so the row must read as working for as long as the count runs.
-    for (let index = 0; index < 4; index += 1) { await sleep(500); await poll(); }
-    values.screenWhileCounting = screenStatus;
-    values.polls = samples.length;
-    const notWorking = samples.filter(working => !working).length;
-    assert.equal(notWorking, 0, `isWorking read false in ${notWorking} of ${samples.length} polls (HTTP ${[...httpStatuses].join("/")}) while the count was still running.`);
-    const stillCounting = pgrep(countMarker('k2'));
-    values.countSeenRunningForMs = Date.now() - countSeenAt;
-    assert.ok(stillCounting.length > 0, `The 25 s count had already finished ${values.countSeenRunningForMs} ms after it was seen running, so Stop could not be tested; rerun.`);
-    // Stop reaches the re-adopted turn: idle within 15 s, same app-server, the command ends, the rollout records the interruption.
+
+    // Phase 1: Stop reaches the re-adopted turn: idle within 15 s, same app-server, the rollout records the interruption. The command
+    // the turn started before the restart must be ended by Stop itself, within 5 s: Codex does not end it on `turn/interrupt`, and
+    // the 25 s count would otherwise run out on its own inside a longer wait and pass for a Stop that worked.
+    const stopRun = await restartDuringCount('k2', (key, value) => { values[key] = value; }, { unattended: true });
+    const { oldPid, before, stillCounting } = stopRun;
     const stopped = Date.now();
     await api('POST', `/api/sessions/${sessionId}/keys`, { keys: ['Escape'] });
     await wait('the session to become idle after Stop', idle, 15_000, 250);
     values.idleAfterMs = Date.now() - stopped;
     assert.equal(row().pid, oldPid, 'The row pid must not change for an interrupt.');
-    await wait('the counting command to end after Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 20_000, 250);
+    await wait('the counting command to end within 5 s of Stop', () => stillCounting.every(pid => !alive(pid)) && pgrep(countMarker('k2')).length === 0, 5_000, 100);
     values.commandGoneAfterMs = Date.now() - stopped;
     const abortRecord = await wait('the rollout to record the interrupted turn', () =>
       rolloutRecords().slice(skip).find(record => record.type === 'event_msg' && record.payload?.type === 'turn_aborted'), 15_000, 500);
@@ -757,12 +801,34 @@ try {
     await send(PROMPTS.resumed);
     await wait('assistant reply containing RESUMED', async () => (await idle()) && (await countAssistant('RESUMED')) > resumedBefore);
     assert.equal(row().pid, oldPid, 'The same app-server must serve the resumed thread.');
+    const afterStop = hostRecord();
+    assert.equal(afterStop.host.pid, before.host.pid, 'The same session host must still hold it.');
+    assert.equal(afterStop.child.pid, oldPid);
+    assert.equal(afterStop.child.startTicks, startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
+    assert.equal(afterStop.child.startTicks, before.child.startTicks);
+    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === afterStop.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
+
+    // Phase 2: a message sent while a re-adopted turn runs is delivered to that turn as a steer (it does not start a second turn),
+    // and is answered once the turn's work is done. The count is not stopped this time.
+    const steerRun = await restartDuringCount('k2s', (key, value) => { values[`steer${key[0].toUpperCase()}${key.slice(1)}`] = value; });
+    const followedBefore = await countAssistant('FOLLOWED');
+    const followUp = await send(PROMPTS.followUp);
+    values.followUpDelivery = followUp.record.deliveryMode;
+    assert.equal(followUp.record.deliveryMode, 'steer', 'A message sent while the adopted turn runs must be delivered as a steer.');
+    assert.equal(followUp.record.state, 'submitted');
+    assert.ok(pgrep(countMarker('k2s')).length > 0, 'The count must still be running when the message is sent.');
+    assert.equal(await countAssistant('FOLLOWED'), followedBefore, 'The steered message must not be answered while the count still runs.');
+    await wait('the counting command to finish by itself', () => pgrep(countMarker('k2s')).length === 0, 60_000, 250);
+    await wait('assistant reply containing FOLLOWED', async () => (await idle()) && (await countAssistant('FOLLOWED')) > followedBefore);
+    values.followUpAnswered = 'after the count';
+    assert.equal(row().pid, steerRun.oldPid, 'The same app-server must answer the steered message.');
     const after = hostRecord();
-    assert.equal(after.host.pid, before.host.pid, 'The same session host must still hold it.');
-    assert.equal(after.child.pid, oldPid);
-    assert.equal(after.child.startTicks, startTicksOf(oldPid), 'The record must still match /proc: no restart happened.');
-    assert.equal(after.child.startTicks, before.child.startTicks);
-    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === after.host.pid), [oldPid], 'The host holds exactly one provider process: no second writer.');
+    assert.equal(after.host.pid, steerRun.before.host.pid, 'The same session host must still hold it.');
+    assert.equal(after.child.pid, steerRun.oldPid);
+    assert.equal(after.child.startTicks, startTicksOf(steerRun.oldPid), 'The record must still match /proc: no restart happened.');
+    assert.equal(after.child.startTicks, steerRun.before.child.startTicks);
+    assert.deepEqual(procEntries().filter(pid => parentOf(pid) === after.host.pid), [steerRun.oldPid], 'The host holds exactly one provider process: no second writer.');
+
     // Nothing the Console sends on its own (recovery, wake) reached the conversation, and no loss line was written at any point.
     const events = readEventLog(eventLog, eventsBeforeShutdown).entries;
     assert.deepEqual(lostTurnStatusLines(events), [], 'No lost-turn status line may be written for a turn that survived the restart.');

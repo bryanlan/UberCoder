@@ -137,6 +137,16 @@ export interface CodexThread {
 
 export type CodexCommandExecutionStatus = 'inProgress' | 'completed' | 'failed' | 'declined';
 
+/**
+ * A question the model asked with `request_user_input_async` (codex-cli 0.164): it carries a `title` (the question itself)
+ * and optionally plain-string `options`, with no id, header or secret flag. The raw items are untrusted; `asyncQuestions`
+ * checks them before they are shown.
+ */
+export interface CodexAsyncQuestion {
+  title: string;
+  options?: string[] | null;
+}
+
 export type CodexThreadItem =
   | { type: 'userMessage'; id: string; clientId: string | null; content: CodexUserInput[] }
   | { type: 'hookPrompt'; id: string; fragments: unknown[] }
@@ -147,7 +157,7 @@ export type CodexThreadItem =
       phase: 'commentary' | 'partial_answer' | 'final_answer' | null;
       memoryCitation: unknown;
       delivery: 'async' | null;
-      questions: unknown[] | null;
+      questions: CodexAsyncQuestion[] | null;
     }
   | { type: 'plan'; id: string; text: string }
   | { type: 'reasoning'; id: string; summary: string[]; content: string[] }
@@ -261,6 +271,27 @@ export interface ThreadTurnsListParams {
 }
 export interface ThreadTurnsListResponse {
   data: CodexTurn[];
+  nextCursor: string | null;
+  backwardsCursor?: string | null;
+}
+
+/** One item of a thread, with the turn it belongs to. Oldest first unless `sortDirection` says otherwise. */
+export interface ThreadItemEntry {
+  turnId: string;
+  item: CodexThreadItem;
+  startedAtMs: number | null;
+  completedAtMs: number | null;
+}
+export interface ThreadItemsListParams {
+  threadId: string;
+  /** Only the items of this turn. */
+  turnId?: string | null;
+  cursor?: string | null;
+  limit?: number | null;
+  sortDirection?: 'asc' | 'desc';
+}
+export interface ThreadItemsListResponse {
+  data: ThreadItemEntry[];
   nextCursor: string | null;
   backwardsCursor?: string | null;
 }
@@ -407,6 +438,7 @@ export interface CodexRequestMap {
   'thread/resume': { params: ThreadResumeParams; result: ThreadResumeResponse };
   'thread/read': { params: ThreadReadParams; result: ThreadReadResponse };
   'thread/turns/list': { params: ThreadTurnsListParams; result: ThreadTurnsListResponse };
+  'thread/items/list': { params: ThreadItemsListParams; result: ThreadItemsListResponse };
   'thread/unarchive': { params: ThreadUnarchiveParams; result: ThreadUnarchiveResponse };
   'thread/unsubscribe': { params: ThreadUnsubscribeParams; result: ThreadUnsubscribeResponse };
   'thread/backgroundTerminals/list': { params: ThreadBackgroundTerminalsListParams; result: ThreadBackgroundTerminalsListResponse };

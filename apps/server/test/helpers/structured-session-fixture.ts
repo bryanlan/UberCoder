@@ -86,12 +86,14 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
    * names the provider processes that outlived the old backend behind their session hosts (native id -> pid), and `survivorTurns`
    * the turn each of them is running (native id -> turn id).
    */
-  const restartBackend = async (restart: { survivors?: Record<string, number>; survivorTurns?: Record<string, string> } = {}) => {
+  const restartBackend = async (restart: { survivors?: Record<string, number>; survivorTurns?: Record<string, string>; survivorUnidentified?: string[]; reattachBusy?: number } = {}) => {
     await manager.stop();
     const nextPlugin = new FakeTransportPlugin({
       ...options.plugin,
       ...(restart.survivors ? { survivors: restart.survivors } : {}),
       ...(restart.survivorTurns ? { survivorTurns: restart.survivorTurns } : {}),
+      ...(restart.survivorUnidentified ? { survivorUnidentified: restart.survivorUnidentified } : {}),
+      ...(restart.reattachBusy ? { reattachBusy: restart.reattachBusy } : {}),
     });
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);

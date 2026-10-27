@@ -213,23 +213,25 @@ function isMissingBinary(error: unknown): boolean {
   return false;
 }
 
-/** The lines a session host replayed on connect, oldest first. `firstSeq` is the sequence number of the first one. */
+/** The lines a session host replayed on connect, oldest first, each with the host's sequence number. */
 interface ReplayedLines {
   firstSeq: number;
-  /** The newest sequence number the host had when the connection was made. */
+  /** The newest sequence number the host had when the connection was made: everything up to it is replay, everything after it is live. */
   newestSeq: number;
-  lines: string[];
+  lines: Array<{ seq: number; line: string }>;
 }
 
-/** A host connection whose replayed lines were taken off already: the lines that came behind them are delivered first, then live output. */
+/**
+ * A host connection whose replayed lines were taken off already: the lines that came behind them are delivered first, then live
+ * output. A line is replay when its sequence number is at or below the host's newest at connect time (`replayBoundary`). A replayed
+ * line that arrives late (the host answered `status` slowly, or not at all) is dropped here, never handed to the client as live.
+ */
 class ReplayGate implements ManagedLineTransport {
   readonly outlivesClose: boolean;
-  readonly started: boolean;
   private pending: string[];
 
-  constructor(private readonly inner: HostLineTransport, pending: string[]) {
+  constructor(private readonly inner: HostLineTransport, pending: string[], private readonly replayBoundary: number) {
     this.outlivesClose = inner.outlivesClose;
-    this.started = inner.started;
     this.pending = pending;
   }
 
@@ -251,7 +253,10 @@ class ReplayGate implements ManagedLineTransport {
         // The listener owns its own errors; one line never stops the stream.
       }
     }
-    return this.inner.onLine(listener);
+    return this.inner.onLine((line, seq) => {
+      if (seq !== undefined && seq <= this.replayBoundary) return; // replay that came after the gate was built
+      listener(line);
+    });
   }
 
   onExit(listener: (info: LineTransportExit) => void): () => void {
@@ -290,7 +295,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private cursorTimer: NodeJS.Timeout | undefined;
   private lastSavedSeq = -1;
   private clientRef: JsonRpcClient | undefined;
-  private starting: Promise<JsonRpcClient> | undefined;
+  /** The start of the connection in flight, and whether it may only attach to a running host. */
+  private starting: { promise: Promise<JsonRpcClient>; attachOnly: boolean } | undefined;
   private rateLimitSnapshot: CodexRateLimitSnapshot | undefined;
   private cliVersion: string | undefined;
   private disposed = false;
@@ -423,23 +429,29 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
 
   /**
    * After a backend restart: picks the thread up again when the app-server it ran in is still running behind its session host,
-   * and resolves undefined when no host answers. It connects to a running host only (nothing is started), then resumes the
-   * thread, which adopts a turn the thread is still running (see {@link CodexAppServerSession.adopt}).
+   * and resolves undefined when no host answers. It connects to a running host only (nothing is started, here or in the resume
+   * that follows), then resumes the thread, which adopts a turn the thread is still running (see
+   * {@link CodexAppServerSession.adopt}). A host that runs but does not answer in time is left alone and reported as
+   * {@link TransportUnavailableError}: it is not "no survivor", because the turn may well be running in it.
    */
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession | undefined> {
-    if (!this.clientRef || this.clientRef.exited) {
-      try {
-        await this.ensureClient(true);
-      } catch (error) {
-        if (error instanceof LineTransportNotRunningError) return undefined;
-        throw error;
-      }
+    try {
+      await this.ensureClient(true);
+      return await this.resumeThread(nativeSessionId, options, true);
+    } catch (error) {
+      if (!(error instanceof LineTransportNotRunningError)) throw error;
+      if (error.reason === 'unreachable') throw new TransportUnavailableError('The running Codex app-server did not answer in time. It was left alone; try again in a moment.');
+      return undefined;
     }
-    return this.resume(nativeSessionId, options);
   }
 
   async resume(nativeSessionId: string, options: OpenOptions): Promise<CodexAppServerSession> {
-    const client = await this.ensureClient();
+    return this.resumeThread(nativeSessionId, options, false);
+  }
+
+  /** `attachOnly`: the connection is made to a running host or not at all (see {@link reattach}). */
+  private async resumeThread(nativeSessionId: string, options: OpenOptions, attachOnly: boolean): Promise<CodexAppServerSession> {
+    const client = await this.ensureClient(attachOnly);
     this.noteSessionEnv(options);
     const params: ThreadResumeParams = {
       threadId: nativeSessionId,
@@ -487,7 +499,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
 
   async dispose(reason: 'shutdown' | 'restart'): Promise<void> {
     if (reason === 'shutdown') this.disposed = true;
-    if (this.starting) await this.starting.catch(() => undefined);
+    if (this.starting) await this.starting.promise.catch(() => undefined);
     const client = this.clientRef;
     this.clientRef = undefined;
     // A process held by a session host keeps running and keeps waiting for the answers to its questions: they stay held for the
@@ -508,14 +520,33 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   // -------------------------------------------------------------------------------------------------------
   // Process
 
-  /** `attachOnly`: connect to a running host and start nothing; rejects with {@link LineTransportNotRunningError} when there is none. */
+  /**
+   * `attachOnly`: connect to a running host and start nothing; rejects with {@link LineTransportNotRunningError} when there is none.
+   * An attach-only caller and an ordinary one never share a failed attempt: an ordinary caller that finds an attach-only start
+   * ended without a host starts one itself, and an attach-only caller that finds an ordinary start in flight waits for it and
+   * uses the connection it made (it started nothing).
+   */
   private async ensureClient(attachOnly = false): Promise<JsonRpcClient> {
-    if (this.disposed) throw new TransportUnavailableError('The Codex app-server instance was shut down.');
-    if (this.clientRef && !this.clientRef.exited) return this.clientRef;
-    this.starting ??= this.startClient(attachOnly).finally(() => {
-      this.starting = undefined;
-    });
-    return this.starting;
+    for (;;) {
+      if (this.disposed) throw new TransportUnavailableError('The Codex app-server instance was shut down.');
+      if (this.clientRef && !this.clientRef.exited) return this.clientRef;
+      let attempt = this.starting;
+      if (!attempt) {
+        const promise = this.startClient(attachOnly);
+        attempt = { promise, attachOnly };
+        this.starting = attempt;
+        const done = (): void => {
+          if (this.starting === attempt) this.starting = undefined;
+        };
+        promise.then(done, done);
+      }
+      try {
+        return await attempt.promise;
+      } catch (error) {
+        if (attempt.attachOnly && !attachOnly && error instanceof LineTransportNotRunningError) continue;
+        throw error;
+      }
+    }
   }
 
   private async startClient(attachOnly = false): Promise<JsonRpcClient> {
@@ -626,22 +657,24 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   /**
    * The host replays what it still has buffered, ahead of live output. The lines are history (their notifications were
    * handled, or are outdated), so they are taken off the stream and read once by `absorbReplay`; the client sees only lines
-   * that arrive after them. `status` is answered after the replay, which marks its end.
+   * that arrive after them. A line is replay or live by its sequence number, against the host's newest at connect time. `status`
+   * is answered after the replay, so it marks when to stop collecting; when it is slow or never comes, the lines still to come
+   * are told apart by the same number (see {@link ReplayGate}), so none of them reaches the client as live output.
    */
   private async separateReplay(transport: HostLineTransport): Promise<{ transport: LineTransport; replay: ReplayedLines }> {
-    const { seq, firstSeq } = transport.info;
-    const replayCount = seq >= firstSeq ? seq - firstSeq + 1 : 0;
-    const lines: string[] = [];
-    const stop = transport.onLine((line) => void lines.push(line));
+    const { seq: newestSeq, firstSeq } = transport.info;
+    const collected: Array<{ seq: number | undefined; line: string }> = [];
+    const stop = transport.onLine((line, seq) => void collected.push({ seq, line }));
     try {
       await transport.status(this.timings.initializeTimeoutMs);
     } catch {
       // The connection is lost or the host is slow: the client reports it when it starts.
     }
     stop();
+    const isReplay = (entry: { seq: number | undefined }): entry is { seq: number; line: string } => entry.seq !== undefined && entry.seq <= newestSeq;
     return {
-      transport: new ReplayGate(transport, lines.slice(replayCount)),
-      replay: { firstSeq, newestSeq: seq, lines: lines.slice(0, replayCount) },
+      transport: new ReplayGate(transport, collected.filter((entry) => !isReplay(entry)).map((entry) => entry.line), newestSeq),
+      replay: { firstSeq, newestSeq, lines: collected.filter(isReplay) },
     };
   }
 
@@ -663,24 +696,24 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     if (gap) this.log.info({ seen, firstSeq: replay.firstSeq, newestSeq: replay.newestSeq }, 'the codex session host no longer holds every line since the last backend; pending questions are checked against the thread status instead');
     const requests: Array<{ id: JsonRpcId; method: string; params: unknown }> = [];
     const resolved = new Set<string>();
-    replay.lines.forEach((line, index) => {
-      if (replay.firstSeq + index <= seen) return; // handled by the backend that saved the cursor
+    for (const { seq, line } of replay.lines) {
+      if (seq <= seen) continue; // handled by the backend that saved the cursor
       let frame: unknown;
       try {
         frame = JSON.parse(line);
       } catch {
-        return;
+        continue;
       }
-      if (typeof frame !== 'object' || frame === null) return;
+      if (typeof frame !== 'object' || frame === null) continue;
       const { method, id, params } = frame as { method?: unknown; id?: unknown; params?: unknown };
-      if (typeof method !== 'string') return;
+      if (typeof method !== 'string') continue;
       if (method === 'serverRequest/resolved') {
         const requestId = (params as { requestId?: unknown } | undefined)?.requestId;
         if (typeof requestId === 'string' || typeof requestId === 'number') resolved.add(String(requestId));
       } else if ((typeof id === 'string' || typeof id === 'number') && (THREAD_SERVER_REQUESTS as string[]).includes(method)) {
         requests.push({ id, method, params });
       }
-    });
+    }
     for (const key of resolved) this.restart.removeQuestion(key);
     for (const { id, method, params } of requests) {
       const key = String(id);

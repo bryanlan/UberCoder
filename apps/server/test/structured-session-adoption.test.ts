@@ -4,6 +4,7 @@ import { StructuredRequestNotFoundError } from '../src/sessions/session-manager.
 import type { StructuredQuestionNotice } from '../src/sessions/structured/pending-requests.js';
 import type { TransportEvent } from '../src/providers/transport/types.js';
 import type { FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
+import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 // A turn can outlive a backend restart in the provider process that runs it (a Claude CLI, or the shared Codex app-server, each
@@ -33,7 +34,7 @@ const lossLines = (f: StructuredSessionFixture, sessionId: string) =>
 const methods = (instance: { calls: Array<{ method: string }> } | undefined) => (instance?.calls ?? []).map(call => call.method);
 
 /** A bound row with a running turn (`turn-1`), then a new backend over the same database whose process survived running it. */
-async function runningThenRestarted(options: { plugin?: FakeTransportPluginOptions; survivorRunsTurn?: boolean } = {}) {
+async function runningThenRestarted(options: { plugin?: FakeTransportPluginOptions; survivorRunsTurn?: boolean; restart?: { survivorUnidentified?: string[]; reattachBusy?: number } } = {}) {
   const f = fixture({ plugin: options.plugin });
   const { session } = await f.bindNew();
   const native = session.conversationRef;
@@ -45,6 +46,7 @@ async function runningThenRestarted(options: { plugin?: FakeTransportPluginOptio
   const backend = await f.restartBackend({
     survivors: { [native]: pid },
     ...(options.survivorRunsTurn === false ? {} : { survivorTurns: { [native]: 'turn-1' } }),
+    ...options.restart,
   });
   return { f, session, native, backend, activityBefore };
 }
@@ -165,6 +167,107 @@ describe('A turn that did not survive a backend restart', () => {
     await backend.manager.reconcileSessions();
     await settle();
     expect(methods(backend.plugin.instance)).toEqual([]);
+  });
+});
+
+describe.each([
+  ['a shared process (Codex)', undefined],
+  ['a per-session process (Claude)', PER_SESSION],
+] as const)('A provider process that runs but does not answer in time (%s)', (_label, plugin) => {
+  it('is left alone: the row keeps its turn, no loss is written, and the next load that gets an answer adopts it', async () => {
+    const { f, session, native, backend, activityBefore } = await runningThenRestarted({ plugin, restart: { reattachBusy: 3 } });
+
+    // The first poll after the deploy, and both lookups of the first reconcile pass (the survivor sweep and the row's own load),
+    // find the process slow.
+    expect(await backend.manager.getSessionScreen(session.id)).toBeUndefined();
+    await backend.manager.reconcileSessions();
+    await settle();
+    const instance = backend.plugin.instance!;
+    expect(methods(instance)).toEqual(['reattach', 'reattach', 'reattach']);
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(f.row(session.id).lastActivityAt).toBe(activityBefore);
+    expect(backend.tmux.created).toEqual([]);
+
+    // The next load gets an answer: the survivor is adopted with its turn, as if it had answered at once.
+    const polled = await backend.manager.getSessionScreen(session.id);
+    await settle();
+    expect(polled?.screen.status).toMatch(/working/);
+    expect(methods(instance)).toEqual(['reattach', 'reattach', 'reattach', 'reattach']);
+    expect(instance.sessions).toHaveLength(1);
+    expect(instance.sessions[0]!.nativeSessionId).toBe(native);
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(methods(instance)).not.toContain('resume');
+  });
+
+  it('says so on the conversation only after the third failed lookup in a row, once', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin, restart: { reattachBusy: 4 } });
+    const slowLines = () => eventLogLines(f.row(session.id)).filter(line => /slow to answer/.test(line.text));
+
+    await backend.manager.getSessionScreen(session.id);
+    await backend.manager.getSessionScreen(session.id);
+    expect(slowLines()).toEqual([]);
+    await backend.manager.getSessionScreen(session.id);
+    expect(slowLines()).toHaveLength(1);
+    await backend.manager.getSessionScreen(session.id);
+    expect(slowLines()).toHaveLength(1); // not repeated
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+
+    // An answer ends the run: nothing more is said, and the turn is adopted.
+    await backend.manager.getSessionScreen(session.id);
+    await settle();
+    expect(backend.plugin.instance!.sessions).toHaveLength(1);
+    expect(slowLines()).toHaveLength(1);
+    expect(f.row(session.id).isWorking).toBe(true);
+  });
+
+  it('does not run recovery or declare the turn lost for an unattended row, however many loads find the process slow', async () => {
+    const { f, session, backend } = await runningThenRestarted({ plugin, restart: { reattachBusy: 5 } });
+    enableUnattendedRecovery(f.db, f.providerId as 'codex' | 'claude', session.conversationRef);
+    for (let load = 0; load < 5; load += 1) await backend.manager.getSessionScreen(session.id);
+    await settle();
+    expect(backend.manager['runRecovery'].getRunState(session.id)).toBeUndefined();
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(methods(backend.plugin.instance)).not.toContain('sendTurn');
+  });
+});
+
+describe('A thread the app-server says is running a turn that no listing names', () => {
+  it('is not declared lost: the row stays working until the first event names the turn', async () => {
+    const { f, session, native, backend } = await runningThenRestarted({ survivorRunsTurn: false, restart: { survivorUnidentified: ['fake-thread-1'] } });
+    expect(native).toBe('fake-thread-1');
+    // The plugin cannot name the turn (its listing failed) but the provider says the thread is active.
+    await backend.manager.reconcileSessions();
+    await settle();
+
+    const instance = backend.plugin.instance!;
+    expect(methods(instance)).toEqual(['reattach']);
+    expect(lossLines(f, session.id)).toEqual([]);
+    expect(f.row(session.id).isWorking).toBe(true);
+    expect(backend.tmux.created).toEqual([]);
+
+    // The first event of the turn adopts it; its terminal ends the row's work as usual.
+    const adopted = instance.sessions[0]!;
+    expect(adopted.nativeSessionId).toBe(native);
+    adopted.turnUnidentified = false;
+    adopted.push({ type: 'turn.started', turnId: 'turn-1', origin: 'provider', replay: false, adopted: true });
+    await settle();
+    expect(backend.manager['structured'].turnActive(session)).toBe(true);
+    adopted.completeTurn('completed');
+    await settle();
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(lossLines(f, session.id)).toEqual([]);
+  });
+
+  it('is still declared lost when the app-server has no turn for the thread at all', async () => {
+    const { f, session, backend } = await runningThenRestarted({ survivorRunsTurn: false });
+    await backend.manager.reconcileSessions();
+    await settle();
+    expect(f.row(session.id).isWorking).toBe(false);
+    expect(lossLines(f, session.id)).toHaveLength(1);
   });
 });
 

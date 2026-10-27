@@ -319,8 +319,13 @@ Run recovery ownership (requires explicit unattended permission):
 
 ## Structured provider lane
 
-- `docs/structured-providers.md` — plan, contracts, slice boundaries and verification evidence;
+- `docs/structured-providers.md`: plan, plugin contract (a verbatim copy of `types.ts`), slice 1 boundaries and evidence;
   `docs/research/codex-app-server-2026-10-26/` holds the protocol brief and seam maps it was built from.
+- `docs/structured-cutover.md`: the cutover plan and record (session host relay, Claude plugin, per-session processes, default
+  transport and migration, re-adoption across restarts, questions and images, the flip procedure, proof evidence, review rounds).
+  `docs/research/claude-headless-2026-10-26/` holds the Claude protocol brief and probe transcripts;
+  `docs/research/cutover-2026-10-26/` holds the proof evidence JSON (the final runs are `claude-proof-2026-10-26T18-36-00Z`,
+  `codex-proof-2026-10-26T18-37-31Z` and `migration-proof-2026-10-26T18-40-03Z`), `review-round-1.md` and `review-round-2.md`.
 - `apps/server/src/providers/transport/{types,registry}.ts` — transport plugin contract (capabilities,
   events, instance, session) and the plugin registry.
 - `apps/server/src/providers/transport/line-transport.ts` — line channels to provider processes:
@@ -331,7 +336,9 @@ Run recovery ownership (requires explicit unattended permission):
 - `apps/server/src/providers/transport/codex/` — the `codex app-server` plugin: `jsonrpc.ts` (JSON-RPC client
   over a `LineTransport`), `protocol.ts` (wire shapes), `app-server-instance.ts` (shared child process behind a
   session host, thread routing, environment, reconnect), `app-server-session.ts` (thread and turn
-  lifecycle, event mapping, steer and interrupt), `process-lifetime.ts` (process start-ticks identity and
+  lifecycle, event mapping, steer and interrupt, adoption of a turn or question a restart left running),
+  `restart-state.ts` (what one backend writes down for the next: held questions with their JSON-RPC ids, the turn each
+  thread runs, the cursor into the session host's replay buffer), `process-lifetime.ts` (process start-ticks identity and
   gated termination of a recorded process or group), `errors.ts`, `usage.ts`
   and `redact.ts` (ported from T3 Code; see `THIRD_PARTY_NOTICES.md`).
 - `apps/server/src/providers/transport/claude/` — the headless Claude plugin (`claude --output-format stream-json`, one
@@ -339,7 +346,10 @@ Run recovery ownership (requires explicit unattended permission):
   launch and reattach, `probe`, the one-writer check), `claude-session.ts` (turns, steer and "send now", interrupt, requests,
   event mapping, unload and detach), `stream-json.ts` (frame client: control requests matched by id, server requests that must
   be answered), `protocol.ts` (wire types), `errors.ts` and `usage.ts` (result and rate-limit classification, ported from T3
-  Code), `transcript.ts` (where the CLI keeps transcripts and live-process registry files), `event-channel.ts`, `index.ts`.
+  Code), `transcript.ts` (where the CLI keeps transcripts and live-process registry files), `image-fit.ts` (sharp: scales
+  and re-encodes an image to what the API accepts before it becomes a base64 block), `event-channel.ts`, `index.ts`.
+  `apps/server/src/images/prompt.ts` holds the matching prompt helpers (`withoutImageInstruction`, `imagePromptFiles`, which
+  accepts only files directly in the image store).
 - `apps/server/src/sessions/structured/pending-requests.ts` — the meta key and projection of the questions a structured
   session is waiting on (`pendingRequests` on the row; the service owns the list).
 - `apps/web/src/components/PendingQuestionCard.tsx` — the question card in the conversation pane; its answer goes to
@@ -347,7 +357,8 @@ Run recovery ownership (requires explicit unattended permission):
 - `apps/server/src/sessions/tmux-client.ts`: also holds `assertTmuxSessionName`, which makes every
   `ShellTmuxClient` method refuse a `structured:` session name.
 - `apps/server/src/sessions/structured/structured-session-service.ts` — loaded sessions, active turn,
-  steer-versus-turn policy, exactly-once terminals and process environment; `structured-run-monitor.ts`
+  steer-versus-turn policy, exactly-once terminals, process environment, survivor adoption (`reattachSurvivors`), ending
+  orphan hosts (`sweepOrphanHosts`, `endConversation`) and the question list; `structured-run-monitor.ts`
   — run state for RunRecovery from turn events plus the rollout monitor.
 - `apps/server/src/sessions/structured/default-transport.ts` — the pure rule for the transport of a bind that names
   none (`structuredSessions.defaultTransport` for a provider whose lane is on); routes and `SessionManager` share it.
@@ -364,7 +375,9 @@ Run recovery ownership (requires explicit unattended permission):
   survival, parent death, and the factory's reconnect, replacement and reaping.
 - `apps/server/test/structured-claude-plugin.test.ts`: the Claude plugin against a scripted fake `claude`
   (`test/helpers/fake-claude.mjs`, `claude-harness.ts`): launch, turns, steer, interrupt, requests, failures, resume, the
-  one-writer check, bare-mode and login refusals, the session host path.
+  one-writer check, bare-mode and login refusals, image fitting for large images, the session host path.
+  `apps/server/test/image-input.test.ts` also covers the prompt helpers (`imagePromptFiles` accepts only files directly in the
+  image store and reads an envelope without its instruction line).
   `structured-codex-requests.test.ts`: Codex questions and images. `structured-session-requests.test.ts`: questions on the
   session row and the answer guard.
 - `apps/server/test/structured-codex-process-lifetime.test.ts`: `/proc` start-ticks identity, the host launch,
@@ -374,6 +387,18 @@ Run recovery ownership (requires explicit unattended permission):
   and half-restored rows re-armed at boot, not-sent delivery, a turn id that runs again.
 - `apps/server/test/structured-session-env.test.ts`: the provider process environment (coordination
   variables, configured `env`).
+- `apps/server/test/structured-claude-reattach.test.ts`: the Claude plugin finding a process again in the middle of a turn (the
+  turn is known at once, Stop reaches it, a message sent meanwhile gets its own turn), the background-task snapshot wait,
+  frames of a turn the session did not send, an empty headless chat restarted under its id, resume beside a holder, and Stop
+  dropping queued steers.
+- `apps/server/test/structured-codex-restart.test.ts`: the Codex plugin across a backend restart (adopted and ended turns, held
+  questions answered by id, requests read from the host replay, a replay that does not reach back far enough, the handler
+  limit, questions asked in a message). `structured-session-codex-restart.test.ts`: the same through the real manager, the real
+  Codex plugin and the real session host, against a scripted app-server.
+- `apps/server/test/structured-session-survivors.test.ts`: the first reconcile pass adopting a per-session process that outlived
+  a restart (fake plugin). `structured-session-adoption.test.ts`: the manager side of adopting a running turn on every load path,
+  a turn that did not survive, Stop and queued steers, withdrawn and repeated questions, message-mode questions.
+  `structured-session-orphans.test.ts`: ending a session host nobody adopted (release, sleep, the startup sweep).
 - `apps/server/test/structured-session-per-session.test.ts`: per-session processes (environment, coordination
   identity, authority text, own pid, idle sleep, manual suspend, pressure, release, unexpected exit).
   `structured-session-migration.test.ts`: moving tmux conversations over and the dry run.
@@ -381,13 +406,16 @@ Run recovery ownership (requires explicit unattended permission):
   binds and granted launches.
 - `apps/server/test/tmux-client-structured-guard.test.ts`: the tmux client refuses the `structured:` name in
   every method.
-- `scripts/prove-structured-codex.mjs` — opt-in real-Codex proof of the whole lane through the HTTP API;
-  evidence JSON under `test-results/structured-codex-proof/`.
-  `scripts/prove-structured-claude.mjs` — the same for a real structured Claude chat (coordination hooks and MCP, steer,
-  Stop, a question, an image, a live model switch, sleep and restore, backend restart, release); evidence under
-  `test-results/structured-claude-proof/`. `scripts/prove-structured-migration.mjs` — real tmux Codex and Claude chats moved
-  to the structured transport by the reconcile pass; evidence under `test-results/structured-migration-proof/`.
-  `scripts/structured-proof-kit.mjs` — their shared harness (isolated backend, evidence, process helpers, cleanup).
+- `scripts/prove-structured-codex.mjs`: opt-in real-Codex proof of the whole lane through the HTTP API (16 steps, including
+  a question, an image, a backend restart during a running turn and a large image); evidence JSON under
+  `test-results/structured-codex-proof/`.
+  `scripts/prove-structured-claude.mjs`: the same for a real structured Claude chat (14 steps: coordination hooks and MCP,
+  steer, Stop, a question, an image, a live model switch, sleep and restore, backend restart while idle and during a running
+  turn, a large image, release); evidence under `test-results/structured-claude-proof/`.
+  `scripts/prove-structured-migration.mjs`: real tmux Codex and Claude chats moved to the structured transport by the
+  reconcile pass (9 steps); evidence under `test-results/structured-migration-proof/`.
+  `scripts/structured-proof-kit.mjs`: their shared harness (isolated backend, evidence, process scan and cleanup, PNG
+  builders, event-log reader).
 - Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register and
   structured liveness, `sessions/tmux-client.ts`,
   `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls

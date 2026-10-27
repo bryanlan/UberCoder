@@ -43,7 +43,9 @@ import {
   type CodexTurnError,
   type CodexTurnStatus,
   type CodexUserInput,
+  type CodexBackgroundTerminal,
   type ThreadBackgroundTerminalsListResponse,
+  type ThreadItemsListResponse,
   type TurnStartParams,
 } from './protocol.js';
 import { redactFreeText } from './redact.js';
@@ -311,6 +313,24 @@ export function pendingQuestions(params: unknown): PendingQuestion[] | undefined
   return questions;
 }
 
+/**
+ * The questions of an async `agentMessage` item (the model's `request_user_input_async` tool) as the host shows them: each is
+ * `{ title, options? }` with plain-string options, no id and no header, so the title is the question, a question is named by
+ * its position, and a typed answer is always allowed (the answer goes back as an ordinary message). Undefined when the item
+ * cannot be shown: no questions, or a question without a title or with an option that is not a non-empty string.
+ */
+export function asyncQuestions(raw: unknown): PendingQuestion[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const questions: PendingQuestion[] = [];
+  for (const [index, entry] of raw.entries()) {
+    if (!isRecord(entry) || typeof entry.title !== 'string' || !entry.title.trim()) return undefined;
+    const { options } = entry;
+    if (options !== undefined && options !== null && (!Array.isArray(options) || options.some((option) => typeof option !== 'string' || !option.trim()))) return undefined;
+    questions.push({ id: `q${index + 1}`, question: entry.title, options: ((options ?? []) as string[]).map((label) => ({ label })), allowCustom: true });
+  }
+  return questions;
+}
+
 /** A question held open for the person: the id list shapes the answer, `settle` sends the JSON-RPC reply. */
 interface OpenQuestion {
   turnId: string | undefined;
@@ -418,6 +438,13 @@ const ADOPTION_TURN_WINDOW = 8;
 const MAX_MESSAGE_QUESTIONS = 256;
 /** Notifications kept while a resumed session works out which turn its thread is running. */
 const MAX_ADOPTION_FRAMES = 4096;
+/** Past the limit above these are still kept, because losing one leaves a turn, a question or the thread state wrong for good. Everything else is a delta or a progress tick. */
+const ESSENTIAL_ADOPTION_FRAMES = new Set(['turn/started', 'turn/completed', 'thread/status/changed', 'thread/closed', 'serverRequest/resolved']);
+/** Pages read (of {@link ADOPTION_ITEMS_PER_PAGE} items) when looking for the commands a turn found running has going. */
+const ADOPTION_COMMAND_PAGES = 10;
+const ADOPTION_ITEMS_PER_PAGE = 100;
+/** The longest one of those optional listings may take: adopting a turn must not wait a whole request timeout for what is only a help to Stop. */
+const ADOPTION_LISTING_TIMEOUT_MS = 10_000;
 const MAX_EARLY_EVENTS_PER_TURN = 512;
 const MAX_EARLY_TURNS = 16;
 
@@ -492,6 +519,14 @@ export class CodexAppServerSession implements TransportSession {
   /** The id of the turn that has not reached its terminal event, if any. */
   get activeTurn(): string | undefined {
     return this.activeTurnId ?? undefined;
+  }
+
+  /**
+   * The thread was running a turn when this session attached and no listing named it. The first event of a turn nobody
+   * knows is adopted as that turn; until then the host must not take the missing turn for a lost one.
+   */
+  get turnUnidentified(): boolean {
+    return !this.ended && this.adoptUnknownTurn && this.activeTurnId === null;
   }
 
   /** Called once by the instance after it registers the session: announces the native id and readiness. */
@@ -679,7 +714,7 @@ export class CodexAppServerSession implements TransportSession {
     if (this.ended) return;
     if (this.adopting) {
       // The turn this thread is running is not known yet: apply the notification once it is, in the order it arrived.
-      if (this.heldFrames.length < MAX_ADOPTION_FRAMES) this.heldFrames.push({ method, params });
+      if (this.heldFrames.length < MAX_ADOPTION_FRAMES || ESSENTIAL_ADOPTION_FRAMES.has(method)) this.heldFrames.push({ method, params });
       return;
     }
     this.dispatchNotification(method, params);
@@ -880,7 +915,7 @@ export class CodexAppServerSession implements TransportSession {
     // The turn the previous backend followed ended while nobody listened: its terminal has not been reported.
     if (tracked && tracked.status !== 'inProgress') this.adoptEndedTurn(tracked);
     const running = turns.find((turn) => turn.status === 'inProgress' && !this.turns.has(turn.id) && !this.finishedTurnIds.has(turn.id));
-    if (running) this.adoptRunningTurn(running);
+    if (running) await this.adoptRunningTurn(running);
     else if (active && this.activeTurnId === null) this.adoptUnknownTurn = true;
     // A marker that names a turn the server no longer lists, or one that is not running: nothing is left to follow.
     if (trackedTurnId && this.activeTurnId === null) this.host.noteTurn(this.nativeSessionId, undefined);
@@ -902,9 +937,84 @@ export class CodexAppServerSession implements TransportSession {
     }
   }
 
-  private adoptRunningTurn(turn: CodexTurn): void {
+  private async adoptRunningTurn(turn: CodexTurn): Promise<void> {
     const record = this.newTurn(turn.id, 'provider', true);
     this.markStarted(record);
+    // Notifications wait until this is done, so a command that ends meanwhile is removed again in order.
+    await this.trackRunningCommands(record);
+  }
+
+  /**
+   * A turn found running was started by an earlier backend: this session never saw its commands start, so it cannot end them
+   * at Stop (Codex does not end a turn's command on `turn/interrupt`). Ask which commands the turn has running, read from its
+   * in-progress `commandExecution` items (the process id comes from the item, or from the thread's background terminals when
+   * the item has none), and track them like commands seen starting. Best effort: a provider that cannot list them leaves the
+   * turn with no tracked commands, as before, and the failure goes to the log.
+   */
+  private async trackRunningCommands(record: TurnRecord): Promise<void> {
+    const [items, terminals] = await Promise.all([this.listRunningCommandItems(record.id), this.listTerminalProcesses()]);
+    if (this.ended || record.terminal) return;
+    for (const item of items) {
+      const processId = item.processId ?? terminals.get(item.id);
+      if (processId && !record.commands.has(item.id)) record.commands.set(item.id, processId);
+    }
+    if (items.length > 0) this.host.log.debug?.({ threadId: this.nativeSessionId, turnId: record.id, running: items.length, tracked: record.commands.size }, 'codex tracked the commands an adopted turn is running');
+  }
+
+  /** The in-progress commands of one turn, newest first. An error gives none. */
+  private async listRunningCommandItems(turnId: string): Promise<Array<{ id: string; processId: string | null }>> {
+    const found: Array<{ id: string; processId: string | null }> = [];
+    try {
+      let cursor: string | null = null;
+      for (let page = 0; page < ADOPTION_COMMAND_PAGES; page += 1) {
+        const response: ThreadItemsListResponse = await callCodex(
+          this.host.client(),
+          'thread/items/list',
+          { threadId: this.nativeSessionId, turnId, limit: ADOPTION_ITEMS_PER_PAGE, sortDirection: 'desc', ...(cursor ? { cursor } : {}) },
+          { timeoutMs: Math.min(this.host.timings.requestTimeoutMs, ADOPTION_LISTING_TIMEOUT_MS) },
+        );
+        for (const entry of Array.isArray(response?.data) ? response.data : []) {
+          const item = entry?.item;
+          if (typeof entry?.turnId === 'string' && entry.turnId !== turnId) continue;
+          if (isRecord(item) && item.type === 'commandExecution' && item.status === 'inProgress' && typeof item.id === 'string') {
+            found.push({ id: item.id, processId: asString(item.processId) ?? null });
+          }
+        }
+        cursor = response?.nextCursor ?? null;
+        if (!cursor) break;
+      }
+    } catch (error) {
+      this.host.log.debug?.({ threadId: this.nativeSessionId, turnId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/items/list failed');
+    }
+    return found;
+  }
+
+  /** The thread's live background terminals by item id. An error gives none. */
+  private async listTerminalProcesses(): Promise<Map<string, string>> {
+    try {
+      return new Map((await this.listBackgroundTerminals(Math.min(this.host.timings.requestTimeoutMs, ADOPTION_LISTING_TIMEOUT_MS))).map((terminal) => [terminal.itemId, terminal.processId]));
+    } catch (error) {
+      this.host.log.debug?.({ threadId: this.nativeSessionId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/backgroundTerminals/list failed');
+      return new Map();
+    }
+  }
+
+  /** Every live background terminal of the thread. Throws when the provider cannot list them. */
+  private async listBackgroundTerminals(timeoutMs: number = this.host.timings.requestTimeoutMs): Promise<CodexBackgroundTerminal[]> {
+    const terminals: CodexBackgroundTerminal[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 20; page += 1) {
+      const response: ThreadBackgroundTerminalsListResponse = await callCodex(
+        this.host.client(),
+        'thread/backgroundTerminals/list',
+        { threadId: this.nativeSessionId, ...(cursor ? { cursor } : {}) },
+        { timeoutMs },
+      );
+      terminals.push(...response.data);
+      cursor = response.nextCursor;
+      if (!cursor) break;
+    }
+    return terminals;
   }
 
   private adoptEndedTurn(turn: CodexTurn): void {
@@ -1157,19 +1267,7 @@ export class CodexAppServerSession implements TransportSession {
     const job = (async () => {
       let targets = tracked;
       try {
-        const live = new Set<string>();
-        let cursor: string | null = null;
-        for (let page = 0; page < 20; page += 1) {
-          const response: ThreadBackgroundTerminalsListResponse = await callCodex(
-            this.host.client(),
-            'thread/backgroundTerminals/list',
-            { threadId, ...(cursor ? { cursor } : {}) },
-            { timeoutMs: this.host.timings.requestTimeoutMs },
-          );
-          for (const terminal of response.data) live.add(terminal.processId);
-          cursor = response.nextCursor;
-          if (!cursor) break;
-        }
+        const live = new Set((await this.listBackgroundTerminals()).map((terminal) => terminal.processId));
         targets = tracked.filter((processId) => live.has(processId));
       } catch (error) {
         log.debug?.({ threadId, error: error instanceof Error ? error.message : String(error) }, 'codex thread/backgroundTerminals/list failed; terminating tracked commands anyway');
@@ -1202,6 +1300,10 @@ export class CodexAppServerSession implements TransportSession {
       this.adoptUnknownTurn = false;
       const adopted = this.newTurn(turnId, 'provider', true);
       this.markStarted(adopted);
+      // Its commands that started before this session attached are found in the background; Stop before that finds none of them.
+      const job = this.trackRunningCommands(adopted).catch(() => undefined);
+      this.cleanupJobs.add(job);
+      void job.finally(() => this.cleanupJobs.delete(job));
       return adopted;
     }
     if (this.pendingStart !== null && !this.finishedTurnIds.has(turnId)) {
@@ -1264,23 +1366,30 @@ export class CodexAppServerSession implements TransportSession {
       replay: false,
       ...(title ? { title } : {}),
     });
-    if (item.type === 'agentMessage' && item.delivery === 'async' && Array.isArray(item.questions)) this.openMessageQuestion(turnId, item.id, item.questions);
+    if (item.type === 'agentMessage' && item.delivery === 'async' && item.questions !== null && item.questions !== undefined) this.openMessageQuestion(turnId, item.id, item.questions);
   }
 
   /**
-   * On codex-cli 0.164 the model asks through `request_user_input_async`: the tool answers `{accepted: true}` at once, no server
-   * request is raised, and the question arrives as an assistant message item (`delivery: 'async'`, `questions`). Nothing waits
-   * for it, so there is nothing to hold; the person's answer goes back as a normal message (`responseMode: 'message'`).
+   * On codex-cli 0.164 the model asks through `request_user_input_async`: the tool answers `{accepted: true}` at once, Codex
+   * raises no server request, and the question arrives as an assistant message item (`delivery: 'async'`, `questions` of
+   * `{ title, options? }`; its id is the tool call's) in an `item/started` and an identical `item/completed`. The turn stays open
+   * while the model polls (sleep calls). Nothing waits on the answer, so there is nothing to hold; the person's answer goes back
+   * as an ordinary message (`responseMode: 'message'`), which steers into the open turn. Observed in the real frames
+   * recorded in docs/research/cutover-2026-10-26/.
    */
-  private openMessageQuestion(turnId: string, itemId: string, raw: unknown[]): void {
+  private openMessageQuestion(turnId: string, itemId: string, raw: unknown): void {
     const requestId = `item:${itemId}`;
-    if (this.messageQuestions.has(requestId)) return;
-    // A question without an id of its own gets its position, so the answer can name it.
-    const questions = pendingQuestions({ questions: raw.map((question, index) => (isRecord(question) && typeof question.id !== 'string' ? { ...question, id: `q${index + 1}` } : question)) });
-    if (!questions) return;
+    if (this.messageQuestions.has(requestId) || (Array.isArray(raw) && raw.length === 0)) return;
+    const questions = asyncQuestions(raw);
+    if (!questions) {
+      // A question nobody can see leaves the model polling for an answer that cannot come, so say so.
+      this.messageQuestions.add(requestId);
+      this.notice('warn', 'Codex asked a question that the Console cannot show as a card. It is in the conversation; answer it in the message box.');
+      return;
+    }
     if (this.messageQuestions.size >= MAX_MESSAGE_QUESTIONS) this.messageQuestions.delete(this.messageQuestions.values().next().value as string);
     this.messageQuestions.add(requestId);
-    const summary = declinedServerRequest('item/tool/requestUserInput', { questions: raw }).summary;
+    const summary = shorten(questions[0]!.question);
     this.channel.push({ type: 'request.opened', requestId, kind: 'question', summary, turnId, questions, responseMode: 'message' });
   }
 

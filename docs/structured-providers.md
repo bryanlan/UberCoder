@@ -3,7 +3,9 @@
 Date: 2026-10-26. Branch: `feature/structured-provider-lane`. Status: slice 1 implemented; see
 Verification evidence. The lane ships behind a config flag that defaults off. Nothing in this document
 changes the running Console until the flag is turned on for a provider. The text below was corrected to the
-implementation on 2026-10-26; where it still differs from the code, the code governs.
+implementation on 2026-10-26; where it still differs from the code, the code governs. The cutover work that
+followed (relay, Claude plugin, questions, images, re-adoption across restarts, migration) is in
+`docs/structured-cutover.md`; this document keeps the slice 1 record and the plugin contract.
 
 ## Decision
 
@@ -164,6 +166,10 @@ Three levels, as in T3: plugin (static) to instance (one binary and home, shared
 `processModel: 'shared'`) to session (one native conversation).
 
 ```ts
+// Plugin contract for structured (protocol-driven) provider sessions. See docs/structured-providers.md.
+// Three levels: plugin (static) -> instance (one binary and home; a shared process when
+// processModel is 'shared') -> session (one native conversation).
+
 export interface TransportCapabilities {
   processModel: 'shared' | 'per-session';
   nativeIds: 'server-allocated' | 'client-allocated';
@@ -177,49 +183,156 @@ export interface TransportCapabilities {
 
 export interface ProviderFailure {
   class: 'usage_limit' | 'provider_error' | 'transport_error' | 'permission_error' | 'validation_error' | 'unknown';
-  code?: string;          // provider code, e.g. codex 'serverOverloaded'
-  message: string;        // redacted by the plugin before emit
+  code?: string; // provider code, e.g. codex 'serverOverloaded'
+  message: string; // redacted by the plugin before emit
   retryable?: boolean;
   resetAt?: string;
 }
 
+/** One question an agent asks the person (Claude AskUserQuestion, Codex requestUserInput). */
+export interface PendingQuestion {
+  id: string;
+  header?: string;
+  question: string;
+  options: Array<{ label: string; description?: string }>;
+  multiSelect?: boolean;
+  allowCustom?: boolean;
+}
+
+/** The host's answer to a request.opened event. */
+export type RequestResponse =
+  | { decision: 'decline' | 'cancel' }
+  | { decision: 'answer'; answers: Record<string, string[]>; text?: string };
+
 export type TransportEvent =
   | { type: 'session.state'; state: 'starting' | 'ready' | 'running' | 'stopped' | 'error'; failure?: ProviderFailure }
   | { type: 'session.native'; nativeSessionId: string; transcriptPath?: string; title?: string }
-  | { type: 'turn.started'; turnId: string; origin: 'user' | 'provider'; replay: boolean }
+  /**
+   * `adopted`: the turn was already running when this session attached (a backend restart left it running behind its
+   * session host). It is not new activity: the host marks the conversation working but does not move recency.
+   */
+  | { type: 'turn.started'; turnId: string; origin: 'user' | 'provider'; replay: boolean; adopted?: boolean }
   | { type: 'item.completed'; turnId: string; itemId: string; kind: 'assistant' | 'reasoning' | 'command' | 'file_change' | 'mcp' | 'search' | 'other'; replay: boolean; title?: string }
-  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string }
+  /**
+   * `replay`: the request was already open before this session attached (adopted after a reattach or reconnect, or read back
+   * from the host's replay). The host does not move recency for it and does not announce it again when it announced the id before.
+   * `responseMode`: `live` (default) is answered through `respond()` while the provider waits; `message` is a question the provider
+   * already moved on from (it asked in a message), so the answer is sent to it as a normal user message and then closed.
+   */
+  | { type: 'request.opened'; requestId: string; kind: 'command' | 'file_change' | 'permission' | 'mcp' | 'question'; summary: string; turnId?: string; questions?: PendingQuestion[]; replay?: boolean; responseMode?: 'live' | 'message' }
   | { type: 'request.closed'; requestId: string; outcome: 'resolved' | 'declined' | 'cancelled' }
   | { type: 'usage.updated'; contextUsedTokens?: number; contextMaxTokens?: number; windows?: Array<{ id: string; usedPercent: number; resetsAt?: string }> }
   | { type: 'notice'; level: 'info' | 'warn'; text: string }
   | { type: 'turn.terminal'; turnId: string; status: 'completed' | 'interrupted' | 'failed'; failure?: ProviderFailure; sessionUsable: boolean; replay: boolean };
 
-export interface TurnInput { text: string; images?: Array<{ path: string; mimeType: string }>; model?: string; effort?: string; clientMessageId?: string }
+export interface TurnInput {
+  text: string;
+  images?: Array<{ path: string; mimeType: string }>;
+  model?: string;
+  effort?: string;
+  clientMessageId?: string;
+}
 
 export interface TransportSession {
   readonly nativeSessionId: string;
   readonly capabilities: TransportCapabilities;
-  readonly events: AsyncIterable<TransportEvent>;          // single consumer; ends after session.state 'stopped'
-  readonly transcriptPath?: string;                         // when the provider reports it
-  sendTurn(input: TurnInput): Promise<{ turnId: string }>;  // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
-  steer?(turnId: string, input: TurnInput): Promise<void>;  // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
-  interrupt(turnId: string): Promise<void>;                 // resolves when the request is accepted; terminal follows as an event
-  respond(requestId: string, decision: 'decline' | 'cancel'): Promise<void>;
-  readonly pid?: number;                                    // per-session plugins: this conversation's own process
-  unload(): Promise<void>;                                  // shared process: drop the thread from memory; per-session: end this conversation's process (it stays resumable)
-  hasBackgroundWork?(): boolean;                            // the process runs background shell commands or subagents no turn covers; idle sleep and pressure leave it alone
-  close(reason: 'release' | 'shutdown' | 'error'): Promise<void>; // per-session: ends the process whatever the reason
+  readonly events: AsyncIterable<TransportEvent>; // single consumer; ends after session.state 'stopped'
+  readonly transcriptPath?: string; // when the provider reports it
+  /** Per-session plugins: the pid of this conversation's own process. Shared plugins leave it out (the instance reports the shared pid). */
+  readonly pid?: number;
+  /**
+   * The turn the provider is running right now, when the transport knows one. A plugin that attaches to a process that was
+   * already running (`reattach`, or a `resume` that finds its thread mid-turn) sets it before the call resolves, so the host
+   * can mark the conversation working without waiting for the first event, and does not count the turn as new activity.
+   * Omitted by plugins that do not say.
+   */
+  readonly activeTurn?: string;
+  /**
+   * True while the provider says the conversation is running a turn that the transport cannot name yet (a reattach found the
+   * thread active and could not list its turns; the turn is adopted from the first event that names it). The host keeps the
+   * conversation marked working and does not take the missing turn for a lost one. Omitted by plugins that never need it.
+   */
+  readonly turnUnidentified?: boolean;
+  sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written but a retry may work, SendRejectedError when nothing was written and a retry cannot work
+  steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
+  /**
+   * Resolves when the request is accepted; the terminal follows as an event. A plugin whose stop also drops sends that were
+   * queued behind the turn reports the steers among them (`cancelledSteerIds`: the `clientMessageId` the host passed to
+   * `steer`, or the message uuid when it passed none), so the host can show them as not delivered or send them again.
+   */
+  interrupt(turnId: string): Promise<void | { cancelledSteerIds?: string[] }>;
+  /** Answers a pending request. Rejects with {@link RequestNotPendingError} when the id is not open (never seen, withdrawn, or its turn ended). */
+  respond(requestId: string, response: RequestResponse): Promise<void>;
+  /**
+   * Idle sleep and manual suspend. Shared process: drop the thread from memory (the process keeps serving other threads).
+   * Per-session: end this conversation's own process; the conversation stays resumable by its native id.
+   */
+  unload(): Promise<void>;
+  /**
+   * True while the provider process is running work of its own that no turn covers (a background shell command or
+   * subagent). Idle sleep and memory pressure leave such a process alone, as they leave a tmux screen that shows
+   * background work. Optional: a plugin that cannot tell leaves it out and the host treats the session as having none.
+   */
+  hasBackgroundWork?(): boolean;
+  /**
+   * The host is finished with the session. Per-session plugins end the process whatever the reason; `release` also means the
+   * conversation is over. A shared process keeps running for its other threads.
+   */
+  close(reason: 'release' | 'shutdown' | 'error'): Promise<void>;
 }
 
-export interface OpenOptions {
-  conversationId: string;                                   // Console bound-session id
+/**
+ * A line-oriented duplex channel to a provider process: a stdio child, or a session host relay that outlives
+ * the Console backend. Plugins speak their protocol over it and never spawn directly in production.
+ */
+export interface LineTransport {
+  readonly pid?: number;
+  write(line: string): Promise<void>; // rejects when the channel is closed; nothing is written then
+  onLine(listener: (line: string) => void): () => void;
+  onExit(listener: (info: { code: number | null; signal: string | null; reason: 'exited' | 'disconnected' }) => void): () => void;
+  close(options?: { terminate?: boolean }): Promise<void>; // terminate: end the provider process, not only the channel
+}
+
+export interface LineTransportSpawn {
+  argv: string[];
   cwd: string;
-  model?: string; effort?: string;
+  env: Record<string, string>;
+  /** Stable identity for reconnecting to a host relay after a backend restart. */
+  hostId?: string;
+  /**
+   * Connect to the live process behind `hostId` and do nothing else. No process is started, and nothing is ended: not a
+   * stale host, not a host that runs another command line. Rejects with {@link LineTransportNotRunningError} when no live
+   * process answers for exactly this `hostId` and `argv`. A factory that runs children directly over stdio (no hosts)
+   * rejects the same way, because a stdio child cannot outlive its parent.
+   */
+  attachOnly?: boolean;
+}
+
+export type LineTransportFactory = (spawn: LineTransportSpawn) => Promise<LineTransport>;
+
+export interface OpenOptions {
+  conversationId: string; // Console bound-session id
+  cwd: string;
+  model?: string;
+  effort?: string;
   policy: { approvals: 'never' | 'on-request'; sandbox: 'full-access' | 'workspace-write' | 'read-only' };
-  env?: Record<string, string>;                             // per-session only: coordination variables, configured env, AGENT_CONSOLE_SESSION_ID
-  consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string }; // per-session only, coordination on
-  appendSystemPrompt?: string;                              // grant authority text of a granted launch
-  systemPromptSnapshot?: 'on' | 'off';                      // 'off' on every resume of a granted session
+  /**
+   * Per-session plugins only: the environment for this conversation's process (the Console's coordination variables, the
+   * provider's configured `env`, and `AGENT_CONSOLE_SESSION_ID`). A shared process never gets one conversation's identity.
+   */
+  env?: Record<string, string>;
+  /**
+   * Per-session plugins only, and only when coordination is enabled: what a conversation's own coordination MCP config needs
+   * (the same runtime directory, helper script and session id the tmux launch pins).
+   */
+  consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string };
+  /** The standing-authority text of a session a grant launched; the same text the tmux launch appends to the system prompt. */
+  appendSystemPrompt?: string;
+  /**
+   * `'off'`: the provider rebuilds its system prompt on this launch instead of replaying the one recorded on the first
+   * request, so changed `appendSystemPrompt` text reaches a resumed conversation. Omitted or `'on'`: the provider's default.
+   */
+  systemPromptSnapshot?: 'on' | 'off';
 }
 
 export interface TransportInstance {
@@ -228,9 +341,15 @@ export interface TransportInstance {
   probe(): Promise<{ installed: boolean; version?: string; auth: 'ok' | 'missing' | 'unknown'; models: Array<{ id: string; label: string; efforts?: string[] }> }>;
   start(options: OpenOptions): Promise<TransportSession>;
   resume(nativeSessionId: string, options: OpenOptions): Promise<TransportSession>; // throws ResumeFailedError
-  reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>; // per-session only: adopt this conversation's process that outlived a backend restart; undefined when none; never starts a process
+  /**
+   * Per-session plugins only. Adopts the conversation's own process when one outlived a backend restart behind its session
+   * host, and resolves undefined when there is none. It never starts a process, never ends one it does not adopt, and
+   * refuses (throws) a process that does not belong to this conversation. The host calls it once at startup so that idle
+   * sleep, memory pressure and release can end survivors that nobody has used since the restart.
+   */
+  reattach?(nativeSessionId: string, options: OpenOptions): Promise<TransportSession | undefined>;
   alive(): Promise<{ pid?: number; connected: boolean }>;
-  dispose(reason: 'shutdown' | 'restart'): Promise<void>;   // shared: disconnect; never kills a process that other Consoles own
+  dispose(reason: 'shutdown' | 'restart'): Promise<void>; // shared: disconnect; never kills a process that other Consoles own
 }
 
 export interface TransportPlugin<Config = unknown> {
@@ -240,45 +359,173 @@ export interface TransportPlugin<Config = unknown> {
 
 export interface PluginContext {
   runtimeDir: string; // <runtimeDir>/structured/<plugin>/
+  /**
+   * Present when Console coordination is enabled: this Console's runtime directory and the MCP helper script that
+   * serves its coordination tools. A plugin points the provider's coordination MCP server at them so the agent's
+   * tool calls reach this Console and not whichever one the provider's own config names (the tmux launch does the same).
+   */
+  coordination?: { runtimeDir: string; helperPath: string };
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };
   meta: { get(key: string): string | undefined; set(key: string, value: string): void; delete(key: string): void };
+  /**
+   * Opens line channels to provider processes. Present when the host runs provider processes behind session hosts that
+   * outlive the backend; a plugin that finds none runs its child directly over stdio (tests and embedding).
+   */
+  lineTransport?: LineTransportFactory;
+}
+
+/** `sendTurn` was called while the previous turn on the same session is still running. */
+export class PreviousTurnActiveError extends Error {
+  readonly code = 'previous_turn_active';
+  constructor(message = 'A turn is already running on this session.') {
+    super(message);
+    this.name = 'PreviousTurnActiveError';
+  }
+}
+
+/**
+ * The request certainly never reached the provider (the session had ended or the connection was gone before
+ * anything was written, or a control request timed out), so the caller can queue it and try again. A failure after the write is not this
+ * error: its outcome is uncertain and must not be replayed.
+ */
+export class NotSentError extends Error {
+  readonly code = 'not_sent';
+  constructor(message = 'The request was not sent.') {
+    super(message);
+    this.name = 'NotSentError';
+  }
+}
+
+/**
+ * The message could not be prepared or was refused before anything was written, and sending it again cannot change that: the
+ * provider refused a setting the message carries (a model or effort), or an attachment is missing or unreadable. Unlike
+ * {@link NotSentError} the caller must not retry: it shows `message` to the person, who decides what to do with the message.
+ */
+export class SendRejectedError extends Error {
+  readonly code = 'send_rejected';
+  constructor(message = 'The message could not be sent.') {
+    super(message);
+    this.name = 'SendRejectedError';
+  }
+}
+
+/** `steer` named a turn that is not the active one any more (it ended first). The caller may send the text as a new turn. */
+export class TurnNotActiveError extends Error {
+  readonly code = 'turn_not_active';
+  readonly turnId?: string;
+  constructor(turnId?: string, message = 'The turn finished before the steer reached it.') {
+    super(message);
+    this.name = 'TurnNotActiveError';
+    this.turnId = turnId;
+  }
+}
+
+/** `resume` could not reattach the native session (unknown id, missing rollout, protocol refusal). */
+export class ResumeFailedError extends Error {
+  readonly code = 'resume_failed';
+  constructor(message = 'The native session could not be resumed.') {
+    super(message);
+    this.name = 'ResumeFailedError';
+  }
+}
+
+/**
+ * `respond` named a request that is not open: the CLI withdrew it, its turn ended, or it was answered already. The answer
+ * reached nobody, so the caller must not report it as delivered.
+ */
+export class RequestNotPendingError extends Error {
+  readonly code = 'request_not_pending';
+  readonly requestId?: string;
+  constructor(requestId?: string, message = 'That request is no longer waiting for an answer.') {
+    super(message);
+    this.name = 'RequestNotPendingError';
+    this.requestId = requestId;
+  }
+}
+
+/**
+ * Why `attachOnly` found nothing: no host record, no running host, or one that serves nobody because it refuses connections
+ * (`absent`); a host whose provider ended (`ended`); a host that runs another command line (`other_command`); or a running host
+ * that did not answer in time (`unreachable`, possibly only stalled, so its provider may well run).
+ */
+export type LineTransportNotRunningReason = 'absent' | 'ended' | 'other_command' | 'unreachable';
+
+/** `attachOnly` found no live process for the host id and command line. Nothing was started or ended. */
+export class LineTransportNotRunningError extends Error {
+  readonly code = 'transport_not_running';
+  /** `absent` and `ended` mean no provider process is reachable for this host id, so a launch record that names it is stale. The others say nothing about that. */
+  readonly reason?: LineTransportNotRunningReason;
+  constructor(message = 'No live provider process answers for this session host.', reason?: LineTransportNotRunningReason) {
+    super(message);
+    this.name = 'LineTransportNotRunningError';
+    this.reason = reason;
+  }
+}
+
+/** The provider binary or its process is unavailable (not installed, not connected, exited). */
+export class TransportUnavailableError extends Error {
+  readonly code = 'transport_unavailable';
+  constructor(message = 'The provider transport is unavailable.') {
+    super(message);
+    this.name = 'TransportUnavailableError';
+  }
 }
 ```
 
-The context carries no spawn helper. A plugin opens its provider process through `context.lineTransport`, a
-`LineTransportFactory` (`providers/transport/line-transport.ts`) that returns a `LineTransport`: a line channel to
-a provider process held by a session host that outlives the backend, or to a child run directly over stdio. The
-host (`app.ts`) provides the factory; a plugin that finds none runs its child over stdio (tests, embedding).
+The block is a verbatim copy of `types.ts`; if the two ever differ, the file is right. The context carries no
+spawn helper. A plugin opens its provider process through `context.lineTransport`, a `LineTransportFactory`
+(`providers/transport/line-transport.ts`) that returns a `LineTransport`: a line channel to a provider process held
+by a session host that outlives the backend, or to a child run directly over stdio. The host (`app.ts`) provides
+the factory; a plugin that finds none runs its child over stdio (tests, embedding).
 
 Contract errors (`types.ts`):
 
 - `PreviousTurnActiveError` (`previous_turn_active`): `sendTurn` while a turn runs.
-- `NotSentError` (`not_sent`): the request certainly never reached the provider. The session had ended, or
-  the connection was gone, before anything was written. The caller may queue the request and try again. A
-  failure after the write is not this error: its outcome is uncertain and the request is never replayed.
-- `TurnNotActiveError` (`turn_not_active`): `steer` named a turn that already ended. The host sends the text
-  as a new turn for this error only.
+- `NotSentError` (`not_sent`): the request certainly never reached the provider. The session had ended, or the
+  connection was gone, before anything was written. The Claude plugin also uses it for the work done before the
+  write (a refused model switch, an unreadable image), so those messages are queued and tried again. Review round 2 (N3)
+  found the cost: a failure no retry can fix is retried every second for ever. A failure after the write is not this
+  error: its outcome is uncertain and the request is never replayed.
+- `TurnNotActiveError` (`turn_not_active`, carries `turnId`): `steer` named a turn that already ended. The host sends
+  the text as a new turn for this error only.
+- `RequestNotPendingError` (`request_not_pending`, carries `requestId`): `respond` named a request that is not open
+  (never seen, withdrawn, answered already, or its turn ended). The answer reached nobody. The service maps it to
+  `StructuredRequestNotPendingError` and the route answers 404.
 - `ResumeFailedError` (`resume_failed`) and `TransportUnavailableError` (`transport_unavailable`).
-- `LineTransportNotRunningError` (`transport_not_running`): a `LineTransportFactory` request with `attachOnly` found no
-  live process for the host id and command line. `attachOnly` connects to a running host and nothing else: it never
-  starts a process and never ends one (not a stale host, not a host that runs another command line). A stdio factory
-  answers the same, because a stdio child does not outlive its parent. `reattach` is built on it.
+- `LineTransportNotRunningError` (`transport_not_running`, with an optional `reason`): a `LineTransportFactory` request
+  with `attachOnly` found no live process for the host id and command line. `attachOnly` connects to a running host and
+  nothing else: it never starts a process and never ends one (not a stale host, not a host that runs another command
+  line). `absent` and `ended` mean no provider process is reachable, so a launch record that names it is stale;
+  `other_command` says nothing about this conversation's process; `unreachable` is a running host that did not answer
+  in time, which may only be stalled. A stdio factory answers `absent`, because a stdio child does not outlive its
+  parent. `reattach` is built on it.
 
 `TurnAlreadyCompletedError` no longer exists; `TurnNotActiveError` replaced it.
 
 Event rules:
 
-- `replay: true` marks events reconstructed from `thread/resume` or reconnect backfill. The host never
-  lets replay events touch `lastActivityAt`, `lastOutputAt` or `lastResponseAt` (AGENTS.md recency
-  rule) and never journals them.
-- `turn.terminal` fires exactly once per turn. If the connection drops, the plugin emits
-  `session.state: 'error'` and the host decides (RunRecovery `process_exited`).
+- `replay: true` marks events reconstructed from `thread/resume` or reconnect backfill. On `request.opened` it marks a
+  request that was already open when the session attached. The host never lets replay events touch `lastActivityAt`,
+  `lastOutputAt` or `lastResponseAt` (AGENTS.md recency rule) and never journals them. A question whose request id
+  the person was told about before (kept per provider process) is shown again without a second status line or push.
+- `turn.started` with `adopted: true` is a turn that was already running when the session attached: a backend restart
+  left it behind its session host. The host marks the conversation working and does not move recency. A plugin that
+  attaches mid-turn also sets `TransportSession.activeTurn` before the call resolves.
+- `turn.terminal` fires exactly once per turn. If the connection drops, the plugin emits `session.state: 'error'`
+  and the host decides (RunRecovery `process_exited`).
 - `session.state` and `notice` never count as activity.
+- `request.opened` with `kind: 'question'` and a non-empty `questions` list is held for the person and answered through
+  `respond()` (`responseMode` `live`, the default). With `responseMode: 'message'` the provider has already moved on
+  (it asked in a message), nothing waits, and the answer is sent as a normal user message and the card is closed.
+  Every other request, and a question with no `questions`, is declined by the host with `respond(..., { decision:
+  'decline' })`.
 - Message bodies are not part of the event stream in slice 1. Assistant text arrives through the rollout
   transcript and `session.transcript-updated`.
 
 Fake for tests: `apps/server/test/helpers/structured-fixtures.ts` provides `FakeTransportPlugin` whose
-sessions record calls (`sendTurn`, `steer`, `interrupt`, `unload`, `close`) and let tests push events.
+sessions record calls (`sendTurn`, `steer`, `interrupt`, `respond`, `unload`, `close`) and let tests push events.
+The fake instance also takes `survivors` (native ids whose process outlived the previous backend, adopted once by
+`reattach`).
 It is injected through `SessionManagerOptions.transportPlugins`.
 
 ## Codex app-server plugin (`apps/server/src/providers/transport/codex/`)
@@ -317,9 +564,9 @@ the source of truth for field names):
   with a reused pid or another boot is never acted on. `dispose('shutdown')` and `dispose('restart')` only
   disconnect from a host; the host and the app-server keep running. Ending them is explicit
   (`terminateHost`, or `{"type":"terminate"}` on the socket). The threads that were loaded when the backend
-  stopped are loaded again by the service with `thread/resume` on first use, as before; that is safe because the
-  process never died. The new backend asks for live output only: what the app-server did while no backend was
-  connected is read from the rollout, as after any restart. If the connection drops while the process keeps
+  stopped are loaded again by the service with `thread/resume`; that is safe because the process never died. A row
+  that is still marked working is resumed at boot (see "Restart adoption" below), any other thread on first use. The
+  transcript of what the app-server did while no backend was connected is read from the rollout, as after any restart. If the connection drops while the process keeps
   running (another client took the host over), the instance behaves as for a process exit: pending requests fail
   (a request already written is `sent: true`, an uncertain outcome that is never replayed, and
   `exit.reason` is `disconnected`), every open session ends with `process_exited` ("Another client took over
@@ -390,9 +637,44 @@ the source of truth for field names):
   `usage.updated`. Subagent child threads stream on the same connection: demultiplex by `threadId`
   and never merge a child's events into the parent conversation.
 - Server-to-client requests must always be answered or the turn blocks forever. Under `never`,
-  command/file/permission approvals are not sent. `item/tool/requestUserInput` is answered with empty
-  answers and recorded as a `status` event; `mcpServer/elicitation/request` is answered
+  command/file/permission approvals are not sent. `item/tool/requestUserInput` with questions the Console can show is
+  held open: the plugin emits `request.opened` (`kind: question`, `questions`), the handler's reply is a promise that
+  `respond()` settles, and the held request stops counting against the client's limit of concurrent server-request
+  handlers (`hold()`), so open questions cannot make the client refuse approvals that must be declined. A question the
+  Console cannot show is answered with empty answers and logged as a fixed line ("Declined a question the Console cannot
+  show"; the details stay in the server log). `mcpServer/elicitation/request` is answered
   `{ action: 'decline', content: null, _meta: null }`; anything else gets a JSON-RPC `-32601` error.
+- Questions asked in a message. On `codex-cli` 0.164.0 in the default collaboration mode the model's tool is
+  `request_user_input_async`, which answers `{accepted: true}` at once and raises no server request. Codex instead emits an
+  `agentMessage` item (`item/started`, then `item/completed`) with `delivery: 'async'`, `phase: 'final_answer'` and
+  `questions: [{ title, options?: string[] }]`. The item has no `id` or `question` fields, and its id is the tool call id. The
+  turn stays open while the model polls with `sleep`. The plugin maps the item to a `request.opened` with `kind: 'question'`,
+  `responseMode: 'message'`, request id `item:<itemId>` and questions `{ id: 'q1', …, question: title, options: [{ label }],
+  allowCustom: true }`. The host shows a card. Nothing waits on the answer, so the service sends it as an ordinary message (a
+  `turn/steer` into the open turn, which ends the same turn; a new turn if the turn is gone). A question the Console cannot show
+  as a card raises a `warn` notice, which becomes a status line, and does not fail silently. The frames were captured from the
+  real app-server; `structured-codex-requests` and `structured-codex-restart` cover the mapping against the fake.
+- Restart adoption. The app-server and its running turns outlive a backend restart. The instance writes down what the
+  next backend needs, in the Console database through `PluginContext.meta` (`CodexRestartState`, `codex/restart-state.ts`):
+  the questions it holds open (JSON-RPC id, thread, params), the turn each thread runs, and a cursor into the host's replay
+  buffer (saved every 5 s while it moves and at each turn boundary; it belongs to one host process). A backend that
+  expects a running host attaches with `attachOnly` and `sinceSeq: 0` (and opens the usual way only when there is nothing
+  to attach to), reads the buffered lines before any thread is resumed (a question that arrived while nobody listened is recorded; an approval or elicitation that arrived is declined
+  by id), and starts the client on the lines after them. `reattach(threadId)` then connects to a running host only and
+  `thread/resume`s the thread; the session `adopt`s what it finds: `thread.status` and the newest turns
+  (`thread/turns/list`) give the running turn, which becomes an adopted provider turn (events and its terminal are
+  accepted; if no listing names it, the first event of an unknown turn on an active thread is taken as that turn), a turn
+  that ended while nobody listened is reported once, and a recorded question is held again only while the thread says it
+  waits on user input (`waitingOnUserInput`). It is answered by id over the same relayed stdin (`replyToServerRequest`),
+  because the app-server keeps waiting for the reply to that JSON-RPC id. A wait that no record explains cannot be
+  answered; a notice tells the person to Stop. `dispose('shutdown')` leaves held questions held (answering them with
+  nothing would race the socket closing). Observed in the proof (step k2): Stop on an adopted turn ended the turn at
+  once, but the counting command, which had started before the restart, ran to the end of its 25 s count. The plugin
+  terminates a command (`thread/backgroundTerminals/terminate`) only when it saw that command's `item/started`, and an
+  adopted turn starts with an empty list of commands, so Stop has nothing to terminate (review round 2, N1; Codex does not
+  end a turn's command on `turn/interrupt` by itself). Two more limits from round 2: while adoption waits for the turn listing
+  the session keeps at most 4096 thread notifications and drops the rest (N5), and the manager declares the turn lost before
+  the "first event names the turn" fallback can run (N5); a slow host at adoption is treated as no survivor (N4).
 - Connection loss: when the process ends on its own, every open session gets `session.state: 'error'` with
   the code `process_exited` and a message that names only how it ended (`exit code 1`, `signal SIGKILL`).
   The host writes the conversation status line "The provider connection ended (exit code 1). The session
@@ -439,7 +721,7 @@ Line numbers are from `main` at `af009e3`.
 | `drainAssignments` (648-846) | Replace the tmux liveness/owner/screen/submit block with `deliverAutomatic(session, prompt)` returning `submitted | deferred | failed`; keep attempt records, follow-ups, continuation bookkeeping and `status` events in SM. Guard order unchanged: working, queued input, manual pause, run failure. `deferred` means nothing was sent; `failed` means the outcome is uncertain (see Input and delivery rules). |
 | RunRecovery `canRetry` (330) and `submit` (363) | `canRetry`: thread loaded on a live connection, no active turn, enabled project/provider, memory above the floor. `submit`: `sendTurn` with the recovery prompt. A `deferred` delivery (nothing was sent: the transport's `NotSentError`, a turn that started first, an unloaded thread) throws `RecoverySubmitDeferredError`; RunRecovery then gives the attempt back and schedules the retry one backoff step later, inside the same 10-minute recovery window, instead of stopping as "outcome uncertain". Only a `failed` delivery or another error stops recovery as uncertain. A `StructuredRunMonitor` (one per session, a stable key for RunRecovery) takes run state from the turn events, which are authoritative for turns the host observed, and attaches the rollout-based `CodexRunMonitor` once the index has the transcript path; the newer of the two states wins. |
 | `verifyNativeProcessEpoch` (969), `providerTurnIsWorking` (988) | Epoch = `structured-epoch:<sessionId>`. A transcript run older than the epoch is never recorded as a response. `turn.started`/`turn.terminal` events drive `isWorking` directly through `syncSessionWorkingState`. For a structured row `providerTurnIsWorking` is `alive ? turnActive : false`: a thread that is not loaded runs nothing, so the transcript run state is never consulted. Without this, a rollout whose last record is an unfinished turn would read as working after a restart or an idle sleep, and would block peer and continuation wakes. |
-| `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot. Boot settles lost work only: a row still marked working loses its turn with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
+| `reconcileSessions`, `refreshStructuredSessionState` | A structured thread loads on first use, not at boot, except survivors: the first pass ends session hosts no conversation owns, then `reattachSurvivors` adopts every awake per-session row and every shared-process (Codex) row still marked working (see below). The same lookup runs before loss handling on every path that loads a working row (screen poll, queued message, wake), so a poll that comes before the first pass cannot declare a surviving turn lost. Only a row the provider has no turn for loses it with the connection (status line, `isWorking=false`, and RunRecovery `process_exited` for unattended work). A row in status `error` or `starting` is restored, as on tmux (`starting` is a restore that a crash cut off). When the thread is not loaded and the row has a run failure or unfinished unattended work, the refresh branch calls `watchSessionOutput`, which attaches the run monitor, so RunRecovery re-arms a scheduled retry from the persisted budget and the rollout. |
 | `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `background_work`, `queued_input`. |
 | `reconcileSessions`, `defaultTransportFor`, `migrateTmuxRowToStructured` (lane C2) | While `structuredSessions.defaultTransport` is `structured`, each restorable tmux row of a provider whose lane is on is classified and, when idle or dead, flipped to a sleeping structured row (`BoundSessionsRepo.setTransport`); a live tmux session is stopped like idle sleep and confirmed dead first. `structuredMigrationReport()` is the dry run, served at `GET /api/sessions/structured-migration`. A bind that names no transport takes `defaultTransportFor(provider)`. See `docs/structured-cutover.md`. |
 | `releaseSessionInternal` (3481) | `interrupt` if a turn is active, then `unload`, then `ended`; delete the runtime dir as today. |
@@ -474,51 +756,75 @@ start(input: { sessionId; provider; cwd; profile?; model?; effort? }): Promise<{
 resume(session, cwd): Promise<{ transcriptPath?; pid? }>
 ensureLoaded(session, cwd?): Promise<'loaded' | 'unavailable'>
 submitHuman(session, record: { requestId; text }, images?): Promise<{ turnId; mode: 'turn' | 'steer' }>
-interrupt(session): Promise<'interrupted' | 'idle'>
+interrupt(session): Promise<{ outcome: 'interrupted' | 'idle'; cancelledSteerIds: string[] }>
 deliverAutomatic(session, prompt): Promise<{ status: 'submitted' | 'deferred' | 'failed'; reason?; turnId? }>
+respond(session, requestId, response: RequestResponse): Promise<{ message?: string }>   // one answer per question; throws StructuredRequestNotPendingError
 setProfile(session, profile): Promise<'applied' | 'deferred'>
 unload(session): Promise<void>
 release(session): Promise<void>
+endConversation(session): Promise<void>                                       // end the conversation's session host and launch record without loading it
+sweepOrphanHosts(owned: (sessionId: string) => boolean): Promise<string[]>   // startup: end per-session hosts no restorable row owns
 alive(session): boolean
 screen(session): SessionScreen
 reattachSurvivors(candidates: Array<{ session; cwd }>): Promise<string[]>   // startup, per-session plugins only
 hasBackgroundWork(session): boolean
 ```
 
-Per-session behavior of the service (lane C5, on top of lane C2):
+Per-session behavior of the service (lane C5 and the round 1 fixes, on top of lane C2):
 
-- **Survivors.** A per-session provider process can outlive a backend restart behind its session host, and the service
-  loads rows on first use, so nothing would own it: idle sleep, pressure suspension and release see an unloaded row.
-  The first `reconcileSessions` pass therefore hands every awake (bound, not suspended) row of a per-session plugin to
-  `reattachSurvivors`, which calls the plugin's `reattach`. A process found becomes a loaded session (new epoch, status
-  line "Reconnected to the running agent process") and is reaped like any other. A row with no survivor stays unloaded
-  and resumes on next use; `reattach` never starts a process. A use of the conversation waits for its own lookup
-  (`ensureLoaded`). Shared-process plugins are never asked. Claude's `reattach` connects with `attachOnly`, requires the
-  recorded launch to name this native id and the host to run exactly that command line, refuses a session another live
-  process holds in the CLI's registry (only the host's own child may), then repeats `initialize` (the CLI answers with
-  the requests still open and a snapshot of its background tasks). A process the earlier backend started but never
-  spoke to is handshaken as a new launch, with the host replaying its SessionStart hook frames.
-  The row may still say a turn is running that ended while no backend listened; the working-state expiry clears that after
-  one idle window unless the process reports a turn by then.
-- **Default profile.** A Claude per-session row with no cost profile (a migrated tmux row, a history bind) and no model
-  of its own from a granted launch runs on `medium`, the profile new Claude chats get: its `model` and `effort` go on
-  the resume and on every turn, and `onProfileDefaulted` stores `medium` on the row so the UI shows it. Codex keeps the
-  model its shared process was configured with.
+- **Survivors.** A provider process can outlive a backend restart behind its session host, and the service loads rows on
+  first use, so nothing would own it: idle sleep, pressure suspension and release see an unloaded row. The first
+  `reconcileSessions` pass therefore ends the orphan hosts (below) and hands the candidate rows to `reattachSurvivors`,
+  which calls the plugin's `reattach`. Candidates: every awake (bound, not suspended) row of a per-session plugin, and
+  the rows of a shared plugin (Codex) that are still marked working, because resuming a thread loads it into the shared
+  process and only a thread that may be running a turn needs that. A process found becomes a loaded session (new epoch,
+  status line "Reconnected to the running agent process") and is reaped like any other. A turn it reports through
+  `activeTurn` (or an `adopted` `turn.started`) is the session's active turn: the row stays working, recency does not
+  move, Stop reaches the provider, and the terminal ends it. A row with no survivor stays unloaded and resumes on next use;
+  `reattach` never starts a process. A use of the conversation waits for its own lookup (`ensureLoaded`). Claude's
+  `reattach` connects with `attachOnly`, requires the recorded launch to name this native id and the host to run exactly
+  that command line, refuses a session another live process holds in the CLI's registry (only the host's own child may),
+  then repeats `initialize`: the reply carries the requests still open and `session_state`, and a `session_state` other
+  than `idle` makes the session adopt a running turn. A process the earlier backend started but never spoke to is handshaken
+  as a new launch, with the host replaying its SessionStart hook frames. A host that runs but does not answer in time is
+  left alone and reported as unavailable; the next use tries again. A shared row that is working but whose thread runs no
+  turn loses the turn the way a dead connection does.
+- **Orphan hosts.** `sweepOrphanHosts` runs once at the first pass, before adoption, and ends the per-session hosts whose
+  conversation has no restorable structured row (with their launch records); the shared Codex host is never swept.
+  `endConversation` does the same for one conversation when `release` or `unload` finds it not loaded (a survivor nobody
+  adopted), so idle sleep ends the process and not only the row marker.
+- **Default model for profile-less Claude rows.** A per-session Claude row with no cost profile (a migrated tmux row, a
+  history bind) and no model of its own from a granted launch resumes with effort `medium` and no model, what the tmux
+  resume template gives it, on the resume and on every turn. Nothing is stored on the row. Codex keeps the model its
+  shared process was configured with.
 - **Background work.** `hasBackgroundWork(session)` reads the transport's flag, bounded: it is ignored once the transport
   has sent no event for four hours (`BACKGROUND_WORK_STALE_MS`). `suspensionBlockReason` returns `background_work` for
   idle sleep, pressure suspension and manual suspend, as the tmux path refuses while its screen shows background work.
   The Claude session derives the flag from `system/background_tasks_changed` (the full live set, replaced on every
   frame) plus `task_started`, `task_notification` and terminal `task_updated` frames; ambient tasks and foreground tasks
-  do not count, and a late frame of an earlier run of a resumed task is ignored.
+  do not count, and a late frame of an earlier run of a resumed task is ignored. After a reattach the plugin waits up to
+  1 s for the snapshot the CLI sends behind the reply to the repeated `initialize`, so the idle decision that follows never
+  reads an empty set.
+- **Stop and queued steers.** `interrupt` returns the steers the provider dropped with the turn (`cancelledSteerIds`). The
+  manager marks each queued message `failed` with "cancelled by Stop", and adds one status line when a dropped message had
+  no journal entry.
+- **Questions.** `respond` lets exactly one answer through per question. A question stays on the row until it is answered
+  or the provider withdraws it; an answer for a withdrawn or unknown request is `StructuredRequestNotPendingError` and the
+  route answers 404. A `message`-mode question stays open after its turn ends and is answered with a normal message that
+  names the question (a steer while the turn still runs, a new turn otherwise). Questions of an earlier backend process are
+  deleted at boot and come back only through the plugin's re-adoption (`replay`), without a second status line or push.
+  A question the Console cannot show gets the fixed log line "Declined a question the Console cannot show".
 
 `start` takes no opening prompt: `SessionManager` journals the prompt and sends it as the first turn after
 `start` returns, and rolls the bind back if that send fails.
 
 The service subscribes to each session's event stream and calls SM-provided callbacks:
-`onTurnStarted`, `onItemCompleted` (live only: `lastOutputAt = lastActivityAt = now`),
-`onTurnTerminal` (completed: `lastResponseAt`; failed: RunRecovery `changed`), `onRequest` (decline and
-`status` event), `onSessionState` (error: RunRecovery `processExited`), `appendStatus`, `onProfileDefaulted`
-(optional: a row loaded on the provider's default cost profile gets it stored).
+`onTurnStarted` (`adopted`: a turn already running when the session attached marks the row working without moving
+recency), `onItemCompleted` (live only: `lastOutputAt = lastActivityAt = now`),
+`onTurnTerminal` (completed: `lastResponseAt`; failed: RunRecovery `changed`), `onRequest` (a request declined at
+once: a `status` event, with a fixed line for a question), `onQuestion` (a question is waiting; `announced` suppresses
+the repeat status line and push), `onRequestsChanged`, `onSessionState` (error: RunRecovery `processExited`) and
+`appendStatus`.
 
 ## Coordination, grants and other readers
 
@@ -539,8 +845,9 @@ The service subscribes to each session's event stream and calls SM-provided call
   the same fixed notice text through `sendTurn`. `PeerWakeAttempt` records keep their format so audit,
   delivery warnings and grant push keep working.
 - `grants/session-launches.ts`: restart goes through `restartGrantedSession`, which handles structured rows.
-  A granted launch always creates a tmux session: `launch_session` has no `transport` field. The memory gate
-  stays as is. Concurrency counting keeps using `pid` (the app-server pid is set on structured rows).
+  In slice 1 a granted launch always created a tmux session; since lane C2 a bind that names no transport takes
+  `structuredSessions.defaultTransport`, except a launch that carries command-line flags, which stays on tmux (see
+  `docs/structured-cutover.md`). The memory gate stays as is. Concurrency counting keeps using `pid` (the app-server pid is set on structured rows).
 - `scripts/worktree-sweep.mjs`: unchanged; a structured row's checkout looks "process running" while the
   shared process lives, which is the conservative outcome.
 
@@ -561,16 +868,19 @@ The service subscribes to each session's event stream and calls SM-provided call
   `ConversationPane.tsx` for `boundSession.transport === 'structured'`: hide Text Bypass, the
   arrow/Backspace/Tab keys, the native-selection affordances and the terminal panel; keep Send, Esc/Stop,
   model profile controls, `QueuedInputNotice`, `RunFailureNotice`, suspend and close. A small
-  "app-server" badge next to the status. `useConversationData.ts` keeps polling `/screen` (cheap
+  "app-server" badge next to the status. A row with pending questions shows a `PendingQuestionCard` (options, a typed
+  answer) that posts to `POST /api/sessions/:id/requests/:requestId`. `useConversationData.ts` keeps polling `/screen` (cheap
   synthesized response) so older code paths stay valid.
 
 ## Not in slice 1
 
 - Streaming assistant deltas into the pane (needs a new event-log record type and a merge rule).
-- Approval or question UI (requests are declined and logged).
-- Image attachments on structured sessions (route refuses with a clear error).
+- Approval or question UI (requests are declined and logged). Questions were built in the cutover (cards, answer
+  route); approvals are still declined.
+- Image attachments on structured sessions (route refuses with a clear error). Built in the cutover for both providers.
 - Claude Agent SDK plugin and ACP plugin. The contract above is written for them; a contract test
-  suite runs the fake plugin through the same host paths so nothing in the host is Codex-shaped.
+  suite runs the fake plugin through the same host paths so nothing in the host is Codex-shaped. The Claude plugin was
+  built in the cutover on the CLI's stream-json protocol, not the SDK package.
 - Pressure suspension of rows on a shared process (per-session plugins are suspended since lane C2) and restart of an
   idle shared process under memory pressure.
 - Granted launches of structured sessions: not in slice 1; built in lane C2 (a granted launch takes the default transport).
@@ -590,6 +900,11 @@ The service subscribes to each session's event stream and calls SM-provided call
   fixes added launcher-shaped process-group tests (`test/helpers/fake-launcher.mjs`), the MCP argv and context
   tests, not-sent steer and recovery tests, the refused-interrupt tests, the one-line status reason tests (the
   fake app-server gained `exitAtStart`), the asleep screen test and fake-plugin error-type tests.
+  The cutover and its review round added `structured-codex-restart` (the Codex plugin across a backend restart: adopted
+  turns, held questions, host replay, the handler limit, message-mode questions), `structured-session-codex-restart`
+  (the same through the real manager, the real plugin and the real session host) and `structured-session-adoption`
+  (the manager side of adoption, Stop and queued steers, withdrawn questions, repeated questions, message-mode
+  questions), among others; the full list is in `docs/agent_docs/running_tests.md`.
 - Web tests: New Chat option, hidden controls, badge.
 - `npm run typecheck && npm run build` and the full `npm test`. The full server runs on `be43958` and on
   `ca41634` each had the same three failures, identical on untouched `main` on this host
@@ -626,6 +941,10 @@ The service subscribes to each session's event stream and calls SM-provided call
   Step j therefore waits for the medium turn to start, not to answer.
 
 ## Verification evidence
+
+This section is the slice 1 record (12 steps). The proof has since grown to 16 steps (a question h2, an image h3, a
+restart during a running turn k2, a screenshot-sized image l, release m); the run on the cutover build is in
+`docs/structured-cutover.md`, "Verification evidence".
 
 Real Codex proof, 2026-10-26, `codex-cli 0.164.0`. `node scripts/prove-structured-codex.mjs --run` passed
 12 of 12 steps on the round-2 fixes (the working tree on top of `4f62494`, 78 seconds; evidence copied to
@@ -736,7 +1055,8 @@ the env merge order, and eight new problems. The round-2 fixes:
 
 Left open on purpose:
 
-- Granted launches always create tmux sessions. `launch_session` has no `transport` field.
+- Granted launches always create tmux sessions. `launch_session` has no `transport` field. (Closed in lane C2: a bind that
+  names no transport takes the default transport.)
 - RunRecovery ignores the `retryable` flag on the `thread_closed` failure. It retries only `server_overloaded`,
   `server_unavailable` and `process_exited`.
 - A steer the server refused for a reason other than losing the race shows "Submission could not be confirmed".

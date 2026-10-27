@@ -16,7 +16,6 @@ import {
   terminateHost,
   terminateHostAt,
   transportStartedFresh,
-  transportWasStarted,
   type LineTransportExit,
 } from '../src/providers/transport/line-transport.js';
 import {
@@ -783,7 +782,6 @@ describe('the line transport factory', () => {
     await sleep(100);
 
     const attached = await slow()(rig.request({ attachOnly: true })); // it answers now: an attach connects instead of failing
-    expect(transportWasStarted(attached)).toBe(false);
     await attached.close();
     fs.unlinkSync(rig.paths.socket);
     expect(await reason()).toBe('absent'); // alive, but nobody can reach it
@@ -805,12 +803,10 @@ describe('the line transport factory', () => {
       const banners = (lines: string[]) => lines.filter((value) => value.includes('"banner"'));
 
       const first = await open(rig.make(), request());
-      expect(transportWasStarted(first.transport)).toBe(true);
       await waitUntil(() => banners(first.lines).length === 1, 8_000, 'the banner');
       await first.transport.close();
 
       const second = await open(rig.make(), request()); // the host exists, and nobody has written to it
-      expect(transportWasStarted(second.transport)).toBe(false);
       expect(transportStartedFresh(second.transport)).toBe(true);
       await waitUntil(() => banners(second.lines).length === 1, 8_000, 'the banner replayed to the second client');
       await second.transport.write(line({ cmd: 'echo', text: 'used now' }));
@@ -818,26 +814,12 @@ describe('the line transport factory', () => {
       await second.transport.close();
 
       const third = await open(rig.make(), request()); // used: its past is not this client's
-      expect(transportWasStarted(third.transport)).toBe(false);
       expect(transportStartedFresh(third.transport)).toBe(false);
       await sleep(300);
       expect(third.lines).toEqual([]);
       await third.transport.write(line({ cmd: 'echo', text: 'live' }));
       await waitUntil(() => third.lines.length === 1, 8_000, 'a live line');
       expect(JSON.parse(third.lines[0]!)).toEqual({ echo: 'live' });
-      await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
-    });
-
-    it('marks a stdio child as started, and a bare connect to somebody else\'s host as not', async () => {
-      const rig = factoryRig();
-      const stdio = await rig.make()(rig.request({ hostId: undefined }));
-      cleanups.push(() => stdio.close());
-      expect(transportWasStarted(stdio)).toBe(true);
-      const hosted = await open(rig.make(), rig.request());
-      expect(transportWasStarted(hosted.transport)).toBe(true);
-      const bare = await HostLineTransport.connect({ socketPath: rig.paths.socket });
-      cleanups.push(() => bare.close().catch(() => undefined));
-      expect(bare.started).toBe(false);
       await terminateHost(rig.runtimeDir, 'codex', log, { closeGraceMs: 300, termGraceMs: 300 });
     });
   });

@@ -81,7 +81,13 @@ export interface TransportSession {
    * Omitted by plugins that do not say.
    */
   readonly activeTurn?: string;
-  sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written
+  /**
+   * True while the provider says the conversation is running a turn that the transport cannot name yet (a reattach found the
+   * thread active and could not list its turns; the turn is adopted from the first event that names it). The host keeps the
+   * conversation marked working and does not take the missing turn for a lost one. Omitted by plugins that never need it.
+   */
+  readonly turnUnidentified?: boolean;
+  sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written but a retry may work, SendRejectedError when nothing was written and a retry cannot work
   steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
   /**
    * Resolves when the request is accepted; the terminal follows as an event. A plugin whose stop also drops sends that were
@@ -213,7 +219,7 @@ export class PreviousTurnActiveError extends Error {
 
 /**
  * The request certainly never reached the provider (the session had ended or the connection was gone before
- * anything was written), so the caller can queue it and try again. A failure after the write is not this
+ * anything was written, or a control request timed out), so the caller can queue it and try again. A failure after the write is not this
  * error: its outcome is uncertain and must not be replayed.
  */
 export class NotSentError extends Error {
@@ -221,6 +227,19 @@ export class NotSentError extends Error {
   constructor(message = 'The request was not sent.') {
     super(message);
     this.name = 'NotSentError';
+  }
+}
+
+/**
+ * The message could not be prepared or was refused before anything was written, and sending it again cannot change that: the
+ * provider refused a setting the message carries (a model or effort), or an attachment is missing or unreadable. Unlike
+ * {@link NotSentError} the caller must not retry: it shows `message` to the person, who decides what to do with the message.
+ */
+export class SendRejectedError extends Error {
+  readonly code = 'send_rejected';
+  constructor(message = 'The message could not be sent.') {
+    super(message);
+    this.name = 'SendRejectedError';
   }
 }
 

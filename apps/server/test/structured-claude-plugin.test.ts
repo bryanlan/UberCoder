@@ -17,6 +17,7 @@ import { createStdioLineTransportFactory, terminateHost } from '../src/providers
 import {
   LineTransportNotRunningError,
   NotSentError,
+  SendRejectedError,
   PreviousTurnActiveError,
   RequestNotPendingError,
   ResumeFailedError,
@@ -499,34 +500,68 @@ describe('turns', () => {
       const { setup, session } = await startSession();
       const image = path.join(setup.dir, 'not-an-image.png');
       fs.writeFileSync(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]));
-      await expect(session.sendTurn({ text: 'look', images: [{ path: image, mimeType: 'image/png' }] })).rejects.toBeInstanceOf(NotSentError);
+      // Sending it again would fail the same way: the message is rejected with the reason, not left to be retried.
+      const error = await session.sendTurn({ text: 'look', images: [{ path: image, mimeType: 'image/png' }] }).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(SendRejectedError);
+      expect(error).not.toBeInstanceOf(NotSentError);
+      expect((error as Error).message).toMatch(/image could not be read/);
       expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
     });
   });
 
-  it('fails a send whose image cannot be read, before anything is written, as not sent', async () => {
+  it('rejects a send whose image cannot be read, before anything is written, with the reason', async () => {
     const { setup, session } = await startSession();
     const error = await session.sendTurn({ text: 'look', images: [{ path: path.join(setup.dir, 'missing.png'), mimeType: 'image/png' }] }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(NotSentError); // nothing reached the process, so the host may queue it again
+    // A missing file stays missing: this is not NotSentError, which the host retries.
+    expect(error).toBeInstanceOf(SendRejectedError);
+    expect(error).not.toBeInstanceOf(NotSentError);
+    expect((error as Error).message).toMatch(/ENOENT|no such file/i);
     expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
     // The slot is free again.
     const { turnId } = await session.sendTurn({ text: 'ok' });
     expect(turnId).toBeTruthy();
   });
 
-  it('reports a refused or timed-out model change as not sent, and writes nothing', async () => {
+  it('rejects a steer whose image cannot be read, and registers nothing for it', async () => {
+    const { setup, session } = await startSession({ steps: [{ sleep: 400 }, assistantText('done')] });
+    const { turnId } = await session.sendTurn({ text: 'work' });
+    const error = await session.steer(turnId, { text: 'look', images: [{ path: path.join(setup.dir, 'missing.png'), mimeType: 'image/png' }] }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(SendRejectedError);
+    expect(receivedUserFrames(setup.logFile)).toHaveLength(1); // only the turn itself
+  });
+
+  it('keeps NotSentError for a model change that timed out and rejects one the CLI refused, writing nothing either way', async () => {
     const { setup, session } = await startSession();
     const client = (session as unknown as { client: StreamJsonClient }).client;
     const real = client.sendControl.bind(client);
+    const requests: string[] = [];
     (client as unknown as { sendControl: unknown }).sendControl = async (request: { subtype: string }, options?: { timeoutMs?: number }) => {
-      if (request.subtype === 'set_model') throw new ClaudeControlTimeoutError('set_model', 150);
+      requests.push(request.subtype);
+      if (request.subtype === 'set_model' && requests.filter((subtype) => subtype === 'set_model').length === 1) throw new ClaudeControlTimeoutError('set_model', 150);
+      if (request.subtype === 'set_model') throw new ClaudeControlError('set_model', 'Model opus-9 is not available');
       if (request.subtype === 'apply_flag_settings') throw new ClaudeControlError('apply_flag_settings', 'refused');
       return real(request as never, options);
     };
+    // A timeout may go through next time; a refusal never will.
     await expect(session.sendTurn({ text: 'x', model: 'opus' })).rejects.toBeInstanceOf(NotSentError);
-    await expect(session.sendTurn({ text: 'x', effort: 'high' })).rejects.toBeInstanceOf(NotSentError);
+    const refusedModel = await session.sendTurn({ text: 'x', model: 'opus' }).catch((caught: unknown) => caught);
+    expect(refusedModel).toBeInstanceOf(SendRejectedError);
+    expect((refusedModel as Error).message).toMatch(/opus-9 is not available/);
+    const refusedEffort = await session.sendTurn({ text: 'x', effort: 'high' }).catch((caught: unknown) => caught);
+    expect(refusedEffort).toBeInstanceOf(SendRejectedError);
+    expect((refusedEffort as Error).message).toMatch(/refused/);
     expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
     expect(session.activeTurn).toBeUndefined(); // the slot is free again
+  });
+
+  it('keeps NotSentError for a connection that was lost while the message was prepared', async () => {
+    const { setup, session } = await startSession();
+    const client = (session as unknown as { client: StreamJsonClient }).client;
+    (client as unknown as { sendControl: unknown }).sendControl = async () => {
+      throw new ClaudeExitError({ code: null, signal: null, reason: 'disconnected' }, false);
+    };
+    await expect(session.sendTurn({ text: 'x', model: 'opus' })).rejects.toBeInstanceOf(NotSentError);
+    expect(receivedUserFrames(setup.logFile)).toHaveLength(0);
   });
 
   it('uses a caller uuid as the message uuid and a fresh one otherwise', async () => {
@@ -1306,6 +1341,37 @@ describe('resume', () => {
   it('starts the id again when the transcript holds no conversation either', async () => {
     const setup = setupFake({ sessionStartHook: false });
     writeTranscript(setup.configDir, setup.cwd, sessionId, false);
+    const session = setup.track(await setup.instance.resume(sessionId, setup.open()));
+    expect(startEntries(setup.logFile)[0]!.argv).toEqual(expect.arrayContaining(['--session-id', sessionId]));
+    expect(session.nativeSessionId).toBe(sessionId);
+  });
+
+  it('does not start a conversation over that completed a turn and has lost its transcript: it fails with a clear reason and starts nothing', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    const session = setup.track(await setup.instance.resume(sessionId, setup.open())); // never ran a turn: started under its own id
+    const events = new EventLog(session);
+    const { turnId } = await session.sendTurn({ text: 'first words' });
+    expect((await events.waitForTerminal(turnId)).status).toBe('completed');
+    expect(JSON.parse(setup.context.metaStore.get('claude-turns:conversation-1')!)).toMatchObject({ sessionId });
+
+    // Idle sleep: the process ends and its launch record goes with it. The record of the completed turn stays.
+    await session.unload();
+    await waitUntil(() => session.isEnded);
+    expect(setup.context.metaStore.has('claude-launch:conversation-1')).toBe(false);
+    expect(setup.context.metaStore.has('claude-turns:conversation-1')).toBe(true);
+
+    // The CLI removed the transcript (the fake never wrote one): starting over would drop the history without a word.
+    const starts = startEntries(setup.logFile).length;
+    const error = await setup.instance.resume(sessionId, setup.open()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ResumeFailedError);
+    expect((error as Error).message).toMatch(/is gone/);
+    expect(startEntries(setup.logFile)).toHaveLength(starts);
+  });
+
+  it('starts over a conversation whose record of completed turns names another session', async () => {
+    const setup = setupFake({ sessionStartHook: false });
+    // A record for a different native id (the conversation was restarted under a new one) says nothing about this id.
+    setup.context.metaStore.set('claude-turns:conversation-1', JSON.stringify({ sessionId: 'another-session' }));
     const session = setup.track(await setup.instance.resume(sessionId, setup.open()));
     expect(startEntries(setup.logFile)[0]!.argv).toEqual(expect.arrayContaining(['--session-id', sessionId]));
     expect(session.nativeSessionId).toBe(sessionId);

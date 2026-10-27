@@ -19,6 +19,7 @@ import {
   NotSentError,
   PreviousTurnActiveError,
   RequestNotPendingError,
+  TransportUnavailableError,
   TurnNotActiveError,
   type OpenOptions,
   type PluginContext,
@@ -137,9 +138,13 @@ export const BACKGROUND_WORK_STALE_MS = 4 * 3_600_000;
  */
 const UNPROFILED_CLAUDE_EFFORT = 'medium';
 
-/** Where a per-session provider keeps its session host and launch record, by provider. The service ends both when it ends a conversation. */
-const PER_SESSION_HOSTS: Partial<Record<ProviderId, { hostId(sessionId: string): string; launchKey(sessionId: string): string; hostPrefix: string }>> = {
-  claude: { hostId: claudeHostId, launchKey: sessionId => `claude-launch:${sessionId}`, hostPrefix: 'claude-' },
+/**
+ * Where a per-session provider keeps its session host, its launch record and its record of having completed a turn, by provider.
+ * The service ends the host and the launch record whenever it ends a conversation's process (a sleep as well as a release); the
+ * turn record outlives a sleep, so only the end of the conversation itself (`release`, or a host no row owns) removes it.
+ */
+const PER_SESSION_HOSTS: Partial<Record<ProviderId, { hostId(sessionId: string): string; launchKey(sessionId: string): string; turnsKey(sessionId: string): string; hostPrefix: string }>> = {
+  claude: { hostId: claudeHostId, launchKey: sessionId => `claude-launch:${sessionId}`, turnsKey: sessionId => `claude-turns:${sessionId}`, hostPrefix: 'claude-' },
 };
 
 interface LoadedSession {
@@ -240,6 +245,8 @@ export class StructuredSessionService {
   private readonly loading = new Map<string, Promise<'loaded' | 'unavailable'>>();
   /** Survivor lookups at startup, so a use of the conversation waits for the answer instead of racing it with a resume. */
   private readonly reattaching = new Map<string, Promise<unknown>>();
+  /** Conversations whose last survivor lookup reached a provider process that did not answer in time (so it is not known to be gone). */
+  private readonly busySurvivors = new Set<string>();
   private readonly failures = new Map<string, string>();
 
   constructor(options: StructuredSessionServiceOptions) {
@@ -334,13 +341,25 @@ export class StructuredSessionService {
       }
       const lookup = this.reattachSurvivor(candidate).finally(() => { this.reattaching.delete(candidate.session.id); });
       this.reattaching.set(candidate.session.id, lookup);
+      this.busySurvivors.delete(candidate.session.id);
       try {
         if (await lookup) adopted.push(candidate.session.id);
       } catch (error) {
+        // A provider process that runs but did not answer in time is not a process that is gone: the caller must not take the
+        // conversation's turn for lost (see `survivorBusy`).
+        if (error instanceof TransportUnavailableError) this.busySurvivors.add(candidate.session.id);
         this.logger?.warn({ err: error, sessionId: candidate.session.id }, 'Reattaching a surviving provider process failed.');
       }
     }
     return adopted;
+  }
+
+  /**
+   * The last `reattachSurvivors` for this conversation reached a provider process (or its session host) that did not answer in
+   * time, and so did not adopt it. The process may be running a turn; only a later lookup can tell. False after any other outcome.
+   */
+  survivorBusy(sessionId: string): boolean {
+    return this.busySurvivors.has(sessionId);
   }
 
   private async reattachSurvivor({ session, cwd }: SurvivorCandidate): Promise<boolean> {
@@ -397,6 +416,12 @@ export class StructuredSessionService {
 
   turnActive(session: Pick<BoundSession, 'id'>): boolean {
     return this.sessions.get(session.id)?.activeTurnId !== undefined;
+  }
+
+  /** The loaded session's provider says a turn is running that the transport has not named yet (see `TransportSession.turnUnidentified`). */
+  turnUnidentified(session: Pick<BoundSession, 'id'>): boolean {
+    const state = this.sessions.get(session.id);
+    return state?.loaded === true && state.transport.turnUnidentified === true;
   }
 
   /**
@@ -465,6 +490,7 @@ export class StructuredSessionService {
     this.failures.delete(session.id);
     this.meta.delete(`structured-epoch:${session.id}`);
     this.clearAnnounced(session.id);
+    this.forgetTurnRecords(session);
     if (!state) {
       await this.endConversation(session);
       return;
@@ -476,6 +502,14 @@ export class StructuredSessionService {
       try { await state.transport.unload(); } catch (error) { this.logger?.warn({ err: error, sessionId: session.id }, 'Structured unload failed.'); }
     }
     await state.transport.close('release');
+  }
+
+  /** The conversation is over for good: the per-session providers' record of having completed a turn goes with it. */
+  private forgetTurnRecords(session: Pick<BoundSession, 'id'> & Partial<Pick<BoundSession, 'provider'>>): void {
+    for (const [provider, naming] of Object.entries(PER_SESSION_HOSTS) as Array<[ProviderId, NonNullable<(typeof PER_SESSION_HOSTS)[ProviderId]>]>) {
+      if (session.provider && session.provider !== provider) continue;
+      this.meta.delete(naming.turnsKey(session.id));
+    }
   }
 
   /**
@@ -524,6 +558,7 @@ export class StructuredSessionService {
         try {
           await terminateHost(this.hosts.runtimeDir, hostId, this.hosts.log);
           this.meta.delete(naming.launchKey(sessionId));
+          this.meta.delete(naming.turnsKey(sessionId));
           ended.push(hostId);
         } catch (error) {
           this.logger?.warn({ err: error, hostId }, 'Ending a provider process that no conversation owns failed.');
@@ -666,7 +701,7 @@ export class StructuredSessionService {
     const selected = profile ? profileTable(session.provider)[profile] : undefined;
     const model = selected ? `${selected.model} ${selected.reasoningEffort}` : session.launchContext?.model;
     // `asleep`: the row is not loaded in the provider (manual or idle sleep, or not restored yet). Loading it again reads `idle`.
-    const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId ? 'working' : 'idle'}`;
+    const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId || state.transport.turnUnidentified ? 'working' : 'idle'}`;
     const used = state?.usage?.used, max = state?.usage?.max;
     return {
       content: '',

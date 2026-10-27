@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
@@ -312,6 +315,50 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     expect(instance.calls.map(call => call.method)).toEqual(['reattach']); // no resume
     expect(instance.sessions).toHaveLength(1);
     await svc.shutdown();
+  });
+
+  it('reports a process that runs but did not answer as busy, which is not the same as absent, and forgets it once the process answers', async () => {
+    const plugin = new FakeTransportPlugin({ ...PER_SESSION, survivors: { 'native-1': 4321 }, reattachBusy: 1 });
+    const svc = service(plugin);
+    expect(await svc.reattachSurvivors([{ session: row('c1', 'native-1'), cwd: '/tmp' }])).toEqual([]);
+    expect(svc.survivorBusy('c1')).toBe(true);
+    expect(svc.alive({ id: 'c1' })).toBe(false);
+
+    expect(await svc.reattachSurvivors([{ session: row('c1', 'native-1'), cwd: '/tmp' }])).toEqual(['c1']);
+    expect(svc.survivorBusy('c1')).toBe(false);
+    expect(svc.alive({ id: 'c1' })).toBe(true);
+    await svc.shutdown();
+
+    const none = service(new FakeTransportPlugin({ ...PER_SESSION }));
+    expect(await none.reattachSurvivors([{ session: row('c2', 'native-9'), cwd: '/tmp' }])).toEqual([]);
+    expect(none.survivorBusy('c2')).toBe(false); // nothing runs for it
+    await none.shutdown();
+  });
+
+  it('keeps the record of completed turns through a sleep and ends it with the conversation', async () => {
+    const registry = new TransportPluginRegistry();
+    registry.register(new FakeTransportPlugin({ ...PER_SESSION }));
+    const context = fakePluginContext();
+    const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turns-record-'));
+    const svc = new StructuredSessionService({
+      registry,
+      config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
+      createContext: () => context,
+      meta: context.meta,
+      callbacks: { onTurnStarted() {}, onItemCompleted() {}, onTurnTerminal() {}, onRequest() {}, onQuestion() {}, onRequestsChanged() {}, onSessionState() {}, appendStatus() {} },
+      hosts: { runtimeDir, log: { info() {}, warn() {} } },
+    });
+    context.meta.set('claude-turns:c1', JSON.stringify({ sessionId: 'native-1' }));
+    context.meta.set('claude-launch:c1', JSON.stringify({ sessionId: 'native-1', argv: ['claude'] }));
+
+    await svc.unload({ id: 'c1', provider: 'claude' }); // a sleep: the process and its launch record go, the record of turns stays
+    expect(context.metaValues.has('claude-launch:c1')).toBe(false);
+    expect(context.metaValues.has('claude-turns:c1')).toBe(true);
+
+    await svc.release({ id: 'c1', provider: 'claude' }); // the conversation is over
+    expect(context.metaValues.has('claude-turns:c1')).toBe(false);
+    await svc.shutdown();
+    fs.rmSync(runtimeDir, { recursive: true, force: true });
   });
 
   it('skips a conversation that is loaded already, one without a native id yet, and a plugin without reattach', async () => {

@@ -102,6 +102,8 @@ export class FakeTransportSession implements TransportSession {
   readonly withdrawn = new Set<string>();
   /** The turn the plugin found running when it adopted the process (`TransportSession.activeTurn`). */
   adoptedTurn: string | undefined;
+  /** The provider says a turn is running that the plugin cannot name yet (`TransportSession.turnUnidentified`). */
+  turnUnidentified = false;
   private turnCounter = 0;
   private readonly channel = new EventChannel();
 
@@ -224,6 +226,10 @@ export class FakeTransportInstance implements TransportInstance {
    * and, as the Claude plugin does, starts a provider-origin turn for it without marking it as adopted.
    */
   survivorTurns = new Map<string, string>();
+  /** Native ids whose surviving process runs a turn the plugin cannot name: the adopted session says `turnUnidentified` and reports no turn. */
+  survivorUnidentified = new Set<string>();
+  /** The next this-many `reattach` calls fail as a provider process that runs but does not answer in time (`TransportUnavailableError`), keeping the survivor. */
+  reattachBusy = 0;
   private threadCounter = 0;
   private pidCounter = 0;
 
@@ -258,12 +264,17 @@ export class FakeTransportInstance implements TransportInstance {
   async reattach(nativeSessionId: string, options: OpenOptions): Promise<FakeTransportSession | undefined> {
     this.calls.push({ method: 'reattach', args: [nativeSessionId, options] });
     this.assertOpen();
+    if (this.reattachBusy > 0) {
+      this.reattachBusy -= 1;
+      throw new TransportUnavailableError('The running provider process did not answer in time. It was left alone.');
+    }
     const pid = this.survivors.get(nativeSessionId);
     if (pid === undefined) return undefined;
     this.survivors.delete(nativeSessionId);
     const session = this.open(nativeSessionId, options, true);
     session.pid = pid;
     session.reattached = true;
+    if (this.survivorUnidentified.has(nativeSessionId)) session.turnUnidentified = true;
     const running = this.survivorTurns.get(nativeSessionId);
     if (running) {
       session.adoptedTurn = running;
@@ -305,6 +316,10 @@ export interface FakeTransportPluginOptions {
   survivors?: Record<string, number>;
   /** Native id -> the turn that surviving process is running (see `FakeTransportInstance.survivorTurns`). */
   survivorTurns?: Record<string, string>;
+  /** Native ids whose surviving process runs a turn the plugin cannot name (see `FakeTransportInstance.survivorUnidentified`). */
+  survivorUnidentified?: string[];
+  /** How many `reattach` calls fail as a process that does not answer in time (see `FakeTransportInstance.reattachBusy`). */
+  reattachBusy?: number;
 }
 
 export class FakeTransportPlugin implements TransportPlugin {
@@ -326,6 +341,8 @@ export class FakeTransportPlugin implements TransportPlugin {
     instance.manualTurns = this.options.manualTurns ?? false;
     instance.survivors = new Map(Object.entries(this.options.survivors ?? {}));
     instance.survivorTurns = new Map(Object.entries(this.options.survivorTurns ?? {}));
+    instance.survivorUnidentified = new Set(this.options.survivorUnidentified ?? []);
+    instance.reattachBusy = this.options.reattachBusy ?? 0;
     this.instances.push(instance);
     return instance;
   }

@@ -365,6 +365,11 @@ export class ClaudeInstance implements TransportInstance {
       // The CLI writes a conversation only once a prompt reaches the model, so a chat that never ran a turn (or lost its
       // process before the first prompt got through) has no transcript, or only preamble, and `--resume` cannot find it.
       // Its id is unused, so launch it again under the same id: the conversation is still the Console's, and it was empty.
+      // A chat that did complete a turn is another matter: its transcript was removed (the CLI deletes old ones) or moved, and
+      // starting over under its id would silently drop the history, so that stays a failed resume with a clear reason.
+      if (this.conversationRan(claude.conversationId, nativeSessionId)) {
+        throw new ResumeFailedError(`The saved Claude conversation for session ${nativeSessionId} is gone (its transcript was not found), so it cannot be resumed. Start a new conversation.`);
+      }
       this.log.info({ sessionId: nativeSessionId, transcripts: files.length }, 'claude has no conversation for this session; starting it again under the same id');
       const session = await this.launch('new', nativeSessionId, claude, configDir);
       session.noteNoHistory();
@@ -448,6 +453,27 @@ export class ClaudeInstance implements TransportInstance {
   // used `--session-id`, and a profile switched since would differ in `--model`).
   private launchKey(conversationId: string): string {
     return `claude-launch:${conversationId}`;
+  }
+
+  // Whether a conversation ever completed a turn. The launch record cannot say: it goes with the process (an idle sleep ends
+  // the process), and the history question comes up exactly then. This record stays until the service ends the conversation.
+  private ranKey(conversationId: string): string {
+    return `claude-turns:${conversationId}`;
+  }
+
+  private noteConversationRan(conversationId: string, sessionId: string): void {
+    if (this.conversationRan(conversationId, sessionId)) return;
+    this.context.meta.set(this.ranKey(conversationId), JSON.stringify({ sessionId, firstTurnCompletedAt: new Date().toISOString() }));
+  }
+
+  private conversationRan(conversationId: string, sessionId: string): boolean {
+    const stored = this.context.meta.get(this.ranKey(conversationId));
+    if (!stored) return false;
+    try {
+      return (JSON.parse(stored) as { sessionId?: unknown }).sessionId === sessionId;
+    } catch {
+      return false;
+    }
   }
 
   private forgetLaunch(conversationId: string, sessionId: string): void {
@@ -616,6 +642,7 @@ export class ClaudeInstance implements TransportInstance {
       ...optionalFlag('model', flagValue(argv, '--model')),
       ...optionalFlag('effort', flagValue(argv, '--effort')),
       requireSubscriptionLogin: this.requireSubscriptionLogin,
+      onTurnCompleted: () => this.noteConversationRan(options.conversationId, sessionId),
       onEnded: (ended, kind) => {
         if (this.sessions.get(ended.nativeSessionId) === ended) this.sessions.delete(ended.nativeSessionId);
         // The process is gone: nothing is left to reattach to. A detached session leaves its process running.

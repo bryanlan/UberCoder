@@ -7,8 +7,11 @@ import {
 } from '../src/providers/transport/codex/app-server-session.js';
 import { RequestNotPendingError, type RequestResponse, type TransportEvent, type TransportSession } from '../src/providers/transport/types.js';
 import {
+  agentMessageItem,
   baseHandlers,
   EventLog,
+  itemCompleted,
+  itemStarted,
   notification,
   OPEN_OPTIONS,
   readLog,
@@ -19,6 +22,7 @@ import {
   turnCompleted,
   turnObject,
   turnStarted,
+  userMessageItem,
   waitUntil,
   type FakeSetup,
 } from './helpers/codex-harness.js';
@@ -272,6 +276,112 @@ describe('Codex questions', () => {
     expect(log.of('request.closed').map((event) => event.requestId)).toEqual(['1', '2']);
     await session.respond('0', { decision: 'answer', answers: { schema_preference: ['UI flexibility'] } });
     await waitUntil(() => answers(fake).length === 3, 5000, 'the answer');
+  });
+});
+
+// codex-cli 0.164.0 in the default collaboration mode gives the model `request_user_input_async` instead of a blocking
+// `item/tool/requestUserInput`. The frames below are the ones a real app-server sent (captured over stdio on 2026-10-26, ids
+// shortened): the tool answers `{"accepted":true}` at once, no server request is raised, the question arrives as an agentMessage
+// item with `delivery: 'async'` and `questions: [{ title, options }]` (item/started, then an identical item/completed), the model
+// then polls with a 60 s `sleep` item, and a steered answer interrupts the sleep and ends the same turn.
+const ASK_ID = 'call_12c928c4cfa3441b81ffa8baf557987c';
+const ASK_ITEM = {
+  ...agentMessageItem(ASK_ID, 'Which color do you prefer?\n- Red\n- Blue'),
+  delivery: 'async',
+  questions: [{ title: 'Which color do you prefer?', options: ['Red', 'Blue'] }],
+};
+const COMMENTARY_ITEM = { ...agentMessageItem('msg_0b8abc5af500dbee', 'I’ll ask for your color preference and wait for your answer.\n'), phase: 'commentary' };
+const SLEEP_ITEM = { type: 'sleep', id: 'call_0b6df4df884f4e96', durationMs: 60_000 };
+const OBSERVED_FRAMES = [
+  turnStarted(THREAD, TURN),
+  itemStarted(THREAD, TURN, userMessageItem('um-1', 'Ask me which color I prefer.')),
+  itemCompleted(THREAD, TURN, userMessageItem('um-1', 'Ask me which color I prefer.')),
+  itemStarted(THREAD, TURN, { ...COMMENTARY_ITEM, text: '' }),
+  itemCompleted(THREAD, TURN, COMMENTARY_ITEM),
+  itemStarted(THREAD, TURN, ASK_ITEM),
+  itemCompleted(THREAD, TURN, ASK_ITEM),
+  itemStarted(THREAD, TURN, SLEEP_ITEM),
+];
+
+describe('A question the model asked with request_user_input_async', () => {
+  it('opens one message-mode card from the observed frames, holds nothing, and survives the end of its turn', async () => {
+    const fake = track(setupFake({
+      handlers: {
+        ...baseHandlers(THREAD),
+        'turn/start': { result: { turn: turnObject(TURN, 'inProgress', null) }, emitAfter: OBSERVED_FRAMES },
+        'turn/steer': { result: { turnId: TURN }, emitAfter: [itemCompleted(THREAD, TURN, SLEEP_ITEM), turnCompleted(THREAD, TURN, 'completed', null, 100)] },
+      },
+    }));
+    const { session, log } = await startTurn(fake);
+    const opened = await log.waitForType('request.opened') as Opened;
+    await sleep(150);
+
+    expect(opened).toEqual({
+      type: 'request.opened',
+      requestId: `item:${ASK_ID}`,
+      kind: 'question',
+      summary: 'Which color do you prefer?',
+      turnId: TURN,
+      questions: [{ id: 'q1', question: 'Which color do you prefer?', options: [{ label: 'Red' }, { label: 'Blue' }], allowCustom: true }],
+      responseMode: 'message',
+    });
+    // item/started and item/completed carry the same item: one card. Nothing is held, so no JSON-RPC reply is owed.
+    expect(log.of('request.opened')).toHaveLength(1);
+    expect(log.of('request.closed')).toEqual([]);
+    expect(answers(fake)).toEqual([]);
+    // The turn is still open (the model polls), and the message the question became is an ordinary assistant item.
+    expect(log.of('turn.terminal')).toEqual([]);
+    expect(log.of('item.completed').map((event) => [event.itemId, event.kind])).toContainEqual([ASK_ID, 'assistant']);
+
+    // The answer is a message: a steer into the open turn, which interrupts the sleep and ends the turn.
+    await session.steer!(TURN, { text: 'Answer to your question: Which color do you prefer?: Blue' });
+    expect(receivedRequests(fake.logFile, 'turn/steer')[0]!.params).toMatchObject({
+      expectedTurnId: TURN,
+      input: [{ type: 'text', text: 'Answer to your question: Which color do you prefer?: Blue' }],
+    });
+    await log.waitForType('turn.terminal');
+    // The card outlives its turn: only the host closes it, when the person answers or declines.
+    expect(log.of('request.closed')).toEqual([]);
+    expect(log.of('request.opened')).toHaveLength(1);
+  });
+
+  it('maps several questions by position, with and without options', async () => {
+    const item = {
+      ...agentMessageItem('call_two', 'Which package?\n- pnpm\n- npm\n\nWhat should it be named?'),
+      delivery: 'async',
+      questions: [{ title: 'Which package manager?', options: ['pnpm', 'npm'] }, { title: 'What should it be named?' }, { title: 'Anything else?', options: null }],
+    };
+    const fake = track(setupFake(scenario([turnStarted(THREAD, TURN), itemCompleted(THREAD, TURN, item)])));
+    const { log } = await startTurn(fake);
+    const opened = await log.waitForType('request.opened') as Opened;
+
+    expect(opened.requestId).toBe('item:call_two');
+    expect(opened.summary).toBe('Which package manager?');
+    expect(opened.questions).toEqual([
+      { id: 'q1', question: 'Which package manager?', options: [{ label: 'pnpm' }, { label: 'npm' }], allowCustom: true },
+      { id: 'q2', question: 'What should it be named?', options: [], allowCustom: true },
+      { id: 'q3', question: 'Anything else?', options: [], allowCustom: true },
+    ]);
+  });
+
+  it('says so when the question cannot be shown, and ignores a message that asks nothing', async () => {
+    const asyncItem = (id: string, questions: unknown) => ({ ...agentMessageItem(id, 'A question.'), delivery: 'async', questions });
+    const fake = track(setupFake(scenario([
+      turnStarted(THREAD, TURN),
+      itemCompleted(THREAD, TURN, asyncItem('call_a', [{ question: 'The old field name', options: ['x'] }])), // no title
+      itemCompleted(THREAD, TURN, asyncItem('call_b', [{ title: 'Which?', options: [{ label: 'x' }] }])), // option is not a string
+      itemCompleted(THREAD, TURN, asyncItem('call_c', 'Which?')), // not a list
+      itemCompleted(THREAD, TURN, asyncItem('call_a', [{ question: 'The old field name' }])), // the same item again: one notice
+      itemCompleted(THREAD, TURN, asyncItem('call_d', [])), // nothing asked
+      itemCompleted(THREAD, TURN, { ...agentMessageItem('msg_plain', 'Hello'), delivery: null, questions: null }),
+      turnCompleted(THREAD, TURN, 'completed', null, 100),
+    ])));
+    const { log } = await startTurn(fake);
+    await log.waitForType('turn.terminal');
+
+    expect(log.of('request.opened')).toEqual([]);
+    const notices = log.of('notice').filter((event) => /cannot show as a card/.test(event.text));
+    expect(notices.map((event) => event.level)).toEqual(['warn', 'warn', 'warn']);
   });
 });
 

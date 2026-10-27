@@ -5,7 +5,7 @@ import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
 import type { QueuedInputRecord } from '../src/sessions/input-queue.js';
 import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt.js';
 import { peerWakePaused } from '../src/coordination/wake.js';
-import { NotSentError, TurnNotActiveError } from '../src/providers/transport/types.js';
+import { NotSentError, SendRejectedError, TurnNotActiveError } from '../src/providers/transport/types.js';
 import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
@@ -136,6 +136,86 @@ describe('Structured human input', () => {
     expect(record(f, session.id, requestId)).toMatchObject({ state: 'queued', reason: 'Waiting for the session to accept the message.' });
     await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('submitted');
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
+  });
+
+  it('fails a message the provider can never accept, with the reason, instead of retrying it every second', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    const thread = f.thread(session.conversationRef);
+    const rejected = new SendRejectedError('The message could not be sent: set_model: Model opus-9 is not available');
+    const real = thread.sendTurn.bind(thread);
+    thread.sendTurn = async input => {
+      thread.calls.push({ method: 'sendTurn', args: [input] });
+      throw rejected;
+    };
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'use the new model', requestId);
+
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'needs_review', reason: rejected.message });
+    expect(record(f, session.id, requestId)).toMatchObject({ state: 'failed', reason: rejected.message });
+    // Nothing retries it: no timer is left to send it again, and a later message waits behind it for the person to decide.
+    await new Promise(resolve => setTimeout(resolve, 1_300));
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    expect(record(f, session.id, requestId).state).toBe('failed');
+    thread.sendTurn = real;
+  });
+
+  it('rejects a direct send the provider can never accept as input that was not sent', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    const thread = f.thread(session.conversationRef);
+    thread.sendTurn = async input => {
+      thread.calls.push({ method: 'sendTurn', args: [input] });
+      throw new SendRejectedError('The message could not be sent: the image could not be read.');
+    };
+    await expect(f.manager.sendInput(session.id, 'look at this')).rejects.toThrow(/image could not be read.*Nothing was sent/);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+  });
+
+  it('stops retrying a message the transport keeps refusing before it writes anything, after 10 minutes', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    const thread = f.thread(session.conversationRef);
+    thread.sendTurn = async input => {
+      thread.calls.push({ method: 'sendTurn', args: [input] });
+      throw new NotSentError('The fake connection is down.');
+    };
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'send me when you can', requestId);
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'queued' });
+    const first = record(f, session.id, requestId);
+    expect(first).toMatchObject({ state: 'queued', reason: 'Waiting for the session to accept the message.' });
+    expect(Date.parse(first.notSentSince!)).toBeLessThanOrEqual(Date.now());
+
+    // A run of refusals that began a little under 10 minutes ago does not end the wait: the message is still retried.
+    const age = (ms: number) => f.db.meta.set(`session-input:${session.id}:${requestId}`, JSON.stringify({ ...record(f, session.id, requestId), notSentSince: new Date(Date.now() - ms).toISOString() }));
+    age(9 * 60_000);
+    await expect.poll(() => f.calls(session.conversationRef, 'sendTurn').length, { timeout: 5000, interval: 100 }).toBeGreaterThan(1);
+    expect(record(f, session.id, requestId).state).toBe('queued');
+    expect(Date.now() - Date.parse(record(f, session.id, requestId).notSentSince!)).toBeGreaterThan(8.5 * 60_000); // the run keeps its start
+
+    // Past 10 minutes of refusals the message fails, with the reason, and nothing retries it.
+    age(10 * 60_000 + 1_000);
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('failed');
+    expect(record(f, session.id, requestId).reason).toMatch(/could not be sent for 10 minutes/);
+    expect(f.row(session.id).queuedInputs?.find(item => item.requestId === requestId)).toMatchObject({ state: 'needs_review' });
+    const attempts = f.calls(session.conversationRef, 'sendTurn').length;
+    await new Promise(resolve => setTimeout(resolve, 1_300));
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(attempts);
+  });
+
+  it('does not count the wait for a running turn as refusals: the run of refusals starts again afterwards', async () => {
+    const f = fixture({ plugin: { capabilities: { steer: 'none' } } });
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'first');
+    await settle();
+    const requestId = randomUUID();
+    await send(f, session.id, 'wait for the turn', requestId);
+    // Hours of waiting for a turn are not a failure to send.
+    f.db.meta.set(`session-input:${session.id}:${requestId}`, JSON.stringify({ ...record(f, session.id, requestId), notSentSince: new Date(Date.now() - 3 * 3_600_000).toISOString() }));
+    await new Promise(resolve => setTimeout(resolve, 1_300));
+    expect(record(f, session.id, requestId).state).toBe('queued');
+    expect(record(f, session.id, requestId).notSentSince).toBeUndefined();
   });
 
   it('queues a steer the transport reports as never sent, then delivers it as a steer, instead of marking it unconfirmed', async () => {

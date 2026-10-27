@@ -10,7 +10,7 @@ import { createCodexAppServerPlugin } from '../src/providers/transport/codex/ind
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import { createLineTransportFactory, terminateHost } from '../src/providers/transport/line-transport.js';
 import {
-  FAKE_APP_SERVER, FAST_TIMINGS, HOST_PROGRAM, agentMessageItem, baseHandlers, itemCompleted, readLog, receivedRequests, serverRequest,
+  FAKE_APP_SERVER, FAST_TIMINGS, HOST_PROGRAM, agentMessageItem, baseHandlers, commandItem, itemCompleted, itemStarted, readLog, receivedRequests, serverRequest,
   threadResult, turnCompleted, turnObject, turnStarted, waitUntil, writeScenario,
 } from './helpers/codex-harness.js';
 import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
@@ -171,5 +171,57 @@ describe('A Codex turn that runs across a backend restart, through the host', ()
       { id: 0, result: { answers: { schema_preference: { answers: ['Flexible'] } } } },
     ]);
     expect(f.row().pendingRequests).toBeUndefined();
+  });
+});
+
+describe('A Codex turn found running after a backend restart, through the host', () => {
+  it('ends the command it was running when Stop reaches it: the new backend asks the app-server which commands are running', async () => {
+    const entry = { turnId: TURN, item: commandItem('cmd-1', 'proc-1'), startedAtMs: 1, completedAtMs: null };
+    const f = await restartFixture({
+      'turn/interrupt': { result: {} },
+      'thread/items/list': { result: { data: [entry], nextCursor: null } },
+      'thread/backgroundTerminals/list': { result: { data: [{ itemId: 'cmd-1', processId: 'proc-1', command: 'sleep 30', cwd: '/work', osPid: 1, cpuPercent: null, rssKb: null }], nextCursor: null } },
+      'thread/backgroundTerminals/terminate': { result: { terminated: true } },
+    }, {
+      result: { turn: turnObject(TURN, 'inProgress', 1790000001) },
+      emitAfter: [turnStarted(THREAD, TURN), itemStarted(THREAD, TURN, commandItem('cmd-1', 'proc-1'))],
+    });
+    await f.first.manager.sendInput(f.session.id, 'run a long command');
+    await waitUntil(() => f.row().isWorking, 5_000, 'the turn to start');
+    await f.first.manager.stop(); // the backend that saw the command start goes away
+
+    const second = f.backend();
+    await second.manager.reconcileSessions();
+    expect(f.row().isWorking).toBe(true);
+    expect(receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate')).toEqual([]);
+    await second.manager.sendKeystrokes(f.session.id, { keys: ['Escape'] });
+    expect(receivedRequests(f.logFile, 'turn/interrupt')).toHaveLength(1);
+    await waitUntil(() => receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate').length === 1, 5_000, 'the command to be ended');
+    expect(receivedRequests(f.logFile, 'thread/backgroundTerminals/terminate')[0]!.params).toEqual({ threadId: THREAD, processId: 'proc-1' });
+  });
+
+  it('is not declared lost when the app-server says the thread is running but no listing names the turn: the first event adopts it', async () => {
+    const f = await restartFixture({ 'thread/turns/list': { error: { code: -32603, message: 'cannot list turns' } } }, {
+      result: { turn: turnObject(TURN, 'inProgress', 1790000001) },
+      emitAfter: [turnStarted(THREAD, TURN), itemCompleted(THREAD, TURN, agentMessageItem('item-a', 'working'), 2500), turnCompleted(THREAD, TURN, 'completed', null, 300)],
+    });
+    await f.first.manager.sendInput(f.session.id, 'a long task');
+    await waitUntil(() => f.row().isWorking, 5_000, 'the turn to start');
+    await f.first.manager.stop();
+
+    const second = f.backend();
+    // The conversation that is open during the deploy polls first. The thread is active, so the turn is not lost, whatever the listing says.
+    const polled = await second.manager.getSessionScreen(f.session.id);
+    expect(polled?.screen.status).toMatch(/working/);
+    expect(f.lossLines()).toEqual([]);
+    expect(f.row().isWorking).toBe(true);
+    await second.manager.reconcileSessions();
+    expect(f.lossLines()).toEqual([]);
+    expect(receivedRequests(f.logFile, 'thread/resume')).toHaveLength(1);
+
+    await waitUntil(() => f.row().lastResponseAt, 10_000, 'the turn to complete');
+    expect(f.row().isWorking).toBe(false);
+    expect(f.lossLines()).toEqual([]);
+    expect(receivedRequests(f.logFile, 'turn/start')).toHaveLength(1);
   });
 });

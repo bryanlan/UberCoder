@@ -23,6 +23,7 @@ import {
   NotSentError,
   PreviousTurnActiveError,
   RequestNotPendingError,
+  SendRejectedError,
   TurnNotActiveError,
   type ProviderFailure,
   type RequestResponse,
@@ -66,7 +67,7 @@ import {
   type SystemTaskFrame,
   type UserFrame,
 } from './protocol.js';
-import { ClaudeExitError, describeExit, type OpenServerRequest, type StreamJsonClient, type StreamJsonExit } from './stream-json.js';
+import { ClaudeControlTimeoutError, ClaudeExitError, describeExit, type OpenServerRequest, type StreamJsonClient, type StreamJsonExit } from './stream-json.js';
 import { locateTranscripts } from './transcript.js';
 import { contextFromUsageResponse, contextMaxFromModelUsage, contextUsedFromResultUsage, ClaudeRateLimitTracker } from './usage.js';
 
@@ -141,6 +142,8 @@ export interface ClaudeSessionInit {
   requireSubscriptionLogin: boolean;
   /** The session ended: drop it from the instance. `detached` means the process was left running on purpose. */
   onEnded(session: ClaudeSession, kind: 'exited' | 'detached'): void;
+  /** Called once, when the first turn of this session's lifetime completes: the conversation has a history from now on. */
+  onTurnCompleted?(session: ClaudeSession): void;
 }
 
 type ItemKind = Extract<TransportEvent, { type: 'item.completed' }>['kind'];
@@ -267,6 +270,12 @@ interface PendingRequest {
   turnId?: string;
 }
 
+/** A file read that failed for a reason that passes (too many open files, a busy device), unlike a file that is missing or not readable. */
+function isTransientFileError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN' || code === 'EBUSY' || code === 'EIO' || code === 'ENOMEM';
+}
+
 const MAX_FINISHED_TURNS = 256;
 const MAX_SEEN_ASSISTANT = 2_048;
 const MAX_OPEN_TOOLS = 512;
@@ -287,6 +296,8 @@ export class ClaudeSession implements TransportSession {
   private readonly configDir: string;
   private readonly requireSubscriptionLogin: boolean;
   private readonly onEnded: (session: ClaudeSession, kind: 'exited' | 'detached') => void;
+  private readonly onTurnCompleted: ((session: ClaudeSession) => void) | undefined;
+  private completedTurnReported = false;
   private readonly rateLimits = new ClaudeRateLimitTracker();
   private readonly byUuid = new Map<string, SendEntry>();
   private readonly finished: TurnRecord[] = [];
@@ -331,6 +342,7 @@ export class ClaudeSession implements TransportSession {
     this.effort = init.effort;
     this.requireSubscriptionLogin = init.requireSubscriptionLogin;
     this.onEnded = init.onEnded;
+    this.onTurnCompleted = init.onTurnCompleted;
     this.events = this.channel.iterable();
     // Subscribed at construction: the SessionStart hook frames arrive before the `initialize` reply.
     this.unsubscribe.push(this.client.onFrame((frame) => this.handleFrame(frame)));
@@ -631,18 +643,26 @@ export class ClaudeSession implements TransportSession {
 
   /**
    * Runs what comes before the user frame is written (the settings changes, reading and fitting the images). Nothing has
-   * reached the process when it fails (a refused or timed-out `set_model`, an unreadable image), so every failure is
-   * {@link NotSentError} and the caller may send again.
+   * reached the process when it fails, but what a retry can do differs:
+   *  - a lost connection or a control request that timed out may work next time: {@link NotSentError};
+   *  - anything else cannot: the CLI refused the model or effort, the image file is missing or unreadable, the image cannot
+   *    be fitted. Retrying would only repeat the failure (and the `set_model` request with it), so the message fails with the
+   *    reason as {@link SendRejectedError}.
    */
   private async beforeWrite<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof NotSentError) throw error;
-      const reason = error instanceof Error ? error.message : String(error);
-      const notSent = new NotSentError(`The message was not sent: ${redactFreeText(reason, 300)}`);
-      notSent.cause = error;
-      throw notSent;
+      if (error instanceof NotSentError || error instanceof SendRejectedError) throw error;
+      const reason = redactFreeText(error instanceof Error ? error.message : String(error), 300);
+      if (error instanceof ClaudeExitError || error instanceof ClaudeControlTimeoutError || isTransientFileError(error)) {
+        const notSent = new NotSentError(`The message was not sent: ${reason}`);
+        notSent.cause = error;
+        throw notSent;
+      }
+      const rejected = new SendRejectedError(`The message could not be sent: ${reason}`);
+      rejected.cause = error;
+      throw rejected;
     }
   }
 
@@ -1245,6 +1265,14 @@ export class ClaudeSession implements TransportSession {
       this.firstTerminalSeen = true;
       // The transcript exists once the first turn has run; confirm where.
       void this.refreshTranscriptPath().catch(() => undefined);
+    }
+    if (status === 'completed' && !this.completedTurnReported) {
+      this.completedTurnReported = true;
+      try {
+        this.onTurnCompleted?.(this);
+      } catch (error) {
+        this.log.warn({ error: error instanceof Error ? error.message : String(error) }, 'claude could not record that the conversation completed a turn');
+      }
     }
   }
 
