@@ -1,4 +1,5 @@
 import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import { getConversationStatusColor } from './work-status';
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
 type BoundSessionItem = TreeResponse['boundSessions'][number];
@@ -38,23 +39,22 @@ export function deriveSidebarProjects({
   recentActivitySortEnabled,
   manualProjectOrder,
   mobileActiveOnly = false,
+  activeOnly = false,
+  nowMs = Date.now(),
 }: {
   tree?: TreeResponse;
   workMode: boolean;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
   mobileActiveOnly?: boolean;
+  activeOnly?: boolean;
+  nowMs?: number;
 }): SidebarProject[] {
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
   const manualOrderIndex = new Map(manualProjectOrder.map((slug, index) => [slug, index]));
 
   return (tree?.projects ?? [])
     .map((project) => {
-      const providerEntries = (['codex', 'claude'] as const).map((provider) => {
-        const conversations = project.providers[provider].conversations
-          .filter((conversation) => !workMode || conversation.isBound);
-        return [provider, { ...project.providers[provider], conversations }] as const;
-      });
       const combinedConversations = (['codex', 'claude'] as const)
         .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
           const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
@@ -73,10 +73,18 @@ export function deriveSidebarProjects({
             launchContext: session?.launchContext,
           };
         }))
-        .filter(({ conversation, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt }) => (
-          (!workMode || conversation.isBound)
-          && (!mobileActiveOnly || (conversation.isBound && !manualSuspendedAt && !pressureSuspendedAt && !idleSuspendedAt))
-        ));
+        .filter(({ conversation, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt, lastResponseAt, isWorking, runFailure }) => {
+          if (workMode && !conversation.isBound) return false;
+          if ((activeOnly || mobileActiveOnly)
+            && (!conversation.isBound || manualSuspendedAt || pressureSuspendedAt || idleSuspendedAt)) return false;
+          if (!activeOnly) return true;
+          const color = getConversationStatusColor(conversation.isBound, lastResponseAt, isWorking, nowMs, runFailure);
+          return color === 'red' || color === 'green' || color === 'yellow';
+        });
+      const providerEntries = (['codex', 'claude'] as const).map((provider) => [provider, {
+        ...project.providers[provider],
+        conversations: combinedConversations.filter((item) => item.provider === provider).map((item) => item.conversation),
+      }] as const);
       const latestActivityAt = combinedConversations.reduce(
         (latest, conversation) => conversation.activityTimestamp > latest ? conversation.activityTimestamp : latest,
         '',
