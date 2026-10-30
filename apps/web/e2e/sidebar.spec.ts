@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { ConversationSummary, ProjectSummary } from '@agent-console/shared';
+import type { BoundSession, ConversationSummary, ProjectSummary, TreeResponse } from '@agent-console/shared';
 
 async function openConsole(page: Page): Promise<void> {
   const conversation: ConversationSummary = {
@@ -99,4 +99,72 @@ test('opens conversation rename empty and saves the entered name', async ({ page
   await page.getByRole('button', { name: 'Cancel rename' }).click();
   await page.reload();
   await expect(page.getByRole('link', { name: /CODEX: New conversation name/ })).toBeVisible();
+});
+
+test('filters to active status chats beside Work mode and remembers the choice', async ({ page }, testInfo) => {
+  const now = Date.parse('2026-10-30T12:00:00Z');
+  const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
+  await page.clock.install({ time: now });
+  const cases: Array<{ ref: string; session?: Partial<BoundSession> }> = [
+    { ref: 'Green chat', session: { lastResponseAt: ago(0.5) } },
+    { ref: 'Red chat', session: { isWorking: true, lastResponseAt: ago(90) } },
+    { ref: 'Yellow chat', session: { lastResponseAt: ago(12 - 10 / 3600) } },
+    { ref: 'Amber chat', session: { lastResponseAt: ago(12) } },
+    { ref: 'Purple chat', session: { lastResponseAt: ago(48) } },
+    { ref: 'Gray chat', session: {} },
+    { ref: 'Manual chat', session: { lastResponseAt: ago(0.5), manualSuspendedAt: ago(0) } },
+    { ref: 'Pressure chat', session: { lastResponseAt: ago(2), pressureSuspendedAt: ago(0) } },
+    { ref: 'Idle chat', session: { isWorking: true, idleSuspendedAt: ago(0) } },
+    { ref: 'History chat' },
+  ];
+  const tree: TreeResponse = {
+    projects: [{
+      slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo', tags: [], allowedLocalhostPorts: [],
+      providers: {
+        codex: { id: 'codex', label: 'Codex', conversations: cases.filter(item => item.ref !== 'Yellow chat').map(({ ref, session }) => ({
+          ref, provider: 'codex', projectSlug: 'demo', kind: 'history', title: ref,
+          updatedAt: ago(0), isBound: Boolean(session), degraded: false,
+        })) },
+        claude: { id: 'claude', label: 'Claude', conversations: [{
+          ref: 'Yellow chat', provider: 'claude', projectSlug: 'demo', kind: 'history', title: 'Yellow chat',
+          updatedAt: ago(0), isBound: true, degraded: false,
+        }] },
+      },
+    }],
+    boundSessions: cases.flatMap(({ ref, session }) => session ? [{
+      id: ref, provider: ref === 'Yellow chat' ? 'claude' : 'codex', projectSlug: 'demo', conversationRef: ref,
+      tmuxSessionName: `fixture-${ref}`, status: 'bound', startedAt: ago(90), updatedAt: ago(0), ...session,
+    }] : []),
+  };
+  await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
+  await page.route('**/api/projects/tree', route => route.fulfill({ json: tree }));
+  await page.goto('/');
+  const sidebar = page.getByRole('complementary', { name: 'Chats' });
+  const activeOnly = sidebar.getByRole('button', { name: 'Active only', exact: true });
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
+  await expect(sidebar.getByRole('link', { name: /History chat/ })).toHaveCount(0);
+  await sidebar.getByRole('button', { name: 'Work mode', exact: true }).click();
+  // Browse mode caps the list until expanded.
+  await sidebar.getByRole('button', { name: /Show all/ }).click();
+  await expect(sidebar.getByRole('link', { name: /History chat/ })).toBeVisible();
+  await activeOnly.click();
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
+  for (const { ref } of cases) {
+    await expect(sidebar.getByRole('link', { name: new RegExp(ref) })).toHaveCount(
+      ['Green chat', 'Red chat', 'Yellow chat'].includes(ref) ? 1 : 0,
+    );
+  }
+  await page.screenshot({ path: testInfo.outputPath('active-only.png') });
+  await page.reload();
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
+  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toBeVisible();
+  await page.clock.fastForward(30_000);
+  await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: /Red chat/ })).toBeVisible();
+  await sidebar.getByRole('button', { name: 'Work mode', exact: true }).click();
+  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toHaveCount(0);
+  await activeOnly.click();
+  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: /Amber chat/ })).toBeVisible();
 });

@@ -18,9 +18,18 @@ const cases = (['manualSuspendedAt', 'pressureSuspendedAt', 'idleSuspendedAt'] a
   ].map((age) => ({ marker, ...age }))
 ));
 
-it('keeps a project and its new-conversation actions after its last child is evicted', async () => {
+it.each([
+  { workMode: true, activeOnly: false },
+  { workMode: false, activeOnly: true },
+])('keeps a project and its new-conversation actions after its last child is evicted with Work mode $workMode and Active only $activeOnly', async ({ workMode, activeOnly }) => {
+  vi.spyOn(Date, 'now').mockReturnValue(now);
   const tree: TreeResponse = {
-    boundSessions: [],
+    boundSessions: [{
+      id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
+      tmuxSessionName: 'fixture-only', status: 'bound',
+      startedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
+      lastResponseAt: new Date(now).toISOString(),
+    }],
     projects: [{
       slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',
       tags: [], allowedLocalhostPorts: [],
@@ -41,7 +50,7 @@ it('keeps a project and its new-conversation actions after its last child is evi
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <Sidebar
-          tree={currentTree} open workMode recentActivitySortEnabled={false} manualProjectOrder={[]}
+          tree={currentTree} open workMode={workMode} activeOnly={activeOnly} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
           onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation}
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}
@@ -114,7 +123,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <Sidebar
-          tree={tree} open workMode recentActivitySortEnabled={false} manualProjectOrder={[]}
+          tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
           onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={() => {}}
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}

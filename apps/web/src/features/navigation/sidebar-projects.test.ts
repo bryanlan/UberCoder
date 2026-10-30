@@ -295,3 +295,57 @@ describe('mobile active conversations', () => {
     expect(tree.projects[0]?.providers.codex.conversations).toHaveLength(5);
   });
 });
+
+describe('Active only', () => {
+  const nowMs = Date.parse('2026-10-30T12:00:00Z');
+  const ago = (hours: number) => new Date(nowMs - hours * 3_600_000).toISOString();
+  const failures: BoundSession['runFailure'] = {
+    turnId: 'failed-turn', failedAt: ago(0.1), code: 'unknown', message: 'Stopped',
+    attempts: 0, maxAttempts: 3, status: 'stopped',
+  };
+  const cases: Array<{ ref: string; provider: ProviderId; session?: Partial<BoundSession> }> = [
+    { ref: 'green', provider: 'codex', session: { lastResponseAt: ago(0.5) } },
+    { ref: 'red', provider: 'claude', session: { isWorking: true, lastResponseAt: ago(90) } },
+    { ref: 'yellow', provider: 'claude', session: { lastResponseAt: ago(11.99) } },
+    { ref: 'amber', provider: 'codex', session: { lastResponseAt: ago(12) } },
+    { ref: 'purple', provider: 'claude', session: { lastResponseAt: ago(48) } },
+    { ref: 'gray', provider: 'codex', session: {} },
+    { ref: 'failed', provider: 'claude', session: { lastResponseAt: ago(0.5), runFailure: failures } },
+    { ref: 'retrying', provider: 'codex', session: { lastResponseAt: ago(0.5), runFailure: { ...failures, status: 'retrying' } } },
+    { ref: 'manual', provider: 'codex', session: { lastResponseAt: ago(0.5), manualSuspendedAt: ago(0) } },
+    { ref: 'pressure', provider: 'claude', session: { lastResponseAt: ago(2), pressureSuspendedAt: ago(0) } },
+    { ref: 'idle', provider: 'codex', session: { isWorking: true, idleSuspendedAt: ago(0) } },
+    { ref: 'history', provider: 'codex' },
+  ];
+  const chats = cases.map(({ ref, provider, session }) => conversation({
+    ref, provider, projectSlug: 'alpha', updatedAt: ago(0), isBound: Boolean(session),
+  }));
+  const tree: TreeResponse = {
+    projects: [project({
+      slug: 'alpha', displayName: 'Alpha',
+      codex: chats.filter(chat => chat.provider === 'codex'),
+      claude: chats.filter(chat => chat.provider === 'claude'),
+    }), project({ slug: 'empty', displayName: 'Empty' })],
+    boundSessions: cases.flatMap(({ ref, provider, session }) => session ? [{
+      ...boundSession({ projectSlug: 'alpha', provider, conversationRef: ref }), ...session,
+    }] : []),
+  };
+
+  it.each([true, false])('keeps only unsuspended red, green and yellow chats with Work mode %s', (workMode) => {
+    const options = { tree, workMode, recentActivitySortEnabled: true, manualProjectOrder: [], nowMs };
+    const projects = deriveSidebarProjects({ ...options, activeOnly: true });
+    expect(projects.map(item => item.slug)).toEqual(['alpha', 'empty']);
+    const visible = projects[0]!;
+    expect(visible.combinedConversations.map(item => item.conversation.ref)).toEqual(['green', 'retrying', 'red', 'yellow']);
+    expect(visible.providers.codex.conversations.map(item => item.ref)).toEqual(['green', 'retrying']);
+    expect(visible.providers.claude.conversations.map(item => item.ref)).toEqual(['red', 'yellow']);
+    expect(deriveSidebarProjects(options)[0]?.combinedConversations).toHaveLength(workMode ? 11 : 12);
+    expect(tree.projects[0]?.providers.codex.conversations).toHaveLength(7);
+  });
+
+  it('removes a yellow chat as its response reaches twelve hours old', () => {
+    const options = { tree, workMode: true, activeOnly: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
+    expect(deriveSidebarProjects({ ...options, nowMs })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(true);
+    expect(deriveSidebarProjects({ ...options, nowMs: nowMs + 60_000 })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(false);
+  });
+});

@@ -110,6 +110,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
   const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
+  const [activeOnly, setActiveOnly] = useLocalStorageBoolean('agent-console:active-only', false);
   const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden:v2', true);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
@@ -940,6 +941,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         onClose={closeSidebarIfMobile}
         workMode={workMode}
         onToggleWorkMode={() => setWorkMode((current) => !current)}
+        activeOnly={activeOnly}
+        onToggleActiveOnly={() => setActiveOnly((current) => !current)}
         recentActivitySortEnabled={uiPreferences.recentActivitySortEnabled}
         manualProjectOrder={uiPreferences.manualProjectOrder}
         onToggleRecentActivity={handleToggleRecentActivity}

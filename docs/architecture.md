@@ -441,6 +441,11 @@ user's actual prompt.
   last child is released or evicted, and show "No active conversations." when empty. Projects with
   bound conversations sort above empty projects in Work mode; each group follows the selected recent
   activity or manual order, so a newly bound conversation returns its project to that order.
+- The desktop Active only toggle beside Work mode remembers its setting locally. It filters the
+  project chat list to bound, unsuspended sessions whose current dot is green, red, or yellow,
+  using the same status rules as the dots. All suspension reasons are excluded even when the dot
+  is green or yellow. The filter updates with response age, works with Work mode on or off, and
+  retains configured projects and their new-conversation actions. Mobile filters are independent.
 - Each project chat menu offers Close for a bound session. Close uses the authenticated release
   action to stop the provider process, clear runtime state and end the restorable binding. The chat
   disappears from Work mode and its saved history remains visible when Work mode is off. Closing

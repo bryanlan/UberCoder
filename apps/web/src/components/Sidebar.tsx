@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
 import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
-import { getConversationStatusClass } from '../features/navigation/work-status';
+import { conversationStatusClasses, getConversationStatusColor } from '../features/navigation/work-status';
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { TitleTooltip } from './TitleTooltip';
@@ -27,6 +27,8 @@ interface SidebarProps {
   onClose: () => void;
   workMode: boolean;
   onToggleWorkMode: () => void;
+  activeOnly: boolean;
+  onToggleActiveOnly: () => void;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
   onToggleRecentActivity: () => Promise<void>;
@@ -200,6 +202,7 @@ function SearchResultsPanel({
 }
 
 function ConversationLink({
+  nowMs,
   project,
   provider,
   conversationRef,
@@ -226,6 +229,7 @@ function ConversationLink({
   autoTrackedAt,
   launchContext,
 }: {
+  nowMs: number;
   project: ProjectSummary;
   provider: ProviderId;
   conversationRef: string;
@@ -253,7 +257,6 @@ function ConversationLink({
   launchContext?: import('@agent-console/shared').AgentLaunchContext;
 }) {
   const location = useLocation();
-  const nowMs = useNowMs();
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -261,7 +264,7 @@ function ConversationLink({
   const href = `/projects/${encodeURIComponent(project.slug)}/${provider}/${encodeURIComponent(conversationRef)}`;
   const active = location.pathname === href;
   const suspended = Boolean(manualSuspendedAt || pressureSuspendedAt || idleSuspendedAt);
-  const indicatorClassName = getConversationStatusClass(isBound, lastResponseAt, isWorking, nowMs, runFailure);
+  const indicatorClassName = conversationStatusClasses[getConversationStatusColor(isBound, lastResponseAt, isWorking, nowMs, runFailure)];
 
   async function submitRename(): Promise<void> {
     const nextTitle = draftTitle.trim();
@@ -428,7 +431,9 @@ function fallbackProjectDisplayName(project: Pick<ProjectSummary, 'path' | 'dire
 
 function ProjectSection({
   project,
+  nowMs,
   workMode,
+  activeOnly,
   mobile = false,
   creatingConversationKey,
   creatingAnyConversation,
@@ -451,7 +456,9 @@ function ProjectSection({
   tailscaleIpv4,
 }: {
   project: SidebarProject;
+  nowMs: number;
   workMode: boolean;
+  activeOnly: boolean;
   mobile?: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
@@ -712,6 +719,7 @@ function ProjectSection({
             {displayedConversations.map(({ provider, conversation, activityTimestamp, lastResponseAt, isWorking, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt, autoTrackedAt, runFailure, launchContext }) => (
               <ConversationLink
                 key={`${provider}:${conversation.ref}`}
+                nowMs={nowMs}
                 project={project}
                 provider={provider}
                 conversationRef={conversation.ref}
@@ -753,7 +761,7 @@ function ProjectSection({
           </div>
         ) : (
           <div className="px-3 py-2 text-sm text-slate-500">
-            {workMode ? 'No active conversations.' : 'No conversations indexed yet.'}
+            {workMode || activeOnly ? 'No active conversations.' : 'No conversations indexed yet.'}
           </div>
         )}
       </div>
@@ -767,6 +775,8 @@ export function Sidebar({
   onClose,
   workMode,
   onToggleWorkMode,
+  activeOnly,
+  onToggleActiveOnly,
   recentActivitySortEnabled,
   manualProjectOrder,
   onToggleRecentActivity,
@@ -786,6 +796,7 @@ export function Sidebar({
   refreshing,
 }: SidebarProps) {
   const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
+  const nowMs = useNowMs();
   const [mobileShowAll, setMobileShowAll] = useState(false);
   const [mobileProjectFilter, setMobileProjectFilter] = useState('');
   const [mobileChatsPerProject, setMobileChatsPerProject] = useState(20);
@@ -842,6 +853,8 @@ export function Sidebar({
       recentActivitySortEnabled,
       manualProjectOrder,
       mobileActiveOnly: isMobile && !mobileShowAll,
+      activeOnly: !isMobile && activeOnly,
+      nowMs,
     });
     if (!isMobile || !mobileShowAll) return projects;
     return projects
@@ -852,7 +865,7 @@ export function Sidebar({
           .sort((a, b) => b.activityTimestamp.localeCompare(a.activityTimestamp))
           .slice(0, mobileChatsPerProject),
       }));
-  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject]);
+  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, nowMs]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -906,6 +919,20 @@ export function Sidebar({
               )}
             >
               Work mode
+            </button>}
+            {!isMobile && <button
+              type="button"
+              onClick={onToggleActiveOnly}
+              aria-pressed={activeOnly}
+              title="Show only unsuspended chats with green, red, or yellow status"
+              className={clsx(
+                'rounded-full border px-3 py-1.5 text-xs font-medium transition',
+                activeOnly
+                  ? enabledToggleClassName
+                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+              )}
+            >
+              Active only
             </button>}
             {!isMobile && <button
               type="button"
@@ -999,7 +1026,9 @@ export function Sidebar({
               <ProjectSection
                 key={project.slug}
                 project={project}
+                nowMs={nowMs}
                 workMode={effectiveWorkMode}
+                activeOnly={!isMobile && activeOnly}
                 mobile={isMobile}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
