@@ -1,10 +1,12 @@
 # Structured cutover: Claude plugin, parity and tmux retirement
 
-Date: 2026-10-26. Branch: `feature/structured-claude-cutover`, stacked on `feature/structured-provider-lane`
-(the Codex app-server lane, see `docs/structured-providers.md`). Status: Phase A is built and was proven against the
-real Claude and Codex CLIs after each of six review rounds (the runs on `b2e6e5e`, `dd3c615` and `52ee445` passed all three
-proofs, see "Verification evidence"). Deploying it and flipping the default are Bryan's live steps.
-Nothing in this document changes the running Console until those steps are executed.
+Date: 2026-10-26, cut over 2026-10-30. Branch: `feature/structured-claude-cutover`, stacked on
+`feature/structured-provider-lane` (the Codex app-server lane, see `docs/structured-providers.md`), integrated into `main`.
+Status: Phase A is live. It was proven against the real Claude and Codex CLIs after each of six review rounds (see
+"Verification evidence"), then on 2026-10-30 Bryan asked for the cutover: `main` was fast-forwarded to the branch, the live
+Console was rebuilt and restarted with both lanes on, a real structured chat per provider answered on the live Console, and
+`defaultTransport` was flipped to `structured`; the first reconcile passes moved every asleep tmux row. The record is in
+"Cutover record (2026-10-30)". Phase B (tmux retirement) has not started.
 
 ## Goal
 
@@ -616,6 +618,60 @@ names the live runtime) out of the proof. Production never passes it, so the pro
 coordination MCP server the CLI started; the cost is that the proof starts the user-scope MCP servers of `~/.claude.json` as a real
 tmux chat does, and calls none of their tools.
 
+## Cutover record (2026-10-30)
+
+Bryan asked for the cutover on 2026-10-30 ("ok I want to cut over to this new system, proceed with doing that"). All
+times UTC. The live Console is the user unit `agent-console.service` (KillMode=process) serving `apps/server/dist` from
+the `main` checkout, with its configuration in `~/.config/agent-console/config.json`.
+
+1. **Integration.** `main` had moved to `f58d6e1` (Active only sidebar filter). It was merged into the branch (`82ddff3`,
+   no conflicts; the two web test fixtures that each side extended were reconciled in `65769cc`). On the merged branch the
+   web suite (219), typecheck and build passed; the server suite passed 2472 tests with the three failures that already fail
+   on `main` plus two load-sensitive tests (`structured-session-codex` "unloads the thread on idle sleep and resumes it on the
+   next message" and `claude-run-state` "protects paused sessions") that pass when run alone. `main` was fast-forwarded.
+2. **Backups.** `~/.local/share/agent-console/deploy-backups/structured-cutover-20261030T212734Z/` holds a `VACUUM INTO`
+   snapshot of the live database (740 MB, `quick_check` ok), the installed builds (`dist-before.tgz`), the live config and the
+   previous head `f58d6e1`. (The SQLite online backup API never finished against the live writer; `VACUUM INTO` took 15 s.)
+3. **Deploy with the lanes on and tmux still the default** (21:30). `structuredSessions.codex.enabled` and
+   `structuredSessions.claude.enabled` were set to true with `defaultTransport: tmux`, the live checkout rebuilt and the unit
+   restarted; health answered after 5 s. All provider processes and tmux sessions kept their pids; the 47 bound rows kept
+   theirs. The tree advertised both structured providers; the migration dry run reported every tmux row as `providerOff`
+   (the default was still tmux).
+4. **Live structured smoke** (21:30 to 21:31, project `fresh-workspace`, explicit `transport: structured`). Claude headless:
+   bound, "READY" after 5.8 s, Stop during a 40 s shell count settled the row in 111 ms on the same pid, released with no
+   process left. Codex app-server: "READY" after 6.2 s, Stop settled in 81 ms, released; the shared app-server stays, as
+   designed. Processes: session host 36 MB, headless `claude` 227 MB, `codex app-server` 207 MB plus its 39 MB node wrapper.
+5. **The idle-window change** (`6b3db0c`, made before the flip). The migration killed a live idle tmux session as soon as
+   its screen read idle, while idle sleep waits for the idle window and the restore grace. Bryan's planner lanes were live
+   and idle at the time, and a killed TUI loses its timers and background jobs. A live row now moves only when
+   `isIdleSuspendable` agrees and is reported `active` until then; dead and asleep rows still move at once. The migration
+   tests were adjusted (a row the pass relaunches gets the restore grace like any restored session, so those tests set
+   `restoreGraceMs: 0` and make the row idle before the pass that moves it) and a new case covers the wait.
+6. **Flip** (21:41). `defaultTransport: structured`, rebuild, restart; health after 5 s. The first passes moved 70 restorable
+   tmux rows ("Moved tmux conversations to the structured transport", `migrated: 70`); the dry run 36 s after boot read
+   `dead: 55, active: 3, working: 4` while rows were still moving, and the tree a minute later showed 40 structured rows
+   asleep and no tmux row asleep. The seven live tmux rows (four working, three `active`: the planner strategist, the planner
+   tactician and a refine-loop worker) stay on tmux until idle sleep would stop them. No tmux session was killed by the flip
+   and no error was logged; the only warnings were the pre-existing "Session runtime command is still running" lines that
+   `runRecovery` writes at boot.
+7. **Live migration check.** A scratch tmux chat per provider, then a manual suspend so the next pass moves the row.
+   First run in `fresh-workspace`, which is not a Git repository: the tmux Codex chat could not start there, and the
+   pre-existing pending-session restore replaced it with a new conversation on the default transport (now structured), which
+   answered the recorded prompt; the tmux Claude chat answered "FIRST" after 9.4 s, was suspended, and the next pass moved it
+   to the structured transport keeping its manual marker. (`GET /api/sessions/:id/screen` answers 404 for any suspended row;
+   that is the existing contract, not a regression.) Second and third runs: the moved Claude row was resumed and answered
+   "SECOND" on the structured transport after 8.4 s in the same native conversation (new headless process, released
+   cleanly). The Codex tmux attempts in the agent-console project (a Git repository) never answered on tmux: the first
+   message into a pending tmux Codex chat always goes through `restartFirstPendingCodexTurnIfNeeded`, which releases the
+   pending row and binds again with the text as the initial prompt, and that bind now takes the default transport. Each
+   attempt therefore answered on a new structured row (titles "Reply with first word", "Name this chat"), which is the
+   existing first-turn behaviour landing on the new default rather than a failure; the tmux-to-structured move itself is
+   covered for Codex by the isolated migration proof (step d, real tmux Codex chat moved and resumed) and for Claude by the
+   live run above. All scratch rows were released.
+
+Rollback stays as documented in the flip procedure: `defaultTransport: tmux` and a restart return new conversations to
+tmux, moved rows keep working on the structured transport, and the backups above restore the previous build and database.
+
 ## Verification evidence
 
 **Round 6 run (current).** On `be85bec` (the review round 6 fixes), 2026-10-27 05:07 to 05:19 UTC, the same sequence: the
@@ -969,6 +1025,15 @@ Open follow-ups after rounds 3 to 5:
   turn's and Stop after a restart ends it.
 
 - In the unknown-turn background path, a Stop that arrives before the background listing returns finds no commands.
+- Typing into a pending tmux chat whose screen is not ready yet makes the Console restart the pending session with the
+  text as its initial prompt (`restartPendingSessionWithInitialPrompt`, the `/keys` route). That restart binds without a
+  transport, so since the flip it starts the conversation on the structured transport (a new row id, the pending alias
+  follows) even when the chat was bound with an explicit `transport: tmux`; a launch with flags keeps tmux. Seen in the live
+  migration checks on 2026-10-30. Harmless under the default and gone with Phase B; a restart that kept the row's own
+  transport would be the tidier shape.
+- `structured-session-codex` "unloads the thread on idle sleep and resumes it on the next message" is load-sensitive: it
+  failed once in a full server run beside a build and a database snapshot (expected a truthy value, got undefined) and passes
+  alone.
 - The exactly-once turn-end counters in the proofs read the provider's records; a Console that handled one turn end twice
   (two completion lines, a second recency move) would still pass them.
 - A message whose not-sent refusals alternate with "waiting for the session" deferrals never reaches the ten-minute cap; it
