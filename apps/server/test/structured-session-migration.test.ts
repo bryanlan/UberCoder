@@ -62,6 +62,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   it('stops an idle live tmux session the way idle sleep does, then flips the row to a sleeping structured row', async () => {
     const f = fixture();
     const bound = await bindTmux(f, 'native-idle');
+    makeIdleFor(f, bound.id);
     const before = f.row(bound.id);
     expect(before).toMatchObject({ transport: 'tmux', status: 'bound' });
     expect(f.tmux.alive.has(before.tmuxSessionName)).toBe(true);
@@ -81,6 +82,25 @@ describe('Moving tmux conversations to the structured transport', () => {
     expect(f.events.some(event => event.type === 'session.updated' && event.session.id === bound.id && event.session.transport === 'structured')).toBe(true);
     // Nothing was loaded: the conversation waits for its next message.
     expect(f.plugin.instances.flatMap(instance => instance.calls).filter(call => call.method === 'start' || call.method === 'resume')).toHaveLength(0);
+  });
+
+  it('leaves a live tmux session used within the idle window alone, and moves it once idle sleep would stop it', async () => {
+    const f = fixture();
+    const bound = await bindTmux(f, 'native-active');
+    const spies = spyTmux(f);
+
+    // Bound a moment ago: the process, its timers and its background jobs stay until idle sleep would have ended them.
+    await f.manager.reconcileSessions();
+    expect(f.row(bound.id)).toMatchObject({ transport: 'tmux', idleSuspendedAt: undefined });
+    expect(f.tmux.alive.has(f.row(bound.id).tmuxSessionName)).toBe(true);
+    expect(spies.kill).not.toHaveBeenCalled();
+    expect(spies.capture).not.toHaveBeenCalled();
+    expect((await f.manager.structuredMigrationReport()).rows.find(row => row.id === bound.id)?.outcome).toBe('active');
+
+    makeIdleFor(f, bound.id);
+    await f.manager.reconcileSessions();
+    expect(f.row(bound.id)).toMatchObject({ transport: 'structured', pid: undefined });
+    expect(spies.kill).toHaveBeenCalledTimes(1);
   });
 
   it('converts a row whose tmux session already ended without a kill, a screen read or any pane call', async () => {
@@ -112,7 +132,7 @@ describe('Moving tmux conversations to the structured transport', () => {
     expect(f.tmux.alive.has(f.row(bound.id).tmuxSessionName)).toBe(true);
     expect(spies.kill).not.toHaveBeenCalled();
 
-    f.db.sqlite.prepare('update bound_sessions set is_working=0 where id=?').run(bound.id);
+    makeIdleFor(f, bound.id);
     await f.manager.reconcileSessions();
     expect(f.row(bound.id)).toMatchObject({ transport: 'structured', pid: undefined });
     expect(spies.kill).toHaveBeenCalledTimes(1);
@@ -155,6 +175,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   it('leaves a live session with an unsent draft alone: the idle guard refuses it', async () => {
     const f = fixture();
     const bound = await bindTmux(f, 'native-draft');
+    makeIdleFor(f, bound.id);
     f.tmux.paneText = CODEX_DRAFT_SCREEN;
     const spies = spyTmux(f);
     await f.manager.reconcileSessions();
@@ -166,6 +187,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   it('does not flip the row when the tmux session survives the kill: there is never a second writer', async () => {
     const f = fixture();
     const bound = await bindTmux(f, 'native-stubborn');
+    makeIdleFor(f, bound.id);
     f.tmux.failKill = true;
     await f.manager.reconcileSessions();
     expect(f.row(bound.id)).toMatchObject({ transport: 'tmux', tmuxSessionName: expect.not.stringContaining('structured:') });
@@ -190,7 +212,8 @@ describe('Moving tmux conversations to the structured transport', () => {
   });
 
   it('leaves a Claude conversation whose transcript file is missing, and converts it once the file exists', async () => {
-    const f = fixture();
+    // A row the pass relaunches gets the restore grace like any restored session; none here, so idleness alone decides.
+    const f = fixture({ manager: { restoreGraceMs: 0 } });
     const bound = await bindTmux(f, 'claude-native-1', { claude: true });
     f.tmux.alive.delete(f.row(bound.id).tmuxSessionName);
 
@@ -209,6 +232,8 @@ describe('Moving tmux conversations to the structured transport', () => {
     expect(f.row(bound.id).transport).toBe('tmux');
 
     fs.writeFileSync(transcript, '{"type":"user"}\n');
+    // The passes above relaunched the dead row, so it is a live session now and moves once idle sleep would stop it.
+    makeIdleFor(f, bound.id);
     await f.manager.reconcileSessions();
     expect(f.row(bound.id)).toMatchObject({ transport: 'structured', provider: 'claude', conversationRef: 'claude-native-1' });
   });
@@ -233,6 +258,7 @@ describe('Moving tmux conversations to the structured transport', () => {
       claude: { enabled: false, command: ['fake-claude'], idleUnloadMinutes: 60, env: {} },
     } } });
     const codex = await bindTmux(f, 'native-codex');
+    makeIdleFor(f, codex.id);
     const claude = await bindTmux(f, 'native-claude', { claude: true });
     f.tmux.alive.delete(f.row(claude.id).tmuxSessionName);
     await f.manager.reconcileSessions();
@@ -261,7 +287,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   });
 
   it('does not let one failed move stop the pass, and tries that row again on the next one', async () => {
-    const f = fixture();
+    const f = fixture({ manager: { restoreGraceMs: 0 } });
     const first = await bindTmux(f, 'native-first');
     const second = await bindTmux(f, 'native-second');
     for (const row of [first, second]) f.tmux.alive.delete(f.row(row.id).tmuxSessionName);
@@ -271,6 +297,8 @@ describe('Moving tmux conversations to the structured transport', () => {
     expect(failing).toHaveBeenCalledTimes(2);
     expect([first, second].map(row => f.row(row.id).transport).sort()).toEqual(['structured', 'tmux']);
 
+    // The pass relaunched the row whose write failed; it moves again once idle sleep would stop it.
+    for (const row of [first, second]) makeIdleFor(f, row.id);
     await f.manager.reconcileSessions();
     expect([first, second].map(row => f.row(row.id).transport)).toEqual(['structured', 'structured']);
   });
@@ -278,6 +306,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   it('resumes the converted conversation structurally on its next message, without tmux', async () => {
     const f = fixture();
     const bound = await bindTmux(f, 'native-resume');
+    makeIdleFor(f, bound.id);
     await f.manager.reconcileSessions();
     expect(f.row(bound.id).transport).toBe('structured');
     const spies = spyTmux(f);
@@ -302,6 +331,7 @@ describe('Moving tmux conversations to the structured transport', () => {
   it('does not move a row twice and leaves converted rows to the structured sleep and restore paths', async () => {
     const f = fixture();
     const bound = await bindTmux(f, 'native-once');
+    makeIdleFor(f, bound.id);
     await f.manager.reconcileSessions();
     const converted = f.row(bound.id);
     const spies = spyTmux(f);
@@ -320,7 +350,7 @@ describe('Moving a row whose failed run is being recovered', () => {
   });
 
   it.each(['scheduled', 'retrying'] as const)('waits while a %s recovery is pending, never cancels it, and moves once it has stopped', async status => {
-    const f = fixture();
+    const f = fixture({ manager: { restoreGraceMs: 0 } });
     const idle = await bindTmux(f, 'native-recovering-idle');
     const dead = await bindTmux(f, 'native-recovering-dead');
     f.tmux.alive.delete(f.row(dead.id).tmuxSessionName);
@@ -341,8 +371,10 @@ describe('Moving a row whose failed run is being recovered', () => {
     expect(eventLogLines(f.row(idle.id)).some(line => /Moved to the structured transport/.test(line.text))).toBe(false);
     expect(eventLogLines(f.row(idle.id)).some(line => /cancelled by user input or Stop/i.test(line.text))).toBe(false);
 
-    // Once recovery has resolved (here: it stopped for good) the row is no different from any other, and moves.
+    // Once recovery has resolved (here: it stopped for good) the row is no different from any other, and moves when idle
+    // sleep would stop it. The pass relaunched the dead row while it waited, so both are live sessions now.
     for (const id of [idle.id, dead.id]) f.db.boundSessions.setRunFailure(id, failure('stopped'));
+    for (const id of [idle.id, dead.id]) makeIdleFor(f, id);
     await f.manager.reconcileSessions();
     for (const id of [idle.id, dead.id]) expect(f.row(id)).toMatchObject({ transport: 'structured' });
   });
@@ -352,6 +384,8 @@ describe('The migration dry run', () => {
   it('counts what the next pass would do, and changes nothing', async () => {
     const f = fixture();
     const alive = await bindTmux(f, 'native-alive');
+    makeIdleFor(f, alive.id);
+    const active = await bindTmux(f, 'native-active-row');
     const dead = await bindTmux(f, 'native-dead-row');
     f.tmux.alive.delete(f.row(dead.id).tmuxSessionName);
     const working = await bindTmux(f, 'native-working-row');
@@ -367,15 +401,15 @@ describe('The migration dry run', () => {
     expect(report.defaultTransport).toBe('structured');
     expect(report.providers).toEqual(['codex', 'claude']);
     expect(report.structuredRows).toBe(1);
-    expect(report.outcomes).toMatchObject({ idle: 1, dead: 1, working: 1, pending: 1, noTranscript: 1 });
-    expect(Object.values(report.outcomes).reduce((sum, count) => sum + count, 0)).toBe(5);
+    expect(report.outcomes).toMatchObject({ idle: 1, active: 1, dead: 1, working: 1, pending: 1, noTranscript: 1 });
+    expect(Object.values(report.outcomes).reduce((sum, count) => sum + count, 0)).toBe(6);
     expect(Object.fromEntries(report.rows.map(row => [row.id, row.outcome]))).toEqual({
-      [alive.id]: 'idle', [dead.id]: 'dead', [working.id]: 'working', [pending.id]: 'pending', [claude.id]: 'noTranscript',
+      [alive.id]: 'idle', [active.id]: 'active', [dead.id]: 'dead', [working.id]: 'working', [pending.id]: 'pending', [claude.id]: 'noTranscript',
     });
     expect(report.rows.some(row => row.id === structured.id)).toBe(false);
     expect(spies.kill).not.toHaveBeenCalled();
     expect(spies.capture).not.toHaveBeenCalled();
-    for (const id of [alive.id, dead.id, working.id, pending.id, claude.id]) expect(f.row(id).transport).toBe('tmux');
+    for (const id of [alive.id, active.id, dead.id, working.id, pending.id, claude.id]) expect(f.row(id).transport).toBe('tmux');
   });
 
   it('is served read-only at GET /api/sessions/structured-migration behind authentication', async () => {

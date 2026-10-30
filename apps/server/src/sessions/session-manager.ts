@@ -320,13 +320,15 @@ function splitLiteralTextForTmux(text: string): string[] {
 
 /**
  * What the move of tmux conversations to the structured transport does with a row. `dead` and `idle` are the rows that
- * move; the rest wait or stay. See `SessionManager.structuredMigrationReport`.
+ * move; the rest wait or stay (`active` waits for the idle-sleep window). See `SessionManager.structuredMigrationReport`.
  */
 export type StructuredMigrationOutcome =
   /** The tmux session already ended: the row moves without a tmux call. */
   | 'dead'
-  /** The tmux session is alive and the row is not working: it moves once the idle guard confirms an idle screen. */
+  /** The tmux session is alive and the row has been idle for the idle-sleep window: it moves once the idle guard confirms an idle screen. */
   | 'idle'
+  /** The tmux session is alive and was used within the idle-sleep window: it moves when idle sleep would stop it. */
+  | 'active'
   | 'working'
   | 'queuedInput'
   | 'modelRequest'
@@ -348,7 +350,7 @@ export type StructuredMigrationOutcome =
   | 'providerOff';
 
 const STRUCTURED_MIGRATION_OUTCOMES: readonly StructuredMigrationOutcome[] = [
-  'dead', 'idle', 'working', 'queuedInput', 'modelRequest', 'pending', 'noTranscript', 'recovering', 'launchFlags', 'notBound', 'unverified', 'externalOwner', 'providerOff',
+  'dead', 'idle', 'active', 'working', 'queuedInput', 'modelRequest', 'pending', 'noTranscript', 'recovering', 'launchFlags', 'notBound', 'unverified', 'externalOwner', 'providerOff',
 ];
 
 export interface StructuredMigrationReport {
@@ -4094,7 +4096,9 @@ export class SessionManager {
     if (session.provider === 'claude' && !(await this.hasReadableIndexedTranscript(session))) return 'noTranscript';
     const liveness = await checkTmuxLiveness(this.tmuxClient, session.tmuxSessionName);
     if (liveness === 'unknown') return 'unverified';
-    if (liveness === 'alive') return 'idle';
+    // A live session moves when idle sleep would stop it anyway: after the idle window and its restore grace. A person or
+    // an agent in the middle of work keeps the process, its timers and its background jobs until then.
+    if (liveness === 'alive') return this.isIdleSuspendable(session) ? 'idle' : 'active';
     // The tmux session is gone. A provider process that kept running outside this binding would be a second writer.
     const owner = this.assignmentForSession(session);
     return owner?.processStart && processStart(owner.pid) === owner.processStart ? 'externalOwner' : 'dead';

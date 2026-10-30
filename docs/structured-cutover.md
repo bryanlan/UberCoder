@@ -379,9 +379,12 @@ and a failure on one row is logged and never stops the pass.
    is not working, has no queued input, no model change in flight, no scheduled or running unattended recovery (moving
    the row would cancel it and blame the person), no launch flags, and (Claude) its transcript file is indexed and
    readable. A tmux session that is gone while the provider process still runs outside the binding is left alone.
-2. A live tmux session passes the idle-sleep guard (owner option, screen readable and idle, no unsent draft, no native
-   selection, no unsent peer notice), is killed, and must be confirmed dead. If any step fails the row is untouched and
-   the next pass tries again. A dead session moves without a kill, screen read or key press (only the liveness check).
+2. A live tmux session moves only when idle sleep would stop it anyway: it has been idle for the idle window
+   (`sessions.eagerRestoreHours`, one hour by default) and its restore grace, and it passes the idle-sleep guard (owner
+   option, screen readable and idle, no unsent draft, no native selection, no unsent peer notice). It is then killed and
+   must be confirmed dead. If any step fails the row is untouched and the next pass tries again. A live session used
+   within the window is reported `active` and keeps its process, timers and background jobs until then. A dead session
+   moves without a kill, screen read or key press (only the liveness check).
 3. `BoundSessionsRepo.setTransport` flips the row in one transaction: `transport='structured'`,
    `tmux_session_name='structured:<id>'`, `raw_log_path` and `pid` cleared, `idle_suspended_at` set to now (an existing
    idle marker keeps its time; a manual or pressure suspension keeps its own marker and gets no idle one). Identity,
@@ -398,9 +401,9 @@ that).
 
 `SessionManager.structuredMigrationReport()` is the dry run: for every restorable tmux row it returns the outcome the
 next pass would reach, with counts. It reads the database and asks tmux whether each session exists; it kills, moves
-and captures nothing. Outcomes: `dead` and `idle` move; `working`, `queuedInput`, `modelRequest`, `pending`,
-`noTranscript`, `recovering`, `launchFlags`, `notBound`, `unverified`, `externalOwner` and `providerOff` do not
-move on that pass. It is served at
+and captures nothing. Outcomes: `dead` and `idle` move; `active` (live, used within the idle window), `working`,
+`queuedInput`, `modelRequest`, `pending`, `noTranscript`, `recovering`, `launchFlags`, `notBound`, `unverified`,
+`externalOwner` and `providerOff` do not move on that pass. It is served at
 `GET /api/sessions/structured-migration` (authenticated, no CSRF token, read-only) with `defaultTransport`, the
 providers whose lane is on, `structuredRows` (rows already moved) and one entry per row.
 
@@ -418,8 +421,8 @@ The migration then converts idle rows on the next reconcile pass (the first pass
 3. Read `GET /api/sessions/structured-migration` before the first pass (it runs 5 s after start) or just after: the
    counts say how many rows move now (`dead`, `idle`) and what blocks the rest.
 4. The migration runs inside reconcile. Watch the report fall to the rows that cannot move; each moved row shows the
-   status line above. Working rows move when they go idle, recovering rows when their recovery has resolved. Rows with
-   launch flags stay on tmux.
+   status line above. Working and `active` rows move when idle sleep would have stopped them (an hour after their last
+   activity by default), recovering rows when their recovery has resolved. Rows with launch flags stay on tmux.
 5. Rollback: set `defaultTransport` back to `tmux` and restart. New conversations return to tmux; rows already moved
    keep working on the structured transport, because the transport is stored on the row.
 

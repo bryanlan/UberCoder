@@ -663,10 +663,12 @@ migration); this section is the summary.
 - Default transport and migration: `structuredSessions.defaultTransport` (`tmux` unless set) is the transport of a
   bind that names none, including granted launches, for providers whose lane is on. While it is `structured`,
   `reconcileSessions` also moves existing tmux conversations over, one row at a time under its command lock: a live
-  tmux session passes the idle-sleep guard, is killed and confirmed dead, then `BoundSessionsRepo.setTransport` flips the
+  tmux session that idle sleep would stop (idle for the idle window and past its restore grace) passes the idle-sleep
+  guard, is killed and confirmed dead, then `BoundSessionsRepo.setTransport` flips the
   row (`transport='structured'`, the `structured:<id>` name, `idle_suspended_at` set, identity, native conversation and
   recency unchanged). The row resumes its native conversation on its next message; nothing is loaded at move time.
-  Working rows, rows with queued input and Claude rows without a transcript wait and are retried.
+  Live rows used within the idle window, working rows, rows with queued input and Claude rows without a transcript wait
+  and are retried.
   `GET /api/sessions/structured-migration` is the dry run. `scripts/prove-structured-migration.mjs` runs the whole move
   against real tmux Codex and Claude chats. See `docs/structured-cutover.md`.
 - Images: the existing attachment flow feeds both providers (Codex `localImage`, Claude base64 image blocks), and only files
