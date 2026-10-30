@@ -1912,6 +1912,42 @@ describe('codex instance behind a session host', () => {
     expect(startEvents(fake.logFile)).toHaveLength(1);
     expect(receivedRequests(fake.logFile, 'initialize')).toHaveLength(1);
   });
+
+  it('ends an app-server that has had no thread loaded for the idle window, and the next open starts a fresh one', async () => {
+    // 0.004 minutes is 240 ms: long enough for a release and a reopen to cancel it, short enough to watch it fire.
+    const fake = track(setupFake(hostScenario([completedTurn('turn-1'), completedTurn('turn-2')]), FAST_TIMINGS, {}, { host: true, idleUnloadMinutes: 0.004 }));
+    const first = await fake.instance.start(OPEN_OPTIONS);
+    const firstPid = (await fake.instance.alive()).pid!;
+    const firstLog = new EventLog(first);
+    await first.sendTurn({ text: 'one' });
+    expect((await firstLog.waitForType('turn.terminal')).status).toBe('completed');
+
+    // A loaded thread keeps the process, however long it sits idle.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await fake.instance.alive()).toEqual({ pid: firstPid, connected: true });
+
+    // Released and opened again inside the window: the reopen cancels the recycle.
+    await first.close('release');
+    const second = await fake.instance.resume(THREAD, OPEN_OPTIONS);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await fake.instance.alive()).toEqual({ pid: firstPid, connected: true });
+    expect(startEvents(fake.logFile)).toHaveLength(1);
+
+    // Released and left alone for the window: the app-server and its host end, and the record goes with them.
+    await second.close('release');
+    expect(await waitUntil(() => processStartTicks(firstPid) === undefined, 5_000, 'the idle app-server to end')).toBe(true);
+    expect(fake.context.metaStore.has('structured-instance:codex')).toBe(false);
+    expect(fake.instance.needsRespawn).toBe(true);
+
+    // The next open starts a fresh app-server; the thread resumes from its rollout and runs a turn on it.
+    const third = await fake.instance.resume(THREAD, OPEN_OPTIONS);
+    const nextPid = (await fake.instance.alive()).pid!;
+    expect(nextPid).not.toBe(firstPid);
+    expect(startEvents(fake.logFile)).toHaveLength(2);
+    const thirdLog = new EventLog(third);
+    await third.sendTurn({ text: 'three' });
+    expect((await thirdLog.waitForType('turn.terminal')).status).toBe('completed');
+  });
 });
 
 describe.skipIf(process.env.AGENT_CONSOLE_REAL_CODEX !== '1')('real codex app-server handshake', () => {

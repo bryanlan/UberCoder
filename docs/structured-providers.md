@@ -682,7 +682,7 @@ the source of truth for field names):
   refusal leaves the turn running and is surfaced to the caller. It terminates the tracked background commands
   (`thread/backgroundTerminals/terminate`, experimental) whichever of `turn/completed` and the interrupt
   response arrives first, because a command the turn started never ends on its own. Then it waits up to 10 s for
-  `turn/completed`, else finalizes locally as `interrupted`. `unload` = `thread/unsubscribe`. `thread/closed`
+  `turn/completed`, else finalizes locally as `interrupted`. `unload` = `thread/unsubscribe`. The app-server keeps an unsubscribed thread, and that thread's MCP servers (one coordination helper per thread, about 40 MB), in memory; only `thread/archive` unloads it, and archiving moves the rollout (probe of 2026-10-30). So the instance ends the shared app-server and its session host once no thread has been loaded on it for `idleUnloadMinutes` (a loaded thread cancels that, a start in flight postpones it); the next open starts a fresh process and threads resume from their rollouts. `thread/closed`
   (the server unloaded the thread) finalizes a running turn as `failed` with the retryable code
   `thread_closed` and ends the session locally.
 - Notifications map to `TransportEvent`: `turn/started` to `turn.started` (events for a turn can

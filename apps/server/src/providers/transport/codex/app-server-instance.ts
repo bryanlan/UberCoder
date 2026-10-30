@@ -330,6 +330,10 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private hostTransport: HostLineTransport | undefined;
   private hostStartTicks: string | undefined;
   private cursorTimer: NodeJS.Timeout | undefined;
+  /** Ends an app-server that has had no thread loaded for the idle window; see {@link armIdleRecycle}. */
+  private idleRecycleTimer: NodeJS.Timeout | undefined;
+  /** The recycle in flight: an open waits for the old process to end before it starts a new one. */
+  private recycling: Promise<void> | undefined;
   private lastSavedSeq = -1;
   private clientRef: JsonRpcClient | undefined;
   /** The request ids and the run of timeouts, shared with the instances this Console's plugin created before and will create after this one. */
@@ -357,6 +361,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
     this.now = options.now ?? Date.now;
     this.restart = new CodexRestartState(context.meta);
     this.openTransport = context.lineTransport ?? createStdioLineTransportFactory({ log: { warn: (fields, message) => context.log.warn(fields, message) } });
+    this.armIdleRecycle(); // a survivor nobody loads within the window is ended too
   }
 
   /** True after the process ended or the connection to it dropped: the next use connects again. */
@@ -383,6 +388,71 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
 
   release(session: CodexAppServerSession): void {
     if (this.sessions.get(session.nativeSessionId) === session) this.sessions.delete(session.nativeSessionId);
+    if (this.sessions.size === 0) this.armIdleRecycle();
+  }
+
+  /**
+   * The app-server keeps every thread it ever loaded in memory after `thread/unsubscribe`, together with that thread's MCP
+   * servers (one coordination helper per thread, about 40 MB each); only `thread/archive` unloads a thread, and archiving moves
+   * its rollout (probe of 2026-10-30, codex-cli 0.164.0). So once no conversation has had a thread loaded here for the idle
+   * window (`idleUnloadMinutes`, the window after which an idle thread is unloaded) the app-server and its session host are
+   * ended, and the next open starts a fresh one that resumes threads from their rollouts. Ending it also ends the background
+   * terminals of idle threads, as tmux idle sleep ended a TUI's children. A loaded thread cancels the recycle; a start in
+   * flight postpones it; a disposed instance never recycles (the next backend's instance arms its own timer).
+   */
+  private armIdleRecycle(): void {
+    this.clearIdleRecycle();
+    const afterMs = this.config.idleUnloadMinutes * 60_000;
+    if (this.disposed || this.sessions.size > 0 || !(afterMs > 0)) return;
+    this.idleRecycleTimer = setTimeout(() => {
+      this.idleRecycleTimer = undefined;
+      void this.recycleIdleAppServer().catch((error: unknown) => {
+        this.log.warn({ error: error instanceof Error ? error.message : String(error) }, 'ending the idle codex app-server failed');
+      });
+    }, afterMs);
+    this.idleRecycleTimer.unref();
+  }
+
+  private clearIdleRecycle(): void {
+    if (this.idleRecycleTimer) clearTimeout(this.idleRecycleTimer);
+    this.idleRecycleTimer = undefined;
+  }
+
+  private async recycleIdleAppServer(): Promise<void> {
+    if (this.disposed || this.sessions.size > 0) return;
+    if (this.starting || this.recycling) {
+      this.armIdleRecycle();
+      return;
+    }
+    const client = this.clientRef;
+    const run = async (): Promise<void> => {
+      if (client && !client.exited && !client.closeRequested) {
+        // A planned end, like `dispose`: forget the client first so its exit is not taken for a lost process.
+        this.clientRef = undefined;
+        this.stopCursorTimer();
+        this.hostTransport = undefined;
+        this.restart.reset();
+        this.context.meta.delete(INSTANCE_META_KEY);
+        this.respawnNeeded = true;
+        this.log.info({ idleMinutes: this.config.idleUnloadMinutes }, 'ending the codex app-server: no thread has been loaded on it for the idle window, and the threads it still holds keep their MCP servers running');
+        await client.close({ terminate: true });
+        return;
+      }
+      // Not connected (or a connection already being let go of): a running host nobody adopted is ended from its record;
+      // without a record there is nothing to end. The process is gone afterwards, and so are the questions and turns it held.
+      const endHost = this.context.endHost;
+      if (!endHost) return;
+      await endHost(HOST_ID, { closeGraceMs: this.timings.closeGraceMs, termGraceMs: this.timings.termGraceMs, staleTermGraceMs: this.timings.staleTermGraceMs });
+      this.restart.reset();
+      this.context.meta.delete(INSTANCE_META_KEY);
+      this.respawnNeeded = true;
+    };
+    this.recycling = run();
+    try {
+      await this.recycling;
+    } finally {
+      this.recycling = undefined;
+    }
   }
 
   noteTurn(threadId: string, turnId: string | undefined): void {
@@ -551,6 +621,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
 
   async dispose(reason: 'shutdown' | 'restart'): Promise<void> {
     if (reason === 'shutdown') this.disposed = true;
+    this.clearIdleRecycle();
+    if (this.recycling) await this.recycling.catch(() => undefined);
     if (this.starting) await this.starting.promise.catch(() => undefined);
     const client = this.clientRef;
     this.clientRef = undefined;
@@ -581,6 +653,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
   private async ensureClient(attachOnly = false): Promise<JsonRpcClient> {
     for (;;) {
       if (this.disposed) throw new TransportUnavailableError('The Codex app-server instance was shut down.');
+      if (this.recycling) await this.recycling.catch(() => undefined); // the old process ends before a new one starts
       const live = this.clientRef;
       if (live && !live.exited) {
         if (!live.closeRequested) return live;
@@ -1002,6 +1075,7 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
       status: thread.status,
     });
     this.sessions.set(thread.id, session);
+    this.clearIdleRecycle();
     session.announce();
     return session;
   }

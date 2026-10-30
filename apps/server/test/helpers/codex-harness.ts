@@ -88,6 +88,8 @@ export interface FakeSetup {
 export interface SetupOptions {
   /** Run the app-server behind a real session host, so it outlives the instance. Default: directly over stdio. */
   host?: boolean;
+  /** The idle window of the instance (`structuredSessions.codex.idleUnloadMinutes`). Default: 60. */
+  idleUnloadMinutes?: number;
 }
 
 export function writeScenario(dir: string, scenario: Scenario): { scenarioPath: string; logFile: string } {
@@ -110,7 +112,7 @@ export function setupFake(scenario: Scenario, timings: Partial<CodexTimings> = F
   const context = makeContext(path.join(hostRuntimeDir, 'structured', 'codex'));
   if (options.host) context.lineTransport = hostTransportFactory(hostRuntimeDir, context);
   const plugin = createCodexAppServerPlugin({ timings, baseEnv: { PATH: process.env.PATH, ...baseEnv }, clientVersion: '9.9.9' });
-  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: 60, env: {} }, context) as CodexAppServerInstance;
+  const instance = plugin.create({ enabled: true, command, idleUnloadMinutes: options.idleUnloadMinutes ?? 60, env: {} }, context) as CodexAppServerInstance;
   const stopHost = async (): Promise<void> => {
     if (options.host) await terminateHost(hostRuntimeDir, 'codex', context.log, { closeGraceMs: 300, termGraceMs: 300, staleTermGraceMs: 300 });
   };

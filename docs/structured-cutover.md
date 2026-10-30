@@ -669,6 +669,17 @@ the `main` checkout, with its configuration in `~/.config/agent-console/config.j
    covered for Codex by the isolated migration proof (step d, real tmux Codex chat moved and resumed) and for Claude by the
    live run above. All scratch rows were released.
 
+8. **Memory after the cutover, and the app-server recycle.** Per process on this host: a tmux Claude TUI 330 to 390 MB
+   against a headless `claude` of about 230 MB plus a 36 MB session host; a tmux Codex TUI 220 to 260 MB each against one
+   shared `codex app-server` of about 240 MB (plus a 39 MB node wrapper and a 36 MB host) for every Codex conversation.
+   Coordination MCP helpers cost about 42 MB per live conversation on both transports. Idle conversations cost nothing on
+   either transport after the idle window. The backend itself was 973 MB after five hours on the old build and 643 MB freshly
+   started; that number is uptime, not the transport. One leak was found and bounded: the app-server keeps every thread it
+   ever loaded, with that thread's MCP helper, after `thread/unsubscribe` (a probe showed only `thread/archive` unloads a
+   thread, and archiving moves the rollout), so five released scratch chats had left five helpers (about 210 MB) under the
+   live app-server. The Codex instance now ends the app-server and its host once no thread has been loaded on it for
+   `idleUnloadMinutes`; the next open starts a fresh one (unit test on the fake app-server behind a real host).
+
 Rollback stays as documented in the flip procedure: `defaultTransport: tmux` and a restart return new conversations to
 tmux, moved rows keep working on the structured transport, and the backups above restore the previous build and database.
 
