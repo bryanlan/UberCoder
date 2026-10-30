@@ -26,7 +26,7 @@ it.each([
   const tree: TreeResponse = {
     boundSessions: [{
       id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
-      tmuxSessionName: 'fixture-only', status: 'bound',
+      tmuxSessionName: 'fixture-only', status: 'bound', transport: 'tmux',
       startedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
       lastResponseAt: new Date(now).toISOString(),
     }],
@@ -167,7 +167,7 @@ describe('structured New Chat option', () => {
       <QueryClientProvider client={client}>
         <MemoryRouter>
           <Sidebar
-            tree={tree} open workMode recentActivitySortEnabled={false} manualProjectOrder={[]}
+            tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
             onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation}
             onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
             onRenameProject={async () => true} onRebindConversation={async () => true}
