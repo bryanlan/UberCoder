@@ -74,7 +74,8 @@ describe('Auto model profile on a structured session', () => {
     expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'add a --json flag to the export command', model: 'gpt-6.1-terra', effort: 'low' })]);
     expect(f.row(session.id)).toMatchObject({
       codexProfile: 'auto', modelProfileRequest: undefined,
-      autoRoute: { routePending: false, decision: {
+      // The second message will be checked again, so the row asks for it and remembers what this routing saw.
+      autoRoute: { routePending: true, routedPrompts: 1, previousPrompt: 'add a --json flag to the export command', decision: {
         source: 'router', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'low', launchName: 'gpt-6.1-terra',
         role: 'implementer', rolePercent: 91, difficulty: 'lighter', quotaState: 'on_pace', reason: 'Best implementer fit is GPT-6.1 Terra at low effort.',
       } },
@@ -82,16 +83,46 @@ describe('Auto model profile on a structured session', () => {
     expect((await f.manager.getSessionScreen(session.id))!.screen.model).toBe('gpt-6.1-terra low');
   });
 
-  it('holds the choice: later messages are not routed again and keep the model', async () => {
+  it('checks the second message once more with the conversation so far, keeps the model when the answer is the same, and then holds the choice', async () => {
     const { f, routeCalls, answers } = autoFixture();
     const { session } = await f.bindNew({ codexProfile: 'auto' });
     answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
     await f.manager.sendInput(session.id, 'first');
     f.plugin.instance!.sessions[0]!.completeTurn();
     await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+
+    answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
     await f.manager.sendInput(session.id, 'second');
-    expect(routeCalls).toHaveLength(1);
-    expect(sentTurns(f, session.conversationRef).map(turn => turn.model)).toEqual(['gpt-6.1-terra', 'gpt-6.1-terra']);
+    expect(routeCalls).toHaveLength(2);
+    expect(routeCalls[1]).toEqual(['route', '--task', 'second\n\nfirst', '--launcher', 'console', '--provider', 'openai', '--json']);
+    // A clear second answer is final, and the same model keeps running without a second status line.
+    expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ launchName: 'gpt-6.1-terra' }) });
+    f.plugin.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+    await f.manager.sendInput(session.id, 'third');
+    expect(routeCalls).toHaveLength(2);
+    expect(sentTurns(f, session.conversationRef).map(turn => turn.model)).toEqual(['gpt-6.1-terra', 'gpt-6.1-terra', 'gpt-6.1-terra']);
+  });
+
+  it('lets the second-message check switch the model, applying it before that turn, and a clear answer is final', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(routed('gpt-6-luna', 'GPT-6 Luna', 'low'));
+    await f.manager.sendInput(session.id, 'hi, can you help with the exporter');
+    f.plugin.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+
+    answers.push(routed('gpt-6.1-sol', 'GPT-6.1 Sol', 'high'));
+    await f.manager.sendInput(session.id, 'it must stream rows without loading the whole table');
+    expect(routeCalls).toHaveLength(2);
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'it must stream rows without loading the whole table', model: 'gpt-6.1-sol', effort: 'high' });
+    expect(f.row(session.id)).toMatchObject({ modelProfileRequest: undefined, autoRoute: { routePending: false, decision: { launchName: 'gpt-6.1-sol', effort: 'high' } } });
+    expect(f.row(session.id).autoRoute?.routedPrompts).toBeUndefined();
+    f.plugin.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+    await f.manager.sendInput(session.id, 'third');
+    expect(routeCalls).toHaveLength(2);
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' });
   });
 
   it('routes again on the next message after A is pressed again, keeping the old model until then', async () => {
@@ -109,8 +140,10 @@ describe('Auto model profile on a structured session', () => {
     answers.push(routed('gpt-6.1-sol', 'GPT-6.1 Sol', 'high'));
     await f.manager.sendInput(session.id, 'a much harder second task');
     expect(routeCalls).toHaveLength(2);
+    // Pressing A reset everything: this prompt is routed on its own, as the first, and the one after it is checked again.
+    expect(routeCalls[1]![2]).toBe('a much harder second task');
     expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6.1-sol', effort: 'high' });
-    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { model: 'gpt-6.1-sol' } });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 1, previousPrompt: 'a much harder second task', decision: { model: 'gpt-6.1-sol' } });
   });
 
   it('applies Medium and records a visible warning when the router fails, without holding the message back', async () => {
@@ -120,14 +153,35 @@ describe('Auto model profile on a structured session', () => {
 
     await f.manager.sendInput(session.id, 'do the thing');
     expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'do the thing', model: 'gpt-6.1-sol', effort: 'xhigh' })]);
-    expect(f.row(session.id)).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: false, decision: {
+    expect(f.row(session.id)).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: true, routedPrompts: 1, decision: {
       source: 'fallback', model: 'gpt-6.1-sol', effort: 'xhigh', warning: 'Auto unavailable: timed out after 8 s. Using Medium.',
     } } });
-    // One routing per selection of A: the failure is not retried on the next message.
+    // The failed routing counts as the first prompt, so the second is checked again; a router that is still down changes nothing,
+    // and the choice is then final.
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 1 });
     f.plugin.instance!.sessions[0]!.completeTurn();
     await expect.poll(() => f.row(session.id).isWorking).toBe(false);
     await f.manager.sendInput(session.id, 'and again');
-    expect(routeCalls).toHaveLength(1);
+    expect(routeCalls).toHaveLength(2);
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'and again', model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { source: 'fallback' } });
+    f.plugin.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+    await f.manager.sendInput(session.id, 'and once more');
+    expect(routeCalls).toHaveLength(2);
+  });
+
+  it('switches from the Medium fallback when the router is back for the second message', async () => {
+    const { f, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }));
+    await f.manager.sendInput(session.id, 'one');
+    f.plugin.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(session.id).isWorking).toBe(false);
+    answers.push(routed('gpt-6-luna', 'GPT-6 Luna', 'medium'));
+    await f.manager.sendInput(session.id, 'two');
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6-luna', effort: 'medium' });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { source: 'router', launchName: 'gpt-6-luna' } });
   });
 
   it('applies Medium when the router answers without a model', async () => {
@@ -145,7 +199,7 @@ describe('Auto model profile on a structured session', () => {
     const { session } = await f.bindNew({ codexProfile: 'auto', initialPrompt: 'summarize the readme' });
     expect(routeCalls).toHaveLength(1);
     expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'summarize the readme', model: 'gpt-6-luna', effort: 'medium' })]);
-    expect(f.row(session.id).autoRoute?.routePending).toBe(false);
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 1, previousPrompt: 'summarize the readme' });
   });
 
   it('routes a queued message the same way, once', async () => {
@@ -251,7 +305,7 @@ describe('Provisional Auto choices', () => {
     await f.manager.sendInput(session.id, 'hmm, look at this');
     expect(sentTurns(f, session.conversationRef)[0]).toMatchObject({ model: 'gpt-6-luna', effort: 'low' });
     expect(f.row(session.id).autoRoute).toMatchObject({
-      routePending: true, provisionalRoutes: 1, previousPrompt: 'hmm, look at this',
+      routePending: true, routedPrompts: 1, previousPrompt: 'hmm, look at this',
       decision: { source: 'router', provisional: true, launchName: 'gpt-6-luna', role: 'implementer', rolePercent: 40, difficulty: 'lighter', classifierStatus: 'cannot_tell' },
     });
   });
@@ -313,7 +367,7 @@ describe('Provisional Auto choices', () => {
     answers.push(provisional('gpt-6-luna', 'GPT-6 Luna', 'low'));
     await f.manager.sendInput(session.id, 'two');
     expect(routeCalls).toHaveLength(2);
-    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, provisionalRoutes: 2, previousPrompt: 'two', decision: { provisional: true } });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 2, previousPrompt: 'two', decision: { provisional: true } });
     expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6-luna', effort: 'low' });
     expect(statusLines()).toBe(before);
   });
@@ -327,14 +381,14 @@ describe('Provisional Auto choices', () => {
     answers.push(provisional('gpt-6.1-terra', 'GPT-6.1 Terra', 'medium'));
     await f.manager.sendInput(session.id, 'two');
     await finishTurn(f, session.id);
-    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, provisionalRoutes: 2 });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 2 });
     answers.push(provisional('gpt-6.1-sol', 'GPT-6.1 Sol', 'medium'));
     await f.manager.sendInput(session.id, 'three');
     expect(routeCalls).toHaveLength(3);
     // The third provisional answer is applied, then kept as the final choice.
     expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6.1-sol', effort: 'medium' });
     expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { launchName: 'gpt-6.1-sol', provisional: false } });
-    expect(f.row(session.id).autoRoute?.provisionalRoutes).toBeUndefined();
+    expect(f.row(session.id).autoRoute?.routedPrompts).toBeUndefined();
 
     await finishTurn(f, session.id);
     await f.manager.sendInput(session.id, 'four');
@@ -353,8 +407,47 @@ describe('Provisional Auto choices', () => {
     expect(routeCalls).toHaveLength(2);
     // No drop to Medium: the message runs on the model the session has.
     expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'two', model: 'gpt-6-luna', effort: 'low' });
-    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, provisionalRoutes: 2, previousPrompt: 'two', decision: { source: 'router', provisional: true, launchName: 'gpt-6-luna' } });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 2, previousPrompt: 'two', decision: { source: 'router', provisional: true, launchName: 'gpt-6-luna' } });
     expect(eventLogLines(f.row(session.id)).some(line => line.type === 'status' && /Auto could not re-route \(timed out after 8 s\)\. Keeping GPT-6 Luna/.test(line.text))).toBe(true);
+  });
+
+  it('keeps checking after a clear first routing when the second answer is still provisional, up to three routed prompts counting the first', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
+    await f.manager.sendInput(session.id, 'one');
+    await finishTurn(f, session.id);
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 1, decision: { launchName: 'gpt-6.1-terra' } });
+
+    answers.push(provisional('gpt-6-luna', 'GPT-6 Luna', 'low'));
+    await f.manager.sendInput(session.id, 'two');
+    await finishTurn(f, session.id);
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 2, decision: { launchName: 'gpt-6-luna', provisional: true } });
+
+    answers.push(provisional('gpt-6.1-sol', 'GPT-6.1 Sol', 'medium'));
+    await f.manager.sendInput(session.id, 'three');
+    expect(routeCalls).toHaveLength(3);
+    // The third routed prompt ends it, whatever the answer: the choice is kept and marked final.
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { launchName: 'gpt-6.1-sol', provisional: false } });
+    await finishTurn(f, session.id);
+    await f.manager.sendInput(session.id, 'four');
+    expect(routeCalls).toHaveLength(3);
+    expect(sentTurns(f, session.conversationRef).map(turn => turn.model)).toEqual(['gpt-6.1-terra', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-sol']);
+  });
+
+  it('ends after the second prompt when the router fails that check on a clear first choice, keeping the choice', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
+    await f.manager.sendInput(session.id, 'one');
+    await finishTurn(f, session.id);
+    answers.push(Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }));
+    await f.manager.sendInput(session.id, 'two');
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'two', model: 'gpt-6.1-terra', effort: 'low' });
+    expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { source: 'router', launchName: 'gpt-6.1-terra' } });
+    await finishTurn(f, session.id);
+    await f.manager.sendInput(session.id, 'three');
+    expect(routeCalls).toHaveLength(2);
   });
 
   it('starts counting afresh when A is pressed again', async () => {
@@ -365,7 +458,7 @@ describe('Provisional Auto choices', () => {
     await finishTurn(f, session.id);
     await f.manager.requestModelProfile(session.id, 'auto');
     expect(f.row(session.id).autoRoute).toMatchObject({ routePending: true, decision: { provisional: true } });
-    expect(f.row(session.id).autoRoute?.provisionalRoutes).toBeUndefined();
+    expect(f.row(session.id).autoRoute?.routedPrompts).toBeUndefined();
     answers.push(routed('gpt-6.1-sol', 'GPT-6.1 Sol', 'high'));
     await f.manager.sendInput(session.id, 'two');
     // Routed from the new prompt alone: pressing A discarded the notes of the provisional run.

@@ -4,7 +4,7 @@ import { imagePromptDisplay, imagePromptFiles } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { MAX_PROVISIONAL_ROUTES, PROVIDER_NAMES, PROVIDERS, visibleModelMatchesTarget, type AgentLaunchContext, type AutoDecision, type AutoRoute, type BoundSession, type ConversationSummary, type ModelTarget, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
+import { MAX_ROUTED_PROMPTS, PROVIDER_NAMES, PROVIDERS, visibleModelMatchesTarget, type AgentLaunchContext, type AutoDecision, type AutoRoute, type BoundSession, type ConversationSummary, type ModelTarget, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
 import { ModelProfileService, ModelProfilesUnavailableError, ROUTE_TASK_MAX_CHARS, composeRerouteTask, fallbackDecision, peekSessionModelTarget, rowProfile, sessionModelTarget } from '../model-profiles/service.js';
 import { commandToShell } from '../lib/shell.js';
@@ -130,11 +130,15 @@ function autoChoiceText(decision: AutoDecision): string {
   return `Auto chose ${model}${decision.reason ? `: ${decision.reason}` : '.'}`;
 }
 
-/** The Auto state a decision leaves on the row: a provisional choice is routed again with the next prompt (three times at most). */
-function autoRouteFor(decision: AutoDecision, prompt: string, routes: number): AutoRoute {
-  if (decision.provisional !== true) return { routePending: false, decision };
-  if (routes >= MAX_PROVISIONAL_ROUTES) return { routePending: false, decision: { ...decision, provisional: false } };
-  return { routePending: true, decision, provisionalRoutes: routes, previousPrompt: prompt.slice(0, ROUTE_TASK_MAX_CHARS) };
+/**
+ * The Auto state a routing leaves on the row. `routed` counts the prompts routed since A was selected, this one included. The
+ * prompt after the first is always checked once more, with the conversation so far; after that the choice is final unless it is
+ * still provisional, and three routed prompts in all end it whatever the answer.
+ */
+function autoRouteFor(decision: AutoDecision, prompt: string, routed: number): AutoRoute {
+  const more = routed < MAX_ROUTED_PROMPTS && (routed === 1 || decision.provisional === true);
+  if (!more) return { routePending: false, decision: decision.provisional === true ? { ...decision, provisional: false } : decision };
+  return { routePending: true, decision, routedPrompts: routed, previousPrompt: prompt.slice(0, ROUTE_TASK_MAX_CHARS) };
 }
 
 function describeAppliedModel(applied: AppliedModel | undefined): string {
@@ -4984,10 +4988,11 @@ export class SessionManager {
 
   private async routeAutoNow(session: BoundSession, text: string): Promise<void> {
     try {
-      // A provisional choice (the classifier could not tell the kind of task) is routed again from the conversation so far. Pressing
-      // A again starts afresh: it keeps the decision but not the notes of a provisional run (`previousPrompt`).
+      // The prompt after the first is checked again from the conversation so far, and so is every later prompt while the choice is
+      // provisional (the classifier could not tell the kind of task). Pressing A again starts afresh: it keeps the decision but not
+      // the notes of the run (`routedPrompts`, `previousPrompt`), so the next prompt counts as the first.
       const previous = session.autoRoute;
-      const rerouting = previous?.decision?.source === 'router' && previous.decision.provisional === true && previous.previousPrompt !== undefined;
+      const rerouting = previous?.decision !== undefined && previous.routedPrompts !== undefined && previous.previousPrompt !== undefined;
       const task = rerouting
         ? composeRerouteTask({ prompt: text, assistantReply: await this.lastAssistantReplyStart(session), previousPrompt: previous?.previousPrompt })
         : text;
@@ -4996,12 +5001,12 @@ export class SessionManager {
       // The row may have changed while the router ran (released, or a different profile chosen).
       if (!latest || activeModelProfile(latest) !== 'auto' || !latest.autoRoute?.routePending || this.hasLiveModelProfileRequest(latest)) return;
       if (rerouting && latest.autoRoute.decision) {
-        await this.applyReroute(latest, outcome, text, previous?.provisionalRoutes ?? 1);
+        await this.applyReroute(latest, outcome, text, previous?.routedPrompts ?? 1);
         return;
       }
       const medium = outcome.ok ? undefined : await this.modelProfiles.entry(session.provider, 'medium').catch(() => undefined);
       const decision = outcome.ok ? outcome.decision : fallbackDecision(outcome.reason, medium);
-      await this.applyAutoDecision(latest, decision, outcome.ok ? autoRouteFor(decision, text, 1) : { routePending: false, decision });
+      await this.applyAutoDecision(latest, decision, autoRouteFor(decision, text, 1));
     } catch (error) {
       // Never block the message: it runs on the model the session already has.
       this.logger?.warn({ err: error, sessionId: session.id }, 'Auto routing failed; the message runs on the current model.');
@@ -5029,20 +5034,16 @@ export class SessionManager {
   }
 
   /**
-   * The next prompt of a session whose Auto choice is provisional. A clear answer ends the re-routing; a provisional one counts
-   * toward {@link MAX_PROVISIONAL_ROUTES}, after which the last choice is kept and marked final. A router failure keeps the
-   * choice (and counts), because a first guess is better than dropping to Medium. A changed model or effort is applied through the
-   * ordinary profile switch; the same model only updates the row.
+   * A prompt after the first on a session whose Auto state still asks for a check: the second prompt always, later ones while the
+   * choice is provisional (see {@link autoRouteFor}). A router failure keeps the choice, because a first guess is better than
+   * dropping to Medium, and counts as a routed prompt. A changed model or effort is applied through the ordinary profile switch;
+   * the same model only updates the row.
    */
   private async applyReroute(latest: BoundSession, outcome: Awaited<ReturnType<ModelProfileService['route']>>, text: string, priorRoutes: number): Promise<void> {
     const kept = latest.autoRoute!.decision!;
-    const routes = priorRoutes + 1;
+    const routed = priorRoutes + 1;
     const decision = outcome.ok ? outcome.decision : kept;
-    const route: AutoRoute = outcome.ok
-      ? autoRouteFor(decision, text, routes)
-      : routes >= MAX_PROVISIONAL_ROUTES
-        ? { routePending: false, decision: { ...kept, provisional: false } }
-        : { routePending: true, decision: kept, provisionalRoutes: routes, previousPrompt: text.slice(0, ROUTE_TASK_MAX_CHARS) };
+    const route = autoRouteFor(decision, text, routed);
     const changed = outcome.ok && (decision.launchName !== kept.launchName || decision.effort !== kept.effort);
     if (changed) {
       await this.applyAutoDecision(latest, decision, route);
@@ -5052,7 +5053,8 @@ export class SessionManager {
     const updated = this.db.boundSessions.setAutoRoute(latest.id, route, now);
     if (!updated) return;
     if (!outcome.ok) {
-      this.appendEvent(updated, { type: 'status', text: `Auto could not re-route (${outcome.reason.replace(/[.\s]+$/, '')}). Keeping ${describeAppliedModel({ model: kept.launchName ?? '', effort: kept.effort ?? '', label: kept.label })}.`, timestamp: now });
+      const keeping = kept.launchName && kept.effort ? describeAppliedModel({ model: kept.launchName, effort: kept.effort, label: kept.label }) : 'the model the session has';
+      this.appendEvent(updated, { type: 'status', text: `Auto could not re-route (${outcome.reason.replace(/[.\s]+$/, '')}). Keeping ${keeping}.`, timestamp: now });
     }
     this.eventBus.emit({ type: 'session.updated', session: updated });
   }

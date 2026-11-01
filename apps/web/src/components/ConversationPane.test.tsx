@@ -368,7 +368,7 @@ describe('Auto model profile (A)', () => {
 
   it('marks a provisional choice, says the role is unclear, and drops the re-route hint', () => {
     renderPane({
-      sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: true, provisionalRoutes: 1, previousPrompt: 'hm', decision: {
+      sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: true, routedPrompts: 1, previousPrompt: 'hm', decision: {
         source: 'router', decidedAt: baseTime, model: 'gpt-6-luna', label: 'GPT-6 Luna', effort: 'low', launchName: 'gpt-6-luna',
         role: 'implementer', rolePercent: 41, difficulty: 'lighter', classifierStatus: 'cannot_tell', provisional: true,
       } } },
@@ -377,6 +377,18 @@ describe('Auto model profile (A)', () => {
     expect(line).toHaveTextContent('A (provisional) → GPT-6 Luna·low · role unclear · lighter');
     expect(line).not.toHaveTextContent('41%');
     expect(line).not.toHaveTextContent('re-routes with your next message');
+  });
+
+  it('says a clear first choice is checked again at the next prompt, and that A pressed again re-routes', () => {
+    const decision = { source: 'router' as const, decidedAt: baseTime, model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'low', launchName: 'gpt-6.1-terra', role: 'implementer', rolePercent: 91 };
+    const first = renderPane({ sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: true, routedPrompts: 1, previousPrompt: 'hi', decision } } });
+    expect(screen.getByTestId('auto-route-line')).toHaveTextContent('A → GPT-6.1 Terra·low · implementer 91% · re-checks at your next prompt');
+    first.unmount();
+    const pressed = renderPane({ sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: true, decision } } });
+    expect(screen.getByTestId('auto-route-line')).toHaveTextContent('implementer 91% · re-routes with your next message');
+    pressed.unmount();
+    renderPane({ sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: false, decision } } });
+    expect(screen.getByTestId('auto-route-line')).not.toHaveTextContent('re-');
   });
 
   it('shows a Grok session\'s Auto choice with its own name and quota state', () => {

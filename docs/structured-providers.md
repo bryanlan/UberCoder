@@ -123,7 +123,7 @@ Rules:
   `claude_profile`. It is written and kept like them (a stale upsert cannot overwrite a newer profile; the completion of a
   model-profile request writes the column of the row's provider). Old rows read as having none.
 - `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 21 in the same change.
-- Provisional Auto routing and the provider-neutral Start add no column: they live in the existing `auto_route_json`.
+- The second-prompt check, provisional Auto routing and the provider-neutral Start add no column: they live in the existing `auto_route_json`.
 
 ### Shared contracts (`packages/shared/src/index.ts`)
 

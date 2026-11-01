@@ -82,14 +82,18 @@ export interface AutoRoute {
   routePending: boolean;
   /** The latest decision. Its model is what the session runs on until the next routing. */
   decision?: AutoDecision;
-  /** How many routings in a row have come back provisional. Three end the re-routing and the last choice is kept as final. */
-  provisionalRoutes?: number;
-  /** The text the last provisional routing saw (at most 2,000 characters); the next routing starts from it. */
+  /**
+   * How many prompts have been routed since A was selected (the first counts). Absent after A is pressed again, so the next prompt
+   * counts as the first. The second prompt is always routed again; later ones only while the choice is provisional, up to
+   * {@link MAX_ROUTED_PROMPTS}, when the last choice is kept as final.
+   */
+  routedPrompts?: number;
+  /** The text the last routing saw (at most 2,000 characters); the next routing starts from it. */
   previousPrompt?: string;
 }
 
-/** A provisional Auto choice is re-routed on the next prompts, at most this many provisional routings in all. */
-export const MAX_PROVISIONAL_ROUTES = 3;
+/** Auto routes at most this many prompts per selection of A, counting the first. */
+export const MAX_ROUTED_PROMPTS = 3;
 
 const AUTO_QUOTA_WORDS: Record<string, string> = {
   surplus: 'surplus',
@@ -126,8 +130,10 @@ export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undef
     if (decision.quotaState) parts.push(`${providerName} ${AUTO_QUOTA_WORDS[decision.quotaState] ?? decision.quotaState}`);
   }
   const base = `${provisional ? 'A (provisional)' : 'A'} → ${parts.join(' · ')}`;
-  // A provisional choice re-routes by itself; the marker already says so.
-  const line = route?.routePending && !provisional ? `${base} · re-routes with your next message` : base;
+  // A provisional choice re-routes by itself and its marker already says so. After the first prompt the second is always checked
+  // once more; A pressed again routes the next message afresh.
+  const pendingNote = provisional ? undefined : route?.routedPrompts === 1 ? 're-checks at your next prompt' : 're-routes with your next message';
+  const line = route?.routePending && pendingNote ? `${base} · ${pendingNote}` : base;
   const title = decision.source === 'fallback' ? decision.warning : decision.reason;
   return { line, ...(title ? { title } : {}) };
 }

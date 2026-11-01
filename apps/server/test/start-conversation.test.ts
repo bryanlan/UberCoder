@@ -74,7 +74,8 @@ describe('Provider-neutral Start', () => {
     expect(started.session).toMatchObject({ provider: 'grok', transport: 'structured' });
     expect(f.row(started.session.id)).toMatchObject({
       provider: 'grok', grokProfile: 'auto', transport: 'structured',
-      autoRoute: { routePending: false, decision: { source: 'router', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7',
+      // A clear Start choice is still checked once at the session's second prompt.
+      autoRoute: { routePending: true, routedPrompts: 1, previousPrompt: 'review the quota pacing code', decision: { source: 'router', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7',
         role: 'implementer', rolePercent: 72, difficulty: 'lighter', quotaState: 'tight' } },
     });
     // The process starts on the routed model, and the prompt is the first turn on it, sent once and not routed again.
@@ -138,7 +139,7 @@ describe('Provider-neutral Start', () => {
     wo.answers.push(new Error('no route'));
     const started = await start('hello');
     expect(started.warning).toContain('Started on Codex with its own default model');
-    expect(f.row(started.session.id)).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: false, decision: { source: 'fallback', warning: expect.stringContaining('Auto unavailable') } } });
+    expect(f.row(started.session.id)).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: true, routedPrompts: 1, decision: { source: 'fallback', warning: expect.stringContaining('Auto unavailable') } } });
     expect(turns('codex')).toEqual([expect.objectContaining({ text: 'hello' })]);
     expect(turns('codex')[0]!.model).toBeUndefined();
   });
@@ -161,11 +162,31 @@ describe('Provider-neutral Start', () => {
     expect(f.db.pendingConversations.list()).toEqual([]);
   });
 
+  it('checks a clear Start choice once more at the second prompt, inside the provider Start chose, and a changed model is final', async () => {
+    const { f, wo, start, turns } = startFixture();
+    wo.answers.push(routed('xai', 'grok-4.6', 'Grok 4.6', 'low'));
+    const started = await start('hi, a question about the exporter');
+    const id = started.session.id;
+    expect(wo.routeCalls).toHaveLength(1);
+    f.extraPlugins[1]!.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(id).isWorking).toBe(false);
+
+    wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'high'));
+    await f.manager.sendInput(id, 'it must stream rows');
+    expect(wo.routeCalls[1]).toEqual(['route', '--task', 'it must stream rows\n\nhi, a question about the exporter', '--launcher', 'console', '--provider', 'xai', '--json']);
+    expect(turns('grok').at(-1)).toMatchObject({ text: 'it must stream rows', model: 'grok-4.7', effort: 'high' });
+    expect(f.row(id).autoRoute).toMatchObject({ routePending: false, decision: { launchName: 'grok-4.7' } });
+    f.extraPlugins[1]!.instance!.sessions[0]!.completeTurn();
+    await expect.poll(() => f.row(id).isWorking).toBe(false);
+    await f.manager.sendInput(id, 'and one more');
+    expect(wo.routeCalls).toHaveLength(2);
+  });
+
   it('re-routes a provisional Start choice on the next prompt, inside the provider Start chose', async () => {
     const { f, wo, start, turns } = startFixture();
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'low', { provisional: true }));
     const started = await start('look at this');
-    expect(f.row(started.session.id).autoRoute).toMatchObject({ routePending: true, provisionalRoutes: 1, previousPrompt: 'look at this', decision: { provisional: true } });
+    expect(f.row(started.session.id).autoRoute).toMatchObject({ routePending: true, routedPrompts: 1, previousPrompt: 'look at this', decision: { provisional: true } });
     // The opening prompt was not routed a second time.
     expect(wo.routeCalls).toHaveLength(1);
 
