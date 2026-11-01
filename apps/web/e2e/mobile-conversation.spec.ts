@@ -12,7 +12,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   }));
   const sessions: BoundSession[] = chats.filter(chat => chat.isBound).map(chat => ({
     id: chat.ref, provider: 'codex', projectSlug: 'demo', conversationRef: chat.ref,
-    tmuxSessionName: 'fixture-only', status: 'bound', startedAt: stamp, updatedAt: stamp,
+    status: 'bound', startedAt: stamp, updatedAt: stamp,
     isWorking: false, ...(chat.ref === 'sleeping' ? { manualSuspendedAt: stamp } : {}),
   }));
   const projects: ProjectSummary[] = ['demo', 'empty'].map(slug => ({
@@ -45,7 +45,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   await page.route('**/api/events', route => route.fulfill({ contentType: 'text/event-stream', body: ': fixture\n\n' }));
   await page.route('**/api/settings/ui-preferences', route => route.fulfill({ json: { recentActivitySortEnabled: true, manualProjectOrder: [] } }));
   await page.route('**/api/network-info', route => route.fulfill({ json: {} }));
-  await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects, boundSessions: sessions } }));
+  await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects, boundSessions: sessions, structuredProviders: ['codex', 'claude'] } }));
   await page.route('**/api/conversations/demo/codex/*/messages**', route => {
     const ref = route.request().url().split('/codex/')[1]!.split('/')[0];
     return route.fulfill({ json: { conversation: chats.find(chat => chat.ref === ref), boundSession: sessions.find(session => session.id === ref), messages, messagePage: { hasOlder: false, total: messages.length } } });
@@ -53,7 +53,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   await page.route('**/api/sessions/*/screen**', route => {
     const ref = route.request().url().split('/sessions/')[1]!.split('/')[0];
     return route.fulfill({ json: { session: sessions.find(session => session.id === ref), screen: {
-      content: 'Terminal details should stay out of the mobile reading view.', inputText: '', inputActive: true, capturedAt: stamp, status: 'Ready',
+      content: '', inputText: '', inputActive: true, capturedAt: stamp, status: 'Codex idle',
     } } });
   });
   await page.route('**/api/sessions/*/keys', route => {
@@ -86,7 +86,7 @@ test('starts in reading mode and switches chats in a full-screen filtered list',
   await expect(page.getByRole('complementary', { name: 'Active workers' })).toBeHidden();
   await expect(page.getByRole('textbox', { name: 'Message' })).toBeHidden();
   await expect(page.getByRole('button', { name: 'Use high Codex profile' })).toBeHidden();
-  await expect(page.getByText('Terminal details should stay out of the mobile reading view.')).toBeHidden();
+  await expect(page.getByText('Codex idle', { exact: true })).toBeHidden();
   expect((await page.getByTestId('conversation-scroll').boundingBox())!.height).toBeGreaterThan(700);
   await page.screenshot({ path: testInfo.outputPath('mobile-reading.png') });
   await page.getByRole('button', { name: 'Chats', exact: true }).tap();
@@ -201,15 +201,15 @@ test('keeps a readable scroll area above a compact reply when the keyboard opens
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
-test('keeps separate per-chat drafts and uses controls without focusing the phone keyboard', async ({ page }) => {
+test('keeps separate per-chat drafts and stops the turn from controls without focusing the phone keyboard', async ({ page }) => {
   const { calls } = await openMobile(page);
   await page.getByRole('button', { name: 'Reply', exact: true }).tap();
   const input = page.getByRole('textbox', { name: 'Message' });
   await input.fill('Draft for first chat');
   await page.getByRole('button', { name: 'Controls', exact: true }).tap();
   await expect(input).toBeHidden();
-  await page.getByRole('button', { name: '↓', exact: true }).tap();
-  await expect.poll(() => calls).toEqual([{ keys: ['Down'] }]);
+  await page.getByRole('button', { name: 'Interrupt session', exact: true }).tap();
+  await expect.poll(() => calls).toEqual([{ keys: ['Escape'] }]);
   expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
   await page.getByRole('button', { name: 'Chats', exact: true }).tap();
   await page.getByRole('complementary', { name: 'Chats' }).getByRole('link', { name: /second conversation/ }).tap();

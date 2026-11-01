@@ -2,18 +2,20 @@ import { expect, test, type Page } from '@playwright/test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { BoundSession, ConversationKind, ConversationSummary, ProjectSummary, ProviderId, SessionEvent } from '@agent-console/shared';
 import { AppDatabase } from '../../server/src/db/database.js';
 import { RealtimeEventBus } from '../../server/src/realtime/event-bus.js';
-import { SessionManager } from '../../server/src/sessions/session-manager.js';
-import { FakeTmux } from '../../server/test/helpers/session-fixtures.js';
+import { TransportPluginRegistry } from '../../server/src/providers/transport/registry.js';
+import { createRecoveryManager, project as fixtureProject, provider as fixtureProvider } from '../../server/test/helpers/session-fixtures.js';
+import { FakeTransportPlugin } from '../../server/test/helpers/structured-fixtures.js';
 
 async function openChat(page: Page, provider: ProviderId, kind: ConversationKind = 'history') {
   const stamp = new Date().toISOString();
   const ref = kind === 'pending' ? 'pending:c1' : 'c1';
   const session: BoundSession = {
     id: 'session-to-close', provider, projectSlug: 'demo', conversationRef: ref,
-    tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true,
+    status: 'bound', shouldRestore: true,
     startedAt: stamp, updatedAt: stamp, isWorking: false,
   };
   const conversation: ConversationSummary = {
@@ -125,68 +127,77 @@ test('Close preserves Browse mode and the current view for a background chat', a
   expect(calls.releases).toBe(1);
 });
 
-for (const failure of ['kill', 'liveness'] as const) {
-  test(`a real ${failure} failure keeps Close available and the chat selected`, async ({ page }) => {
-    await page.addInitScript(() => {
-      class FixtureEventSource {
-        onmessage: ((event: MessageEvent) => void) | null = null;
-        private readonly listener = (event: Event) => {
-          this.onmessage?.(new MessageEvent('message', { data: JSON.stringify((event as CustomEvent).detail) }));
-        };
-        constructor() { window.addEventListener('close-fixture-event', this.listener); }
-        close() { window.removeEventListener('close-fixture-event', this.listener); }
-      }
-      window.EventSource = FixtureEventSource as unknown as typeof EventSource;
-    });
-    const { chatPath, session } = await openChat(page, 'codex');
-    const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-close-failure-'));
-    const db = new AppDatabase(path.join(fixtureDir, 'private.sqlite'));
-    const tmux = new FakeTmux();
-    tmux.alive.add(session.tmuxSessionName);
-    if (failure === 'kill') tmux.failKill = true;
-    else tmux.hasSessionResults.push(new Error('Fixture tmux unavailable'));
-    const events: SessionEvent[] = [];
-    const bus = new RealtimeEventBus();
-    const unsubscribe = bus.subscribe(event => events.push(event));
-    db.boundSessions.upsert(session);
-    const manager = new SessionManager(db, tmux, path.join(fixtureDir, 'runtime'), bus);
-    let releaseError = '';
-    try {
-      await page.route('**/api/sessions/*/release', async route => {
-        try {
-          await manager.releaseSession(session.id);
-          await route.fulfill({ status: 204 });
-        } catch (error) {
-          releaseError = (error as Error).message;
-          for (const event of events) {
-            await page.evaluate(value => window.dispatchEvent(new CustomEvent('close-fixture-event', { detail: value })), event);
-          }
-          await route.fulfill({ status: 500, json: { error: releaseError } });
-        }
-      });
-      await closeChat(page);
-      await expect.poll(() => releaseError).not.toBe('');
-      await expect(page.getByText(releaseError, { exact: true })).toBeVisible();
-      await expect(page).toHaveURL(new RegExp(`${chatPath}$`));
-      await expect(page.locator('aside').getByRole('link', { name: /Chat to close/ })).toBeVisible();
-      await page.getByRole('button', { name: 'Conversation actions for Chat to close' }).click();
-      await expect(page.getByRole('button', { name: 'Close', exact: true })).toBeEnabled();
-      expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
-      expect(db.boundSessions.listTreeVisible().map(item => item.id)).toContain(session.id);
-      expect(tmux.alive.has(session.tmuxSessionName)).toBe(true);
-      const statuses = events.filter(event => event.type === 'session.updated').map(event => event.session.status);
-      const releaseStartedAt = statuses.indexOf('releasing');
-      // Queue cancellation can publish the still-bound session before release starts.
-      expect(statuses.slice(0, releaseStartedAt).every(status => status === 'bound')).toBe(true);
-      expect(statuses.slice(releaseStartedAt)).toEqual(['releasing', 'bound']);
-    } finally {
-      unsubscribe();
-      await manager.stop();
-      db.close();
-      await fs.rm(fixtureDir, { recursive: true, force: true });
+test('a real release failure keeps Close available and the chat selected', async ({ page }) => {
+  await page.addInitScript(() => {
+    class FixtureEventSource {
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      private readonly listener = (event: Event) => {
+        this.onmessage?.(new MessageEvent('message', { data: JSON.stringify((event as CustomEvent).detail) }));
+      };
+      constructor() { window.addEventListener('close-fixture-event', this.listener); }
+      close() { window.removeEventListener('close-fixture-event', this.listener); }
     }
+    window.EventSource = FixtureEventSource as unknown as typeof EventSource;
   });
-}
+  const { chatPath } = await openChat(page, 'codex');
+  // The real session manager over a fake provider transport: no provider process is started.
+  const fixtureDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-close-failure-'));
+  const db = new AppDatabase(path.join(fixtureDir, 'private.sqlite'));
+  const plugin = new FakeTransportPlugin();
+  const registry = new TransportPluginRegistry();
+  registry.register(plugin);
+  const events: SessionEvent[] = [];
+  const bus = new RealtimeEventBus();
+  const unsubscribe = bus.subscribe(event => events.push(event));
+  const manager = createRecoveryManager(db, path.join(fixtureDir, 'runtime'), bus, fixtureProvider, undefined, {
+    transportPlugins: registry,
+    structuredSessions: { codex: { enabled: true, command: ['fake-codex', 'app-server'], idleUnloadMinutes: 60, env: {} } },
+  });
+  const pendingRef = `pending:${randomUUID()}`;
+  const now = new Date().toISOString();
+  db.pendingConversations.put({
+    ref: pendingRef, kind: 'pending', projectSlug: fixtureProject.slug, provider: 'codex', title: 'New Codex conversation',
+    createdAt: now, updatedAt: now, isBound: false, degraded: false, rawMetadata: { pending: true },
+  });
+  const session = await manager.bindConversation({
+    project: fixtureProject, provider: fixtureProvider, conversationRef: pendingRef, title: 'New Codex conversation', kind: 'pending',
+  });
+  plugin.instance!.sessions[0]!.close = async () => { throw new Error('Fixture close failure'); };
+  let releaseError = '';
+  try {
+    await page.route('**/api/sessions/*/release', async route => {
+      try {
+        await manager.releaseSession(session.id);
+        await route.fulfill({ status: 204 });
+      } catch (error) {
+        releaseError = (error as Error).message;
+        for (const event of events) {
+          await page.evaluate(value => window.dispatchEvent(new CustomEvent('close-fixture-event', { detail: value })), event);
+        }
+        await route.fulfill({ status: 500, json: { error: releaseError } });
+      }
+    });
+    await closeChat(page);
+    await expect.poll(() => releaseError).not.toBe('');
+    await expect(page.getByText(releaseError, { exact: true })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`${chatPath}$`));
+    await expect(page.locator('aside').getByRole('link', { name: /Chat to close/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Conversation actions for Chat to close' }).click();
+    await expect(page.getByRole('button', { name: 'Close', exact: true })).toBeEnabled();
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
+    expect(db.boundSessions.listTreeVisible().map(item => item.id)).toContain(session.id);
+    const statuses = events.filter(event => event.type === 'session.updated').map(event => event.session.status);
+    const releaseStartedAt = statuses.indexOf('releasing');
+    // Queue cancellation can publish the still-bound session before release starts.
+    expect(statuses.slice(0, releaseStartedAt).every(status => status === 'bound')).toBe(true);
+    expect(statuses.slice(releaseStartedAt)).toEqual(['releasing', 'bound']);
+  } finally {
+    unsubscribe();
+    await manager.stop();
+    db.close();
+    await fs.rm(fixtureDir, { recursive: true, force: true });
+  }
+});
 
 for (const { kind, routeRef } of [
   { kind: 'history', routeRef: 'c1/' },

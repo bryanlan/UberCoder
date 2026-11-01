@@ -1,13 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
 import type { BoundSession, ConversationSummary, ProjectSummary, ProviderId, SessionKeystrokeRequest } from '@agent-console/shared';
 
-const rejection = 'Live session did not accept the typed text into its input buffer. The draft was not submitted.';
+const rejection = 'The session did not accept the message. Nothing was sent.';
 
-async function openConversation(page: Page, provider: ProviderId, delivery: 'reject' | 'queue' = 'reject', nativeMenu = false) {
+async function openConversation(page: Page, provider: ProviderId, delivery: 'reject' | 'queue' = 'reject') {
   const stamp = new Date().toISOString();
   let session: BoundSession = {
     id: 'original-session', provider, projectSlug: 'demo', conversationRef: 'c1',
-    tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true,
+    status: 'bound', shouldRestore: true,
     startedAt: stamp, updatedAt: stamp, isWorking: false,
   };
   const conversation: ConversationSummary = {
@@ -36,9 +36,8 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
   await page.route('**/api/sessions/*/screen**', route => {
     screenSessions.push(session.id);
     return route.fulfill({ json: { session, screen: {
-      content: nativeMenu ? 'Select model\n❯ 2. Opus 5.5\nEnter to confirm · Esc to cancel' : 'Three background agents are building.',
-      inputText: '', inputActive: !nativeMenu, capturedAt: stamp,
-      status: provider === 'claude' ? '⏵⏵ bypass permissions on (shift+tab to cycle)' : 'gpt-6.1-sol · 80% left',
+      content: '', inputText: '', inputActive: true, capturedAt: stamp,
+      status: provider === 'claude' ? 'Claude idle' : 'Codex idle',
     } } });
   });
   await page.route('**/api/sessions/*/keys', async route => {
@@ -50,13 +49,10 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
         return;
       }
       const queuedInput = { requestId: body.submissionId!, text: body.submittedText!, requestedAt: new Date().toISOString(),
-        state: 'waiting_for_input' as const, reason: 'Waiting for the typed message to appear.' };
+        state: 'queued' as const, reason: 'Waiting for the session to accept input.' };
       session = { ...session, queuedInputs: [...session.queuedInputs ?? [], queuedInput], updatedAt: new Date(Date.now() + 1).toISOString() };
       await route.fulfill({ json: { session, queuedInput } });
       return;
-    }
-    if (nativeMenu && !body.text && !body.submittedText && !body.imageIds) {
-      return route.fulfill({ json: { session } });
     }
     await route.fulfill({ status: 409, json: { error: rejection } });
   });
@@ -166,17 +162,13 @@ for (const provider of ['claude', 'codex'] as const) {
 }
 
 for (const provider of ['claude', 'codex'] as const) {
-  test(`${provider} queued Text Bypass send leaves subsequent typing in a separate draft`, async ({ page }) => {
+  test(`${provider} queued send leaves subsequent typing in a separate draft`, async ({ page }) => {
     const calls = await openConversation(page, provider, 'queue');
     const textbox = page.getByRole('textbox');
-    const bypass = page.getByRole('button', { name: 'Text Bypass' });
-    await bypass.click();
-    await expect(bypass).toHaveAttribute('aria-pressed', 'true');
-    await textbox.pressSequentially('first message');
+    await textbox.fill('first message');
     await textbox.press('Enter');
     await expect(page.getByText('Queued', { exact: true })).toHaveCount(1);
-    await expect(bypass).toHaveAttribute('aria-pressed', 'false');
-    await expect(bypass).toBeDisabled();
+    await expect(textbox).toHaveValue('');
     const priorCalls = calls.inputCalls.length;
     await textbox.fill('second message');
     await page.waitForTimeout(100);
@@ -188,7 +180,6 @@ for (const provider of ['claude', 'codex'] as const) {
     } }]);
     await page.reload();
     await expect(page.getByText('Queued', { exact: true })).toHaveCount(2);
-    await expect(bypass).toBeDisabled();
     expect(calls.bindCalls).toEqual([]);
     expect(calls.releaseCalls).toEqual([]);
   });
@@ -229,25 +220,27 @@ test('Codex Rebind still replaces the session only when explicitly selected', as
 test.describe('mobile live input', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  test('native menu controls preserve the reply without opening the phone keyboard', async ({ page }, testInfo) => {
+  test('the controls panel keeps the reply draft and stops the turn without opening the phone keyboard', async ({ page }, testInfo) => {
     await page.addInitScript(() => localStorage.setItem('agent-console:live-bridge-height', '600'));
-    const calls = await openConversation(page, 'claude', 'reject', true);
+    const calls = await openConversation(page, 'claude');
     const textbox = page.getByRole('textbox', { name: 'Message' });
     const draft = 'Switching to Fable for the plan review';
     await textbox.fill(draft);
     expect(await textbox.evaluate(node => node.getBoundingClientRect().height)).toBeLessThanOrEqual(112);
     await page.getByRole('button', { name: 'Controls', exact: true }).tap();
     await expect(textbox).toBeHidden();
-    for (const [label, key] of [['↓', 'Down'], ['Enter', 'Enter'], ['Esc', 'Escape']] as const) {
-      await page.getByRole('button', { name: label, exact: true }).tap();
-      await expect.poll(() => calls.inputCalls.at(-1)?.body).toEqual({ keys: [key] });
-      expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
+    await expect(page.getByRole('button', { name: 'Use high Claude profile' })).toBeVisible();
+    for (const name of ['Enter', 'Esc', '↓']) {
+      await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
     }
+    await page.getByRole('button', { name: 'Interrupt session' }).tap();
+    await expect.poll(() => calls.inputCalls.at(-1)?.body).toEqual({ keys: ['Escape'] });
+    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe('TEXTAREA');
     await page.getByRole('button', { name: 'Reply', exact: true }).tap();
     await expect(textbox).toHaveValue(draft);
     expect(await page.evaluate(() => localStorage.getItem('agent-console:live-bridge-height'))).toBe('600');
     expect(calls.bindCalls).toEqual([]);
     expect(calls.releaseCalls).toEqual([]);
-    await page.screenshot({ path: testInfo.outputPath('mobile-menu-reply.png') });
+    await page.screenshot({ path: testInfo.outputPath('mobile-controls-reply.png') });
   });
 });

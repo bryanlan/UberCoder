@@ -7,7 +7,7 @@ async function openConversation(page: Page, provider: ProviderId, outcome: Outco
   const stamp = new Date().toISOString();
   const session: BoundSession = {
     id: 'csrf-fixture', provider, projectSlug: 'demo', conversationRef: 'c1',
-    tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true,
+    status: 'bound', shouldRestore: true,
     startedAt: stamp, updatedAt: stamp, isWorking: false,
   };
   const conversation: ConversationSummary = {
@@ -47,8 +47,8 @@ async function openConversation(page: Page, provider: ProviderId, outcome: Outco
     json: { conversation, boundSession: session, messages, messagePage: { hasOlder: false, total: messages.length } },
   }));
   await page.route('**/api/sessions/*/screen**', route => route.fulfill({ json: { session, screen: {
-    content: 'Ready', inputText: '', capturedAt: stamp,
-    status: provider === 'claude' ? '⏵⏵ bypass permissions on (shift+tab to cycle)' : 'gpt-6.1-sol · 80% left',
+    content: '', inputText: '', inputActive: true, capturedAt: stamp,
+    status: provider === 'claude' ? 'Claude idle' : 'Codex idle',
   } } }));
   await page.route('**/api/sessions/*/keys', async route => {
     const token = route.request().headers()['x-csrf-token'];

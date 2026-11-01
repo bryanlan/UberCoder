@@ -5,7 +5,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
   test(`stopped run visibility and cancellation on ${viewport.name}`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     const stamp = new Date().toISOString();
-    const session: BoundSession = { id: 'recovery-fixture', provider: 'codex', projectSlug: 'demo', conversationRef: 'c1', tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true, startedAt: stamp, updatedAt: stamp, isWorking: false,
+    const session: BoundSession = { id: 'recovery-fixture', provider: 'codex', projectSlug: 'demo', conversationRef: 'c1', status: 'bound', shouldRestore: true, startedAt: stamp, updatedAt: stamp, isWorking: false,
       runFailure: { turnId: 't1', failedAt: stamp, code: 'server_overloaded', message: 'Selected model is at capacity. Please try a different model.', status: 'scheduled', attempts: 1, maxAttempts: 3, nextRetryAt: new Date(Date.now() + 45_000).toISOString() } };
     const conversation: ConversationSummary = { ref: 'c1', provider: 'codex', projectSlug: 'demo', kind: 'history', title: 'Interrupted deployment', updatedAt: stamp, isBound: true, boundSessionId: session.id, degraded: false };
     const project: ProjectSummary = { slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo', tags: [], allowedLocalhostPorts: [], providers: { codex: { id: 'codex', label: 'Codex', conversations: [conversation] }, claude: { id: 'claude', label: 'Claude', conversations: [] } } };

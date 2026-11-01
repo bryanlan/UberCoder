@@ -4,7 +4,7 @@ import type { BoundSession, ConversationSummary, ProjectSummary, ProviderId } fr
 async function openConversation(page: Page, provider: ProviderId, unavailable = false) {
   const stamp = new Date().toISOString();
   const session: BoundSession = { id: 'current-session', provider, projectSlug: 'demo', conversationRef: 'current',
-    tmuxSessionName: 'fixture-only', status: 'bound', shouldRestore: true, startedAt: stamp, updatedAt: stamp };
+    status: 'bound', shouldRestore: true, startedAt: stamp, updatedAt: stamp };
   const current: ConversationSummary = { ref: 'current', provider, projectSlug: 'demo', kind: 'history',
     title: 'Current chat', updatedAt: stamp, isBound: true, boundSessionId: session.id, degraded: false };
   const peerProvider = provider === 'codex' ? 'claude' : 'codex';

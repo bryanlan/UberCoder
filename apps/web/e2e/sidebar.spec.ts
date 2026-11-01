@@ -133,7 +133,7 @@ test('filters to active status chats beside Work mode and remembers the choice',
     }],
     boundSessions: cases.flatMap(({ ref, session }) => session ? [{
       id: ref, provider: ref === 'Yellow chat' ? 'claude' : 'codex', projectSlug: 'demo', conversationRef: ref,
-      tmuxSessionName: `fixture-${ref}`, status: 'bound', startedAt: ago(90), updatedAt: ago(0), ...session,
+      status: 'bound', startedAt: ago(90), updatedAt: ago(0), ...session,
     }] : []),
   };
   await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
