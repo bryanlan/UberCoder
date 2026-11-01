@@ -55,7 +55,7 @@ If existing grants do not cover the work, use `request` with one broad definitio
 Continue other authorized work while the request is pending.
 The grants page shows **Approve**, **Edit** and **Deny**, with the scope first.
 Approval records Bryan's decision, activates the grant and wakes the requester through the existing continuation path.
-Drafts, manual pauses, native choices and memory pressure still defer wake.
+Manual pauses, native choices and memory pressure still defer wake.
 
 Enable notifications on the grants page at the Console's HTTPS address.
 Each browser must grant notification permission once. The server retains its push subscription and VAPID keys in SQLite.

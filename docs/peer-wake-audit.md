@@ -102,7 +102,7 @@ daywide observations from recent warnings. An unconfirmed submission may still b
 or may have been interrupted; a durable submitting marker alone does not prove interruption.
 Stable warning keys allow Waltium to update one operator item per condition. A successful
 clear check closes that rolling condition. Failed, malformed or stale audits cannot clear
-warnings. Provider drafts, approvals and long tools may explain pending messages; pending
+warnings. Provider approvals and long tools may explain pending messages; pending
 age alone does not stop an agent or change a delivery guard.
 
 New wake records distinguish `already_loaded` and `restored`. A marker records the restored

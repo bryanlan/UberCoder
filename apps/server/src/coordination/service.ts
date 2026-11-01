@@ -336,7 +336,7 @@ export class CoordinationService {
       note: 'P3 awareness mail. No wake or direct body injection; a fifteen-minute new-mail notice is offered during an existing turn. The recipient chooses when to fetch it.' };
     if ((priority === 'P1' || dispatchEligible(this.db, message.id)) && this.requestWake && session && status !== 'working') {
       return { id: message.id, ...policy, queued: true, recipient, delivery: 'wake_pending',
-        note: 'Queued for a guarded wake and batched delivery. Stop, drafts, interactive prompts and resource limits still apply.' };
+        note: 'Queued for a guarded wake and batched delivery. Stop, interactive prompts and resource limits still apply.' };
     }
     const delivery = status === 'stopped' ? 'on_resume' : status === 'idle' ? 'next_turn' : 'next_step';
     const note = status === 'stopped'

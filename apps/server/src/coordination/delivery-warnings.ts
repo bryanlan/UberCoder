@@ -36,7 +36,7 @@ export function deliveryWarnings(db: Database.Database, now = Date.now()): WakeW
     });
     const last = attempts.at(-1);
     if (ended) warnings.push({ key: `delivery:${message.id}`, kind: 'delivery', title: 'Peer response ended without acknowledging its message', observedAt,
-      summary: `The ${message.provider} response turn ended but message ${message.id} remains unacknowledged. ${attempts.length > 1 ? `The follow-up is ${last!.status}; no further automatic attempts are permitted.` : 'One guarded follow-up is permitted.'} Inspect hook failures and draft/resource guards.` });
+      summary: `The ${message.provider} response turn ended but message ${message.id} remains unacknowledged. ${attempts.length > 1 ? `The follow-up is ${last!.status}; no further automatic attempts are permitted.` : 'One guarded follow-up is permitted.'} Inspect hook failures and resource guards.` });
     else if (last && ['failed', 'submitting', 'deferred'].includes(last.status) && now - Date.parse(message.created_at) >= 2 * 60_000
       && (last.status !== 'submitting' || now - Date.parse(last.timestamp) >= 30_000)) warnings.push({
       key: `delivery:${message.id}`, kind: 'delivery', title: 'Peer wake is blocked', observedAt,
