@@ -83,7 +83,6 @@ interface UseConversationDataArgs {
   selectedProjectSlug?: string;
   selectedProvider?: ProviderId;
   selectedConversationRef?: string;
-  debugOpen: boolean;
   realtimeDegraded: boolean;
 }
 
@@ -166,7 +165,6 @@ export function useConversationData({
   selectedProjectSlug,
   selectedProvider,
   selectedConversationRef,
-  debugOpen,
   realtimeDegraded,
 }: UseConversationDataArgs) {
   const [historyPrependVersion, setHistoryPrependVersion] = useState(0);
@@ -357,14 +355,6 @@ export function useConversationData({
   const liveScreen = timeline?.liveScreen;
   const liveMode = Boolean(boundSession && liveScreen);
 
-  const rawOutputQuery = useQuery({
-    queryKey: ['raw-output', boundSession?.id],
-    queryFn: () => api.rawOutput(boundSession!.id),
-    // The server no longer has raw terminal output to serve.
-    enabled: false,
-    refetchInterval: realtimeDegraded && boundSession && !isBoundSessionSuspended(boundSession) ? 1000 : false,
-  });
-
   const loadOlderMessages = useCallback(async (): Promise<void> => {
     if (!messagesQuery.hasNextPage) {
       return;
@@ -396,8 +386,6 @@ export function useConversationData({
     resuming: Boolean(boundSession && resumeAttempt?.sessionId === boundSession.id && resumeAttempt.pending),
     retryResume,
     loading: metaQuery.isLoading || (messagesQuery.isLoading && !messagesQuery.data),
-    rawOutput: isBoundSessionSuspended(boundSession) ? undefined : rawOutputQuery.data?.text,
-    rawLoading: rawOutputQuery.isLoading,
     hasOlderMessages: Boolean(messagesQuery.hasNextPage),
     loadingOlderMessages: messagesQuery.isFetchingNextPage,
     loadOlderMessages,

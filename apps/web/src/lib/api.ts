@@ -239,11 +239,10 @@ export const api = {
       csrfToken,
     ),
   sessionScreen: (sessionId: string) =>
-    request<{ session: BoundSession; screen: SessionScreen }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen?lines=120`),
+    request<{ session: BoundSession; screen: SessionScreen }>(`/api/sessions/${encodeURIComponent(sessionId)}/screen`),
   releaseSession: (sessionId: string, csrfToken?: string) => request<void>(`/api/sessions/${encodeURIComponent(sessionId)}/release`, { method: 'POST', body: '{}' }, csrfToken),
   suspendSession: (sessionId: string, csrfToken?: string) => request<{ session: BoundSession }>(`/api/sessions/${encodeURIComponent(sessionId)}/suspend`, { method: 'POST', body: '{}' }, csrfToken),
   resumeSession: (sessionId: string, csrfToken?: string) => request<{ session: BoundSession }>(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, { method: 'POST', body: '{}' }, csrfToken),
-  rawOutput: (sessionId: string) => request<{ text: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/raw-output`),
   settings: () => request<SettingsSummary>('/api/settings'),
   networkInfo: () => request<{ tailscaleIpv4?: string }>('/api/settings/network'),
   uiPreferences: () => request<UiPreferences>('/api/settings/ui-preferences'),

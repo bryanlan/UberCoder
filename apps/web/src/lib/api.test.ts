@@ -41,7 +41,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('Answering an app-server question', () => {
+describe('Reading a session screen', () => {
+  it('asks for the synthesized status without a line count', async () => {
+    const fetchMock = installSuccessfulFetch();
+    await api.sessionScreen('session/1');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/sessions/session%2F1/screen');
+  });
+});
+
+describe('Answering a question the agent asked', () => {
   it('posts the answer to the request route with the CSRF token and encodes the ids', async () => {
     const fetchMock = installSuccessfulFetch();
     const body = { decision: 'answer' as const, answers: { schema: ['Strict'] }, text: 'and fast' };

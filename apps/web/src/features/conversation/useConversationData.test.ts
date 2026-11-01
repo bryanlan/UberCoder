@@ -52,7 +52,7 @@ function page(messages: NormalizedMessage[]): ConversationTimeline {
 }
 
 describe('timelineMessagesRefetchInterval', () => {
-  it('polls a selected external Claude transcript without opening a tmux session', () => {
+  it('polls a selected external Claude transcript without a bound session', () => {
     expect(timelineMessagesRefetchInterval({
       externalClaudeConversation: true,
       pages: [page([message()])],

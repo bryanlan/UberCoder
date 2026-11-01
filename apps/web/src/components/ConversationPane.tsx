@@ -1,11 +1,10 @@
 import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
 import { PendingQuestionCard } from './PendingQuestionCard';
-import { Bug, Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
-import { AnsiUp } from 'ansi_up';
+import { Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import clsx from 'clsx';
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
@@ -17,70 +16,6 @@ import { useConversationScrollController } from '../features/conversation/useCon
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 
 export type MobileInputPanel = 'reply' | 'controls' | null;
-
-type AnsiPaletteColor = {
-  rgb: [number, number, number];
-  class_name: string;
-};
-
-type MutableAnsiConverter = {
-  use_classes: boolean;
-  escape_html: boolean;
-  ansi_colors: [AnsiPaletteColor[], AnsiPaletteColor[]];
-  palette_256: AnsiPaletteColor[];
-  ansi_to_html(text: string): string;
-};
-
-const ansiConverter = new AnsiUp() as unknown as MutableAnsiConverter;
-ansiConverter.use_classes = false;
-ansiConverter.escape_html = true;
-ansiConverter.ansi_colors = [
-  [
-    { rgb: [12, 16, 24], class_name: 'ansi-black' },
-    { rgb: [255, 92, 87], class_name: 'ansi-red' },
-    { rgb: [94, 234, 140], class_name: 'ansi-green' },
-    { rgb: [241, 250, 140], class_name: 'ansi-yellow' },
-    { rgb: [96, 165, 250], class_name: 'ansi-blue' },
-    { rgb: [255, 121, 198], class_name: 'ansi-magenta' },
-    { rgb: [139, 233, 253], class_name: 'ansi-cyan' },
-    { rgb: [226, 232, 240], class_name: 'ansi-white' },
-  ],
-  [
-    { rgb: [100, 116, 139], class_name: 'ansi-bright-black' },
-    { rgb: [255, 110, 118], class_name: 'ansi-bright-red' },
-    { rgb: [134, 239, 172], class_name: 'ansi-bright-green' },
-    { rgb: [253, 224, 71], class_name: 'ansi-bright-yellow' },
-    { rgb: [147, 197, 253], class_name: 'ansi-bright-blue' },
-    { rgb: [244, 114, 182], class_name: 'ansi-bright-magenta' },
-    { rgb: [103, 232, 249], class_name: 'ansi-bright-cyan' },
-    { rgb: [248, 250, 252], class_name: 'ansi-bright-white' },
-  ],
-];
-ansiConverter.palette_256.splice(0, 16, ...ansiConverter.ansi_colors[0], ...ansiConverter.ansi_colors[1]);
-
-function renderAnsiHtml(text: string): string {
-  return ansiConverter.ansi_to_html(text);
-}
-
-const LiveAnsiBlock = memo(function LiveAnsiBlock({
-  text,
-  ansiText,
-  className,
-  containerRef,
-}: {
-  text: string;
-  ansiText?: string;
-  className: string;
-  containerRef?: RefObject<HTMLDivElement | null>;
-}) {
-  return (
-    <div
-      ref={containerRef}
-      className={className}
-      dangerouslySetInnerHTML={{ __html: renderAnsiHtml(ansiText ?? text) }}
-    />
-  );
-});
 
 function useFrozenValue<T,>(value: T, frozen: boolean, resetKey?: string): T {
   const valueRef = useRef(value);
@@ -115,35 +50,28 @@ function MobileSummaryStrip({
   );
 }
 
+/** The synthesized session status: provider state, model and remaining context. */
 function LiveSessionStatus({
   status,
-  statusAnsi,
   model,
   contextPercent,
   mobileCompact,
 }: {
   status: string;
-  statusAnsi?: string;
   model?: string;
   contextPercent?: number;
   mobileCompact: boolean;
 }) {
-  const statusSummary = status
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) ?? 'Session active';
-
+  const statusText = status.trim() || 'Session active';
   const metaLine = [model, contextPercent !== undefined ? `${contextPercent}% left` : undefined]
     .filter(Boolean)
     .join(' · ') || undefined;
-
-  const statusAlreadyHasMeta = (model && status.includes(model)) || /\d{1,3}% left/.test(status);
 
   if (mobileCompact) {
     return (
       <MobileSummaryStrip
         title="Status"
-        summary={metaLine && !statusAlreadyHasMeta ? `${metaLine} · ${statusSummary}` : statusSummary}
+        summary={metaLine ? `${metaLine} · ${statusText}` : statusText}
         className="border-t border-slate-800 bg-slate-900/90"
       />
     );
@@ -152,19 +80,13 @@ function LiveSessionStatus({
   return (
     <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
       <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Status</div>
-      {metaLine && !statusAlreadyHasMeta && (
+      {metaLine && (
         <div className="mb-1 font-mono text-sm leading-6 text-slate-400">{metaLine}</div>
       )}
-      <LiveAnsiBlock
-        text={status || 'Session active'}
-        ansiText={statusAnsi}
-        className="scrollbar-thin max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-300"
-      />
+      <div className="font-mono text-sm leading-6 text-slate-300">{statusText}</div>
     </div>
   );
 }
-
-type SessionKeyToken = NonNullable<SessionKeystrokeRequest['keys']>[number];
 
 const MIN_BRIDGE_HEIGHT_PX = 96;
 const MAX_BRIDGE_HEIGHT_VIEWPORT_RATIO = 0.6;
@@ -183,37 +105,12 @@ function storeBridgeHeight(height: number): void {
   globalThis.localStorage?.setItem(BRIDGE_HEIGHT_STORAGE_KEY, String(height));
 }
 
-const specialKeyButtons = [
-  { label: 'Enter', keys: ['Enter'] },
-  { label: 'Esc', keys: ['Escape'] },
-  { label: '↑', keys: ['Up'] },
-  { label: '↓', keys: ['Down'] },
-  { label: '←', keys: ['Left'] },
-  { label: '→', keys: ['Right'] },
-  { label: 'Backspace', keys: ['BSpace'] },
-  { label: 'Tab', keys: ['Tab'] },
-] satisfies Array<{ label: string; keys: SessionKeyToken[] }>;
+/** The unsent message of each conversation, so a rejected send or a reopened chat still has its text. */
+const composerDraftStore = new Map<string, string>();
 
-/** App-server sessions take a message and an interrupt; terminal navigation keys do not exist there. */
-const structuredKeyButtons = specialKeyButtons.filter(({ keys }) => keys[0] === 'Enter' || keys[0] === 'Escape');
-
-interface LiveBridgeDraftState {
-  draftText?: string;
-  draftDirty?: boolean;
-}
-
-const liveBridgeDraftStore = new Map<string, LiveBridgeDraftState>();
-
-function upsertLiveBridgeDraft(
-  conversationKey: string,
-  updater: (current: LiveBridgeDraftState) => LiveBridgeDraftState,
-): void {
-  const next = updater(liveBridgeDraftStore.get(conversationKey) ?? {});
-  if (!next.draftText && !next.draftDirty) {
-    liveBridgeDraftStore.delete(conversationKey);
-    return;
-  }
-  liveBridgeDraftStore.set(conversationKey, next);
+function storeComposerDraft(conversationKey: string, text: string): void {
+  if (text) composerDraftStore.set(conversationKey, text);
+  else composerDraftStore.delete(conversationKey);
 }
 
 function modelProfileLabel(profile: ModelProfileKey): string {
@@ -224,11 +121,12 @@ function modelProfileRequestStatus(request: ModelProfileRequest): string {
   const label = modelProfileLabel(request.profile);
   if (request.state === 'applying') return `Switching to ${label}…`;
   if (request.state === 'failed') return `Could not switch to ${label}: ${request.message}`;
-  if (request.deferredReason === 'unsent_input') return `${label} queued. Send or clear the terminal draft first.`;
+  if (request.deferredReason === 'unsent_input') return `${label} queued until the pending message is sent or dismissed.`;
   return `${label} queued until this turn finishes.`;
 }
 
-function LiveSessionInputBridge({
+/** The message box of a bound session: write a message, attach images, send it, or stop the running turn. */
+function SessionComposer({
   csrfToken,
   sessionId,
   projectSlug,
@@ -238,9 +136,6 @@ function LiveSessionInputBridge({
   onSendKeystrokes,
   onSetModelProfile,
   onCancelModelProfileRequest,
-  onLocalSubmittedText,
-  onLocalDraftText,
-  onDiscardLocalSubmittedText,
   compact,
   mobileCollapsible,
   bridgeOpen,
@@ -253,10 +148,7 @@ function LiveSessionInputBridge({
   activeModelProfile,
   visibleModel,
   modelProfileRequest,
-  hasQueuedInput,
   queuedDraftText,
-  nativeSelectionActive,
-  structured,
 }: {
   csrfToken?: string;
   sessionId: string;
@@ -267,9 +159,6 @@ function LiveSessionInputBridge({
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
-  onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
-  onLocalDraftText: (sessionId: string, text: string) => void;
-  onDiscardLocalSubmittedText: (messageId: string) => void;
   compact: boolean;
   mobileCollapsible: boolean;
   bridgeOpen: boolean;
@@ -282,16 +171,9 @@ function LiveSessionInputBridge({
   activeModelProfile?: ModelProfileKey;
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
-  hasQueuedInput: boolean;
   queuedDraftText?: string;
-  nativeSelectionActive: boolean;
-  /** App-server session: no terminal, so no Text Bypass or navigation keys. */
-  structured: boolean;
 }) {
-  const [textBypassEnabled, setTextBypassEnabled] = useState(false);
-  const [draftText, setDraftText] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftText ?? '');
-  const [draftDirty, setDraftDirty] = useState(() => liveBridgeDraftStore.get(conversationKey)?.draftDirty ?? false);
-  const [bypassPreviewText, setBypassPreviewText] = useState<string>();
+  const [draftText, setDraftText] = useState(() => composerDraftStore.get(conversationKey) ?? '');
   const [copyingLastMessage, setCopyingLastMessage] = useState(false);
   const [copiedLastMessage, setCopiedLastMessage] = useState(false);
   const [bridgeHeight, setBridgeHeight] = useState(readStoredBridgeHeight);
@@ -300,16 +182,11 @@ function LiveSessionInputBridge({
   const bridgeHeightRef = useRef(bridgeHeight);
   const resizeSessionRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
-  const keyQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Stop goes out at once; a message sent after it waits for it, so Stop cannot land on the new turn.
+  const pendingStopRef = useRef<Promise<void>>(Promise.resolve());
   const inputGenerationRef = useRef(0);
   const submissionDraftRef = useRef<string | undefined>(undefined);
-  const pendingTextRef = useRef('');
-  const textFlushInFlightRef = useRef<Promise<boolean> | undefined>(undefined);
-  const bypassPreviewTextRef = useRef<string | undefined>(undefined);
-  const keepBypassSelectionPinnedRef = useRef(false);
-  const flushTimerRef = useRef<number | undefined>(undefined);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
-  const committedInputRef = useRef('');
   const bridgeBusyRef = useRef(false);
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
@@ -322,7 +199,7 @@ function LiveSessionInputBridge({
   const [agentDragOver, setAgentDragOver] = useState(false);
   const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
   const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
-  const hasNumericMenuDraft = nativeSelectionActive && /^\d{1,8}$/.test(draftText.trim());
+  const canSend = draftText.trim().length > 0 || clipboardImages.items.length > 0;
 
   async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
     const targetSessionId = sessionId;
@@ -356,7 +233,7 @@ function LiveSessionInputBridge({
       if (event.key !== 'Escape' || event.repeat || event.defaultPrevented
         || (event.target instanceof Element && event.target.closest('[role="dialog"]'))) return;
       event.preventDefault();
-      void handleSpecialKey('Escape');
+      void stopTurn();
     };
     window.addEventListener('keydown', stop);
     return () => window.removeEventListener('keydown', stop);
@@ -384,10 +261,6 @@ function LiveSessionInputBridge({
   }, [bridgeHeight]);
 
   useEffect(() => {
-    bypassPreviewTextRef.current = bypassPreviewText;
-  }, [bypassPreviewText]);
-
-  useEffect(() => {
     resizeCleanupRef.current?.();
     if (mobileCollapsible) return;
     const updateViewportHeight = () => updateBridgeHeight(bridgeHeightRef.current);
@@ -406,25 +279,10 @@ function LiveSessionInputBridge({
   }, [bridgeOpen, mobileCollapsible, mobileInputPanel]);
 
   useEffect(() => {
-    if (textBypassEnabled || (!draftDirty && !draftText)) {
-      upsertLiveBridgeDraft(conversationKey, (current) => ({
-        ...current,
-        draftText: '',
-        draftDirty: false,
-      }));
-      return;
-    }
-    upsertLiveBridgeDraft(conversationKey, (current) => ({
-      ...current,
-      draftText,
-      draftDirty,
-    }));
-  }, [conversationKey, draftDirty, draftText, textBypassEnabled]);
+    storeComposerDraft(conversationKey, draftText);
+  }, [conversationKey, draftText]);
 
   useEffect(() => () => {
-    if (flushTimerRef.current !== undefined) {
-      window.clearTimeout(flushTimerRef.current);
-    }
     if (copyResetTimerRef.current !== undefined) {
       window.clearTimeout(copyResetTimerRef.current);
     }
@@ -434,8 +292,6 @@ function LiveSessionInputBridge({
   useEffect(() => {
     setCopiedLastMessage(false);
   }, [latestAssistantMessage]);
-
-  const bridgeText = textBypassEnabled ? (bypassPreviewText ?? '') : draftText;
 
   useLayoutEffect(() => {
     if (!mobileCollapsible || mobileInputPanel !== 'reply') return;
@@ -455,81 +311,7 @@ function LiveSessionInputBridge({
       window.removeEventListener('resize', resize);
       window.visualViewport?.removeEventListener('resize', resize);
     };
-  }, [bridgeText, mobileCollapsible, mobileInputPanel]);
-
-  useEffect(() => {
-    const capture = captureRef.current;
-    if (!capture) {
-      return;
-    }
-    const value = bridgeText;
-    if (document.activeElement === capture) {
-      if (textBypassEnabled && keepBypassSelectionPinnedRef.current) {
-        const end = value.length;
-        capture.setSelectionRange(end, end);
-      }
-    }
-    if (textBypassEnabled && keepBypassSelectionPinnedRef.current) {
-      capture.scrollTop = capture.scrollHeight;
-    }
-  }, [bridgeText, textBypassEnabled]);
-
-  function queueKeystrokes(payload: SessionKeystrokeRequest, attachImages = true): Promise<boolean> {
-    const generation = inputGenerationRef.current;
-    const withImages = attachImages && payload.keys?.includes('Enter') && clipboardImages.items.length > 0;
-    if (withImages && !clipboardImages.ready) {
-      setImageSubmitError('Wait for the images to upload, or retry/remove failed images before sending.');
-      return Promise.resolve(false);
-    }
-    setImageSubmitError(undefined);
-    const request = withImages ? { ...payload, imageIds: clipboardImages.images.map(image => image.id) } : payload;
-    const task = keyQueueRef.current
-      .then(async () => {
-        if (generation !== inputGenerationRef.current) return false;
-        const response = await onSendKeystrokes(sessionId, request);
-        if (generation !== inputGenerationRef.current) return false;
-        if (response?.queuedInput && textBypassEnabled) stopTextBypassForQueue();
-        if (response && withImages) clipboardImages.clear();
-        if (response && mobileCollapsible && mobileInputPanel === 'reply' && captureRef.current
-          && request.keys?.includes('Enter') && (request.submittedText || withImages) && !nativeSelectionActive) {
-          onCloseMobileInput?.();
-        }
-        return response !== undefined;
-      })
-      .catch(() => false);
-    keyQueueRef.current = task.then(() => undefined, () => undefined);
-    return task;
-  }
-
-  function stopTextBypassForQueue(immediate = true): void {
-    if (flushTimerRef.current !== undefined) {
-      window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = undefined;
-    }
-    pendingTextRef.current = '';
-    const nextDraft = bypassPreviewTextRef.current ?? '';
-    committedInputRef.current = '';
-    keepBypassSelectionPinnedRef.current = false;
-    setBypassPreview(undefined);
-    // Complete the handoff before another native input event can run.
-    const updateDraft = () => {
-      setTextBypassEnabled(false);
-      setDraftText(nextDraft);
-      setDraftDirty(Boolean(nextDraft));
-    };
-    if (immediate) flushSync(updateDraft);
-    else updateDraft();
-    onLocalDraftText(sessionId, nextDraft);
-    upsertLiveBridgeDraft(conversationKey, () => ({ draftText: nextDraft, draftDirty: Boolean(nextDraft) }));
-  }
-
-  useEffect(() => {
-    if (hasQueuedInput && textBypassEnabled && !bridgeBusyRef.current) stopTextBypassForQueue(false);
-  }, [hasQueuedInput, textBypassEnabled, bridgeBusy]);
-
-  function enqueueKeystrokes(payload: SessionKeystrokeRequest): void {
-    void queueKeystrokes(payload);
-  }
+  }, [draftText, mobileCollapsible, mobileInputPanel]);
 
   async function runBridgeAction<T>(action: () => Promise<T>): Promise<T | undefined> {
     if (bridgeBusyRef.current) {
@@ -550,71 +332,6 @@ function LiveSessionInputBridge({
     }
   }
 
-  async function flushBufferedText(): Promise<boolean> {
-    const generation = inputGenerationRef.current;
-    if (textFlushInFlightRef.current) {
-      return await textFlushInFlightRef.current;
-    }
-    if (!pendingTextRef.current) {
-      return true;
-    }
-    if (flushTimerRef.current !== undefined) {
-      window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = undefined;
-    }
-    const task = (async (): Promise<boolean> => {
-      let ok = true;
-      while (pendingTextRef.current && generation === inputGenerationRef.current) {
-        const text = pendingTextRef.current;
-        pendingTextRef.current = '';
-        ok = await queueKeystrokes({ text });
-        if (!ok) {
-          break;
-        }
-      }
-      return ok;
-    })();
-    textFlushInFlightRef.current = task;
-    try {
-      return await task;
-    } finally {
-      if (textFlushInFlightRef.current === task) {
-        textFlushInFlightRef.current = undefined;
-      }
-      if (generation === inputGenerationRef.current && pendingTextRef.current) {
-        scheduleBufferedTextFlush();
-      }
-    }
-  }
-
-  function scheduleBufferedTextFlush(): void {
-    if (flushTimerRef.current !== undefined) {
-      window.clearTimeout(flushTimerRef.current);
-    }
-    flushTimerRef.current = window.setTimeout(() => {
-      flushBufferedText();
-    }, 45);
-  }
-
-  function setBypassPreview(next: string | undefined): void {
-    bypassPreviewTextRef.current = next;
-    setBypassPreviewText(next);
-    onLocalDraftText(sessionId, next ?? '');
-  }
-
-  function updateBypassPreview(updater: (current: string | undefined) => string | undefined): string | undefined {
-    const next = updater(bypassPreviewTextRef.current);
-    setBypassPreview(next);
-    return next;
-  }
-
-  function appendLiteralText(text: string): void {
-    keepBypassSelectionPinnedRef.current = true;
-    pendingTextRef.current += text;
-    updateBypassPreview((current) => `${current ?? ''}${text}`);
-    scheduleBufferedTextFlush();
-  }
-
   function setBridgeTextareaValue(value: string): void {
     const capture = captureRef.current;
     if (!capture) {
@@ -627,25 +344,18 @@ function LiveSessionInputBridge({
   }
 
   function clearDraftSubmitPreview(): void {
-    flushSync(() => {
-      setDraftText('');
-      setDraftDirty(false);
-    });
+    flushSync(() => setDraftText(''));
     setBridgeTextareaValue('');
   }
 
   function restoreDraftSubmitPreview(text: string): void {
     // Authentication recovery may have unmounted the composer to show sign-in.
-    upsertLiveBridgeDraft(conversationKey, () => ({ draftText: text, draftDirty: true }));
-    flushSync(() => {
-      setDraftText(text);
-      setDraftDirty(true);
-    });
+    storeComposerDraft(conversationKey, text);
+    flushSync(() => setDraftText(text));
     setBridgeTextareaValue(text);
   }
 
   function replaceDraftText(text: string, cursor = text.length): void {
-    setDraftDirty(true);
     setDraftText(text);
     window.requestAnimationFrame(() => {
       captureRef.current?.setSelectionRange(cursor, cursor);
@@ -674,14 +384,10 @@ function LiveSessionInputBridge({
         const resolved = await api.agentReference(reference);
         if (generation !== inputGenerationRef.current || activeSessionIdRef.current !== targetSessionId || captureRef.current !== input) return;
         const text = formatAgentReference(resolved);
-        if (textBypassEnabled) {
-          appendLiteralText(`${bypassPreviewTextRef.current ? '\n' : ''}${text}\n`);
-        } else {
-          const before = draftText.slice(0, start);
-          const after = draftText.slice(end);
-          const inserted = `${before && !/\s$/.test(before) ? '\n' : ''}${text}\n`;
-          replaceDraftText(before + inserted + after, before.length + inserted.length);
-        }
+        const before = draftText.slice(0, start);
+        const after = draftText.slice(end);
+        const inserted = `${before && !/\s$/.test(before) ? '\n' : ''}${text}\n`;
+        replaceDraftText(before + inserted + after, before.length + inserted.length);
         input.focus({ preventScroll: true });
       } catch (error) {
         if (activeSessionIdRef.current === targetSessionId && captureRef.current === input) {
@@ -691,279 +397,54 @@ function LiveSessionInputBridge({
     });
   }
 
-  async function syncDraftToRemote(extraKeys: SessionKeyToken[] = [], options: { clearAfterSend?: boolean } = {}): Promise<boolean> {
+  /** Post one complete message. False when the server did not take it, or a Stop overtook it. */
+  async function postMessage(text: string, withImages: boolean): Promise<boolean> {
     const generation = inputGenerationRef.current;
-    const baseText = committedInputRef.current;
-    const nextText = draftText;
-    const submittedText = extraKeys.includes('Enter') ? nextText.trim() : '';
-    const clearImmediately = options.clearAfterSend === true;
-    if (clearImmediately) {
-      submissionDraftRef.current = nextText;
-      clearDraftSubmitPreview();
-    }
-    let prefixLength = 0;
-    while (prefixLength < baseText.length && prefixLength < nextText.length && baseText[prefixLength] === nextText[prefixLength]) {
-      prefixLength += 1;
-    }
-    const backspaces = baseText.length - prefixLength;
-    const appendedText = nextText.slice(prefixLength);
-
-    if (backspaces > 0) {
-      const ok = await queueKeystrokes({ keys: Array.from({ length: backspaces }, () => 'BSpace' as const) });
-      if (generation !== inputGenerationRef.current) return false;
-      if (!ok) {
-        if (clearImmediately) {
-          restoreDraftSubmitPreview(nextText);
-        }
-        return false;
-      }
-    }
-
-    if (appendedText || extraKeys.length > 0) {
-      const ok = await queueKeystrokes({
-        ...(appendedText ? { text: appendedText } : {}),
-        ...(extraKeys.length > 0 ? { keys: extraKeys } : {}),
-        ...(submittedText ? { submittedText } : {}),
-      }, !hasNumericMenuDraft);
-      if (generation !== inputGenerationRef.current) return false;
-      if (!ok) {
-        if (clearImmediately) {
-          restoreDraftSubmitPreview(nextText);
-        }
-        return false;
-      }
-    }
-
-    committedInputRef.current = options.clearAfterSend ? '' : nextText;
-    if (!clearImmediately) {
-      setDraftDirty(false);
-    }
+    const submittedText = text.trim();
+    await pendingStopRef.current;
+    if (generation !== inputGenerationRef.current) return false;
+    const response = await onSendKeystrokes(sessionId, {
+      ...(text ? { text } : {}),
+      keys: ['Enter'],
+      ...(submittedText ? { submittedText } : {}),
+      ...(withImages ? { imageIds: clipboardImages.images.map(image => image.id) } : {}),
+    });
+    if (generation !== inputGenerationRef.current || !response) return false;
+    if (withImages) clipboardImages.clear();
+    if (mobileCollapsible && mobileInputPanel === 'reply') onCloseMobileInput?.();
     return true;
   }
 
-  async function syncDraftAndEnableBypass(extraKeys: SessionKeyToken[] = []): Promise<void> {
-    if (hasQueuedInput) {
-      if (extraKeys.length) await queueKeystrokes({ keys: extraKeys });
+  async function sendMessage(): Promise<void> {
+    const text = draftText;
+    const withImages = clipboardImages.items.length > 0;
+    if (!text.trim() && !withImages) return;
+    if (withImages && !clipboardImages.ready) {
+      setImageSubmitError('Wait for the images to upload, or retry/remove failed images before sending.');
       return;
     }
-    const ok = await syncDraftToRemote(extraKeys);
-    if (!ok) {
-      return;
-    }
-    setTextBypassEnabled(true);
-    captureRef.current?.focus({ preventScroll: true });
-  }
-
-  async function handleToggleTextBypass(): Promise<void> {
-    if (hasQueuedInput) return;
-    await runBridgeAction(async () => {
-      if (textBypassEnabled) {
-        const ok = await flushBufferedText();
-        if (!ok) {
-          return;
-        }
-        committedInputRef.current = bypassPreviewText ?? '';
-        setDraftText('');
-        setDraftDirty(false);
-        setTextBypassEnabled(false);
-        keepBypassSelectionPinnedRef.current = false;
-        setBypassPreview(undefined);
-        captureRef.current?.focus({ preventScroll: true });
-        return;
-      }
-
-      if (draftDirty) {
-        const ok = await syncDraftToRemote();
-        if (!ok) {
-          return;
-        }
-      }
-      const nextPreview = draftDirty ? draftText : '';
-      setBypassPreview(nextPreview);
-      setTextBypassEnabled(true);
-      keepBypassSelectionPinnedRef.current = true;
-      captureRef.current?.focus({ preventScroll: true });
-    });
-  }
-
-  function bypassPreviewAfterSubmit(preview: string, submittedText: string): string {
-    if (!preview) {
-      return '';
-    }
-    if (submittedText && preview.startsWith(submittedText)) {
-      return preview.slice(submittedText.length);
-    }
-    return preview;
-  }
-
-  function clearSubmittedBypassPreview(submittedText: string): string {
-    const previewBeforeSubmit = bypassPreviewTextRef.current ?? '';
-    const nextPreview = bypassPreviewAfterSubmit(previewBeforeSubmit, submittedText);
-    bypassPreviewTextRef.current = nextPreview;
-    onLocalDraftText(sessionId, nextPreview);
-    flushSync(() => {
-      setBypassPreviewText(nextPreview);
-    });
-    setBridgeTextareaValue(nextPreview);
-    return previewBeforeSubmit;
-  }
-
-  function restoreSubmittedBypassPreview(submittedText: string, previewBeforeSubmit: string): void {
-    const expectedPreview = bypassPreviewAfterSubmit(previewBeforeSubmit, submittedText);
-    if ((bypassPreviewTextRef.current ?? '') === expectedPreview) {
-      bypassPreviewTextRef.current = previewBeforeSubmit;
-      onLocalDraftText(sessionId, previewBeforeSubmit);
-      flushSync(() => {
-        setBypassPreviewText(previewBeforeSubmit);
-      });
-      setBridgeTextareaValue(previewBeforeSubmit);
-    }
-  }
-
-  async function submitTextBypassEnter(): Promise<void> {
+    setImageSubmitError(undefined);
     await runBridgeAction(async () => {
       const generation = inputGenerationRef.current;
-      const submittedText = (bypassPreviewTextRef.current ?? '').trim();
-      keepBypassSelectionPinnedRef.current = true;
-      const previewBeforeSubmit = clearSubmittedBypassPreview(submittedText);
-      submissionDraftRef.current = previewBeforeSubmit;
-      const optimisticMessage = !nativeSelectionActive && submittedText && !submittedText.startsWith('/')
-        ? onLocalSubmittedText(sessionId, submittedText) : undefined;
-      const restore = () => {
-        if (generation === inputGenerationRef.current) restoreSubmittedBypassPreview(submittedText, previewBeforeSubmit);
-        if (optimisticMessage) {
-          onDiscardLocalSubmittedText(optimisticMessage.id);
-        }
-      };
-
-      const flushed = await flushBufferedText();
-      if (!flushed) {
-        restore();
-        return;
-      }
-      const submitted = await queueKeystrokes({
-        keys: ['Enter'],
-        ...(submittedText ? {
-          submittedText,
-          ...(optimisticMessage ? { clientOptimisticMessageId: optimisticMessage.id } : {}),
-        } : {}),
-      }, !nativeSelectionActive);
-      if (!submitted) {
-        restore();
-      }
+      submissionDraftRef.current = text;
+      clearDraftSubmitPreview();
+      const sent = await postMessage(text, withImages);
+      if (!sent && generation === inputGenerationRef.current) restoreDraftSubmitPreview(text);
     });
   }
 
-  async function handleSpecialKey(specialKey: SessionKeyToken, source: 'keyboard' | 'button' = 'keyboard'): Promise<void> {
-    if (specialKey === 'Escape') {
-      // Stop must reach the server even while a previous send is pending.
-      // Never paste a held draft or flush buffered typing before interruption.
-      inputGenerationRef.current += 1;
-      const heldDraft = submissionDraftRef.current ?? (textBypassEnabled ? bypassPreviewTextRef.current : draftText) ?? queuedDraftText ?? '';
-      if (textBypassEnabled) stopTextBypassForQueue();
-      if (flushTimerRef.current !== undefined) window.clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = undefined;
-      pendingTextRef.current = '';
-      textFlushInFlightRef.current = undefined;
-      committedInputRef.current = '';
-      submissionDraftRef.current = undefined;
-      restoreDraftSubmitPreview(heldDraft || queuedDraftText || '');
-      bridgeBusyRef.current = false;
-      setBridgeBusy(false);
-      const stop = onSendKeystrokes(sessionId, { keys: ['Escape'] });
-      keyQueueRef.current = stop.then(() => undefined, () => undefined);
-      await stop;
-      return;
-    }
-    // Keep held chat drafts separate from explicit numeric menu choices.
-    // Text Bypass retains its ordered flush and consumed-preview handling below.
-    if (source === 'button' && (nativeSelectionActive || (mobileCollapsible && mobileInputPanel === 'controls')) && !textBypassEnabled) {
-      await runBridgeAction(async () => {
-        if (specialKey === 'Enter' && hasNumericMenuDraft) {
-          await syncDraftToRemote(['Enter'], { clearAfterSend: true });
-        } else {
-          await queueKeystrokes({ keys: [specialKey] }, false);
-        }
-      });
-      return;
-    }
-    if (source === 'button') {
-      if (specialKey === 'Enter') {
-        if (textBypassEnabled) {
-          await submitTextBypassEnter();
-          return;
-        }
-        await runBridgeAction(async () => {
-          await syncDraftToRemote(['Enter'], { clearAfterSend: true });
-        });
-        return;
-      }
-      if (textBypassEnabled) {
-        const ok = await flushBufferedText();
-        if (!ok) {
-          return;
-        }
-        keepBypassSelectionPinnedRef.current = true;
-        if (specialKey === 'BSpace') {
-          updateBypassPreview((current) => (current ?? '').slice(0, -1));
-        } else {
-          setBypassPreview('');
-        }
-        enqueueKeystrokes({ keys: [specialKey] });
-        return;
-      }
-      await runBridgeAction(async () => {
-        await syncDraftAndEnableBypass([specialKey]);
-      });
-      return;
-    }
-
-    if (specialKey === 'BSpace') {
-      if (textBypassEnabled) {
-        if (pendingTextRef.current.length > 0) {
-          keepBypassSelectionPinnedRef.current = true;
-          pendingTextRef.current = pendingTextRef.current.slice(0, -1);
-          updateBypassPreview((current) => (current ?? '').slice(0, -1));
-          return;
-        }
-        keepBypassSelectionPinnedRef.current = true;
-        updateBypassPreview((current) => (current ?? '').slice(0, -1));
-        enqueueKeystrokes({ keys: ['BSpace'] });
-        return;
-      }
-      replaceDraftText(draftText.slice(0, -1));
-      return;
-    }
-
-    if (textBypassEnabled) {
-      const submittedText = specialKey === 'Enter' ? (bypassPreviewText ?? '').trim() : '';
-      if (specialKey === 'Enter') {
-        await submitTextBypassEnter();
-        return;
-      }
-      const ok = await flushBufferedText();
-      if (!ok) {
-        return;
-      }
-      keepBypassSelectionPinnedRef.current = true;
-      setBypassPreview('');
-      enqueueKeystrokes({
-        keys: [specialKey],
-        ...(submittedText ? { submittedText } : {}),
-      });
-      return;
-    }
-
-    if (specialKey === 'Enter') {
-      await runBridgeAction(async () => {
-        await syncDraftToRemote(['Enter'], { clearAfterSend: true });
-      });
-      return;
-    }
-
-    await runBridgeAction(async () => {
-      await syncDraftAndEnableBypass([specialKey]);
-    });
+  async function stopTurn(): Promise<void> {
+    // Stop must reach the server even while a previous send is pending.
+    // Never send the held draft before interruption; it comes back into the message box.
+    inputGenerationRef.current += 1;
+    const heldDraft = submissionDraftRef.current ?? draftText;
+    submissionDraftRef.current = undefined;
+    restoreDraftSubmitPreview(heldDraft || queuedDraftText || '');
+    bridgeBusyRef.current = false;
+    setBridgeBusy(false);
+    const stop = onSendKeystrokes(sessionId, { keys: ['Escape'] });
+    pendingStopRef.current = stop.then(() => undefined, () => undefined);
+    await stop;
   }
 
   async function handleCopyLatestAssistantMessage(): Promise<void> {
@@ -993,13 +474,6 @@ function LiveSessionInputBridge({
       setCopyingLastMessage(false);
       captureRef.current?.focus({ preventScroll: true });
     }
-  }
-
-  async function handleToggleBridgePanel(): Promise<void> {
-    if (bridgeOpen && textBypassEnabled) {
-      await flushBufferedText();
-    }
-    onToggleBridge();
   }
 
   function clampBridgeHeight(nextHeight: number): number {
@@ -1051,13 +525,13 @@ function LiveSessionInputBridge({
   }
 
   const stopButton = <button type="button" aria-label="Interrupt session" title="Stop the active turn without sending your draft"
-    onPointerDown={event => event.preventDefault()} onClick={() => { void handleSpecialKey('Escape'); }}
+    onPointerDown={event => event.preventDefault()} onClick={() => { void stopTurn(); }}
     className="min-h-11 rounded-xl border border-red-400/40 px-3 text-xs font-medium text-red-200 hover:bg-red-950">Stop</button>;
 
   function renderBridgeHeader(title: string, summary?: string): ReactNode {
     if (mobileCollapsible) {
       return <div className="flex h-12 items-center justify-between px-3">
-        <span className="text-xs text-slate-400">{mobileInputPanel === 'controls' ? 'Session controls' : textBypassEnabled ? 'Reply · Text Bypass' : 'Reply'}</span>
+        <span className="text-xs text-slate-400">{mobileInputPanel === 'controls' ? 'Session controls' : 'Reply'}</span>
         {stopButton}
         <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-10 w-11 items-center justify-center text-slate-300"><X className="h-4 w-4" /></button>
       </div>;
@@ -1065,7 +539,7 @@ function LiveSessionInputBridge({
     return <div className="mb-2 flex items-center justify-between gap-3 py-1">
       <div className="min-w-0 flex-1"><div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">{title}</div>{summary && <div className="mt-1 truncate text-sm text-slate-200">{summary}</div>}</div>
       {stopButton}
-      <button type="button" aria-expanded={bridgeOpen} aria-label={bridgeOpen ? 'Collapse live input bridge' : 'Expand live input bridge'} onClick={() => { void handleToggleBridgePanel(); }} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', bridgeOpen && 'rotate-180')} /></button>
+      <button type="button" aria-expanded={bridgeOpen} aria-label={bridgeOpen ? 'Collapse message box' : 'Expand message box'} onClick={onToggleBridge} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', bridgeOpen && 'rotate-180')} /></button>
       <button type="button" aria-label={mobileChromeHidden ? 'Show banners' : 'Hide banners'} onClick={onToggleMobileChrome} className="rounded-xl border border-slate-700 p-2 text-slate-300"><ChevronDown className={clsx('h-4 w-4', !mobileChromeHidden && 'rotate-180')} /></button>
     </div>;
   }
@@ -1086,14 +560,14 @@ function LiveSessionInputBridge({
 
   return (
     <div className={clsx('shrink-0 bg-slate-950/90', (!mobileCollapsible || mobileInputPanel) && 'border-t border-slate-800')} data-testid="input-panel">
-      {(!mobileCollapsible || mobileInputPanel === 'controls') && renderBridgeHeader('Live input bridge', 'Expand to type directly into the live session.')}
+      {(!mobileCollapsible || mobileInputPanel === 'controls') && renderBridgeHeader('Message', 'Expand to write a message.')}
       {bridgeOpen && (!mobileCollapsible || mobileInputPanel) && (
         <div className={bridgeBodyClassName}>
           {!mobileCollapsible && <div className="mb-3 flex items-center gap-2">
             <button
               type="button"
-              aria-label="Resize live input bridge"
-              title="Drag to resize live input bridge"
+              aria-label="Resize message box"
+              title="Drag to resize the message box"
               onPointerDown={(event) => {
                 event.preventDefault();
                 event.currentTarget.setPointerCapture(event.pointerId);
@@ -1192,38 +666,11 @@ function LiveSessionInputBridge({
             }}
             onDragLeave={() => setAgentDragOver(false)}
             onDrop={dropAgentReference}
-            onFocus={(event) => {
-              if (textBypassEnabled) {
-                keepBypassSelectionPinnedRef.current = true;
-                const end = bridgeText.length;
-                event.currentTarget.setSelectionRange(end, end);
-              }
-            }}
-            onPointerDown={() => {
-              keepBypassSelectionPinnedRef.current = false;
-            }}
-            onSelect={(event) => {
-              if (!textBypassEnabled) {
-                return;
-              }
-              const target = event.currentTarget;
-              const end = target.value.length;
-              keepBypassSelectionPinnedRef.current = target.selectionStart === end && target.selectionEnd === end;
-            }}
             onChange={(event) => {
               if (bridgeBusy) {
                 return;
               }
-              if (textBypassEnabled) {
-                return;
-              }
-              setDraftDirty(true);
               setDraftText(event.target.value);
-            }}
-            onBlur={() => {
-              if (textBypassEnabled) {
-                void flushBufferedText();
-              }
             }}
             onPaste={(event) => {
               if (bridgeBusy) {
@@ -1238,27 +685,15 @@ function LiveSessionInputBridge({
                 clipboardImages.paste(files);
                 const text = event.clipboardData.getData('text/plain');
                 if (text) {
-                  if (textBypassEnabled) appendLiteralText(text);
-                  else {
-                    const input = event.currentTarget;
-                    replaceDraftText(draftText.slice(0, input.selectionStart) + text + draftText.slice(input.selectionEnd));
-                  }
+                  const input = event.currentTarget;
+                  replaceDraftText(draftText.slice(0, input.selectionStart) + text + draftText.slice(input.selectionEnd));
                 }
-                return;
-              }
-              if (!textBypassEnabled) {
-                return;
-              }
-              event.preventDefault();
-              const text = event.clipboardData.getData('text');
-              if (text) {
-                appendLiteralText(text);
               }
             }}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
                 event.preventDefault();
-                void handleSpecialKey('Escape');
+                void stopTurn();
                 return;
               }
               if (bridgeBusy) {
@@ -1268,50 +703,9 @@ function LiveSessionInputBridge({
               if (event.nativeEvent.isComposing) {
                 return;
               }
-              if (!structured && event.ctrlKey && !event.metaKey && !event.altKey && event.key === '/') {
+              if (event.key === 'Enter' && !event.shiftKey && !mobileCollapsible) {
                 event.preventDefault();
-                if (!event.repeat) {
-                  void handleToggleTextBypass();
-                }
-                return;
-              }
-              if (textBypassEnabled && event.ctrlKey && event.key.toLowerCase() === 'c') {
-                event.preventDefault();
-                void flushBufferedText().then((ok) => {
-                  if (!ok) {
-                    return;
-                  }
-                  setBypassPreview(undefined);
-                  enqueueKeystrokes({ keys: ['C-c'] });
-                });
-                return;
-              }
-              const specialKeyMap: Record<string, SessionKeyToken> = {
-                Enter: 'Enter',
-                Escape: 'Escape',
-                ArrowUp: 'Up',
-                ArrowDown: 'Down',
-                ArrowLeft: 'Left',
-                ArrowRight: 'Right',
-                Backspace: 'BSpace',
-                Tab: 'Tab',
-              };
-              const specialKey = specialKeyMap[event.key];
-              if (specialKey) {
-                if (!textBypassEnabled) {
-                  if (specialKey === 'Enter' && !event.shiftKey && !mobileCollapsible) {
-                    event.preventDefault();
-                    void handleSpecialKey('Enter');
-                  }
-                  return;
-                }
-                event.preventDefault();
-                void handleSpecialKey(specialKey);
-                return;
-              }
-              if (textBypassEnabled && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1) {
-                event.preventDefault();
-                appendLiteralText(event.key);
+                void sendMessage();
               }
             }}
             onBeforeInput={(event) => {
@@ -1320,16 +714,16 @@ function LiveSessionInputBridge({
                 return;
               }
               const nativeEvent = event.nativeEvent as InputEvent;
-              if (textBypassEnabled || nativeEvent.isComposing) {
+              if (nativeEvent.isComposing) {
                 return;
               }
               if (!mobileCollapsible && nativeEvent.inputType === 'insertLineBreak') {
                 event.preventDefault();
-                void handleSpecialKey('Enter');
+                void sendMessage();
               }
             }}
             rows={mobileCollapsible ? 1 : 3}
-            value={bridgeText}
+            value={draftText}
             style={{ height: `${mobileCollapsible ? mobileInputHeight : bridgeHeight}px` }}
             className={clsx(
               'w-full resize-none overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 font-mono text-sm text-slate-100 outline-none transition focus:border-sky-400',
@@ -1337,45 +731,25 @@ function LiveSessionInputBridge({
               agentDragOver && 'ring-2 ring-sky-400',
             )}
           />
-          {mobileCollapsible && <button type="button" aria-label="Send message" disabled={bridgeBusy || (!bridgeText.trim() && clipboardImages.items.length === 0)} onPointerDown={event => event.preventDefault()} onClick={() => { void handleSpecialKey('Enter', 'button'); }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-500 text-slate-950 disabled:opacity-40"><Send className="h-5 w-5" /></button>}
+          {mobileCollapsible && <button type="button" aria-label="Send message" disabled={bridgeBusy || !canSend} onPointerDown={event => event.preventDefault()} onClick={() => { void sendMessage(); }} className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-sky-500 text-slate-950 disabled:opacity-40"><Send className="h-5 w-5" /></button>}
           {mobileCollapsible && stopButton}
           {mobileCollapsible && <button type="button" aria-label="Close input" onClick={onCloseMobileInput} className="flex h-11 w-8 shrink-0 items-center justify-center text-slate-400"><ChevronDown className="h-5 w-5" /></button>}
           </div>}
           {(!mobileCollapsible || mobileInputPanel === 'controls') && (
             <div className={clsx("mt-3 flex flex-wrap gap-2", mobileCollapsible && "order-first")}>
-              {(structured ? structuredKeyButtons : specialKeyButtons).map((button) => (
+              {!mobileCollapsible && (
                 <button
-                  key={button.label}
                   type="button"
-                  disabled={bridgeBusy && button.keys[0] !== 'Escape'}
+                  aria-label="Send message"
+                  disabled={bridgeBusy || !canSend}
                   onPointerDown={(event) => event.preventDefault()}
                   onClick={() => {
-                    void handleSpecialKey(button.keys[0]!, 'button');
-                    if (!mobileCollapsible) captureRef.current?.focus({ preventScroll: true });
+                    void sendMessage();
+                    captureRef.current?.focus({ preventScroll: true });
                   }}
                   className="rounded-xl border border-slate-700 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {button.label}
-                </button>
-              ))}
-              {!structured && (
-                <button
-                  type="button"
-                  aria-pressed={textBypassEnabled}
-                  disabled={bridgeBusy || hasQueuedInput}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={() => {
-                    void handleToggleTextBypass();
-                  }}
-                  className={clsx(
-                    'rounded-xl border px-3 py-2 text-xs font-medium transition',
-                    textBypassEnabled
-                      ? 'border-sky-400/40 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20'
-                      : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-                    bridgeBusy && 'cursor-not-allowed opacity-60',
-                  )}
-                >
-                  Text Bypass
+                  Send
                 </button>
               )}
               <button
@@ -1422,7 +796,6 @@ interface ConversationPaneProps {
   mobileInputPanel?: MobileInputPanel;
   onCloseMobileInput?: () => void;
   onOpenChats?: () => void;
-  onOpenMobileControls?: () => void;
   mobileDetailsOpen?: boolean;
   onBind: (options?: { confirmExternalHandoff?: boolean }) => Promise<void>;
   onRelease: (sessionId: string) => Promise<void>;
@@ -1430,103 +803,15 @@ interface ConversationPaneProps {
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
-  onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
-  onDiscardLocalSubmittedText: (messageId: string) => void;
   binding: boolean;
   releasing: boolean;
   suspending: boolean;
-  debugOpen: boolean;
-  onToggleDebug: () => void;
-  rawOutput?: string;
-  rawLoading: boolean;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   onLoadOlderMessages: () => Promise<void>;
   conversationKey?: string;
   historyPrependVersion: number;
   tailKey?: string;
-}
-
-type LocalLiveDraft = {
-  sessionId: string;
-  text: string;
-  updatedAt: string;
-};
-
-const WAITING_FOR_SESSION_OUTPUT_TEXT = 'Waiting for session output…';
-
-function liveDraftTextDuplicatesHistory(text: string, messages: NormalizedMessage[]): boolean {
-  const trimmed = text.trim();
-  return Boolean(trimmed) && messages.some((message) => (
-    message.role === 'user'
-    && message.text.trim() === trimmed
-  ));
-}
-
-function buildLiveDraftMessage(input: {
-  session: NonNullable<ConversationTimeline['boundSession']>;
-  text: string;
-  timestamp: string;
-}): NormalizedMessage | undefined {
-  const text = input.text.trim();
-  if (!text || text.startsWith('/')) {
-    return undefined;
-  }
-  return {
-    id: `local-live-draft:${input.session.id}`,
-    provider: input.session.provider,
-    role: 'user',
-    lifecycle: 'pending',
-    text,
-    timestamp: input.timestamp,
-    conversationRef: input.session.conversationRef,
-    source: 'user-input',
-    rawMetadata: {
-      localLiveDraft: true,
-    },
-  };
-}
-
-function screenHasInteractiveControlText(text: string): boolean {
-  const normalized = text
-    .split('\n')
-    .map((line) => line.trim().replace(/\s+/g, ' '))
-    .filter(Boolean)
-    .join('\n');
-  return /Enter (?:select|default) · (?:s session · )?Esc back/i.test(normalized)
-    || /Enter to confirm · Esc to (?:exit|cancel)/i.test(normalized)
-    || /Press enter to confirm or esc to go back/i.test(normalized)
-    || /Enter to set as default · s to use this session only · Esc to cancel/i.test(normalized)
-    || /Esc to cancel · Tab to amend/i.test(normalized)
-    || /Enter to select · .*Esc to cancel/i.test(normalized)
-    || /^Enter continue · Esc skip$/im.test(normalized)
-    || /^\/[a-z][\w-]*\s+.+/im.test(normalized);
-}
-
-function liveScreenDisplayText(screen: ConversationTimeline['liveScreen']): string {
-  const content = (screen?.content ?? screen?.contentAnsi ?? '').trim();
-  if (content) {
-    return content;
-  }
-  return (screen?.status ?? screen?.statusAnsi ?? '').trim();
-}
-
-function liveScreenDisplayAnsiText(screen: ConversationTimeline['liveScreen']): string | undefined {
-  return screen?.contentAnsi?.trim()
-    ? screen.contentAnsi
-    : screen?.content?.trim()
-      ? screen.contentAnsi
-      : screen?.statusAnsi;
-}
-
-function shouldShowLiveScreenContent(screen: ConversationTimeline['liveScreen'], isWorking: boolean | undefined): boolean {
-  const visibleText = liveScreenDisplayText(screen);
-  if (!visibleText || visibleText === WAITING_FOR_SESSION_OUTPUT_TEXT) {
-    return false;
-  }
-  const screenText = `${visibleText}\n${screen?.status ?? ''}`;
-  return (screen?.inputActive === false && screenHasInteractiveControlText(screenText))
-    || isWorking === true;
 }
 
 export function ConversationPane({
@@ -1546,7 +831,6 @@ export function ConversationPane({
   mobileInputPanel = null,
   onCloseMobileInput,
   onOpenChats,
-  onOpenMobileControls,
   mobileDetailsOpen = false,
   onBind,
   onRelease,
@@ -1554,15 +838,9 @@ export function ConversationPane({
   onSendKeystrokes,
   onSetModelProfile,
   onCancelModelProfileRequest,
-  onLocalSubmittedText,
-  onDiscardLocalSubmittedText,
   binding,
   releasing,
   suspending,
-  debugOpen,
-  onToggleDebug,
-  rawOutput,
-  rawLoading,
   hasOlderMessages,
   loadingOlderMessages,
   onLoadOlderMessages,
@@ -1572,14 +850,10 @@ export function ConversationPane({
 }: ConversationPaneProps) {
   const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
   const [desktopBridgeOpen, setDesktopBridgeOpen] = useState(true);
-  const [localLiveDraft, setLocalLiveDraft] = useState<LocalLiveDraft>();
   const [handoffDialogOpen, setHandoffDialogOpen] = useState(false);
   const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
-  const structuredSession = Boolean(boundSession);
-  // Claude runs headless; Codex runs through its app-server protocol. Neither has a terminal.
-  const structuredLabel = boundSession?.provider === 'claude' ? 'headless' : 'app-server';
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = isMobile ? !mobileDetailsOpen : mobileChromeHidden;
   const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
@@ -1601,9 +875,6 @@ export function ConversationPane({
       window.localStorage.setItem(largeTranscriptDismissKey, new Date().toISOString());
     }
   }
-  useEffect(() => {
-    setLocalLiveDraft(undefined);
-  }, [boundSession?.id, conversationKey]);
   useEffect(() => {
     setHandoffDialogOpen(false);
     setHandoffConfirmed(false);
@@ -1670,41 +941,8 @@ export function ConversationPane({
     </div>
   ) : null;
 
-  function updateLocalLiveDraft(sessionId: string, text: string): void {
-    const trimmed = text.trim();
-    if (!trimmed) {
-      setLocalLiveDraft((current) => (current?.sessionId === sessionId ? undefined : current));
-      return;
-    }
-    setLocalLiveDraft({
-      sessionId,
-      text,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-
-  const baseHistoryMessages = timeline?.messages ?? [];
-  const liveDraftMessage = useMemo(() => {
-    if (!boundSession) {
-      return undefined;
-    }
-    const localText = localLiveDraft?.sessionId === boundSession.id ? localLiveDraft.text : undefined;
-    const text = localText ?? '';
-    if (liveDraftTextDuplicatesHistory(text, baseHistoryMessages)) {
-      return undefined;
-    }
-    return buildLiveDraftMessage({
-      session: boundSession,
-      text,
-      timestamp: localLiveDraft?.updatedAt ?? new Date().toISOString(),
-    });
-  }, [baseHistoryMessages, boundSession, localLiveDraft]);
-  const historyMessages = useMemo(
-    () => (liveDraftMessage ? [...baseHistoryMessages, liveDraftMessage] : baseHistoryMessages),
-    [baseHistoryMessages, liveDraftMessage],
-  );
-  const hasSavedHistory = historyMessages.length > 0;
-  const showHistory = hasSavedHistory;
+  const historyMessages = useMemo(() => timeline?.messages ?? [], [timeline?.messages]);
+  const showHistory = historyMessages.length > 0;
   const latestAssistantMessage = useMemo(() => {
     for (let index = historyMessages.length - 1; index >= 0; index -= 1) {
       const message = historyMessages[index];
@@ -1719,7 +957,6 @@ export function ConversationPane({
     : (liveMode ? 'live' : 'empty');
   const layoutKey = [
     hideTopPanel ? 'top:hidden' : 'top:shown',
-    debugOpen ? 'debug:open' : 'debug:closed',
     isMobile ? `input:${mobileInputPanel}` : `bridge:${desktopBridgeOpen}`,
     `surface:${activeSurface}`,
     compactLiveLayout ? 'layout:compact' : 'layout:regular',
@@ -1754,22 +991,6 @@ export function ConversationPane({
     () => groupTranscriptTurns(visibleHistoryMessages),
     [visibleHistoryMessages],
   );
-  // An app-server session has no terminal: its synthesized screen only carries status, model and context.
-  const terminalScreen = structuredSession ? undefined : liveScreen;
-  const mobileNeedsSelection = terminalScreen?.inputActive === false && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`);
-  const liveScreenPanel = terminalScreen && (!isMobile || mobileNeedsSelection || mobileInputPanel === 'controls' || !hasSavedHistory) && shouldShowLiveScreenContent(terminalScreen, boundSession?.isWorking) ? (
-    <div
-      data-testid="live-screen-panel"
-      className="mt-4 rounded-md border border-slate-800 bg-slate-950 p-3 shadow-inner"
-    >
-      <LiveAnsiBlock
-        text={liveScreenDisplayText(terminalScreen)}
-        ansiText={liveScreenDisplayAnsiText(terminalScreen)}
-        className="scrollbar-thin max-h-[22rem] overflow-auto whitespace-pre-wrap break-words font-mono text-sm leading-6 text-slate-200"
-      />
-    </div>
-  ) : null;
-
   if (!timeline) {
     if (loading && selectedProvider && project) {
       return (
@@ -1854,20 +1075,11 @@ export function ConversationPane({
               summary={[
                 timeline.conversation.title,
                 conversationStatus,
-                structuredSession ? structuredLabel : undefined,
                 timeline.conversation.degraded ? 'Degraded parse' : undefined,
               ].filter(Boolean).join(' · ')}
               className=""
             />
             <div className="flex flex-wrap gap-2 px-4 pb-3">
-              <button
-                type="button"
-                onClick={onToggleDebug}
-                className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-              >
-                <Bug className="h-4 w-4" />
-                {debugOpen ? 'Hide debug' : 'Show debug'}
-              </button>
               {boundSession ? (
                 <>
                   <button
@@ -1913,23 +1125,12 @@ export function ConversationPane({
                   <span className={clsx('rounded-full border px-2.5 py-1', boundSession ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-400')}>
                     {conversationStatus}
                   </span>
-                  {structuredSession && (
-                    <span title={`Driven through the ${boundSession?.provider === 'claude' ? 'Claude headless protocol' : 'Codex app-server protocol'} rather than a terminal`} className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">{structuredLabel}</span>
-                  )}
                   {timeline.conversation.degraded && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
                   )}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onToggleDebug}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500 hover:bg-slate-800"
-                >
-                  <Bug className="h-4 w-4" />
-                  {debugOpen ? 'Hide debug' : 'Show debug'}
-                </button>
                 {boundSession ? (
                   <>
                     <button
@@ -2034,15 +1235,10 @@ export function ConversationPane({
                 <TranscriptDocumentTurn key={turn.id} turn={turn} />
               ))}
             </div>
-            {liveScreenPanel}
-          </div>
-        ) : liveScreenPanel ? (
-          <div className="w-full pb-5">
-            {liveScreenPanel}
           </div>
         ) : boundSession ? (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
-            {structuredSession ? `Send a message to start this ${structuredLabel} session.` : WAITING_FOR_SESSION_OUTPUT_TEXT}
+            Send a message to start this session.
           </div>
         ) : (
           <div className="mx-auto max-w-2xl rounded-md border border-dashed border-slate-700 p-6 text-center text-slate-400">
@@ -2051,20 +1247,16 @@ export function ConversationPane({
         )}
       </div>
 
-      {isMobile && terminalScreen?.inputActive === false && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`) && mobileInputPanel !== 'controls' && (
-        <button type="button" onClick={onOpenMobileControls} className="shrink-0 border-t border-amber-400/20 bg-amber-500/10 px-3 py-2 text-left text-sm text-amber-200">Needs your input · Open controls</button>
-      )}
-      {structuredSession && boundSession?.pendingRequests?.length ? <PendingQuestionCard sessionId={boundSession.id} requests={boundSession.pendingRequests} csrfToken={csrfToken} /> : null}
+      {boundSession?.pendingRequests?.length ? <PendingQuestionCard sessionId={boundSession.id} requests={boundSession.pendingRequests} csrfToken={csrfToken} /> : null}
       {sessionSuspended ? (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
-          Resume this session to use the live input bridge.
+          Resume this session to send messages.
         </div>
       ) : boundSession ? (
-        <LiveSessionInputBridge
+        <SessionComposer
           csrfToken={csrfToken}
           key={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
           sessionId={boundSession.id}
-          hasQueuedInput={Boolean(boundSession.queuedInputs?.length)}
           queuedDraftText={boundSession.queuedInputs?.at(-1)?.text}
           projectSlug={timeline.conversation.projectSlug}
           conversationKey={`${timeline.conversation.projectSlug}:${timeline.conversation.provider}:${timeline.conversation.ref}`}
@@ -2073,9 +1265,6 @@ export function ConversationPane({
           onSendKeystrokes={onSendKeystrokes}
           onSetModelProfile={onSetModelProfile}
           onCancelModelProfileRequest={onCancelModelProfileRequest}
-          onLocalSubmittedText={onLocalSubmittedText}
-          onLocalDraftText={updateLocalLiveDraft}
-          onDiscardLocalSubmittedText={onDiscardLocalSubmittedText}
           compact={compactLiveLayout}
           mobileCollapsible={isMobile}
           bridgeOpen={isMobile || desktopBridgeOpen}
@@ -2088,13 +1277,10 @@ export function ConversationPane({
           activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}
-          nativeSelectionActive={terminalScreen?.inputActive === false
-            && screenHasInteractiveControlText(`${terminalScreen.content}\n${terminalScreen.status}`)}
-          structured={structuredSession}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">
-          <div>{isClosedConversation ? 'This conversation is closed. Resume it to continue in Agent Console.' : isExternalClaude ? 'This chat is read-only here until you move it into Agent Console.' : 'Bind this conversation to unlock the live input bridge.'}</div>
+          <div>{isClosedConversation ? 'This conversation is closed. Resume it to continue in Agent Console.' : isExternalClaude ? 'This chat is read-only here until you move it into Agent Console.' : 'Bind this conversation to send messages.'}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               type="button"
@@ -2122,22 +1308,12 @@ export function ConversationPane({
       {liveMode && liveScreen && (!isMobile || mobileInputPanel === 'controls') && (
         <LiveSessionStatus
           status={liveScreen.status}
-          statusAnsi={liveScreen.statusAnsi}
           model={liveScreen.model ?? timeline?.conversation.model}
           contextPercent={liveScreen.contextPercent}
           mobileCompact={isMobile}
         />
       )}
 
-      {debugOpen && (
-        <div className="border-t border-slate-800 bg-slate-900/90 px-4 py-3">
-          <div className="mb-2 flex items-center justify-between text-sm text-slate-300">
-            <div className="font-medium">Raw terminal/debug output</div>
-            <div className="text-xs text-slate-500">{rawLoading ? 'Refreshing…' : 'Live view'}</div>
-          </div>
-          <pre className="scrollbar-thin max-h-52 overflow-auto rounded-2xl border border-slate-800 bg-slate-950 p-3 text-xs leading-6 text-slate-300">{structuredSession ? 'App-server sessions have no raw terminal output.' : rawOutput?.trim() || 'No raw output captured yet.'}</pre>
-        </div>
-      )}
       {externalHandoffDialog}
     </div>
   );

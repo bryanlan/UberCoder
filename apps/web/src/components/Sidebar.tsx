@@ -437,6 +437,7 @@ function ProjectSection({
   mobile = false,
   creatingConversationKey,
   creatingAnyConversation,
+  enabledProviders,
   onNewConversation,
   onRenameProject,
   renamingProject,
@@ -462,6 +463,8 @@ function ProjectSection({
   mobile?: boolean;
   creatingConversationKey?: string;
   creatingAnyConversation: boolean;
+  /** Providers whose lane is on; a provider outside this list has no New conversation action. */
+  enabledProviders: readonly ProviderId[];
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
@@ -651,32 +654,36 @@ function ProjectSection({
                     <Pencil className="h-3.5 w-3.5 text-slate-400" />
                     Rename project
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onClose();
-                      onNewConversation(project.slug, 'codex');
-                    }}
-                    disabled={creatingAnyConversation}
-                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Sparkles className="h-3.5 w-3.5 text-sky-300" />
-                    {creatingConversationKey === `${project.slug}:codex` ? 'Starting Codex…' : 'New Codex conversation'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onClose();
-                      onNewConversation(project.slug, 'claude');
-                    }}
-                    disabled={creatingAnyConversation}
-                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <Bot className="h-3.5 w-3.5 text-sky-300" />
-                    {creatingConversationKey === `${project.slug}:claude` ? 'Starting Claude…' : 'New Claude conversation'}
-                  </button>
+                  {enabledProviders.includes('codex') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onClose();
+                        onNewConversation(project.slug, 'codex');
+                      }}
+                      disabled={creatingAnyConversation}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Sparkles className="h-3.5 w-3.5 text-sky-300" />
+                      {creatingConversationKey === `${project.slug}:codex` ? 'Starting Codex…' : 'New Codex conversation'}
+                    </button>
+                  )}
+                  {enabledProviders.includes('claude') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onClose();
+                        onNewConversation(project.slug, 'claude');
+                      }}
+                      disabled={creatingAnyConversation}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Bot className="h-3.5 w-3.5 text-sky-300" />
+                      {creatingConversationKey === `${project.slug}:claude` ? 'Starting Claude…' : 'New Claude conversation'}
+                    </button>
+                  )}
                   {project.allowedLocalhostPorts.length > 0 && (
                     <div className="mt-1 border-t border-slate-800 pt-1">
                       {project.allowedLocalhostPorts.map((port) => (
@@ -807,6 +814,7 @@ export function Sidebar({
   const { width, resizing, separatorProps } = useSidebarWidth(open);
   const effectiveWorkMode = isMobile ? !mobileShowAll : workMode;
   const creatingAnyConversation = Boolean(creatingConversationKey);
+  const enabledProviders = tree?.structuredProviders ?? [];
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
   const [dragOverProjectSlug, setDragOverProjectSlug] = useState<string>();
   const [searchQuery, setSearchQuery] = useState('');
@@ -1010,7 +1018,7 @@ export function Sidebar({
             {isMobile && newChatMode ? (tree?.projects ?? []).map(project => (
               <section key={project.slug} className="mb-3 rounded-xl border border-slate-800 p-3">
                 <div className="mb-2 font-medium">{project.displayName}</div>
-                <div className="flex gap-2">{(['codex', 'claude'] as const).map(provider => (
+                <div className="flex gap-2">{(['codex', 'claude'] as const).filter(provider => enabledProviders.includes(provider)).map(provider => (
                   <button key={provider} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{providerMeta(provider).label}</button>
                 ))}</div>
               </section>
@@ -1032,6 +1040,7 @@ export function Sidebar({
                 mobile={isMobile}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
+                enabledProviders={enabledProviders}
                 onNewConversation={onNewConversation}
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}

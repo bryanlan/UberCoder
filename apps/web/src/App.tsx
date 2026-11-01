@@ -108,7 +108,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const currentSelectionRef = useRef(routeSelection);
   currentSelectionRef.current = routeSelection;
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
-  const [debugOpen, setDebugOpen] = useLocalStorageBoolean('agent-console:debug-open', false);
   const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
   const [activeOnly, setActiveOnly] = useLocalStorageBoolean('agent-console:active-only', false);
   const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden:v2', true);
@@ -150,8 +149,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     resuming,
     retryResume,
     loading: timelineLoading,
-    rawOutput,
-    rawLoading,
     hasOlderMessages,
     loadingOlderMessages,
     loadOlderMessages,
@@ -164,7 +161,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     selectedProjectSlug,
     selectedProvider,
     selectedConversationRef,
-    debugOpen: debugOpen && (!isMobile || mobileDetailsOpen),
     realtimeDegraded,
   });
 
@@ -327,28 +323,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     return message;
   }
 
-  function appendLocalSubmittedText(sessionId: string, text: string): OptimisticSubmittedMessageRef | undefined {
-    const message = appendSelectedSubmittedText({
-      sessionId,
-      text,
-      optimisticNonce: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}:${Math.random()}`,
-      optimistic: true,
-    });
-    return message ? { id: message.id, conversationRef: message.conversationRef } : undefined;
-  }
-
-  function discardSelectedSubmittedMessage(messageId: string): void {
-    if (!selectedProjectSlug || !selectedProvider || !selectedConversationRef) {
-      return;
-    }
-    removeMessageFromConversationCache({
-      projectSlug: selectedProjectSlug,
-      provider: selectedProvider,
-      conversationRef: selectedConversationRef,
-      messageId,
-    });
-  }
-
   function appendRecordedSubmittedText(input: {
     session: BoundSession;
     recordedUserInput: RecordedUserInput;
@@ -424,13 +398,11 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       selectedConversationRef,
       selectedConversationRouteActive: routeSelection.conversationRouteActive,
       timelineBoundSessionId: timeline?.boundSession?.id,
-      debugOpen,
       appendMessageToConversationCache,
       scheduleTimelineMessageRefresh,
     });
   }, [
     appendMessageToConversationCache,
-    debugOpen,
     queryClient,
     routeSelection.conversationRouteActive,
     scheduleTimelineMessageRefresh,
@@ -703,13 +675,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         invalidateConversationData(queryClient, selectedProjectSlug, selectedProvider, selectedConversationRef);
       }
     }
-    if (debugOpen && sessionId === timeline?.boundSession?.id) {
-      void queryClient.invalidateQueries({ queryKey: ['raw-output', sessionId] });
-    }
   }
 
   async function handleSendKeystrokes(sessionId: string, body: SessionKeystrokeRequest): Promise<SessionInputResponse | undefined> {
-    if (body.keys?.some(key => key === 'Escape' || key === 'C-c')) {
+    if (body.keys?.includes('Escape')) {
       inputGenerations.current.set(sessionId, (inputGenerations.current.get(sessionId) ?? 0) + 1);
       for (const key of pendingSubmissionIds.current.keys()) {
         if (key.startsWith(`${sessionId}:`)) pendingSubmissionIds.current.delete(key);
@@ -719,9 +688,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     setActionError(undefined);
     const refreshTimelineMessages = shouldRefreshTimelineAfterKeystrokes(body);
     const optimisticSubmittedText = optimisticSubmittedTextForKeystrokes(body);
-    const optimisticMessage: OptimisticSubmittedMessageRef | undefined = optimisticSubmittedText && body.clientOptimisticMessageId && selectedConversationRef
-      ? { id: body.clientOptimisticMessageId, conversationRef: selectedConversationRef }
-      : optimisticSubmittedText
+    const optimisticMessage: OptimisticSubmittedMessageRef | undefined = optimisticSubmittedText
       ? appendSelectedSubmittedText({
           sessionId,
           text: optimisticSubmittedText,
@@ -771,7 +738,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     } catch (error) {
       discardOptimisticMessage();
       if (generation !== (inputGenerations.current.get(sessionId) ?? 0)) return undefined;
-      setActionError(describeError(error, 'Unable to send keystrokes to the session.'));
+      setActionError(describeError(error, 'Unable to send to the session.'));
       return undefined;
     }
   }
@@ -1054,7 +1021,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               </button>
               <div>
                 <div className="text-sm font-medium text-slate-100">Server-first remote session control</div>
-                <div className="text-xs text-slate-500">Thin browser client · hidden tmux sessions · abstracted live session UI</div>
+                <div className="text-xs text-slate-500">Thin browser client · structured provider sessions · abstracted live session UI</div>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -1120,7 +1087,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onOpenChats={openMobileChats}
               mobileInputPanel={mobileInputPanel}
               onCloseMobileInput={dismissMobileInput}
-              onOpenMobileControls={() => toggleMobileInput('controls')}
               mobileDetailsOpen={mobileDetailsOpen}
               mobileChromeHidden={mobileChromeHidden}
               onToggleMobileChrome={() => setMobileChromeHidden((current) => !current)}
@@ -1130,15 +1096,9 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onSendKeystrokes={handleSendKeystrokes}
               onSetModelProfile={handleSetModelProfile}
               onCancelModelProfileRequest={handleCancelModelProfileRequest}
-              onLocalSubmittedText={appendLocalSubmittedText}
-              onDiscardLocalSubmittedText={discardSelectedSubmittedMessage}
               binding={bindExistingMutation.isPending}
               releasing={releaseMutation.isPending}
               suspending={suspendMutation.isPending}
-              debugOpen={debugOpen && (!isMobile || mobileDetailsOpen)}
-              onToggleDebug={() => setDebugOpen((current) => !current)}
-              rawOutput={rawOutput}
-              rawLoading={rawLoading}
               hasOlderMessages={hasOlderMessages}
               loadingOlderMessages={loadingOlderMessages}
               onLoadOlderMessages={loadOlderMessages}

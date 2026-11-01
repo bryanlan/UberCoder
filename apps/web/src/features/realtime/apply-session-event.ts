@@ -21,7 +21,6 @@ export interface ApplySessionEventContext {
   selectedConversationRef?: string;
   selectedConversationRouteActive: boolean;
   timelineBoundSessionId?: string;
-  debugOpen: boolean;
   appendMessageToConversationCache: (input: {
     projectSlug: string;
     provider: ProviderId;

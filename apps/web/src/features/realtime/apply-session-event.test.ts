@@ -11,7 +11,6 @@ function context(overrides: Partial<Parameters<typeof applySessionEvent>[1]> = {
     selectedConversationRef: 'real-conversation',
     selectedConversationRouteActive: true,
     timelineBoundSessionId: 'session-1',
-    debugOpen: false,
     appendMessageToConversationCache: vi.fn(),
     scheduleTimelineMessageRefresh: vi.fn(),
     ...overrides,

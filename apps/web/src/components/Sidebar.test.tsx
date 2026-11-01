@@ -24,6 +24,7 @@ it.each([
 ])('keeps a project and its new-conversation actions after its last child is evicted with Work mode $workMode and Active only $activeOnly', async ({ workMode, activeOnly }) => {
   vi.spyOn(Date, 'now').mockReturnValue(now);
   const tree: TreeResponse = {
+    structuredProviders: ['codex', 'claude'],
     boundSessions: [{
       id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
       status: 'bound',
@@ -144,8 +145,9 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
 });
 
 describe('New Chat options', () => {
-  function treeWithProject(): TreeResponse {
+  function treeWithProject(structuredProviders: TreeResponse['structuredProviders'] = ['codex', 'claude']): TreeResponse {
     return {
+      structuredProviders,
       boundSessions: [],
       projects: [{
         slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',
@@ -203,6 +205,41 @@ describe('New Chat options', () => {
       expect(screen.getByRole('button', { name: 'Codex' })).toBeInTheDocument();
       await user.click(screen.getByRole('button', { name: 'Claude' }));
       expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { enabled: ['codex'] as const, hidden: 'Claude', shown: 'Codex' },
+    { enabled: ['claude'] as const, hidden: 'Codex', shown: 'Claude' },
+  ])('offers no new $hidden conversation when its lane is off', async ({ enabled, hidden, shown }) => {
+    renderSidebar(treeWithProject([...enabled]));
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    expect(screen.getByRole('button', { name: `New ${shown} conversation` })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: `New ${hidden} conversation` })).not.toBeInTheDocument();
+  });
+
+  it('offers no new conversation for either provider when both lanes are off', async () => {
+    renderSidebar(treeWithProject([]));
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    expect(screen.queryByRole('button', { name: /^New (Codex|Claude) conversation$/ })).not.toBeInTheDocument();
+  });
+
+  it('leaves a provider whose lane is off out of the mobile new-chat picker', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    try {
+      const user = userEvent.setup();
+      renderSidebar(treeWithProject(['claude']));
+      await user.click(screen.getByRole('button', { name: 'New chat' }));
+      expect(screen.getByRole('button', { name: 'Claude' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Codex' })).not.toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();
     }
