@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationSummary } from '@agent-console/shared';
 import { parseClaudeConversationFile } from '../providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../providers/transcripts/codex.js';
+import { parseGrokConversationFile } from '../providers/transcripts/grok.js';
 import type { ProviderConversation } from '../providers/types.js';
 
 interface CachedProviderConversation {
@@ -107,21 +108,18 @@ export async function loadProviderConversationFromSummary(
     const generation = ++nextParseGeneration;
     const promise: Promise<ProviderConversation | null> = Promise.resolve().then(async () => {
       try {
+        const parseInput = {
+          filePath: transcriptPath,
+          provider: summary.provider,
+          projectSlug: summary.projectSlug,
+          conversationRef: summary.ref,
+          collectPathMetadata: false,
+        };
         const parsed = summary.provider === 'claude'
-          ? await parseClaudeConversationFile({
-              filePath: transcriptPath,
-              provider: summary.provider,
-              projectSlug: summary.projectSlug,
-              conversationRef: summary.ref,
-              collectPathMetadata: false,
-            })
-          : await parseCodexConversationFile({
-              filePath: transcriptPath,
-              provider: summary.provider,
-              projectSlug: summary.projectSlug,
-              conversationRef: summary.ref,
-              collectPathMetadata: false,
-            });
+          ? await parseClaudeConversationFile(parseInput)
+          : summary.provider === 'grok'
+            ? await parseGrokConversationFile(parseInput)
+            : await parseCodexConversationFile(parseInput);
 
         const conversation: ProviderConversation = {
           summary: parsed.summary,

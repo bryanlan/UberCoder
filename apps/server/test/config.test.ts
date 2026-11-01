@@ -383,7 +383,8 @@ describe('ConfigService', () => {
     const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
     const codexDefaults = { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
     const claudeDefaults = { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} };
-    const defaults = { codex: codexDefaults, claude: claudeDefaults };
+    const grokDefaults = { enabled: true, command: ['grok'], idleUnloadMinutes: 60, env: {} };
+    const defaults = { codex: codexDefaults, claude: claudeDefaults, grok: grokDefaults };
 
     it('defaults to enabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
@@ -410,6 +411,7 @@ describe('ConfigService', () => {
         expect(a.codex.env).not.toBe(b.codex.env);
         expect(defaultStructuredProviderConfig('claude')).toEqual(claudeDefaults);
         expect(defaultStructuredProviderConfig('codex')).toEqual(codexDefaults);
+        expect(defaultStructuredProviderConfig('grok')).toEqual(grokDefaults);
       } finally {
         for (const configPath of [first, second]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -419,8 +421,8 @@ describe('ConfigService', () => {
       const codexOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: false } } });
       const claudeOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { enabled: false } } });
       try {
-        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults });
-        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false } });
+        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults, grok: grokDefaults });
+        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false }, grok: grokDefaults });
       } finally {
         for (const configPath of [codexOff, claudeOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -439,10 +441,12 @@ describe('ConfigService', () => {
         expect(new ConfigService(full).getConfig().structuredSessions).toEqual({
           codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
           claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } },
+          grok: grokDefaults,
         });
         expect(new ConfigService(enabledOnly).getConfig().structuredSessions).toEqual({
           codex: { ...codexDefaults, enabled: true },
           claude: { ...claudeDefaults, enabled: true },
+          grok: grokDefaults,
         });
         for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv]) expect(() => new ConfigService(configPath)).toThrow();
       } finally {
@@ -454,6 +458,7 @@ describe('ConfigService', () => {
       const block = {
         codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } },
         claude: { enabled: true, command: ['claude', '--debug'], idleUnloadMinutes: 7, env: { OTHER: '2' } },
+        grok: { enabled: true, command: ['grok'], idleUnloadMinutes: 9, env: { GROK_HOME: '~/.grok-alt' } },
       };
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
       try {
@@ -476,9 +481,43 @@ describe('ConfigService', () => {
       } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
     });
 
-    it('ships both lanes on in the example config, which parses', async () => {
+    it('names the provider and profile a provider-neutral Start falls back to: Codex Medium unless config says otherwise', async () => {
+      const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      const named = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, modelRouting: { startDefault: { provider: 'grok', profile: 'low' } } });
+      const partial = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, modelRouting: { startDefault: { provider: 'claude' } } });
+      const badProvider = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, modelRouting: { startDefault: { provider: 'gemini' } } });
+      const badProfile = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, modelRouting: { startDefault: { profile: 'auto' } } });
+      try {
+        expect(new ConfigService(absent).getConfig().modelRouting.startDefault).toEqual({ provider: 'codex', profile: 'medium' });
+        expect(new ConfigService(named).getConfig().modelRouting.startDefault).toEqual({ provider: 'grok', profile: 'low' });
+        expect(new ConfigService(partial).getConfig().modelRouting.startDefault).toEqual({ provider: 'claude', profile: 'medium' });
+        expect(() => new ConfigService(badProvider)).toThrow();
+        expect(() => new ConfigService(badProfile)).toThrow();
+      } finally {
+        for (const configPath of [absent, named, partial, badProvider, badProfile]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('gives Grok its own provider settings, rooted at ~/.grok, and offers Grok only while its structured lane is on', async () => {
+      const off = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { grok: { enabled: false }, claude: { enabled: false } } });
+      const on = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
+      const projectOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
+        projects: { demo: { active: true, path: '/tmp/projects/demo', explicit: true, providers: { grok: { enabled: false } } } } });
+      try {
+        expect(new ConfigService(off).getMergedProviderSettings('__global__', 'grok')).toMatchObject({ id: 'grok', enabled: false, discoveryRoot: path.join(os.homedir(), '.grok') });
+        expect(new ConfigService(on).getMergedProviderSettings('__global__', 'grok')).toMatchObject({ id: 'grok', enabled: true, discoveryRoot: path.join(os.homedir(), '.grok') });
+        // Only Grok follows its lane flag: the history of Claude stays readable with its lane off.
+        expect(new ConfigService(off).getMergedProviderSettings('__global__', 'claude').enabled).toBe(true);
+        // A project can still switch Grok off by itself.
+        expect(new ConfigService(projectOff).getMergedProviderSettings('demo', 'grok').enabled).toBe(false);
+      } finally {
+        for (const configPath of [off, on, projectOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('ships every lane on in the example config, which parses', async () => {
       const example = JSON.parse(await fs.readFile(new URL('../../../config/agent-console.example.json', import.meta.url), 'utf8'));
-      expect(example.structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: true }, claude: { ...claudeDefaults, enabled: true } });
+      expect(example.structuredSessions).toEqual(defaults);
       expect(() => appConfigSchema.parse(example)).not.toThrow();
     });
   });

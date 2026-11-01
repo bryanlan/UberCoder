@@ -27,6 +27,7 @@ async function openChat(page: Page, provider: ProviderId, kind: ConversationKind
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations: provider === 'codex' ? [conversation] : [] },
       claude: { id: 'claude', label: 'Claude', conversations: provider === 'claude' ? [conversation] : [] },
+      grok: { id: 'grok', label: 'Grok', conversations: [] },
     },
   };
   const calls = { releases: 0, binds: 0 };

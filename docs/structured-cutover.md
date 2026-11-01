@@ -701,6 +701,26 @@ third run (the first two runs each failed one different Codex plugin timing test
 host load average was 7 to 9; that file passed three times alone); the web suite passed 19 files, 189 tests; the browser suite
 passed 68 tests. No real provider was started and the real-provider proofs were not rerun on the merged code.
 
+**Merge of `main` (2026-11-01, Grok, Start and Auto re-routing).** `main` gained `8375ffc` (a Grok provider, the provider-neutral
+Start and provisional Auto re-routing), `c80b66f` and `a80a887` (every Auto session is checked again at its second prompt;
+schema 21). The merge keeps all of it and drops every terminal path those commits touched. Grok is wired the way the Claude and
+Codex lanes are: its transport plugin is registered in `app.ts`, its lane is `structuredSessions.grok` (the plugin, the session
+host and the `grok_profile` column are `main`'s, unchanged), its history adapter is `GrokProvider`, and the sidebar offers
+"New Grok conversation" from `tree.structuredProviders` like the other two. What `main` wrote against the terminal era and the
+merge removed: `GrokProvider.getLaunchCommand` and its test; the `providers.grok.commands` templates and their expansion in the
+config service; the "Grok runs on the structured transport only" refusals (a `transport` field in a bind body is refused for every
+provider now); the `transport` argument of Start's bind and the `defaultTransport` argument of the conversation routes; the
+"Codex (app-server) / Claude (headless) / Grok (ACP)" sidebar entries and the protocol badge, which the web lane had already
+removed. `bindStructuredConversation` no longer exists on this branch (its body is `bindConversationInternal`), so the Auto
+decision a Start passes in (`autoDecision`, `startNotice`) was moved into that one function. One default changed: on `main` the
+Grok lane defaulted to off with the others; here every lane defaults to on, so the example config ships `grok.enabled: true` (the
+live config names Grok explicitly). Schema is now 21. The tests `main` added were adapted to the structured fixtures (no `transport`,
+no `tmuxSessionName`, no `tmuxTouched`); `projects-routes.test.ts` names the Grok lane where it counts advertised providers.
+After the merge: `npm run typecheck` and `npm run build` passed; the server suite passed 88 files, 2000 tests (5 skipped) on its
+third run (the first run failed three tests in `projects-routes.test.ts` that did not yet name the Grok lane, the second the Codex
+replay test `queued_turn`, which passed three times alone); the web suite passed 19 files, 210 tests; the browser suite
+passed 70 tests. No `claude`, `codex` or `grok` process was started and the real-provider proofs were not rerun on the merged code.
+
 ## Verification
 
 - Unit: the Claude plugin against a scripted fake `claude` (`structured-claude-plugin`, and `structured-claude-reattach`

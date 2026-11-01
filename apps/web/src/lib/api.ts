@@ -20,6 +20,7 @@ import type {
   SessionRequestResponse,
   UiPreferences,
   SessionKeystrokeRequest,
+  StartConversationResponse,
   TreeResponse,
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
@@ -208,6 +209,13 @@ export const api = {
     request<{ session: BoundSession; conversationRef: string }>(
       `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`,
       { method: 'POST', body: JSON.stringify({}) },
+      csrfToken,
+    ),
+  /** Provider-neutral Start: the server routes the prompt to a provider, creates the structured session and sends the prompt. */
+  startConversation: (projectSlug: string, prompt: string, csrfToken?: string) =>
+    request<StartConversationResponse>(
+      `/api/conversations/${encodeURIComponent(projectSlug)}/start`,
+      { method: 'POST', body: JSON.stringify({ prompt }) },
       csrfToken,
     ),
   renameConversation: (projectSlug: string, provider: string, conversationRef: string, body: RenameConversationRequest, csrfToken?: string) =>

@@ -256,13 +256,14 @@ describe('project routes', () => {
 });
 
 describe('structured provider configuration wiring', () => {
-  async function buildConfiguredApp(structuredSessions?: { codex?: { enabled: boolean }; claude?: { enabled: boolean } }) {
+  async function buildConfiguredApp(structuredSessions?: { codex?: { enabled: boolean }; claude?: { enabled: boolean }; grok?: { enabled: boolean } }) {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-structured-wiring-'));
     const root = path.join(tempDir, 'projects');
     await fs.mkdir(path.join(root, 'demo'), { recursive: true });
     await fs.writeFile(path.join(root, 'demo', 'AGENTS.md'), '# Demo');
     await fs.mkdir(path.join(tempDir, 'codex-home'), { recursive: true });
     await fs.mkdir(path.join(tempDir, 'claude-home'), { recursive: true });
+    await fs.mkdir(path.join(tempDir, 'grok-home'), { recursive: true });
     const provider = (discoveryRoot: string) => ({ enabled: true, discoveryRoot });
     const configPath = path.join(tempDir, 'config.json');
     await fs.writeFile(configPath, JSON.stringify({
@@ -283,6 +284,7 @@ describe('structured provider configuration wiring', () => {
       providers: {
         codex: provider(path.join(tempDir, 'codex-home')),
         claude: provider(path.join(tempDir, 'claude-home')),
+        grok: provider(path.join(tempDir, 'grok-home')),
       },
       projects: { demo: { active: true, path: path.join(root, 'demo'), displayName: 'Demo', allowedLocalhostPorts: [], tags: [] } },
     }, null, 2));
@@ -298,7 +300,7 @@ describe('structured provider configuration wiring', () => {
   }
 
   it('advertises codex and refuses claude when only the Codex lane is on', async () => {
-    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: false } });
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: false }, grok: { enabled: false } });
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual(['codex']);
@@ -314,8 +316,8 @@ describe('structured provider configuration wiring', () => {
     }
   });
 
-  it('advertises nothing and refuses binds when the config switches both lanes off', async () => {
-    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: false } });
+  it('advertises nothing and refuses binds when the config switches every lane off', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: false }, grok: { enabled: false } });
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual([]);
@@ -331,8 +333,8 @@ describe('structured provider configuration wiring', () => {
     }
   });
 
-  it('advertises claude when its lane is on, beside codex when both are, and both when the config says nothing', async () => {
-    const claudeOnly = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: true } });
+  it('advertises claude when its lane is on, beside codex when both are, grok when only it is, and every provider when the config says nothing', async () => {
+    const claudeOnly = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: true }, grok: { enabled: false } });
     try {
       const tree = await claudeOnly.app.inject({ method: 'GET', url: '/api/projects/tree', headers: claudeOnly.headers });
       expect(tree.json().structuredProviders).toEqual(['claude']);
@@ -341,7 +343,16 @@ describe('structured provider configuration wiring', () => {
       await fs.rm(claudeOnly.tempDir, { recursive: true, force: true });
     }
 
-    const both = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: true } });
+    const grokOnly = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: false }, grok: { enabled: true } });
+    try {
+      const tree = await grokOnly.app.inject({ method: 'GET', url: '/api/projects/tree', headers: grokOnly.headers });
+      expect(tree.json().structuredProviders).toEqual(['grok']);
+    } finally {
+      await grokOnly.app.close();
+      await fs.rm(grokOnly.tempDir, { recursive: true, force: true });
+    }
+
+    const both = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: true }, grok: { enabled: false } });
     try {
       const tree = await both.app.inject({ method: 'GET', url: '/api/projects/tree', headers: both.headers });
       expect(tree.json().structuredProviders).toEqual(['codex', 'claude']);
@@ -353,7 +364,7 @@ describe('structured provider configuration wiring', () => {
     const unconfigured = await buildConfiguredApp();
     try {
       const tree = await unconfigured.app.inject({ method: 'GET', url: '/api/projects/tree', headers: unconfigured.headers });
-      expect(tree.json().structuredProviders).toEqual(['codex', 'claude']);
+      expect(tree.json().structuredProviders).toEqual(['codex', 'claude', 'grok']);
     } finally {
       await unconfigured.app.close();
       await fs.rm(unconfigured.tempDir, { recursive: true, force: true });

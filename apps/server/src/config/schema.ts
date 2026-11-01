@@ -1,4 +1,12 @@
 import { z } from 'zod';
+import type { FixedModelProfileKey, ProviderId } from '@agent-console/shared';
+
+// Runtime values must not come from '@agent-console/shared' here: the engineering summary CLI loads this
+// module through tsx, whose tsconfig path maps that package to its type declarations, so a value import
+// arrives undefined. These tuples mirror the provider ids and the fixed profile keys the Start default names,
+// and are type-checked against the shared types.
+const PROVIDER_VALUES = ['codex', 'claude', 'grok'] as const satisfies readonly ProviderId[];
+const FIXED_PROFILE_VALUES = ['high', 'medium', 'low'] as const satisfies readonly FixedModelProfileKey[];
 
 const portSchema = z.number().int().min(1).max(65535);
 
@@ -42,6 +50,7 @@ export const projectConfigSchema = z.object({
   providers: z.object({
     codex: providerOverrideSchema.optional(),
     claude: providerOverrideSchema.optional(),
+    grok: providerOverrideSchema.optional(),
   }).default({}),
 });
 
@@ -68,7 +77,7 @@ const sessionsConfigSchema = z.preprocess(rejectRemovedKeys({
   pressureSuspendIdleMinutes: 60,
 });
 
-// The provider process of each provider's conversations. Both lanes are on by default; a provider whose lane is switched off cannot run conversations.
+// The provider process of each provider's conversations. Every lane is on by default; a provider whose lane is switched off cannot run conversations.
 function structuredProviderSchema(defaultCommand: readonly string[]) {
   return z.object({
     enabled: z.boolean().default(true),
@@ -80,15 +89,18 @@ function structuredProviderSchema(defaultCommand: readonly string[]) {
   });
 }
 
-const STRUCTURED_PROVIDER_DEFAULT_COMMANDS = { codex: ['codex', 'app-server'], claude: ['claude'] } as const;
+const STRUCTURED_PROVIDER_DEFAULT_COMMANDS = { codex: ['codex', 'app-server'], claude: ['claude'], grok: ['grok'] } as const;
 const codexStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.codex);
 const claudeStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.claude);
+// With its lane off, Grok is not offered at all: no history and no new chats.
+const grokStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFAULT_COMMANDS.grok);
 
 /** One provider's structured-session settings. The host service and the provider's transport plugin both take this shape. */
 export type StructuredProviderConfig = z.output<typeof codexStructuredSchema>;
 /** What a provider without a `structuredSessions` entry gets: the lane is on. A fresh object per call. */
 export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURED_PROVIDER_DEFAULT_COMMANDS): StructuredProviderConfig {
-  return (provider === 'claude' ? claudeStructuredSchema : codexStructuredSchema).parse({});
+  const schema = provider === 'claude' ? claudeStructuredSchema : provider === 'grok' ? grokStructuredSchema : codexStructuredSchema;
+  return schema.parse({});
 }
 
 const structuredSessionsConfigSchema = z.preprocess(rejectRemovedKeys({
@@ -96,9 +108,11 @@ const structuredSessionsConfigSchema = z.preprocess(rejectRemovedKeys({
 }), z.object({
   codex: codexStructuredSchema.default(() => defaultStructuredProviderConfig('codex')),
   claude: claudeStructuredSchema.default(() => defaultStructuredProviderConfig('claude')),
+  grok: grokStructuredSchema.default(() => defaultStructuredProviderConfig('grok')),
 })).default(() => ({
   codex: defaultStructuredProviderConfig('codex'),
   claude: defaultStructuredProviderConfig('claude'),
+  grok: defaultStructuredProviderConfig('grok'),
 }));
 
 export const appConfigSchema = z.object({
@@ -118,11 +132,21 @@ export const appConfigSchema = z.object({
   }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
   // The model list lives in workflow_optimizer: the Console reads the High/Medium/Low profiles and asks the Auto router through
   // its `wo` command. `AGENT_CONSOLE_WO_PATH` overrides `woPath` for one process (tests, a trial checkout).
+  // `startDefault` is the provider and profile a provider-neutral Start uses when the router cannot answer.
   modelRouting: z.object({
     woPath: z.string().min(1).default('/home/bryan/code/workflow_optimizer/.venv/bin/wo'),
     profilesTimeoutMs: z.number().int().positive().default(10_000),
     routeTimeoutMs: z.number().int().positive().default(8_000),
-  }).default({ woPath: '/home/bryan/code/workflow_optimizer/.venv/bin/wo', profilesTimeoutMs: 10_000, routeTimeoutMs: 8_000 }),
+    startDefault: z.object({
+      provider: z.enum(PROVIDER_VALUES).default('codex'),
+      profile: z.enum(FIXED_PROFILE_VALUES).default('medium'),
+    }).default({ provider: 'codex', profile: 'medium' }),
+  }).default({
+    woPath: '/home/bryan/code/workflow_optimizer/.venv/bin/wo',
+    profilesTimeoutMs: 10_000,
+    routeTimeoutMs: 8_000,
+    startDefault: { provider: 'codex', profile: 'medium' },
+  }),
   coordination: z.object({
     enabled: z.boolean().default(false),
     pilotPaths: z.array(z.string().min(1)).default([]),
@@ -140,6 +164,8 @@ export const appConfigSchema = z.object({
   providers: z.object({
     codex: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.codex' }),
     claude: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.claude' }),
+    // `discoveryRoot` is where Grok keeps its sessions.
+    grok: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.grok' }),
   }),
   projects: z.record(z.string(), projectConfigSchema).default({}),
 });

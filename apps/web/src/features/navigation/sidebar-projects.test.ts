@@ -32,11 +32,13 @@ function project({
   displayName,
   codex = [],
   claude = [],
+  grok = [],
 }: {
   slug: string;
   displayName: string;
   codex?: ConversationSummary[];
   claude?: ConversationSummary[];
+  grok?: ConversationSummary[];
 }): ProjectSummary {
   return {
     slug,
@@ -48,6 +50,7 @@ function project({
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations: codex },
       claude: { id: 'claude', label: 'Claude', conversations: claude },
+      grok: { id: 'grok', label: 'Grok', conversations: grok },
     },
   };
 }
@@ -79,6 +82,25 @@ function boundSession({
 }
 
 describe('deriveSidebarProjects', () => {
+  it('lists Grok conversations beside Codex and Claude and keeps them under their own provider', () => {
+    const tree: TreeResponse = {
+      projects: [project({
+        slug: 'alpha',
+        displayName: 'Alpha',
+        codex: [conversation({ ref: 'c1', provider: 'codex', projectSlug: 'alpha', updatedAt: '2026-07-01T09:00:00.000Z', isBound: true })],
+        grok: [conversation({ ref: 'g1', provider: 'grok', projectSlug: 'alpha', updatedAt: '2026-07-01T10:00:00.000Z', isBound: true })],
+      })],
+      structuredProviders: [],
+      boundSessions: [],
+    };
+
+    const [alpha] = deriveSidebarProjects({ tree, workMode: true, recentActivitySortEnabled: false, manualProjectOrder: [] });
+
+    expect(alpha?.combinedConversations.map((item) => `${item.provider}:${item.conversation.ref}`)).toEqual(['codex:c1', 'grok:g1']);
+    expect(alpha?.providers.grok.conversations.map((item) => item.ref)).toEqual(['g1']);
+    expect(alpha?.providers.claude.conversations).toEqual([]);
+  });
+
   it('sorts by recent activity using bound-session completion time when present', () => {
     const tree: TreeResponse = {
       structuredProviders: [],

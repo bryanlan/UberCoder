@@ -115,6 +115,9 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
   const [actionError, setActionError] = useState<string>();
+  // Set when Start could not route the first message and the default provider took the chat. Stays until dismissed or until
+  // the next chat is created.
+  const [startWarning, setStartWarning] = useState<string>();
   const pendingSubmissionIds = useRef(new Map<string, string>());
   const inputGenerations = useRef(new Map<string, number>());
   const [creatingConversationKey, setCreatingConversationKey] = useState<string>();
@@ -477,14 +480,31 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     },
   });
 
+  // A conversation the server just created: refresh the tree, open it, and tuck the sidebar away on a small screen.
+  function openCreatedConversation(projectSlug: string, provider: ProviderId, conversationRef: string): void {
+    setActionError(undefined);
+    queryClient.invalidateQueries({ queryKey: ['tree'] });
+    navigate(`/projects/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}`);
+    closeSidebarIfMobile();
+  }
+
   const bindNewMutation = useMutation({
     mutationFn: ({ projectSlug, provider }: { projectSlug: string; provider: ProviderId }) =>
       api.bindNewConversation(projectSlug, provider, authQuery.data?.csrfToken),
     onSuccess: ({ conversationRef }, variables) => {
-      setActionError(undefined);
-      queryClient.invalidateQueries({ queryKey: ['tree'] });
-      navigate(`/projects/${encodeURIComponent(variables.projectSlug)}/${variables.provider}/${encodeURIComponent(conversationRef)}`);
-      closeSidebarIfMobile();
+      openCreatedConversation(variables.projectSlug, variables.provider, conversationRef);
+    },
+    onSettled: () => {
+      setCreatingConversationKey(undefined);
+    },
+  });
+
+  const startMutation = useMutation({
+    mutationFn: ({ projectSlug, prompt }: { projectSlug: string; prompt: string }) =>
+      api.startConversation(projectSlug, prompt, authQuery.data?.csrfToken),
+    onSuccess: ({ provider, conversationRef, warning }, variables) => {
+      setStartWarning(warning);
+      openCreatedConversation(variables.projectSlug, provider, conversationRef);
     },
     onSettled: () => {
       setCreatingConversationKey(undefined);
@@ -634,6 +654,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     const nextKey = `${projectSlug}:${provider}`;
     if (bindNewMutation.isPending || creatingConversationKey) return;
     setActionError(undefined);
+    setStartWarning(undefined);
     setCreatingConversationKey(nextKey);
     bindNewMutation.mutate(
       { projectSlug, provider },
@@ -643,6 +664,20 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         },
       },
     );
+  }
+
+  async function handleStartConversation(projectSlug: string, prompt: string): Promise<boolean> {
+    if (startMutation.isPending || creatingConversationKey) return false;
+    setActionError(undefined);
+    setStartWarning(undefined);
+    setCreatingConversationKey(`${projectSlug}:start`);
+    try {
+      await startMutation.mutateAsync({ projectSlug, prompt });
+      return true;
+    } catch (error) {
+      setActionError(describeError(error, 'Unable to start a new conversation.'));
+      return false;
+    }
   }
 
   async function handleRelease(sessionId: string): Promise<void> {
@@ -922,6 +957,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         onToggleRecentActivity={handleToggleRecentActivity}
         onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
+        onStartConversation={handleStartConversation}
         onRenameProject={handleRenameProject}
         onRebindConversation={handleRebindConversation}
         onRenameConversation={handleRenameConversation}
@@ -1054,6 +1090,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
           <div title={eventError} role="status" className={isMobile ? 'flex shrink-0 items-center gap-2 border-b border-amber-400/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-200' : 'mx-4 mt-4 flex items-center gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6'}>
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {isMobile ? 'Live updates interrupted' : eventError}
+          </div>
+        )}
+        {startWarning && (
+          <div role="status" data-testid="start-warning" className={isMobile ? 'flex shrink-0 items-start gap-2 border-b border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200' : 'mx-4 mt-4 flex items-start gap-2 rounded-2xl border border-amber-400/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200 lg:mx-6'}>
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span className="min-w-0 flex-1">{startWarning}</span>
+            <button type="button" aria-label="Dismiss notice" onClick={() => setStartWarning(undefined)} className="shrink-0 rounded-lg p-1 text-amber-200 transition hover:bg-amber-500/20"><X className="h-4 w-4" /></button>
           </div>
         )}
         {actionError && (

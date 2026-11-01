@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -41,6 +41,7 @@ it.each([
           isBound: true, degraded: false,
         }] },
         claude: { id: 'claude', label: 'Claude', conversations: [] },
+        grok: { id: 'grok', label: 'Grok', conversations: [] },
       },
     }],
   };
@@ -52,7 +53,7 @@ it.each([
       <MemoryRouter>
         <Sidebar
           tree={currentTree} open workMode={workMode} activeOnly={activeOnly} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
-          onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation}
+          onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation} onStartConversation={async () => true}
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}
           onRenameConversation={async () => true} updatingUiPreferences={false}
@@ -116,6 +117,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
           isBound: true, degraded: false,
         }] },
         claude: { id: 'claude', label: 'Claude', conversations: [] },
+        grok: { id: 'grok', label: 'Grok', conversations: [] },
       },
     }],
   };
@@ -126,7 +128,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
       <MemoryRouter>
         <Sidebar
           tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
-          onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={() => {}}
+          onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={() => {}} onStartConversation={async () => true}
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
           onRenameProject={async () => true} onRebindConversation={async () => true}
           onRenameConversation={async () => true} updatingUiPreferences={false}
@@ -156,6 +158,7 @@ describe('New Chat options', () => {
         providers: {
           codex: { id: 'codex', label: 'Codex', conversations: [] },
           claude: { id: 'claude', label: 'Claude', conversations: [] },
+          grok: { id: 'grok', label: 'Grok', conversations: [] },
         },
       }],
     };
@@ -169,7 +172,7 @@ describe('New Chat options', () => {
         <MemoryRouter>
           <Sidebar
             tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
-            onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation}
+            onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={onNewConversation} onStartConversation={async () => true}
             onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
             onRenameProject={async () => true} onRebindConversation={async () => true}
             onRenameConversation={async () => true} updatingUiPreferences={false}
@@ -211,6 +214,42 @@ describe('New Chat options', () => {
     }
   });
 
+  it('offers a new Grok conversation from the project menu only when the tree advertises grok', async () => {
+    const onNewConversation = renderSidebar(treeWithProject(['codex', 'claude', 'grok']));
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    await user.click(screen.getByRole('button', { name: 'New Grok conversation' }));
+    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'grok');
+  });
+
+  it.each([
+    ['an empty list', [] as TreeResponse['structuredProviders']],
+    ['a list without grok', ['codex', 'claude'] as TreeResponse['structuredProviders']],
+  ])('has no new Grok conversation for %s', async (_name, structuredProviders) => {
+    renderSidebar(treeWithProject(structuredProviders));
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+
+    expect(screen.queryByRole('button', { name: /New Grok/ })).not.toBeInTheDocument();
+  });
+
+  it('adds Grok to the mobile new-chat picker when its lane is on', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    try {
+      const user = userEvent.setup();
+      const onNewConversation = renderSidebar(treeWithProject(['codex', 'claude', 'grok']));
+      await user.click(screen.getByRole('button', { name: 'New chat' }));
+      await user.click(screen.getByRole('button', { name: 'Grok' }));
+      expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'grok');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it.each([
     { enabled: ['codex'] as const, hidden: 'Claude', shown: 'Codex' },
     { enabled: ['claude'] as const, hidden: 'Codex', shown: 'Claude' },
@@ -223,12 +262,12 @@ describe('New Chat options', () => {
     expect(screen.queryByRole('button', { name: `New ${hidden} conversation` })).not.toBeInTheDocument();
   });
 
-  it('offers no new conversation for either provider when both lanes are off', async () => {
+  it('offers no new conversation for any provider when every lane is off', async () => {
     renderSidebar(treeWithProject([]));
     const user = userEvent.setup();
 
     await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
-    expect(screen.queryByRole('button', { name: /^New (Codex|Claude) conversation$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^New (Codex|Claude|Grok) conversation$/ })).not.toBeInTheDocument();
   });
 
   it('leaves a provider whose lane is off out of the mobile new-chat picker', async () => {
@@ -241,6 +280,174 @@ describe('New Chat options', () => {
       await user.click(screen.getByRole('button', { name: 'New chat' }));
       expect(screen.getByRole('button', { name: 'Claude' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Codex' })).not.toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('Start (provider-neutral new chat)', () => {
+  const startLabel = 'Start a chat (agent picked for you)';
+
+  function treeWith(structuredProviders: TreeResponse['structuredProviders']): TreeResponse {
+    return {
+      boundSessions: [],
+      structuredProviders,
+      projects: [{
+        slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',
+        tags: [], allowedLocalhostPorts: [],
+        providers: {
+          codex: { id: 'codex', label: 'Codex', conversations: [] },
+          claude: { id: 'claude', label: 'Claude', conversations: [] },
+          grok: { id: 'grok', label: 'Grok', conversations: [] },
+        },
+      }],
+    };
+  }
+
+  function sidebarElement(tree: TreeResponse, props: { onStartConversation?: (projectSlug: string, prompt: string) => Promise<boolean>; creatingConversationKey?: string; onClose?: () => void } = {}) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['network-info'], {});
+    return (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Sidebar
+            tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}} recentActivitySortEnabled={false} manualProjectOrder={[]}
+            onClose={props.onClose ?? (() => {})} onToggleWorkMode={() => {}} onNewConversation={() => {}}
+            onStartConversation={props.onStartConversation ?? (async () => true)}
+            creatingConversationKey={props.creatingConversationKey}
+            onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
+            onRenameProject={async () => true} onRebindConversation={async () => true}
+            onRenameConversation={async () => true} updatingUiPreferences={false}
+            onCloseConversation={async () => true}
+            onRefresh={() => {}} refreshing={false}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+  }
+
+  async function openStartBox(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    await user.click(screen.getByRole('button', { name: startLabel }));
+    return screen.getByRole('textbox', { name: 'First message for Demo' });
+  }
+
+  it.each([
+    ['one provider is enabled', ['grok'] as TreeResponse['structuredProviders'], true],
+    ['every provider is enabled', ['codex', 'claude', 'grok'] as TreeResponse['structuredProviders'], true],
+    ['the list is empty', [] as TreeResponse['structuredProviders'], false],
+  ])('shows or hides Start correctly when %s', async (_name, structuredProviders, shown) => {
+    render(sidebarElement(treeWith(structuredProviders)));
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+
+    if (shown) expect(screen.getByRole('button', { name: startLabel })).toBeInTheDocument();
+    else expect(screen.queryByRole('button', { name: startLabel })).not.toBeInTheDocument();
+    // The provider-specific entries follow the same list of enabled providers.
+    if (structuredProviders.includes('codex')) expect(screen.getByRole('button', { name: 'New Codex conversation' })).toBeInTheDocument();
+    else expect(screen.queryByRole('button', { name: 'New Codex conversation' })).not.toBeInTheDocument();
+  });
+
+  it('sends the typed prompt for the project and closes the box once the chat is created', async () => {
+    const onStartConversation = vi.fn().mockResolvedValue(true);
+    render(sidebarElement(treeWith(['codex']), { onStartConversation }));
+    const user = userEvent.setup();
+
+    const textbox = await openStartBox(user);
+    const send = screen.getByRole('button', { name: 'Send' });
+    expect(send).toBeDisabled();
+    await user.type(textbox, 'Fix the login bug');
+    await user.click(send);
+
+    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Fix the login bug');
+    await waitFor(() => expect(screen.queryByTestId('start-composer')).not.toBeInTheDocument());
+  });
+
+  it('sends with Ctrl+Enter and cancels with Escape without sending', async () => {
+    const onStartConversation = vi.fn().mockResolvedValue(true);
+    render(sidebarElement(treeWith(['codex']), { onStartConversation }));
+    const user = userEvent.setup();
+
+    let textbox = await openStartBox(user);
+    await user.type(textbox, 'Never sent');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByTestId('start-composer')).not.toBeInTheDocument();
+    expect(onStartConversation).not.toHaveBeenCalled();
+
+    textbox = await openStartBox(user);
+    await user.type(textbox, 'Send this one');
+    await user.keyboard('{Control>}{Enter}{/Control}');
+    expect(onStartConversation).toHaveBeenCalledTimes(1);
+    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Send this one');
+  });
+
+  it('keeps the box and the typed prompt when the chat could not be created', async () => {
+    const onStartConversation = vi.fn().mockResolvedValue(false);
+    render(sidebarElement(treeWith(['codex']), { onStartConversation }));
+    const user = userEvent.setup();
+
+    const textbox = await openStartBox(user);
+    await user.type(textbox, 'Try again later');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(onStartConversation).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId('start-composer')).toBeInTheDocument();
+    expect(textbox).toHaveValue('Try again later');
+  });
+
+  it('cannot send a second time while a chat is being created', async () => {
+    const onStartConversation = vi.fn().mockResolvedValue(true);
+    const view = render(sidebarElement(treeWith(['codex']), { onStartConversation }));
+    const user = userEvent.setup();
+
+    const textbox = await openStartBox(user);
+    await user.type(textbox, 'First and only');
+    view.rerender(sidebarElement(treeWith(['codex']), { onStartConversation, creatingConversationKey: 'demo:start' }));
+
+    expect(screen.getByRole('button', { name: 'Starting…' })).toBeDisabled();
+    await user.keyboard('{Control>}{Enter}{/Control}');
+    expect(onStartConversation).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    expect(screen.getByRole('button', { name: startLabel })).toBeDisabled();
+  });
+
+  it('offers Start in the mobile new-chat picker, sends the prompt and closes the picker', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    try {
+      const onStartConversation = vi.fn().mockResolvedValue(true);
+      const onClose = vi.fn();
+      render(sidebarElement(treeWith(['codex']), { onStartConversation, onClose }));
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole('button', { name: 'New chat' }));
+      await user.click(screen.getByRole('button', { name: 'Start' }));
+      await user.type(screen.getByRole('textbox', { name: 'First message for Demo' }), 'Plan the release');
+      await user.click(screen.getByRole('button', { name: 'Send' }));
+
+      expect(onStartConversation).toHaveBeenCalledWith('demo', 'Plan the release');
+      await waitFor(() => expect(onClose).toHaveBeenCalled());
+      expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('hides Start from the mobile new-chat picker when no provider is enabled', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    try {
+      render(sidebarElement(treeWith([])));
+      const user = userEvent.setup();
+
+      await user.click(screen.getByRole('button', { name: 'New chat' }));
+
+      expect(screen.queryByRole('button', { name: 'Codex' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Start' })).not.toBeInTheDocument();
     } finally {
       vi.unstubAllGlobals();
     }

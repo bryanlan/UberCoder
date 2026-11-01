@@ -2,12 +2,12 @@ import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
 import { PendingQuestionCard } from './PendingQuestionCard';
 import { Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
-import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_KEYS, MODEL_PROFILE_SHORTCUTS, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_KEYS, MODEL_PROFILE_SHORTCUTS, PROVIDER_NAMES, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
-import { activeProfileTarget, type ModelProfilesState } from '../lib/model-profiles';
+import { activeProfileTarget, sessionModelProfile, type ModelProfilesState } from '../lib/model-profiles';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
 import { CONVERSATION_DRAG_TYPE, formatAgentReference, readConversationDrag } from '../features/conversation/agent-reference';
 import { copyTextToClipboard } from '../lib/clipboard';
@@ -204,7 +204,7 @@ function SessionComposer({
   const [agentReferenceError, setAgentReferenceError] = useState<string>();
   const [agentDragOver, setAgentDragOver] = useState(false);
   const profileLevels = modelProfiles.status === 'ready' ? modelProfiles.profiles.providers[provider].levels : undefined;
-  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  const providerLabel = PROVIDER_NAMES[provider];
   const canSend = draftText.trim().length > 0 || clipboardImages.items.length > 0;
 
   async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
@@ -1049,7 +1049,7 @@ export function ConversationPane({
         <div className="flex h-full items-center justify-center px-6 text-center">
           <div className="max-w-md">
             <div className="text-lg font-medium text-slate-100">Work mode</div>
-            <div className="mt-2 text-sm text-slate-400">{isMobile ? 'Open Chats to choose a conversation or start a new one.' : 'Select a bound session from the left pane or start a new Codex or Claude session there.'}</div>
+            <div className="mt-2 text-sm text-slate-400">{isMobile ? 'Open Chats to choose a conversation or start a new one.' : 'Select a bound session from the left pane or start a new chat there.'}</div>
           </div>
         </div>
       );
@@ -1310,7 +1310,7 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
-          activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
+          activeModelProfile={sessionModelProfile(boundSession)}
           autoRoute={boundSession.autoRoute}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}

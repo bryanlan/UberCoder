@@ -12,6 +12,7 @@ import { IndexingService } from './indexing/indexing-service.js';
 import { ProjectService } from './projects/project-service.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { createClaudePlugin } from './providers/transport/claude/index.js';
+import { createGrokPlugin } from './providers/transport/grok/index.js';
 import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
 import { createLineTransportFactory } from './providers/transport/line-transport.js';
 import { TransportPluginRegistry } from './providers/transport/registry.js';
@@ -80,6 +81,7 @@ export async function buildApp(options: AppOptions = {}) {
   if (!options.transportPlugins) {
     transportPlugins.register(createCodexAppServerPlugin());
     transportPlugins.register(createClaudePlugin());
+    transportPlugins.register(createGrokPlugin());
   }
   // Provider processes run behind session hosts that outlive this process, so a restart reconnects to them. Injected (test) plugins bring their own transport.
   const lineTransport = options.transportPlugins ? undefined : createLineTransportFactory({
@@ -101,7 +103,7 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
     modelProfiles,
-    structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude },
+    structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude, grok: config.structuredSessions.grok },
     lineTransport,
     // A message attaches only the pasted images the image store holds, found directly in this directory.
     imageStoreDir,
@@ -183,7 +185,8 @@ export async function buildApp(options: AppOptions = {}) {
   const structuredProviders = sessions.enabledStructuredProviders();
   await registerProjectRoutes(app, authService, indexing, sessions, structuredProviders);
   await registerSearchRoutes(app, authService, search);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders,
+    { modelProfiles, startDefault: config.modelRouting.startDefault });
   await registerSessionRoutes(app, authService, db, projectService, sessions, images);
   await registerModelProfileRoutes(app, authService, modelProfiles);
   registerImageRoutes(app, authService, sessions, images);

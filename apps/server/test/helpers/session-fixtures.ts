@@ -1,5 +1,6 @@
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { SessionManager } from '../../src/sessions/session-manager.js';
+import type { ProviderId } from '@agent-console/shared';
 import type { ProviderAdapter } from '../../src/providers/types.js';
 import type { ActiveProject } from '../../src/projects/project-service.js';
 import type { MergedProviderSettings } from '../../src/config/service.js';
@@ -56,7 +57,7 @@ export function createRecoveryManager(
   }, undefined, { coordinationEnabled: true, ...options });
 }
 
-export function enableUnattendedRecovery(db: AppDatabase, providerId: 'codex' | 'claude', nativeSessionId: string): string {
+export function enableUnattendedRecovery(db: AppDatabase, providerId: ProviderId, nativeSessionId: string): string {
   const service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
   const id = service.register({ provider: providerId, nativeSessionId, token: randomUUID(), pid: process.pid, cwd: '/tmp' }).assignmentId!;
   service.update(id, { continuation: 'unattended' }); return id;

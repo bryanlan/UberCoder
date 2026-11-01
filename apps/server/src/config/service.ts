@@ -6,6 +6,8 @@ import { expandHome, normalizeFsPath } from '../lib/path-utils.js';
 
 const PROJECT_MARKER_FILES = new Set(['AGENTS.md', 'agents.md', 'CLAUDE.md', 'claude.md']);
 
+const DEFAULT_DISCOVERY_ROOTS: Record<ProviderId, string> = { codex: '~/.codex', claude: '~/.claude', grok: '~/.grok' };
+
 export interface MergedProviderSettings extends Omit<ProviderSettings, 'discoveryRoot'> {
   id: ProviderId;
   discoveryRoot: string;
@@ -64,6 +66,7 @@ export class ConfigService {
       providers: {
         codex: { ...config.providers.codex, discoveryRoot: normalizeFsPath(config.providers.codex.discoveryRoot ?? '~/.codex') },
         claude: { ...config.providers.claude, discoveryRoot: normalizeFsPath(config.providers.claude.discoveryRoot ?? '~/.claude') },
+        grok: { ...config.providers.grok, discoveryRoot: normalizeFsPath(config.providers.grok.discoveryRoot ?? '~/.grok') },
       },
     };
   }
@@ -92,10 +95,12 @@ export class ConfigService {
   getMergedProviderSettings(directoryName: string, providerId: ProviderId): MergedProviderSettings {
     const globalProvider = this.runtimeConfig.providers[providerId];
     const projectOverride = directoryName === '__global__' ? undefined : this.runtimeConfig.projects[directoryName]?.providers[providerId];
+    // With its structured lane off Grok is not offered at all: no history, no new chats.
+    const laneOff = providerId === 'grok' && !this.runtimeConfig.structuredSessions.grok.enabled;
     return {
       id: providerId,
-      enabled: projectOverride?.enabled ?? globalProvider.enabled,
-      discoveryRoot: normalizeFsPath(projectOverride?.discoveryRoot ?? globalProvider.discoveryRoot ?? (providerId === 'codex' ? '~/.codex' : '~/.claude')),
+      enabled: !laneOff && (projectOverride?.enabled ?? globalProvider.enabled),
+      discoveryRoot: normalizeFsPath(projectOverride?.discoveryRoot ?? globalProvider.discoveryRoot ?? DEFAULT_DISCOVERY_ROOTS[providerId]),
     };
   }
 

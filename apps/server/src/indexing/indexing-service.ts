@@ -34,6 +34,7 @@ export function getProviderTranscriptWatchPaths(providerId: ProviderId, discover
       path.join(discoveryRoot, 'history.jsonl'),
     ];
   }
+  if (providerId === 'grok') return [path.join(discoveryRoot, 'sessions')];
 
   return [
     path.join(discoveryRoot, 'projects'),
@@ -262,6 +263,7 @@ export class IndexingService {
         providers: {
           codex: { id: 'codex', label: 'Codex', conversations: [] },
           claude: { id: 'claude', label: 'Claude', conversations: [] },
+          grok: { id: 'grok', label: 'Grok', conversations: [] },
         },
       });
     }
@@ -299,6 +301,10 @@ export class IndexingService {
           claude: {
             ...project.providers.claude,
             conversations: project.providers.claude.conversations.sort(compareConversationTreeOrder),
+          },
+          grok: {
+            ...project.providers.grok,
+            conversations: project.providers.grok.conversations.sort(compareConversationTreeOrder),
           },
         },
       }))

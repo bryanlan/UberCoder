@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
 import {
+  PROVIDER_NAMES,
   PROVIDERS,
   type BoundSession,
   type ConversationSummary,
@@ -17,12 +18,14 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { AuthService } from '../security/auth-service.js';
 import { LiveOutputReader } from '../sessions/live-output/reader.js';
-import { SessionManager, StructuredSessionDisabledError } from '../sessions/session-manager.js';
+import { SessionManager, StructuredSessionDisabledError, profilePatch } from '../sessions/session-manager.js';
 import { statFileSafe } from '../providers/file-utils.js';
 import { nowIso } from '../lib/time.js';
 import { saveConversationTitle } from '../lib/conversation-title.js';
 import { TITLE_GENERATION_AWAITING_MESSAGE } from '../titles/service.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
+import { StartUnavailableError, startConversation, type StartDefault } from '../sessions/start-conversation.js';
+import type { ModelProfileService } from '../model-profiles/service.js';
 
 const providerSchema = z.enum(PROVIDERS);
 const projectProviderParamsSchema = z.object({
@@ -40,6 +43,9 @@ const bindConversationBodySchema = z.object({
   initialPrompt: z.string().trim().min(1).optional(),
   confirmExternalHandoff: z.literal(true).optional(),
 }).strict();
+const startConversationBodySchema = z.object({
+  prompt: z.string().trim().min(1).max(100_000),
+});
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
@@ -183,6 +189,8 @@ export async function registerConversationRoutes(
   liveOutputReader: LiveOutputReader = new LiveOutputReader(),
   /** Providers whose lane is enabled: only these can bind conversations. */
   structuredProviders: readonly ProviderId[],
+  /** What the provider-neutral Start needs. Without it the Start route is not registered. */
+  start?: { modelProfiles: ModelProfileService; startDefault: StartDefault },
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
@@ -311,6 +319,40 @@ export async function registerConversationRoutes(
     };
   });
 
+  if (start) {
+    app.post('/api/conversations/:projectSlug/start', async (request, reply) => {
+      try {
+        await authService.ensureAuthenticated(request, reply);
+      } catch {
+        return;
+      }
+      const parsedBody = startConversationBodySchema.safeParse(request.body ?? {});
+      if (!parsedBody.success) {
+        reply.code(400).send({ error: 'Invalid start payload.', details: parsedBody.error.flatten() });
+        return;
+      }
+      const parsedParams = z.object({ projectSlug: z.string().min(1) }).safeParse(request.params);
+      if (!parsedParams.success) {
+        reply.code(400).send({ error: 'Invalid conversation route.', details: parsedParams.error.flatten() });
+        return;
+      }
+      const project = await projectService.getProjectBySlug(parsedParams.data.projectSlug);
+      if (!project) {
+        reply.code(404).send({ error: 'Project not found.' });
+        return;
+      }
+      try {
+        return await startConversation({ db, projectService, providerRegistry, sessions, modelProfiles: start.modelProfiles, startDefault: start.startDefault }, { project, prompt: parsedBody.data.prompt });
+      } catch (error) {
+        if (error instanceof StartUnavailableError || error instanceof StructuredSessionDisabledError) {
+          reply.code(400).send({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+    });
+  }
+
   app.post('/api/conversations/:projectSlug/:provider/new/bind', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
@@ -366,7 +408,7 @@ export async function registerConversationRoutes(
       kind: 'pending',
       projectSlug,
       provider: providerId,
-      title: `New ${providerId === 'codex' ? 'Codex' : 'Claude'} conversation`,
+      title: `New ${PROVIDER_NAMES[providerId]} conversation`,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       isBound: false,
@@ -384,7 +426,7 @@ export async function registerConversationRoutes(
         title: pendingConversation.title,
         kind: 'pending',
         // A new chat started from the UI picks its model per message (Auto).
-        ...(providerId === 'codex' ? { codexProfile: 'auto' as const } : { claudeProfile: 'auto' as const }),
+        ...profilePatch(providerId, 'auto'),
       });
       // An adopted alias already points at the native conversation; do not overwrite that record.
       if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {
@@ -499,6 +541,7 @@ export async function registerConversationRoutes(
         kind: 'history',
         initialPrompt: parsedBody.data.initialPrompt,
         codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
+        grokProfile: providerId === 'grok' ? existingSession?.grokProfile : undefined,
       });
       return { session };
     } catch (error) {

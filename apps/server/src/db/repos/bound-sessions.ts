@@ -41,10 +41,10 @@ export class BoundSessionsRepo {
     const tx = this.sqlite.transaction(() => {
       this.sqlite.prepare(`
         insert into bound_sessions (
-          id, provider, codex_profile, claude_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
+          id, provider, codex_profile, claude_profile, grok_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
           started_at, updated_at, last_activity_at, last_output_at, last_completed_at, last_response_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
-          @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, 'structured', @status, @should_restore, @title,
+          @id, @provider, @codex_profile, @claude_profile, @grok_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, 'structured', @status, @should_restore, @title,
           @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, null, @event_log_path
         )
         on conflict(id) do update set
@@ -56,6 +56,10 @@ export class BoundSessionsRepo {
           claude_profile = case
             when excluded.updated_at >= bound_sessions.updated_at then excluded.claude_profile
             else bound_sessions.claude_profile
+          end,
+          grok_profile = case
+            when excluded.updated_at >= bound_sessions.updated_at then excluded.grok_profile
+            else bound_sessions.grok_profile
           end,
           resume_conversation_ref = excluded.resume_conversation_ref,
           status = excluded.status,
@@ -78,6 +82,7 @@ export class BoundSessionsRepo {
         provider: session.provider,
         codex_profile: session.codexProfile ?? null,
         claude_profile: session.claudeProfile ?? null,
+        grok_profile: session.grokProfile ?? null,
         project_slug: session.projectSlug,
         conversation_ref: session.conversationRef,
         resume_conversation_ref: resumeConversationRef ?? null,
@@ -281,7 +286,7 @@ export class BoundSessionsRepo {
       }
       this.sqlite.prepare(`
         update bound_sessions
-        set ${current.provider === 'codex' ? 'codex_profile' : 'claude_profile'} = ?, auto_route_json = ?, model_profile_request_json = null, updated_at = ?
+        set ${profileColumn(current.provider)} = ?, auto_route_json = ?, model_profile_request_json = null, updated_at = ?
         where id = ?
       `).run(
         input.profile,
@@ -341,6 +346,11 @@ export class BoundSessionsRepo {
   }
 }
 
+/** The column a provider's model profile is stored in. */
+function profileColumn(provider: BoundSession['provider']): 'codex_profile' | 'claude_profile' | 'grok_profile' {
+  return provider === 'codex' ? 'codex_profile' : provider === 'grok' ? 'grok_profile' : 'claude_profile';
+}
+
 export function mapBoundSessionRow(row: SqliteRow): BoundSession {
   return {
     runFailure: row.run_failure_json ? JSON.parse(String(row.run_failure_json)) as BoundSession['runFailure'] : undefined,
@@ -348,6 +358,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     provider: String(row.provider) as BoundSession['provider'],
     codexProfile: optionalString(row.codex_profile) as BoundSession['codexProfile'],
     claudeProfile: optionalString(row.claude_profile) as BoundSession['claudeProfile'],
+    grokProfile: optionalString(row.grok_profile) as BoundSession['grokProfile'],
     autoRoute: typeof row.auto_route_json === 'string' ? JSON.parse(row.auto_route_json) as AutoRoute : undefined,
     modelProfileRequest: row.model_profile_request_json
       ? JSON.parse(String(row.model_profile_request_json)) as BoundSession['modelProfileRequest']

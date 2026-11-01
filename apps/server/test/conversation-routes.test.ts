@@ -2672,7 +2672,8 @@ describe('conversation routes', () => {
       db: AppDatabase;
       tempDir: string;
       sessions: Record<string, unknown>;
-      structuredProviders?: Array<'codex' | 'claude'>;
+      structuredProviders?: Array<'codex' | 'claude' | 'grok'>;
+      start?: Parameters<typeof registerConversationRoutes>[9];
     }) {
       const app = fastify();
       const args = [
@@ -2691,7 +2692,7 @@ describe('conversation routes', () => {
         input.sessions as never,
         new RealtimeEventBus(),
       ] as const;
-      await registerConversationRoutes(...args, undefined, input.structuredProviders ?? []);
+      await registerConversationRoutes(...args, undefined, input.structuredProviders ?? [], input.start);
       await app.ready();
       return app;
     }
@@ -2707,7 +2708,7 @@ describe('conversation routes', () => {
       }
     }
 
-    const disabled = (provider: 'codex' | 'claude') => ({ error: new StructuredSessionDisabledError(provider).message });
+    const disabled = (provider: 'codex' | 'claude' | 'grok') => ({ error: new StructuredSessionDisabledError(provider).message });
 
     it('refuses a new chat with 400, and starts nothing, unless the provider lane is enabled', async () => {
       await withDb(async (db, tempDir) => {
@@ -2722,6 +2723,111 @@ describe('conversation routes', () => {
         } finally {
           await app.close();
         }
+      });
+    });
+
+    it('starts a Grok chat with the Auto profile, like the other providers', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn(async (_input: object) => ({ id: 'session-grok', provider: 'grok' }));
+        const app = await buildBindApp({
+          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['grok'],
+        });
+        try {
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/grok/new/bind', payload: {} });
+          expect(response.statusCode).toBe(200);
+          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ grokProfile: 'auto', kind: 'pending', title: 'New Grok conversation' }));
+          expect(bindConversation.mock.calls[0]![0]).not.toHaveProperty('transport');
+          expect(response.json()).toMatchObject({ session: { id: 'session-grok' }, conversationRef: expect.stringMatching(/^pending:/) });
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    it('refuses a Grok chat with 400 while the Grok lane is off', async () => {
+      await withDb(async (db, tempDir) => {
+        const bindConversation = vi.fn();
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex', 'claude'] });
+        try {
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/grok/new/bind', payload: {} });
+          expect(response.statusCode).toBe(400);
+          expect(response.json()).toEqual(disabled('grok'));
+          expect(bindConversation).not.toHaveBeenCalled();
+        } finally {
+          await app.close();
+        }
+      });
+    });
+
+    describe('provider-neutral Start', () => {
+      const startOptions = (route: (provider: unknown, prompt: string) => Promise<unknown>) => ({
+        modelProfiles: { route: vi.fn(route), entry: vi.fn(async () => ({ launchName: 'gpt-6.1-sol', effort: 'xhigh', label: 'GPT-6.1 Sol', model: 'gpt-6.1-sol' })) } as never,
+        startDefault: { provider: 'codex' as const, profile: 'medium' as const },
+      });
+      const sessionsFor = (bindConversation: ReturnType<typeof vi.fn>) => ({
+        bindConversation, getSessionById: vi.fn(), enabledStructuredProviders: () => ['codex', 'grok'],
+      });
+
+      it('routes the prompt, creates the chat on the chosen provider and returns the session, the ref and the provider', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn(async (input: { provider: { id: string } }) => ({ id: 'session-1', provider: input.provider.id }));
+          const route = vi.fn(async () => ({ ok: true, provider: 'grok', decision: { source: 'router', decidedAt: 'now', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7' } }));
+          const app = await buildBindApp({ db, tempDir, sessions: sessionsFor(bindConversation), structuredProviders: ['codex', 'grok'], start: startOptions(route) });
+          try {
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: '  review the router  ' } });
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toMatchObject({ session: { id: 'session-1' }, provider: 'grok', conversationRef: expect.stringMatching(/^pending:/) });
+            expect(response.json().warning).toBeUndefined();
+            expect(route).toHaveBeenCalledWith(undefined, 'review the router', expect.any(Object));
+            expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
+              kind: 'pending', initialPrompt: 'review the router', grokProfile: 'auto',
+              autoDecision: expect.objectContaining({ launchName: 'grok-4.7' }),
+            }));
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('returns the warning when routing failed and the default took the chat', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn(async (input: { provider: { id: string } }) => ({ id: 'session-2', provider: input.provider.id }));
+          const app = await buildBindApp({ db, tempDir, sessions: sessionsFor(bindConversation), structuredProviders: ['codex', 'grok'],
+            start: startOptions(async () => ({ ok: false, reason: 'timed out after 8 s' })) });
+          try {
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: 'hello' } });
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toMatchObject({ provider: 'codex', warning: 'Auto could not pick a provider (timed out after 8 s). Started on Codex Medium.' });
+            expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ codexProfile: 'medium', startNotice: expect.stringContaining('Started on Codex Medium') }));
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
+      it('rejects an empty prompt, an unknown project and a Console with no lane', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn();
+          const app = await buildBindApp({ db, tempDir, sessions: sessionsFor(bindConversation), structuredProviders: ['codex'], start: startOptions(async () => ({ ok: false, reason: 'x' })) });
+          const bare = await buildBindApp({ db, tempDir, sessions: { ...sessionsFor(bindConversation), enabledStructuredProviders: () => [] }, start: startOptions(async () => ({ ok: false, reason: 'x' })) });
+          const withoutStart = await buildBindApp({ db, tempDir, sessions: sessionsFor(bindConversation), structuredProviders: ['codex'] });
+          try {
+            expect((await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: '   ' } })).statusCode).toBe(400);
+            expect((await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: {} })).statusCode).toBe(400);
+            expect((await app.inject({ method: 'POST', url: '/api/conversations/nowhere/start', payload: { prompt: 'x' } })).statusCode).toBe(404);
+            const none = await bare.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: 'x' } });
+            expect(none.statusCode).toBe(400);
+            expect(none.json().error).toContain('no structured session lane is enabled');
+            // Without the Start settings the route does not exist.
+            expect((await withoutStart.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: 'x' } })).statusCode).toBe(404);
+            expect(bindConversation).not.toHaveBeenCalled();
+            expect(db.pendingConversations.list()).toEqual([]);
+          } finally {
+            await app.close();
+            await bare.close();
+            await withoutStart.close();
+          }
+        });
       });
     });
 

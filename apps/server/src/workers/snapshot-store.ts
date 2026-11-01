@@ -8,7 +8,7 @@ const summary = z.object({ task: z.string().max(180), latest: z.string().max(180
 const cached = z.object({ id: z.string().min(1).max(256), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   sourceTask: z.string().max(180), summary, updatedAt: z.string().datetime(), stale: z.boolean() }).strict();
 const worker = z.object({ id: z.string().min(1).max(256), projectSlug: z.string().min(1).max(256),
-  projectName: z.string().max(512), provider: z.enum(['codex', 'claude']), conversationRef: z.string().min(1).max(4096),
+  projectName: z.string().max(512), provider: z.enum(['codex', 'claude', 'grok']), conversationRef: z.string().min(1).max(4096),
   title: z.string().max(4096), working: z.boolean(), task: z.string().max(180), summary: summary.nullable(),
   summaryAt: z.string().datetime().nullable(), stale: z.boolean() }).strict();
 const schema = z.object({ version: z.literal(1), updatedAt: z.string().datetime(),

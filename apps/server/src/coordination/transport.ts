@@ -14,9 +14,9 @@ import { dispatchGrants } from '../grants/transport.js';
 import type { AgentSessionLaunches } from '../grants/session-launches.js';
 
 const text = z.string().trim().min(1);
-// Grok is a coordination identity only. Console session providers stay PROVIDERS,
-// so Grok is not launched, pasted into, or indexed as a Console conversation.
-const coordinationProviders = ['codex', 'claude', 'grok'] as const;
+// Every Console provider can register for coordination. Grok registers too when a Grok process started outside the Console
+// (it loads Claude's hooks), and is also a Console provider that runs on the structured transport.
+const coordinationProviders = PROVIDERS;
 const inputSchema = z.object({
   action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
