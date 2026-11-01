@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { SessionCommandResult } from '../src/sessions/session-manager.js';
 import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
-import type { QueuedInputRecord } from '../src/sessions/input-queue.js';
+import { InputQueue, type QueuedInputRecord } from '../src/sessions/input-queue.js';
 import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt.js';
 import { CoordinationService } from '../src/coordination/service.js';
 import { peerWakeAttemptKey, peerWakePaused, type PeerWakeAttempt } from '../src/coordination/wake.js';
@@ -401,14 +401,20 @@ describe('Structured input that has no meaning without a terminal', () => {
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
   });
 
-  it('rejects a message that is only a slash command, on every submit path', async () => {
+  it('rejects a message that is only a slash command, on every submit path, without pausing automatic input', async () => {
     const f = fixture();
     const { session } = await f.bindNew();
+    const assignment = enableUnattendedRecovery(f.db, 'codex', session.conversationRef);
+    const revision = new InputQueue(f.db.sqlite).revision(session.id);
     await rejected(send(f, session.id, '/compact'));
     await rejected(send(f, session.id, '  /model  '));
     await rejected(f.manager.sendInput(session.id, '/status'));
     await rejected(f.manager.sendKeystrokes(session.id, { text: '/review', keys: ['Enter'] }));
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
+    // Nothing was sent, so nothing a sent message does happened either: no pause, no new input revision, no journal entry.
+    expect(peerWakePaused(f.db, assignment)).toBe(false);
+    expect(new InputQueue(f.db.sqlite).revision(session.id)).toBe(revision);
+    expect(new InputQueue(f.db.sqlite).list(session.id)).toEqual([]);
   });
 
   it('accepts ordinary messages that merely start with a slash', async () => {

@@ -1684,6 +1684,7 @@ export class SessionManager {
   }
 
   async sendInput(sessionId: string, text: string): Promise<SessionCommandResult> {
+    this.assertAdmissibleText(sessionId, text);
     this.inputQueue.advanceRevision(sessionId);
     this.pauseAutomaticInput(sessionId, 'human_input', 'A human conversation input was requested.');
     this.runRecovery.cancel(sessionId);
@@ -1713,6 +1714,7 @@ export class SessionManager {
     revision = this.inputQueue.revision(sessionId)): Promise<SessionCommandResult> {
     // Reject unsupported input before it pauses automatic work or cancels recovery.
     this.assertStructuredKeystrokes(payload);
+    if (payload.keys?.[0] === 'Enter') this.assertAdmissibleText(sessionId, payload.submittedText ?? payload.text);
     const stop = payload.keys?.[0] === 'Escape';
     const cancelledBeforeAdmission = revision !== this.inputQueue.revision(sessionId) && !stop;
     if (cancelledBeforeAdmission && !payload.submissionId) {
@@ -1773,8 +1775,6 @@ export class SessionManager {
     if (!text || payload.keys?.length !== 1 || payload.keys[0] !== 'Enter') {
       throw new SessionInputRejectedError('Queued submission requires a complete message and a single Enter.');
     }
-    const rejection = this.structuredTextRejection(text, session.provider);
-    if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     let record = this.inputQueue.get(sessionId, payload.submissionId!);
     if (record && record.text !== text) throw new SessionInputRejectedError('This submission ID already belongs to another message.');
     const interrupted = revision !== this.inputQueue.revision(sessionId);
@@ -2446,9 +2446,18 @@ export class SessionManager {
     });
   }
 
+  /**
+   * Refuses a message the session cannot take, before anything else happens for it: a refused message must not pause automatic
+   * work, cancel recovery or move the input revision, and is never journaled (it would only sit there failed).
+   */
+  private assertAdmissibleText(sessionId: string, text: string | undefined): void {
+    const provider = this.db.boundSessions.getById(sessionId)?.provider;
+    const rejection = provider && text?.trim() ? this.structuredTextRejection(text.trim(), provider) : undefined;
+    if (rejection) throw new SessionKeystrokeRejectedError(rejection);
+  }
+
   private structuredTextRejection(text: string, provider: ProviderId): string | undefined {
-    // Refuse at admission, before the message is queued, rather than leave it failed in the journal. A caption is judged
-    // without the image envelope after it.
+    // A caption is judged without the image envelope after it.
     if (STRUCTURED_SLASH_COMMAND.test(imagePromptDisplay(text).text.trim())) {
       return 'Slash commands are terminal controls and are not available here. Send the request as a normal message. Nothing was sent.';
     }
@@ -2481,8 +2490,6 @@ export class SessionManager {
   }
 
   private async submitStructuredText(session: BoundSession, text: string): Promise<SessionCommandResult> {
-    const rejection = this.structuredTextRejection(text, session.provider);
-    if (rejection) throw new SessionKeystrokeRejectedError(rejection);
     try {
       await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text, this.imageStoreDir));
     } catch (error) {
