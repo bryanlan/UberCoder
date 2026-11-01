@@ -118,12 +118,44 @@ describe('AppDatabase', () => {
     after.close();
   });
 
+  it('upgrades a version 19 database with a column for the Auto profile state, and keeps that state apart from ordinary upserts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v19-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const before = new AppDatabase(databasePath);
+    before.boundSessions.upsert(boundSession({ id: 'auto-session', conversationRef: 'auto-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
+    before.sqlite.exec('alter table bound_sessions drop column auto_route_json; delete from schema_version where version = 20');
+    expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 19 });
+    before.close();
+
+    const after = new AppDatabase(databasePath);
+    expect(after.sqlite.prepare('select name from schema_version where version = 20').get()).toEqual({ name: 'auto-model-profile' });
+    expect(after.boundSessions.getById('auto-session')?.autoRoute).toBeUndefined();
+    const decision = { source: 'router' as const, decidedAt: '2026-11-01T12:00:00.000Z', model: 'gpt-6.1-terra', effort: 'low', launchName: 'gpt-6.1-terra' };
+    after.boundSessions.setAutoRoute('auto-session', { routePending: false, decision }, '2026-11-01T12:00:00.000Z');
+    // An ordinary status upsert must not erase it.
+    after.boundSessions.upsert({ ...after.boundSessions.getById('auto-session')!, title: 'renamed', updatedAt: '2026-11-01T12:00:01.000Z' });
+    expect(after.boundSessions.getById('auto-session')?.autoRoute).toEqual({ routePending: false, decision });
+
+    // A switch to Auto commits the Auto state its request carries; a switch to High clears it.
+    const request = (profile: 'auto' | 'high', requestId: string) => ({
+      requestId, profile, requestedAt: '2026-11-01T12:01:00.000Z', state: 'applying' as const, startedAt: '2026-11-01T12:01:00.000Z',
+      resumeConversationRef: 'auto-ref', ...(profile === 'auto' ? { autoRoute: { routePending: true, decision } } : {}),
+    });
+    after.boundSessions.replaceModelProfileRequest('auto-session', request('auto', 'r1'), '2026-11-01T12:01:00.000Z');
+    after.boundSessions.completeModelProfileRequest({ id: 'auto-session', requestId: 'r1', profile: 'auto', updatedAt: '2026-11-01T12:01:01.000Z' });
+    expect(after.boundSessions.getById('auto-session')).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: true, decision } });
+    after.boundSessions.replaceModelProfileRequest('auto-session', request('high', 'r2'), '2026-11-01T12:02:00.000Z');
+    after.boundSessions.completeModelProfileRequest({ id: 'auto-session', requestId: 'r2', profile: 'high', updatedAt: '2026-11-01T12:02:01.000Z' });
+    expect(after.boundSessions.getById('auto-session')).toMatchObject({ codexProfile: 'high', autoRoute: undefined });
+    after.close();
+  });
+
   it('upgrades a version 18 database so existing rows read as tmux sessions', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v18-'));
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
     before.boundSessions.upsert(boundSession({ id: 'older-session', conversationRef: 'older-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column transport; delete from schema_version where version = 19');
+    before.sqlite.exec('alter table bound_sessions drop column auto_route_json; alter table bound_sessions drop column transport; delete from schema_version where version >= 19');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 18 });
     before.close();
 

@@ -1,11 +1,13 @@
-import type { ClaudeCostProfileKey, CodexCostProfileKey, ConversationSummary, NormalizedMessage, ProviderId } from '@agent-console/shared';
+import type { ConversationSummary, ModelTarget, NormalizedMessage, ProviderId } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 
 export interface ProviderLaunchOptions {
   initialPrompt?: string;
-  codexProfile?: CodexCostProfileKey;
-  claudeProfile?: ClaudeCostProfileKey;
+  /** The model and effort a cost profile resolved to (the caller reads them from the model catalog). Wins over `model`/`effort`. */
+  profileTarget?: ModelTarget;
+  /** The Medium profile's model and effort: used only for a brand-new conversation that names no model anywhere. */
+  defaultTarget?: ModelTarget;
   model?: string;
   effort?: string;
   flags?: string[];

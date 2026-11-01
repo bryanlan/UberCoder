@@ -55,6 +55,7 @@ describe('command construction and proxy allowlisting', () => {
   it('appends an initial prompt when starting a fresh Codex session', () => {
     const command = new CodexProvider().getLaunchCommand(project, null, settings, {
       initialPrompt: 'Reply with exactly: smoke-token',
+      defaultTarget: { model: 'gpt-6.1-sol', effort: 'xhigh' },
     });
     expect(command.argv).toEqual([
       'codex', '--model', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="xhigh"',
@@ -65,7 +66,7 @@ describe('command construction and proxy allowlisting', () => {
 
   it('applies the canonical high profile to a resumed Codex session', () => {
     const command = new CodexProvider().getLaunchCommand(project, 'session-123', settings, {
-      codexProfile: 'high',
+      profileTarget: { model: 'gpt-6-astra', effort: 'xhigh' },
     });
     expect(command.argv).toEqual([
       'codex', '--dangerously-bypass-approvals-and-sandbox', 'resume',
@@ -105,7 +106,7 @@ describe('command construction and proxy allowlisting', () => {
     };
 
     const command = new CodexProvider().getLaunchCommand(project, 'session-123', configuredSettings, {
-      codexProfile: 'high',
+      profileTarget: { model: 'gpt-6-astra', effort: 'xhigh' },
     });
 
     expect(command.argv).toEqual([
@@ -122,10 +123,12 @@ describe('command construction and proxy allowlisting', () => {
   });
 
   it('uses Opus 5.5 xhigh for a new Claude session without project model flags', () => {
-    const command = new ClaudeProvider().getLaunchCommand(project, null, claudeSettings);
+    const command = new ClaudeProvider().getLaunchCommand(project, null, claudeSettings, { defaultTarget: { model: 'claude-opus-5-5', effort: 'xhigh' } });
     expect(command.argv).toEqual([
       'claude', '--model', 'claude-opus-5-5', '--effort', 'xhigh', '--dangerously-skip-permissions',
     ]);
+    // The provider holds no model of its own: with no default handed in, a new session names none.
+    expect(new ClaudeProvider().getLaunchCommand(project, null, claudeSettings).argv).toEqual(['claude', '--dangerously-skip-permissions']);
   });
 
   it.each([
@@ -133,7 +136,7 @@ describe('command construction and proxy allowlisting', () => {
     ['claude', '--effort=medium'],
   ])('defaults effort-only Claude command %j to Opus 5.5 xhigh', (...newCommand) => {
     const configured = { ...claudeSettings, commands: { ...claudeSettings.commands, newCommand } };
-    const command = new ClaudeProvider().getLaunchCommand(project, null, configured);
+    const command = new ClaudeProvider().getLaunchCommand(project, null, configured, { defaultTarget: { model: 'claude-opus-5-5', effort: 'xhigh' } });
     expect(command.argv).toEqual([
       'claude', '--model', 'claude-opus-5-5', '--effort', 'xhigh', '--dangerously-skip-permissions',
     ]);
@@ -142,9 +145,9 @@ describe('command construction and proxy allowlisting', () => {
   it.each([
     ['high', 'claude-fable-5-1', 'xhigh'],
     ['medium', 'claude-opus-5-5', 'xhigh'],
-    ['low', 'claude-sonnet-5', 'high'],
-  ] as const)('launches a resumed Claude session with %s profile', (profile, model, effort) => {
-    const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings, { claudeProfile: profile });
+    ['low', 'claude-sonnet-5-5', 'high'],
+  ] as const)('launches a resumed Claude session with %s profile', (_profile, model, effort) => {
+    const command = new ClaudeProvider().getLaunchCommand(project, 'session-123', claudeSettings, { profileTarget: { model, effort } });
     expect(command.argv).toEqual([
       'claude', '--model', model, '--effort', effort,
       '--dangerously-skip-permissions', '--resume', 'session-123',
@@ -163,7 +166,7 @@ describe('command construction and proxy allowlisting', () => {
     expect(new ClaudeProvider().getLaunchCommand(project, null, configured).argv).toEqual([
       'claude', '--dangerously-skip-permissions', '--model=claude-sonnet-5', '--effort', 'high',
     ]);
-    expect(new ClaudeProvider().getLaunchCommand(project, 'session-123', configured, { claudeProfile: 'high' }).argv).toEqual([
+    expect(new ClaudeProvider().getLaunchCommand(project, 'session-123', configured, { profileTarget: { model: 'claude-fable-5-1', effort: 'xhigh' } }).argv).toEqual([
       'claude', '--model', 'claude-fable-5-1', '--effort', 'xhigh', '--dangerously-skip-permissions', '--resume', 'session-123',
     ]);
   });

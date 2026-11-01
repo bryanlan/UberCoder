@@ -363,3 +363,6 @@ export function fakePluginContext(runtimeDir = '/tmp/agent-console-fake-runtime'
     metaValues,
   };
 }
+
+/** For tests that build a `StructuredSessionService` on its own: no profile names a model. */
+export const noModelTargets = { resolve: async () => undefined, peek: () => undefined };

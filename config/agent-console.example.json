@@ -41,6 +41,11 @@
       "env": {}
     }
   },
+  "modelRouting": {
+    "woPath": "/home/bryan/code/workflow_optimizer/.venv/bin/wo",
+    "profilesTimeoutMs": 10000,
+    "routeTimeoutMs": 8000
+  },
   "security": {
     "passwordHash": "REPLACE_WITH_OUTPUT_FROM_NPM_RUN_AUTH_HASH",
     "sessionSecret": "REPLACE_WITH_64_PLUS_CHAR_RANDOM_HEX_SECRET",

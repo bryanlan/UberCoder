@@ -315,7 +315,7 @@ describe('Claude model profiles', () => {
 
     await manager.requestModelProfile(session.id, 'low');
     await expect.poll(() => db.boundSessions.getById(session.id)?.claudeProfile).toBe('low');
-    expect(tmux.createdCommands.at(-1)).toContain("'claude-sonnet-5' '--effort' 'high'");
+    expect(tmux.createdCommands.at(-1)).toContain("'claude-sonnet-5-5' '--effort' 'high'");
     expect(tmux.createdCommands.at(-1)).toContain("'--resume' 'claude-history'");
   });
 

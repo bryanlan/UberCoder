@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { BoundSession, ModelProfileKey, ModelProfileRequest, SessionTransport } from '@agent-console/shared';
+import type { AutoRoute, BoundSession, ModelProfileKey, ModelProfileRequest, SessionTransport } from '@agent-console/shared';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 import { InputQueue } from '../../sessions/input-queue.js';
 import { parsePendingRequests, structuredRequestsKey } from '../../sessions/structured/pending-requests.js';
@@ -130,6 +130,15 @@ export class BoundSessionsRepo {
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   setLaunchContext(id: string, context: BoundSession['launchContext']): void {
     this.sqlite.prepare('update bound_sessions set launch_context_json=? where id=?').run(context ? JSON.stringify(context) : null, id);
+  }
+
+  // Independently owned state: ordinary screen/status upserts must not overwrite it.
+  setAutoRoute(id: string, route: AutoRoute | undefined, updatedAt: string): BoundSession | undefined {
+    const current = this.getById(id);
+    if (!current) return undefined;
+    this.sqlite.prepare('update bound_sessions set auto_route_json = ?, updated_at = ? where id = ?')
+      .run(route ? JSON.stringify(route) : null, nextUpdatedAt(current.updatedAt, updatedAt), id);
+    return this.getById(id);
   }
 
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
@@ -266,9 +275,15 @@ export class BoundSessionsRepo {
       }
       this.sqlite.prepare(`
         update bound_sessions
-        set ${current.provider === 'codex' ? 'codex_profile' : 'claude_profile'} = ?, model_profile_request_json = null, updated_at = ?
+        set ${current.provider === 'codex' ? 'codex_profile' : 'claude_profile'} = ?, auto_route_json = ?, model_profile_request_json = null, updated_at = ?
         where id = ?
-      `).run(input.profile, nextUpdatedAt(current.updatedAt, input.updatedAt), input.id);
+      `).run(
+        input.profile,
+        // High, Medium and Low carry no Auto state; a switch to Auto commits the state its request carries.
+        input.profile === 'auto' && current.modelProfileRequest.autoRoute ? JSON.stringify(current.modelProfileRequest.autoRoute) : null,
+        nextUpdatedAt(current.updatedAt, input.updatedAt),
+        input.id,
+      );
       return this.getById(input.id);
     })();
   }
@@ -327,6 +342,7 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     provider: String(row.provider) as BoundSession['provider'],
     codexProfile: optionalString(row.codex_profile) as BoundSession['codexProfile'],
     claudeProfile: optionalString(row.claude_profile) as BoundSession['claudeProfile'],
+    autoRoute: typeof row.auto_route_json === 'string' ? JSON.parse(row.auto_route_json) as AutoRoute : undefined,
     modelProfileRequest: row.model_profile_request_json
       ? JSON.parse(String(row.model_profile_request_json)) as BoundSession['modelProfileRequest']
       : undefined,

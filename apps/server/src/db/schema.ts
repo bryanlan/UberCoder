@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 19;
+export const CURRENT_SCHEMA_VERSION = 20;
 
 interface Migration {
   version: number;
@@ -305,6 +305,10 @@ const MIGRATIONS: Migration[] = [
   { version: 19, name: 'session-transport', up(sqlite) {
     // Which runtime owns the row: 'tmux' (hidden terminal) or 'structured' (provider protocol).
     if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'transport', "transport text not null default 'tmux'");
+  } },
+  { version: 20, name: 'auto-model-profile', up(sqlite) {
+    // The Auto profile's state: whether the next message is routed, and the router's latest decision.
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'auto_route_json', 'auto_route_json text');
   } },
 ];
 

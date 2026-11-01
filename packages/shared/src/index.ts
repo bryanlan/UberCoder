@@ -3,31 +3,129 @@ export * from './workers.js';
 export const PROVIDERS = ['codex', 'claude'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
-export const CODEX_COST_PROFILES = {
-  high: { model: 'gpt-6-astra', reasoningEffort: 'xhigh', shortcut: 'H' },
-  medium: { model: 'gpt-6.1-sol', reasoningEffort: 'xhigh', shortcut: 'M' },
-  low: { model: 'gpt-6-luna', reasoningEffort: 'xhigh', shortcut: 'L' },
-} as const;
-export type CodexCostProfileKey = keyof typeof CODEX_COST_PROFILES;
+/**
+ * Model profiles. The High, Medium and Low models live in one place outside this repository (the workflow_optimizer model
+ * catalog, read through `wo profiles --json`), so nothing here names a model. `auto` is not a model: it asks the router
+ * for one when the next message is sent.
+ */
+export const FIXED_MODEL_PROFILE_KEYS = ['high', 'medium', 'low'] as const;
+export type FixedModelProfileKey = (typeof FIXED_MODEL_PROFILE_KEYS)[number];
+export const MODEL_PROFILE_KEYS = ['auto', ...FIXED_MODEL_PROFILE_KEYS] as const;
+export type ModelProfileKey = (typeof MODEL_PROFILE_KEYS)[number];
+/** The keyboard shortcut letter (Alt plus the letter) and button label of each profile. */
+export const MODEL_PROFILE_SHORTCUTS: Record<ModelProfileKey, string> = { auto: 'A', high: 'H', medium: 'M', low: 'L' };
 
-export const CLAUDE_COST_PROFILES = {
-  high: { model: 'claude-fable-5-1', reasoningEffort: 'xhigh', shortcut: 'H' },
-  medium: { model: 'claude-opus-5-5', reasoningEffort: 'xhigh', shortcut: 'M' },
-  low: { model: 'claude-sonnet-5', reasoningEffort: 'high', shortcut: 'L' },
-} as const;
-export type ClaudeCostProfileKey = keyof typeof CLAUDE_COST_PROFILES;
-export type ModelProfileKey = CodexCostProfileKey | ClaudeCostProfileKey;
+/** The model and reasoning effort a provider is started with or switched to. `model` is the provider's launch name. */
+export interface ModelTarget {
+  model: string;
+  effort: string;
+}
 
-export function visibleModelMatchesProfile(provider: ProviderId, profile: ModelProfileKey, visibleModel: string | undefined): boolean | undefined {
+/** One fixed profile level as the catalog defines it. */
+export interface ModelProfileEntry {
+  /** The catalog's model id. */
+  model: string;
+  /** Plain-English model name, for example `Claude Opus 5.5`. */
+  label: string;
+  effort: string;
+  /** The name the Console launches the model with (`--model` for Claude, the turn model for Codex). */
+  launchName: string;
+}
+
+export interface ProviderModelProfiles {
+  /** The vendor behind the provider, as the router names it. */
+  routerProvider: 'openai' | 'anthropic';
+  levels: Record<FixedModelProfileKey, ModelProfileEntry>;
+}
+
+/** What `GET /api/model-profiles` returns. */
+export interface ModelProfilesResponse {
+  providers: Record<ProviderId, ProviderModelProfiles>;
+  loadedAt: string;
+}
+
+/** One routing decision for an Auto session, built only from the router's typed answer (or from the Medium fallback). */
+export interface AutoDecision {
+  /** `router`: the router chose. `fallback`: routing failed and Medium was applied. */
+  source: 'router' | 'fallback';
+  decidedAt: string;
+  /** Catalog id of the chosen model; absent only when even the Medium profile could not be loaded. */
+  model?: string;
+  label?: string;
+  effort?: string;
+  /** The name the Console launches the model with. */
+  launchName?: string;
+  /** The role the router routed for (`implementer`), from the classifier or its default. */
+  role?: string;
+  /** Classifier confidence in that role, 0 to 100, when the classifier answered. */
+  rolePercent?: number;
+  /** `lighter`, `standard` or `heavier`, when the classifier answered. */
+  difficulty?: string;
+  /** `ok`, or `fallback` when the classifier could not answer and the router used its default role. */
+  classifierStatus?: string;
+  /** Weekly-quota pacing of the chosen subscription: surplus, on_pace, tight, stale or unknown. */
+  quotaState?: string;
+  /** The router's full plain-English reason. */
+  reason?: string;
+  /** Shown to the person when Auto fell back, for example `Auto unavailable: timed out. Using Medium.` */
+  warning?: string;
+}
+
+/** Auto state kept on a session whose profile is `auto`. */
+export interface AutoRoute {
+  /** True from the moment A is selected until the next message has been routed. */
+  routePending: boolean;
+  /** The latest decision. Its model is what the session runs on until the next routing. */
+  decision?: AutoDecision;
+}
+
+const AUTO_QUOTA_WORDS: Record<string, string> = {
+  surplus: 'surplus',
+  on_pace: 'on pace',
+  tight: 'tight',
+  stale: 'quota stale',
+  unknown: 'quota unknown',
+};
+
+/** A short model name for the one-line display: `Claude Sonnet 5.5` becomes `Sonnet 5.5`. */
+export function shortModelLabel(label: string): string {
+  return label.replace(/^Claude\s+/, '');
+}
+
+/**
+ * The compact line and the hover text shown next to the profile control, built only from typed router fields.
+ * Example line: `A → Sonnet 5.5·low · implementer 91% · lighter · Claude on pace`.
+ */
+export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undefined): { line: string; title?: string } {
+  const providerName = provider === 'codex' ? 'Codex' : 'Claude';
+  const decision = route?.decision;
+  if (!decision) return { line: route?.routePending ? 'A → routes with your next message' : 'A' };
+  const parts: string[] = [];
+  parts.push(decision.label && decision.effort ? `${shortModelLabel(decision.label)}·${decision.effort}` : 'no model chosen');
+  if (decision.source === 'router') {
+    if (decision.role) parts.push(decision.rolePercent !== undefined ? `${decision.role} ${decision.rolePercent}%` : decision.role);
+    if (decision.difficulty) parts.push(decision.difficulty);
+    if (decision.quotaState) parts.push(`${providerName} ${AUTO_QUOTA_WORDS[decision.quotaState] ?? decision.quotaState}`);
+  }
+  const base = `A → ${parts.join(' · ')}`;
+  const line = route?.routePending ? `${base} · re-routes with your next message` : base;
+  const title = decision.source === 'fallback' ? decision.warning : decision.reason;
+  return { line, ...(title ? { title } : {}) };
+}
+
+/**
+ * Whether the model a session shows on screen is the model of `target`. `undefined`: it cannot be told (no screen text, or text
+ * in a form this does not read).
+ */
+export function visibleModelMatchesTarget(provider: ProviderId, target: ModelTarget, visibleModel: string | undefined): boolean | undefined {
   if (!visibleModel) return undefined;
-  const selected = provider === 'codex' ? CODEX_COST_PROFILES[profile] : CLAUDE_COST_PROFILES[profile];
   if (provider === 'codex') {
     const observed = visibleModel.trim().match(/^(gpt-[\w.-]+)(?:\s+(default|low|medium|high|xhigh|max|ultra))?$/i);
     if (!observed) return undefined;
-    return observed[1]!.toLowerCase() === selected.model
-      && (!observed[2] || observed[2].toLowerCase() === selected.reasoningEffort);
+    return observed[1]!.toLowerCase() === target.model
+      && (!observed[2] || observed[2].toLowerCase() === target.effort);
   }
-  const expected = selected.model.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
+  const expected = target.model.match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?$/);
   const observed = visibleModel.trim().match(/^([a-z]+)\s+(\d+)(?:\.(\d+))?$/i);
   if (!expected || !observed) return undefined;
   return observed[1]!.toLowerCase() === expected[1]
@@ -48,6 +146,13 @@ interface ModelProfileRequestBase {
   requestId: string;
   profile: ModelProfileKey;
   requestedAt: string;
+  /**
+   * For a switch to `auto`: the Auto state the switch commits (a decision from the router, or just routePending). Absent for
+   * High, Medium and Low, which clear any Auto state when they complete.
+   */
+  autoRoute?: AutoRoute;
+  /** For an Auto decision: the model and effort to apply, so a restart between the steps still applies the same choice. */
+  target?: ModelTarget;
 }
 
 export type ModelProfileRequest =
@@ -232,8 +337,10 @@ export interface BoundSession {
   runFailure?: RunFailure;
   id: string;
   provider: ProviderId;
-  codexProfile?: CodexCostProfileKey;
-  claudeProfile?: ClaudeCostProfileKey;
+  codexProfile?: ModelProfileKey;
+  claudeProfile?: ModelProfileKey;
+  /** Present while the profile is `auto`. */
+  autoRoute?: AutoRoute;
   modelProfileRequest?: ModelProfileRequest;
   projectSlug: string;
   conversationRef: string;

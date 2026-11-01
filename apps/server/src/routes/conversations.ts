@@ -480,6 +480,8 @@ export async function registerConversationRoutes(
         title: pendingConversation.title,
         kind: 'pending',
         transport,
+        // A new chat started from the UI picks its model per message (Auto). A terminal-backed chat cannot, so it keeps Medium.
+        ...(transport === 'structured' ? (providerId === 'codex' ? { codexProfile: 'auto' as const } : { claudeProfile: 'auto' as const }) : {}),
       });
       // An adopted alias already points at the native conversation; do not overwrite that record.
       if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {

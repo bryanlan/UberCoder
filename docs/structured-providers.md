@@ -98,6 +98,14 @@ Rules:
 - `pid` holds the app-server process id for structured rows (readers that use `pid` as "a live
   helper exists" keep working: worker roster, grant concurrency).
 - `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 19 in the same change.
+
+### Schema version 20
+
+- `bound_sessions.auto_route_json TEXT`: the Auto profile's state for a row (`routePending` and the router's latest
+  decision). It is independently owned state like `launch_context_json`: ordinary row upserts do not write it; only
+  `setAutoRoute` and the completion of a model-profile request do.
+- `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 20 in the same change. The new column touches none of the
+  assignment, scope or binding meanings the sweep reads.
 - Meta keys owned by the structured lane: `structured-instance:<provider>` =
   `{ pid, startTicks, bootId, startedAt, version }`, the backend's note of the provider process it is connected
   to. `pid` is the process the session host started, which on an npm install is the `codex` Node launcher; the
@@ -796,7 +804,7 @@ Line numbers are from `main` at `af009e3`.
 | `suspendIdleSession` (1343), `suspendPressureIdleSession` (1261), `suspensionBlockReason` (3371), `suspendSession`/`resumeSession` (3421) | Idle: `unload` and set `idleSuspendedAt`; the row's run monitor is kept. Pressure: skipped for rows on a `shared` process (it cannot be suspended per thread); for a `per-session` plugin it ends the idle conversation's process and sets `pressureSuspendedAt` (lane C2). Manual suspend: `unload` and set `manualSuspendedAt`; resume: `ensureLoaded`. Block reasons: `turn_running`, `background_work`, `queued_input`. |
 | `reconcileSessions`, `defaultTransportFor`, `migrateTmuxRowToStructured` (lane C2) | While `structuredSessions.defaultTransport` is `structured`, each restorable tmux row of a provider whose lane is on is classified and, when idle or dead, flipped to a sleeping structured row (`BoundSessionsRepo.setTransport`); a live tmux session moves only once idle sleep would stop it (idle window and restore grace), and is stopped like idle sleep and confirmed dead first. `structuredMigrationReport()` is the dry run, served at `GET /api/sessions/structured-migration`. A bind that names no transport takes `defaultTransportFor(provider)`. See `docs/structured-cutover.md`. |
 | `releaseSessionInternal` (3481) | `interrupt` if a turn is active, then `unload`, then `ended`; delete the runtime dir as today. |
-| `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running (or one starts during the switch) put the request back to `queued` with `turn_running`, and the next `turn.terminal` re-runs it. The next `sendTurn` carries `model`/`effort`. |
+| `drainModelProfileRequestInternal` (3078), `applyModelProfileRequest` (3226) | No restart. Store the profile and complete the request immediately when idle; when a turn is running (or one starts during the switch) put the request back to `queued` with `turn_running`, and the next `turn.terminal` re-runs it. The next `sendTurn` carries `model`/`effort`, which the session manager resolves from the model catalog (`wo profiles --json`) for High, Medium and Low, or from the Auto decision stored on the row. **Auto:** `routeAutoBeforeTurn` runs before a person's message (typed, queued or the opening prompt) starts a turn on a row whose profile is `auto` and whose `autoRoute.routePending` is set: it asks `wo route`, then writes an `applying` request that carries the chosen target and the decision and completes it through the same `completeStructuredModelProfile`, so a restart between the steps applies the same choice. A running turn is never switched, so a steered message is not routed. |
 | `restartGrantedSession` (1830), `closeGrantedSession` (1869) | Restart: refuse with "Restart is waiting for the current work to finish." while a turn is active. A grant never stops a human's running turn; tmux refuses in the same situation. Otherwise `unload`, reset the run monitor, `ensureLoaded`, `sendTurn(prompt)`. Close: same as release. Completion of a crash-resumed restart compares `structured-epoch` instead of `pid`. |
 | `retainFinishedInbox` (485), `isWorkReleaseDue` path (1170) | Use `providerAlive(session)`: tmux liveness for tmux rows, "thread loaded on a live connection" for structured rows. |
 | `ensureSessionLogPaths` (1517), `watchSessionOutput` | Do not create or tail `raw.log` for structured rows. |
@@ -823,14 +831,14 @@ Input and delivery rules:
 `StructuredSessionService` API used by SM (all run under `runtimes.run(sessionId, label)` by SM):
 
 ```ts
-start(input: { sessionId; provider; cwd; profile?; model?; effort? }): Promise<{ nativeSessionId; transcriptPath?; pid? }>
+start(input: { sessionId; provider; cwd; target?; model?; effort? }): Promise<{ nativeSessionId; transcriptPath?; pid? }>   // target = { model, effort } resolved from the row's profile
 resume(session, cwd): Promise<{ transcriptPath?; pid? }>
 ensureLoaded(session, cwd?): Promise<'loaded' | 'unavailable'>
 submitHuman(session, record: { requestId; text }, images?): Promise<{ turnId; mode: 'turn' | 'steer' }>
 interrupt(session): Promise<{ outcome: 'interrupted' | 'idle'; cancelledSteerIds: string[] }>
 deliverAutomatic(session, prompt): Promise<{ status: 'submitted' | 'deferred' | 'failed'; reason?; turnId? }>
 respond(session, requestId, response: RequestResponse): Promise<{ message?: string }>   // one answer per question; throws StructuredRequestNotPendingError
-setProfile(session, profile): Promise<'applied' | 'deferred'>
+setTarget(session, target?: { model; effort }): Promise<'applied' | 'deferred'>   // the model and effort the next turns carry; undefined keeps the current one
 unload(session): Promise<void>
 release(session): Promise<void>
 endConversation(session): Promise<void>                                       // end the conversation's session host and launch record without loading it

@@ -35,6 +35,7 @@ it does not query the live Console database.
   `NODE_ENV=test npm run test:e2e -- apps/web/e2e/csrf-*.spec.ts`. The auth
   cancellation case uses a private HTTP server and Chromium's real cookie jar
   to verify that an aborted older auth response cannot replace the renewed login.
+- Model profiles and Auto: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- model-profiles model-profile-routes auto-model-profile model-profile-lifecycle` and `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane api`. Server tests run against `apps/server/test/helpers/fake-wo.mjs` (set through `apps/server/vitest.config.ts` as `AGENT_CONSOLE_WO_PATH`), never the real `wo`, so the Jev classifier is not called. Unit tests that need to steer the router pass a stub `WoRunner` to `ModelProfileService`.
 - Server/session changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-lifecycle session-recency session-runtime session-screen-state`.
 - Pending Codex first-turn or session keystroke changes: `npm run build -w @agent-console/shared && npm run test -w @agent-console/server -- session-pending-first-turn session-keystrokes session-keystrokes-submit session-routes`.
 - Durable queued chat submission: `NODE_ENV=test npm run test -w @agent-console/server -- session-input-queue session-routes session-interactive-input`. These fixtures use disposable SQLite databases and fake tmux transports to verify delayed repaint, database reopen, FIFO, matching drafts, cancellation before/during Enter, failed suspension, model-switch deferral, ownership and uncertain Enter. `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane` covers the queued Text Bypass handoff and sending-state controls. Browser coverage in `apps/web/e2e/input-rejection.spec.ts` verifies separate consecutive messages, pending-message display, refresh without resubmission, cancellation and preservation of genuine rejection behavior. Use isolated E2E ports; browser fixtures intercept provider input.
@@ -66,7 +67,7 @@ it does not query the live Console database.
 - Shared wiki storage/search and API: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- wiki`. Fixtures use temporary Git repositories and SQLite files.
 
 ## Environment and Fixtures
-- Install with `npm install`.
+- Install with `npm install`. If the shell sets `NODE_ENV=production`, npm skips the dev dependencies the build and tests need: install with `NODE_ENV=development npm install --include=dev`.
 - Host runtime needs Node 22+, npm 10+, tmux 3.4+, Codex CLI, Claude Code, git, build-essential, and python3.
 - Codex and Claude Code read the shared `AGENTS.md` directly.
 - `node_modules/@agent-console/*` workspace links point back to local `apps/*` and `packages/*`; do not replace them with copied package directories.

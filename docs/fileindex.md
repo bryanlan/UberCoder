@@ -57,6 +57,8 @@
   including the opt-in eight-hour scan for recent unbound Codex conversations.
 - `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and durable Codex/Claude model-profile request/cancel routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
+- `apps/server/src/model-profiles/service.ts` - the Console's only source of model choices: runs `wo profiles --json` and `wo route --task ... --json`, caches and validates the answers, builds Auto decisions and the Medium fallback, and turns a session row into its model and effort. `apps/server/src/routes/model-profiles.ts` serves `GET /api/model-profiles`.
+  `apps/server/test/model-profiles.test.ts`, `model-profile-routes.test.ts` and `auto-model-profile.test.ts` cover them; `apps/server/test/helpers/fake-wo.mjs` stands in for `wo`, and `apps/server/vitest.config.ts` points every server test at it.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
 - `apps/server/src/config/schema.ts` and `service.ts` - config schema, merge behavior, runtime paths, provider/project settings, and security knobs.
@@ -101,7 +103,7 @@
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
   filtering for instruction/environment wrapper and internal memory-citation records, and
   event/response duplicate preference.
-- `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution,
+- `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution, per-message Auto routing (`routeAutoBeforeTurn`),
   canonical conversation ownership, startup verification, recovery,
   bounded recent-conversation auto-tracking, working state, confirmed response timestamps, nine-day Work-mode release, event-log observation, text entry,
   literal selection-keystroke detection, and recency timestamps.
@@ -128,7 +130,8 @@
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
-- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+H/Alt+M/Alt+L Codex/Claude profile controls, and
+- `apps/web/src/lib/model-profiles.ts` - the state of the server's model list in the web app (loading, error, ready) and the model a session's active profile means; the list is fetched in `App.tsx` from `/api/model-profiles`.
+- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+A/Alt+H/Alt+M/Alt+L Codex/Claude profile controls (A only on structured sessions), the Auto route line and fallback warning, the model-list error state, and
   conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
   and the rule that server-derived terminal input is not promoted into transcript rows.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,

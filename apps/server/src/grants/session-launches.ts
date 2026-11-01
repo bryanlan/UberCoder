@@ -2,12 +2,14 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { AgentGrant, AgentGrantAction, AgentLaunchContext, BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
-import type { ProjectService } from '../projects/project-service.js';
+import type { ActiveProject, ProjectService } from '../projects/project-service.js';
+import type { MergedProviderSettings } from '../config/service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { RealtimeEventBus } from '../realtime/event-bus.js';
 import { SessionInputRejectedError, type SessionManager } from '../sessions/session-manager.js';
 import type { GrantService } from './service.js';
 import { AGENT_LAUNCH_PREFIX } from './authority.js';
+import { rowProfile, sessionModelTarget } from '../model-profiles/service.js';
 const SESSION_MEMORY_BYTES = 250 * 1024 * 1024;
 interface LaunchInput {
   projectSlug?: string; provider?: ProviderId; model?: string; effort?: string; flags?: string[];
@@ -128,23 +130,47 @@ export class AgentSessionLaunches {
     if (!project) throw new Error('Choose a configured active project.');
     const settings = this.projects.getMergedProviderSettings(project, input.provider);
     if (!settings.enabled) throw new Error('This provider is disabled for the project.');
-    const profile = target?.provider === 'codex' ? { codexProfile: target.codexProfile } : { claudeProfile: target?.claudeProfile };
-    const command = this.providers.get(input.provider).getLaunchCommand(project, target?.resumeConversationRef ?? null, settings,
-      target ? { ...profile, model: !target.codexProfile && !target.claudeProfile ? target.launchContext?.model : undefined,
-        effort: !target.codexProfile && !target.claudeProfile ? target.launchContext?.effort : undefined, flags: target.launchContext?.flags }
-        : { model: input.model, effort: input.effort, flags: input.flags });
-    let model: string | undefined;
-    for (let i = 1; i < command.argv.length; i++) {
-      const value = command.argv[i]!;
-      if (value === '--model' || value === '-m') model = command.argv[++i];
-      else if (value.startsWith('--model=')) model = value.slice(8);
-    }
+    const model = await this.plannedModel(project, settings, input.provider, target, input);
     const grant = this.grants.grantsFor(assignmentId).find(candidate => (!input.grantId || input.grantId === candidate.id)
       && candidate.actions.includes(action) && (!candidate.projectSlugs.length || candidate.projectSlugs.includes(project.slug))
       && (!candidate.limits.models.length || (model && candidate.limits.models.includes(model))));
     if (!grant) return { requiresGrant: true, action, projectSlug: project.slug, model,
       reason: 'No active grant covers this action, project and model. Request one broad grant with the required actions and scope.' };
     return this.enqueue(assignmentId, action, input, grant, target?.id ?? randomUUID(), id);
+  }
+
+  /**
+   * The model a launch or restart would start on, read from the command the provider would run. A launch that names no model
+   * starts on the Medium profile (Auto is chosen per message, after the launch), so the grant's model limits are checked
+   * against that. A restart keeps the model its row's profile means.
+   */
+  private async plannedModel(
+    project: ActiveProject,
+    settings: MergedProviderSettings,
+    provider: ProviderId,
+    target: BoundSession | undefined,
+    input: LaunchInput,
+  ): Promise<string | undefined> {
+    const profileTarget = target ? await sessionModelTarget(this.sessions.modelProfiles, target) : undefined;
+    const profiled = target ? rowProfile(target) !== undefined : false;
+    const model = target ? (profiled ? undefined : target.launchContext?.model) : input.model;
+    const effort = target ? (profiled ? undefined : target.launchContext?.effort) : input.effort;
+    const resumeRef = target?.resumeConversationRef ?? null;
+    const medium = !resumeRef && !model ? await this.sessions.modelProfiles.entry(provider, 'medium') : undefined;
+    const command = this.providers.get(provider).getLaunchCommand(project, resumeRef, settings, {
+      profileTarget,
+      defaultTarget: medium && { model: medium.launchName, effort: medium.effort },
+      model,
+      effort,
+      flags: target ? target.launchContext?.flags : input.flags,
+    });
+    let planned: string | undefined;
+    for (let i = 1; i < command.argv.length; i++) {
+      const value = command.argv[i]!;
+      if (value === '--model' || value === '-m') planned = command.argv[++i];
+      else if (value.startsWith('--model=')) planned = value.slice(8);
+    }
+    return planned;
   }
 
   private enqueue(assignmentId: string, action: AgentGrantAction, input: LaunchInput, grant: AgentGrant, sessionId: string, id: string) {
@@ -228,17 +254,7 @@ export class AgentSessionLaunches {
     }
     if (grant.limits.models.length) {
       const target = row.action === 'restart_session' ? this.db.boundSessions.getById(row.session_id) : undefined;
-      const command = this.providers.get(input.provider!).getLaunchCommand(project, target?.resumeConversationRef ?? null, settings,
-        target ? { codexProfile: target.codexProfile, claudeProfile: target.claudeProfile,
-          model: !target.codexProfile && !target.claudeProfile ? target.launchContext?.model : undefined,
-          effort: !target.codexProfile && !target.claudeProfile ? target.launchContext?.effort : undefined, flags: target.launchContext?.flags }
-          : { model: input.model, effort: input.effort, flags: input.flags });
-      let model: string | undefined;
-      for (let i = 1; i < command.argv.length; i++) {
-        const value = command.argv[i]!;
-        if (value === '--model' || value === '-m') model = command.argv[++i];
-        else if (value.startsWith('--model=')) model = value.slice(8);
-      }
+      const model = await this.plannedModel(project, settings, input.provider!, target, input);
       if (!model || !grant.limits.models.includes(model)) { this.update(row, 'cancelled', 'The current model is outside the grant.'); return; }
     }
     let available: number | undefined;

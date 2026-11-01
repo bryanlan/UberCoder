@@ -12,6 +12,7 @@ import { AuthService } from '../src/security/auth-service.js';
 function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig {
   return {
     coordination: { enabled: false, pilotPaths: [] },
+    modelRouting: { woPath: '/usr/local/bin/wo', profilesTimeoutMs: 10_000, routeTimeoutMs: 8_000 },
     workerSummaries: { enabled: false, runtimeCommand: ['agent-consult'] },
     conversationTitles: { enabled: false, runtimeCommand: ['agent-consult'] },
     server: {

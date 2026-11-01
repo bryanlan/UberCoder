@@ -13,8 +13,8 @@ export interface SessionRuntimeState {
   workingIdleTimer?: NodeJS.Timeout;
   rawOutputScreenUpdateTimer?: NodeJS.Timeout;
   liveSessionModel?: string;
-  codexProfile?: import('@agent-console/shared').CodexCostProfileKey;
-  claudeProfile?: import('@agent-console/shared').ClaudeCostProfileKey;
+  codexProfile?: import('@agent-console/shared').ModelProfileKey;
+  claudeProfile?: import('@agent-console/shared').ModelProfileKey;
   submittedTurnAt?: string;
   claudeFolderTrustPending?: boolean;
   /** Native process whose hidden pane already has the Console minimum size. */

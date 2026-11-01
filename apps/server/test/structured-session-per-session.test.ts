@@ -4,7 +4,7 @@ import type { AgentLaunchContext } from '@agent-console/shared';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import type { OpenOptions, TurnInput } from '../src/providers/transport/types.js';
-import { FakeTransportPlugin, fakePluginContext, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
+import { FakeTransportPlugin, fakePluginContext, noModelTargets, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 /** The Claude plugin's shape: one process per conversation, ids chosen by the client. */
@@ -151,6 +151,7 @@ describe('Per-session processes: what the host hands a conversation', () => {
     const registry = new TransportPluginRegistry();
     registry.register(new FakeTransportPlugin(PER_SESSION));
     const service = new StructuredSessionService({
+      targets: noModelTargets,
       registry, config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
       createContext: () => fakePluginContext(), meta: fakePluginContext().meta,
       callbacks: {
@@ -337,7 +338,7 @@ describe('Per-session processes: a row with no cost profile', () => {
   it('leaves a row that has a profile on it, and a granted launch on the model it named', async () => {
     const f = fixture({ plugin: PER_SESSION });
     const low = await f.bindNew({ claudeProfile: 'low' });
-    expect(startOptions(f, 0)).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });
+    expect(startOptions(f, 0)).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
     expect(f.row(low.session.id).claudeProfile).toBe('low');
 
     const granted = await f.bindNew({ launchContext: { ...launchContext, model: 'claude-custom', effort: 'low' } });
@@ -354,10 +355,11 @@ describe('Per-session processes: a row with no cost profile', () => {
     const session = await f.bindHistory('native-history-2');
     expect(f.row(session.id).claudeProfile).toBeUndefined();
     await f.manager.requestModelProfile(session.id, 'low');
-    await settle(10);
+    // The switch reads the model catalog (a subprocess), so wait for it instead of counting ticks.
+    await expect.poll(() => f.row(session.id).claudeProfile).toBe('low');
     await f.manager.sendInput(session.id, 'hello');
     expect(f.row(session.id).claudeProfile).toBe('low');
-    expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });
+    expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
   });
 
   it('gives a shared Codex thread no default: its process keeps the model it was configured with', async () => {

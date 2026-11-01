@@ -2,12 +2,13 @@ import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
 import { PendingQuestionCard } from './PendingQuestionCard';
 import { Bug, Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, isBoundSessionSuspended, visibleModelMatchesProfile, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_SHORTCUTS, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
+import { activeProfileTarget, offeredProfileKeys, type ModelProfilesState } from '../lib/model-profiles';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
 import { CONVERSATION_DRAG_TYPE, formatAgentReference, readConversationDrag } from '../features/conversation/agent-reference';
 import { copyTextToClipboard } from '../lib/clipboard';
@@ -256,6 +257,8 @@ function LiveSessionInputBridge({
   onToggleMobileChrome,
   latestAssistantMessage,
   activeModelProfile,
+  autoRoute,
+  modelProfiles,
   visibleModel,
   modelProfileRequest,
   hasQueuedInput,
@@ -285,6 +288,9 @@ function LiveSessionInputBridge({
   onToggleMobileChrome: () => void;
   latestAssistantMessage: string;
   activeModelProfile?: ModelProfileKey;
+  /** Auto state of the session: whether the next message is routed, and the router's latest decision. */
+  autoRoute?: AutoRoute;
+  modelProfiles: ModelProfilesState;
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
   hasQueuedInput: boolean;
@@ -325,7 +331,8 @@ function LiveSessionInputBridge({
   const [imageSubmitError, setImageSubmitError] = useState<string>();
   const [agentReferenceError, setAgentReferenceError] = useState<string>();
   const [agentDragOver, setAgentDragOver] = useState(false);
-  const profileCatalog = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
+  const profileLevels = modelProfiles.status === 'ready' ? modelProfiles.profiles.providers[provider].levels : undefined;
+  const offeredProfiles = offeredProfileKeys(structured);
   const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
   const hasNumericMenuDraft = nativeSelectionActive && /^\d{1,8}$/.test(draftText.trim());
 
@@ -370,15 +377,17 @@ function LiveSessionInputBridge({
   useEffect(() => {
     const onProfileShortcut = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
-      const profile = ({ h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'h' | 'm' | 'l'];
-      if (!profile) return;
+      const profile = ({ a: 'auto', h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'a' | 'h' | 'm' | 'l'];
+      if (!profile || !offeredProfiles.includes(profile)) return;
+      // The control stays disabled while the model list is missing; the keys follow it.
+      if (modelProfiles.status !== 'ready') return;
       event.preventDefault();
       event.stopPropagation();
       requestModelProfile(profile);
     };
     window.addEventListener('keydown', onProfileShortcut, true);
     return () => window.removeEventListener('keydown', onProfileShortcut, true);
-  }, [profileBusy, provider, sessionId]);
+  }, [profileBusy, provider, sessionId, structured, modelProfiles.status]);
 
   useEffect(() => {
     if (!mobileCollapsible) captureRef.current?.focus({ preventScroll: true });
@@ -1076,18 +1085,24 @@ function LiveSessionInputBridge({
   }
 
   const bridgeBodyClassName = mobileCollapsible ? (mobileInputPanel === 'reply' ? 'px-3 py-2' : 'flex flex-col px-3 pb-2') : 'px-4 py-4';
+  const activeTarget = activeProfileTarget(modelProfiles, provider, activeModelProfile, autoRoute);
   const currentProfileMatchesVisibleModel = activeModelProfile
-    ? visibleModelMatchesProfile(provider, activeModelProfile, visibleModel) !== false
+    ? (activeTarget ? visibleModelMatchesTarget(provider, activeTarget, visibleModel) : undefined) !== false
     : false;
+  const profileLetters = offeredProfiles.map((profile) => MODEL_PROFILE_SHORTCUTS[profile]);
+  const profileChoice = `${profileLetters.slice(0, -1).join(', ')}, or ${profileLetters.at(-1)}`;
+  const autoLine = activeModelProfile === 'auto' ? describeAutoRoute(provider, autoRoute) : undefined;
   const displayedProfileStatus = profileError
     ?? (modelProfileRequest
       ? modelProfileRequestStatus(modelProfileRequest)
       : activeModelProfile && !currentProfileMatchesVisibleModel
-        ? `Running: ${visibleModel} · select H, M, or L`
+        ? `Running: ${visibleModel} · select ${profileChoice}`
         : activeModelProfile
         ? `Current: ${modelProfileLabel(activeModelProfile)}`
-        : 'Existing session · choose H, M, or L');
+        : `Existing session · choose ${profileChoice}`);
   const profileApplying = modelProfileRequest?.state === 'applying';
+  const profilesReady = modelProfiles.status === 'ready';
+  const autoWarning = autoRoute?.decision?.source === 'fallback' ? autoRoute.decision.warning : undefined;
 
   return (
     <div className={clsx('shrink-0 bg-slate-950/90', (!mobileCollapsible || mobileInputPanel) && 'border-t border-slate-800')} data-testid="input-panel">
@@ -1123,6 +1138,17 @@ function LiveSessionInputBridge({
               <div>
                 <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">Session model</div>
                 <div className="text-xs text-slate-300">{displayedProfileStatus}</div>
+                {modelProfiles.status === 'error' ? (
+                  <div className="mt-1 text-xs text-rose-300" role="alert" data-testid="model-profiles-error">{modelProfiles.message}</div>
+                ) : modelProfiles.status === 'loading' ? (
+                  <div className="mt-1 text-[11px] text-slate-500">Loading model profiles…</div>
+                ) : null}
+                {autoLine ? (
+                  <div className="mt-1 text-xs text-sky-200" data-testid="auto-route-line" title={autoLine.title}>{autoLine.line}</div>
+                ) : null}
+                {autoWarning ? (
+                  <div className="mt-1 text-xs text-amber-300" role="status" data-testid="auto-route-warning">{autoWarning}</div>
+                ) : null}
                 {modelProfileRequest && modelProfileRequest.state !== 'applying' ? (
                   <button
                     type="button"
@@ -1135,27 +1161,35 @@ function LiveSessionInputBridge({
                 ) : null}
               </div>
               <div className="flex" aria-label={`${providerLabel} model profile`}>
-                {(['high', 'medium', 'low'] as ModelProfileKey[]).map((profile) => (
-                  <button
-                    key={profile}
-                    type="button"
-                    disabled={profileBusy || profileApplying}
-                    aria-label={`Use ${profile} ${providerLabel} profile`}
-                    aria-pressed={activeModelProfile === profile && currentProfileMatchesVisibleModel}
-                    title={`${profile}: ${profileCatalog[profile].model} / ${profileCatalog[profile].reasoningEffort} (Alt ${profileCatalog[profile].shortcut})`}
-                    onClick={() => requestModelProfile(profile)}
-                    className={clsx(
-                      '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',
-                      activeModelProfile === profile && currentProfileMatchesVisibleModel
-                        ? 'bg-sky-500/20 text-sky-100'
-                        : modelProfileRequest?.profile === profile
-                          ? 'bg-amber-500/15 text-amber-100'
-                          : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
-                    )}
-                  >
-                    {profileCatalog[profile].shortcut}
-                  </button>
-                ))}
+                {offeredProfiles.map((profile) => {
+                  const level = profile === 'auto' ? undefined : profileLevels?.[profile as FixedModelProfileKey];
+                  const shortcut = MODEL_PROFILE_SHORTCUTS[profile];
+                  return (
+                    <button
+                      key={profile}
+                      type="button"
+                      disabled={!profilesReady || profileBusy || profileApplying}
+                      aria-label={`Use ${profile} ${providerLabel} profile`}
+                      aria-pressed={activeModelProfile === profile && currentProfileMatchesVisibleModel}
+                      title={profile === 'auto'
+                        ? `auto: the router picks a model when you send your next message (Alt ${shortcut})`
+                        : level
+                          ? `${profile}: ${level.launchName} / ${level.effort} (Alt ${shortcut})`
+                          : `${profile} (Alt ${shortcut})`}
+                      onClick={() => requestModelProfile(profile)}
+                      className={clsx(
+                        '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',
+                        activeModelProfile === profile && currentProfileMatchesVisibleModel
+                          ? 'bg-sky-500/20 text-sky-100'
+                          : modelProfileRequest?.profile === profile
+                            ? 'bg-amber-500/15 text-amber-100'
+                            : 'bg-slate-950 text-slate-300 hover:bg-slate-800',
+                      )}
+                    >
+                      {shortcut}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1433,6 +1467,7 @@ interface ConversationPaneProps {
   onRelease: (sessionId: string) => Promise<void>;
   onSuspend: (sessionId: string) => Promise<void>;
   onSendKeystrokes: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
+  modelProfiles: ModelProfilesState;
   onSetModelProfile: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest: (sessionId: string, requestId: string) => Promise<boolean>;
   onLocalSubmittedText: (sessionId: string, text: string) => { id: string } | undefined;
@@ -1557,6 +1592,7 @@ export function ConversationPane({
   onRelease,
   onSuspend,
   onSendKeystrokes,
+  modelProfiles,
   onSetModelProfile,
   onCancelModelProfileRequest,
   onLocalSubmittedText,
@@ -2076,6 +2112,7 @@ export function ConversationPane({
           conversationRef={timeline.conversation.ref}
           provider={timeline.conversation.provider}
           onSendKeystrokes={onSendKeystrokes}
+          modelProfiles={modelProfiles}
           onSetModelProfile={onSetModelProfile}
           onCancelModelProfileRequest={onCancelModelProfileRequest}
           onLocalSubmittedText={onLocalSubmittedText}
@@ -2091,6 +2128,7 @@ export function ConversationPane({
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
           activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
+          autoRoute={boundSession.autoRoute}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}
           nativeSelectionActive={terminalScreen?.inputActive === false

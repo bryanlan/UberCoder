@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { CodexRunMonitor } from './transcripts/codex-run-state.js';
-import { CODEX_COST_PROFILES, type CodexCostProfileKey, type ConversationSummary } from '@agent-console/shared';
+import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
@@ -331,10 +331,9 @@ export class CodexProvider implements ProviderAdapter {
       }),
       '--dangerously-bypass-approvals-and-sandbox',
     );
-    const profileKey = options?.codexProfile
-      ?? (!conversationRef && !options?.model && !hasConfiguredModelProfile(baseArgv) ? 'medium' : undefined);
-    if (profileKey) {
-      const profile = CODEX_COST_PROFILES[profileKey];
+    const profile = options?.profileTarget
+      ?? (!conversationRef && !options?.model && !hasConfiguredModelProfile(baseArgv) ? options?.defaultTarget : undefined);
+    if (profile) {
       const withoutProfileArgs = withoutConfiguredModelProfile(baseArgv);
       const executable = withoutProfileArgs[0];
       if (!executable) {
@@ -344,7 +343,7 @@ export class CodexProvider implements ProviderAdapter {
         '--model',
         profile.model,
         '-c',
-        `model_reasoning_effort="${profile.reasoningEffort}"`,
+        `model_reasoning_effort="${profile.effort}"`,
       ]);
     }
     if (options?.model || options?.effort) {

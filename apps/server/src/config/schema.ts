@@ -119,6 +119,13 @@ export const appConfigSchema = z.object({
     enabled: z.boolean().default(true),
     runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),
   }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
+  // The model list lives in workflow_optimizer: the Console reads the High/Medium/Low profiles and asks the Auto router through
+  // its `wo` command. `AGENT_CONSOLE_WO_PATH` overrides `woPath` for one process (tests, a trial checkout).
+  modelRouting: z.object({
+    woPath: z.string().min(1).default('/home/bryan/code/workflow_optimizer/.venv/bin/wo'),
+    profilesTimeoutMs: z.number().int().positive().default(10_000),
+    routeTimeoutMs: z.number().int().positive().default(8_000),
+  }).default({ woPath: '/home/bryan/code/workflow_optimizer/.venv/bin/wo', profilesTimeoutMs: 10_000, routeTimeoutMs: 8_000 }),
   coordination: z.object({
     enabled: z.boolean().default(false),
     pilotPaths: z.array(z.string().min(1)).default([]),

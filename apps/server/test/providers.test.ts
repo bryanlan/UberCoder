@@ -58,7 +58,7 @@ describe('provider history discovery', () => {
         continueCommand: ['codex', 'resume', '--last'], env: {},
       },
     } satisfies MergedProviderSettings;
-    const launch = provider.getLaunchCommand(project, conversationRef, settings, { codexProfile: 'medium' });
+    const launch = provider.getLaunchCommand(project, conversationRef, settings, { profileTarget: { model: 'gpt-6.1-sol', effort: 'xhigh' } });
     expect(launch.argv.slice(-2)).toEqual(['-c', 'check_for_update_on_startup=false']);
     expect(launch.argv).toContain('--model');
     expect(launch.argv).toContain('--dangerously-bypass-approvals-and-sandbox');

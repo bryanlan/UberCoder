@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { CLAUDE_COST_PROFILES, type ClaudeCostProfileKey, type ConversationSummary } from '@agent-console/shared';
+import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import { renderTemplateTokens } from '../lib/shell.js';
@@ -177,15 +177,14 @@ export class ClaudeProvider implements ProviderAdapter {
       }),
       '--dangerously-skip-permissions',
     );
-    const profileKey = options?.claudeProfile
-      ?? (!conversationRef && !options?.model && !hasConfiguredClaudeModel(baseArgv) ? 'medium' : undefined);
-    if (profileKey) {
-      const profile = CLAUDE_COST_PROFILES[profileKey];
+    const profile = options?.profileTarget
+      ?? (!conversationRef && !options?.model && !hasConfiguredClaudeModel(baseArgv) ? options?.defaultTarget : undefined);
+    if (profile) {
       const withoutProfileArgs = withoutConfiguredClaudeProfile(baseArgv);
       const executable = withoutProfileArgs[0];
       if (!executable) throw new Error('Claude launch command is empty.');
       baseArgv = [
-        executable, '--model', profile.model, '--effort', profile.reasoningEffort,
+        executable, '--model', profile.model, '--effort', profile.effort,
         ...withoutProfileArgs.slice(1),
       ];
     }

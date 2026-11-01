@@ -42,7 +42,7 @@ describe('SessionManager lifecycle', () => {
       getLaunchCommand(_project, conversationRef, _settings, options) {
         return {
           cwd: '/srv/demo',
-          argv: ['codex', options?.codexProfile ?? 'unprofiled', 'resume', conversationRef ?? ''],
+          argv: ['codex', options?.profileTarget?.model ?? 'unprofiled', 'resume', conversationRef ?? ''],
           env: {},
         };
       },
@@ -63,7 +63,7 @@ describe('SessionManager lifecycle', () => {
     await expect.poll(() => db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
     expect(db.boundSessions.getById(session.id)?.modelProfileRequest).toBeUndefined();
     expect(tmux.created).toHaveLength(2);
-    expect(tmux.createdCommands.at(-1)).toContain('high');
+    expect(tmux.createdCommands.at(-1)).toContain('gpt-6-astra');
     db.close();
   });
 

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
-import { FakeTransportInstance, FakeTransportPlugin, fakePluginContext, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
+import { FakeTransportInstance, FakeTransportPlugin, fakePluginContext, noModelTargets, type FakeTransportPluginOptions } from './helpers/structured-fixtures.js';
 import { eventLogLines, failReattach, recordHistoryNotes, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 // A per-session provider process (one Claude CLI per conversation) can outlive a backend restart behind its session host.
@@ -265,6 +265,7 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     registry.register(plugin);
     const context = fakePluginContext();
     return new StructuredSessionService({
+      targets: noModelTargets,
       registry,
       config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
       createContext: () => context,
@@ -373,6 +374,7 @@ describe('StructuredSessionService.reattachSurvivors', () => {
     const context = fakePluginContext();
     const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'turns-record-'));
     const svc = new StructuredSessionService({
+      targets: noModelTargets,
       registry,
       config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
       createContext: () => context,
@@ -420,6 +422,7 @@ describe('StructuredSessionService.noteConversationHistory', () => {
     registry.register(plugin);
     const context = fakePluginContext();
     return new StructuredSessionService({
+      targets: noModelTargets,
       registry,
       config: { claude: { enabled: true, command: ['x'], idleUnloadMinutes: 60, env: {} } },
       createContext: () => context,
