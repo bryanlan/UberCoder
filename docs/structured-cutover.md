@@ -696,6 +696,10 @@ instead of from a launch command. The two tmux-launch test files `main` edited (
 `model-profile-lifecycle.test.ts`) stay deleted, the one Auto test about a terminal-backed session is removed, and the
 `agent-reference` browser spec serves `/api/model-profiles` like its other fixture routes. Schema is now 20 (the `transport`
 and `tmux_session_name` columns stay, as recorded above).
+After the merge: `npm run typecheck` and `npm run build` passed; the server suite passed 85 files, 1931 tests (5 skipped) on its
+third run (the first two runs each failed one different Codex plugin timing test in `structured-codex-plugin.test.ts` while the
+host load average was 7 to 9; that file passed three times alone); the web suite passed 19 files, 189 tests; the browser suite
+passed 68 tests. No real provider was started and the real-provider proofs were not rerun on the merged code.
 
 ## Verification
 
