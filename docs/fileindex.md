@@ -122,9 +122,10 @@
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
   commentary-progress display.
-- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - live input, draft-preserving Alt+H/Alt+M/Alt+L Codex/Claude profile controls, and
-  conversation shell behavior for text bypass, raw-output/debug panels, live-screen panel gating,
-  and the rule that server-derived terminal input is not promoted into transcript rows.
+- `apps/web/src/components/ConversationPane.tsx` and `apps/web/src/components/ConversationPane.test.tsx` - the conversation shell and
+  its message box (`SessionComposer`: a complete message with images, Stop, per-conversation drafts, a resizable desktop box and
+  the mobile Reply and Controls panels), the draft-preserving Alt+H/Alt+M/Alt+L Codex/Claude profile controls and the status strip.
+  The web has no terminal surface: no key buttons, screen panel, raw output or debug panel.
 - `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
   404 selection, sidebar ordering, Work-mode filtering of conversation children while retaining
   configured active projects, and separation of provider response status
@@ -134,7 +135,7 @@
 - `apps/web/src/features/navigation/useMobileViewport.ts` and `apps/web/src/lib/useMediaQuery.ts` -
   shared mobile layout selection and visual viewport height/panning while the keyboard is open.
 - `apps/web/e2e/mobile-conversation.spec.ts` - mobile reading, chat switching, per-chat drafts,
-  separate key controls and keyboard viewport/scroll checks with mocked provider input.
+  Stop from the Controls panel and keyboard viewport/scroll checks with mocked provider input.
 - `apps/web/e2e/sidebar.spec.ts` - browser coverage for sidebar resizing, width persistence,
   full-screen mobile navigation, and the empty conversation rename field.
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -

@@ -44,18 +44,16 @@ Desktop navigation retains its existing Work/Browse filtering and sizing.
 Reply and Controls share one optional panel. Reply starts at one line, grows to
 at most 112 pixels or 22% of the visible viewport with a 44-pixel minimum, and
 scrolls internally for longer drafts. A separate Send button submits; the phone Return key inserts a
-newline in ordinary draft mode. An accepted or queued reply closes the composer;
+newline. An accepted or queued reply closes the composer;
 rejection retains it. Closing input and switching chats preserve per-chat drafts.
-Controls exposes terminal keys and model settings without focusing a text field;
-key-only actions keep a separate unsent chat draft local. Interactive provider
-choices retain their parsed screen and offer a direct Open controls action.
+Controls exposes Stop, the model profile and the session status without focusing a text field;
+none of them touches the unsent chat draft.
 
 The mobile shell follows visualViewport height and offsetTop on resize and scroll
 so the keyboard and browser panning cannot cover the footer. The transcript keeps
 its own flexible scroll area. Its existing scroll controller follows new output
 only at the bottom, preserves a reader's position above the bottom, and loads
-earlier history through the server-owned pagination path. Routine terminal
-details stay out of the mobile transcript when saved conversation text exists.
+earlier history through the server-owned pagination path.
 Session details, workers and other occasional tools are available under More.
 
 ## Search index updates
