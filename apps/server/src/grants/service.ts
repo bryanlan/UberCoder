@@ -41,28 +41,52 @@ export class GrantService {
   sessionFor(assignmentId: string): BoundSession | undefined {
     const binding = this.db.meta.get(`console-session:${assignmentId}`);
     if (binding) { const session = this.db.boundSessions.getById(binding); if (session?.shouldRestore) return session; }
-    const row = this.db.sqlite.prepare('select provider,native_session_id from coordination_assignments where id=?').get(assignmentId) as { provider: string; native_session_id: string } | undefined;
-    return row && this.db.boundSessions.list().find(s => s.shouldRestore && s.provider === row.provider
-      && (s.conversationRef === row.native_session_id || s.resumeConversationRef === row.native_session_id));
+    // Look the session up directly instead of mapping all ~1,600 session rows on every call.
+    const match = this.db.sqlite.prepare(`select b.id from coordination_assignments a
+      join bound_sessions b on b.provider=a.provider and b.should_restore=1
+        and (b.conversation_ref=a.native_session_id or b.resume_conversation_ref=a.native_session_id)
+      where a.id=? order by b.updated_at desc limit 1`).get(assignmentId) as { id: string } | undefined;
+    return match ? this.db.boundSessions.getById(match.id) : undefined;
   }
 
   get(id: string): AgentGrant | undefined {
     const row = this.db.sqlite.prepare('select * from agent_grants where id=?').get(id) as GrantRow | undefined;
-    if (!row) return undefined;
-    const definition = JSON.parse(row.definition_json) as AgentGrantDefinition;
-    const parent = definition.expiry.kind === 'assignment_finished' ? this.db.sqlite.prepare('select status from coordination_assignments where id=?')
-      .get(definition.expiry.assignmentId ?? row.created_by_assignment_id) as { status: string } | undefined : undefined;
-    const requester = this.db.sqlite.prepare('select description from coordination_assignments where id=?').get(row.created_by_assignment_id) as { description: string } | undefined;
-    const granteeName = definition.grantee.kind === 'assignment'
-      ? (this.db.sqlite.prepare('select description from coordination_assignments where id=?').get(definition.grantee.id) as { description: string } | undefined)?.description
-      : definition.grantee.kind === 'session' ? this.db.boundSessions.getById(definition.grantee.id)?.title : definition.grantee.id;
-    return { ...definition, id, createdByAssignmentId: row.created_by_assignment_id,
-      requesterName: requester?.description ?? row.created_by_assignment_id.slice(0, 8),
-      granteeName: granteeName ?? definition.grantee.id,
-      status: row.status === 'active' && definition.expiry.kind === 'assignment_finished' && (!parent || parent.status === 'finished') ? 'expired' : row.status,
-      provenance: row.provenance_json ? JSON.parse(row.provenance_json) as AgentGrant['provenance'] : undefined,
-      reason: row.reason ?? undefined, createdAt: row.created_at, decidedAt: row.decided_at ?? undefined };
+    return row ? this.grantsFromRows([row])[0] : undefined;
   }
+
+  // One query for every referenced assignment instead of 3-4 freshly prepared lookups per grant.
+  // grantsFor() runs on hooks and polls; per-grant lookups across ~160 grants were the largest
+  // event-loop cost on 2026-11-01 (about 2.5 s of every 20 s).
+  private grantsFromRows(rows: GrantRow[]): AgentGrant[] {
+    const definitions = rows.map(row => JSON.parse(row.definition_json) as AgentGrantDefinition);
+    const ids = new Set<string>();
+    rows.forEach((row, index) => {
+      const definition = definitions[index]!;
+      ids.add(row.created_by_assignment_id);
+      if (definition.grantee.kind === 'assignment') ids.add(definition.grantee.id);
+      if (definition.expiry.kind === 'assignment_finished') ids.add(definition.expiry.assignmentId ?? row.created_by_assignment_id);
+    });
+    const assignments = new Map((ids.size
+      ? this.db.sqlite.prepare('select id, description, status from coordination_assignments where id in (select value from json_each(?))')
+        .all(JSON.stringify([...ids])) as Array<{ id: string; description: string; status: string }>
+      : []).map(row => [row.id, row]));
+    return rows.map((row, index) => {
+      const definition = definitions[index]!;
+      const parent = definition.expiry.kind === 'assignment_finished'
+        ? assignments.get(definition.expiry.assignmentId ?? row.created_by_assignment_id) : undefined;
+      const requester = assignments.get(row.created_by_assignment_id);
+      const granteeName = definition.grantee.kind === 'assignment'
+        ? assignments.get(definition.grantee.id)?.description
+        : definition.grantee.kind === 'session' ? this.db.boundSessions.getById(definition.grantee.id)?.title : definition.grantee.id;
+      return { ...definition, id: row.id, createdByAssignmentId: row.created_by_assignment_id,
+        requesterName: requester?.description ?? row.created_by_assignment_id.slice(0, 8),
+        granteeName: granteeName ?? definition.grantee.id,
+        status: row.status === 'active' && definition.expiry.kind === 'assignment_finished' && (!parent || parent.status === 'finished') ? 'expired' : row.status,
+        provenance: row.provenance_json ? JSON.parse(row.provenance_json) as AgentGrant['provenance'] : undefined,
+        reason: row.reason ?? undefined, createdAt: row.created_at, decidedAt: row.decided_at ?? undefined };
+    });
+  }
+
 
   snapshot(useOffset = 0): AgentGrantsSnapshot {
     const grants = this.allGrants();
@@ -82,7 +106,7 @@ export class GrantService {
       || (grant.grantee.kind === 'project' && grant.grantee.id === projectSlug)));
   }
   private allGrants(): AgentGrant[] {
-    return (this.db.sqlite.prepare('select id from agent_grants order by created_at desc').all() as Array<{ id: string }>).map(row => this.get(row.id)!);
+    return this.grantsFromRows(this.db.sqlite.prepare('select * from agent_grants order by created_at desc').all() as GrantRow[]);
   }
 
   authorityFor(assignmentId: string) { return this.grantsFor(assignmentId).map(authorityRecord); }
