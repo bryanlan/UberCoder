@@ -14,8 +14,6 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
     projectSlug: input.projectSlug ?? 'demo',
     conversationRef: input.conversationRef,
     resumeConversationRef: input.resumeConversationRef ?? input.conversationRef,
-    tmuxSessionName: input.tmuxSessionName ?? `ac-codex-demo-${input.id}`,
-    transport: input.transport ?? 'tmux',
     status: input.status ?? 'bound',
     shouldRestore: input.shouldRestore ?? true,
     title: input.title ?? 'Bound conversation',
@@ -28,7 +26,6 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
     autoTrackedAt: input.autoTrackedAt,
     isWorking: input.isWorking ?? false,
     pid: input.pid,
-    rawLogPath: input.rawLogPath,
     eventLogPath: input.eventLogPath,
   };
 }
@@ -133,27 +130,37 @@ describe('AppDatabase', () => {
     expect(column).toMatchObject({ notnull: 1, dflt_value: "'tmux'" });
     expect(after.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: CURRENT_SCHEMA_VERSION });
     expect(after.sqlite.prepare('select name from schema_version where version = 19').get()).toEqual({ name: 'session-transport' });
-    expect(after.boundSessions.getById('older-session')).toMatchObject({ transport: 'tmux', tmuxSessionName: 'ac-codex-demo-older-session' });
-    expect(after.boundSessions.getRestorableByConversation('demo', 'codex', 'older-ref')?.transport).toBe('tmux');
+    expect(after.sqlite.prepare('select transport from bound_sessions where id = ?').get('older-session')).toEqual({ transport: 'tmux' });
     after.close();
   });
 
-  it('stores the session transport, defaults to tmux, and keeps it when an update omits it', async () => {
+  it('fills the columns kept from the tmux transport with a placeholder on insert and leaves them on update', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-transport-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const { transport: _omitted, ...withoutTransport } = boundSession({ id: 'plain', conversationRef: 'plain-ref', updatedAt: '2026-10-02T00:00:00.000Z' });
-    db.boundSessions.upsert(withoutTransport);
-    db.boundSessions.upsert(boundSession({
-      id: 'structured', conversationRef: 'thread-1', updatedAt: '2026-10-02T00:00:00.000Z',
-      transport: 'structured', tmuxSessionName: 'structured:structured',
-    }));
-    expect(db.boundSessions.getById('plain')?.transport).toBe('tmux');
-    expect(db.boundSessions.getById('structured')).toMatchObject({ transport: 'structured', tmuxSessionName: 'structured:structured' });
+    const raw = () => db.sqlite.prepare('select transport, tmux_session_name as name, raw_log_path as rawLog from bound_sessions where id = ?').get('plain');
+    db.boundSessions.upsert(boundSession({ id: 'plain', conversationRef: 'plain-ref', updatedAt: '2026-10-02T00:00:00.000Z' }));
+    expect(raw()).toEqual({ transport: 'structured', name: 'structured:plain', rawLog: null });
+    db.boundSessions.upsert({ ...db.boundSessions.getById('plain')!, title: 'Renamed', updatedAt: '2026-10-02T00:00:01.000Z' });
+    expect(db.boundSessions.getById('plain')).toMatchObject({ title: 'Renamed' });
+    expect(raw()).toEqual({ transport: 'structured', name: 'structured:plain', rawLog: null });
+    db.close();
+  });
 
-    const { transport: _dropped, ...structuredWithoutTransport } = db.boundSessions.getById('structured')!;
-    db.boundSessions.upsert({ ...structuredWithoutTransport, title: 'Renamed', updatedAt: '2026-10-02T00:00:01.000Z' });
-    expect(db.boundSessions.getById('structured')).toMatchObject({ transport: 'structured', title: 'Renamed' });
-    expect(db.boundSessions.getRestorableByConversation('demo', 'codex', 'thread-1')?.transport).toBe('structured');
+  it('lists restorable rows an earlier build left on tmux, and converts each one once', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-tmux-rows-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    for (const [id, status, restore] of [['live', 'bound', 1], ['ended', 'ended', 0], ['dropped', 'error', 0]] as const) {
+      db.boundSessions.upsert(boundSession({ id, conversationRef: `${id}-ref`, updatedAt: '2026-10-02T00:00:00.000Z', status, shouldRestore: restore === 1 }));
+      db.sqlite.prepare("update bound_sessions set transport = 'tmux', tmux_session_name = ?, raw_log_path = '/tmp/raw.log', pid = 4242 where id = ?").run(`ac-codex-demo-${id}`, id);
+    }
+    expect(db.boundSessions.listTmuxRows().map(row => [row.session.id, row.tmuxSessionName])).toEqual([['live', 'ac-codex-demo-live']]);
+
+    const converted = db.boundSessions.convertTmuxRow('live', { idleSuspendedAt: '2026-10-03T00:00:00.000Z', updatedAt: '2026-10-03T00:00:00.000Z' });
+    expect(converted).toMatchObject({ id: 'live', idleSuspendedAt: '2026-10-03T00:00:00.000Z', pid: undefined, isWorking: false });
+    expect(db.sqlite.prepare('select transport, tmux_session_name as name, raw_log_path as rawLog from bound_sessions where id = ?').get('live'))
+      .toEqual({ transport: 'structured', name: 'structured:live', rawLog: null });
+    expect(db.boundSessions.convertTmuxRow('live', { updatedAt: '2026-10-04T00:00:00.000Z' })).toBeUndefined();
+    expect(db.boundSessions.listTmuxRows()).toEqual([]);
     db.close();
   });
 
@@ -567,7 +574,6 @@ describe('AppDatabase', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'errored-session',
-      tmuxSessionName: 'ac-claude-demo-error',
       status: 'error',
       shouldRestore: true,
       title: 'Errored session',
@@ -606,7 +612,6 @@ describe('AppDatabase', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:errored-session',
-      tmuxSessionName: 'ac-codex-demo-error',
       status: 'error',
       shouldRestore: true,
       title: 'Errored pending session',

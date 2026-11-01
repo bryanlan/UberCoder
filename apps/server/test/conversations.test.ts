@@ -37,22 +37,10 @@ async function setup(): Promise<{ configPath: string; databasePath: string }> {
       codex: {
         enabled: true,
         discoveryRoot: path.join(tempDir, 'codex-home'),
-        commands: {
-          newCommand: ['codex'],
-          resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-          continueCommand: ['codex', 'resume', '--last'],
-          env: {},
-        },
       },
       claude: {
         enabled: true,
         discoveryRoot: path.join(tempDir, 'claude-home'),
-        commands: {
-          newCommand: ['claude'],
-          resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-          continueCommand: ['claude', '--continue'],
-          env: {},
-        },
       },
     },
     projects: {

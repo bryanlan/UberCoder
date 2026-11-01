@@ -1,36 +1,35 @@
 import { z } from 'zod';
-import type { SessionTransport } from '@agent-console/shared';
-
-// Runtime values must not come from '@agent-console/shared' here: the engineering summary CLI loads this
-// module through tsx, whose tsconfig path maps that package to its type declarations, so a value import
-// arrives undefined. The tuple mirrors SESSION_TRANSPORTS in packages/shared and is type-checked against it.
-const SESSION_TRANSPORT_VALUES = ['tmux', 'structured'] as const satisfies readonly SessionTransport[];
 
 const portSchema = z.number().int().min(1).max(65535);
 
-const providerCommandsSchema = z.object({
-  newCommand: z.array(z.string()).min(1),
-  resumeCommand: z.array(z.string()).min(1),
-  continueCommand: z.array(z.string()).min(1).optional(),
-  env: z.record(z.string(), z.string()).default({}),
-});
+/**
+ * Keys that configured the tmux transport, which was removed (Phase B, 2026-11). A config that still carries one fails at startup
+ * with its path named, instead of having it ignored: a setting nothing reads any more must not look as if it still worked.
+ */
+function rejectRemovedKeys(removed: Record<string, string>) {
+  return (input: unknown, context: z.RefinementCtx) => {
+    if (input && typeof input === 'object') {
+      for (const [key, message] of Object.entries(removed)) {
+        if (key in input) context.addIssue({ code: 'custom', message, path: [key] });
+      }
+    }
+    return input;
+  };
+}
 
-const providerSettingsSchema = z.object({
+const REMOVED_PROVIDER_COMMANDS = {
+  commands: 'The tmux launch commands were removed with the tmux transport. Delete this key; the provider process is configured in structuredSessions.<provider>.',
+};
+
+const providerSettingsSchema = z.preprocess(rejectRemovedKeys(REMOVED_PROVIDER_COMMANDS), z.object({
   enabled: z.boolean().default(true),
   discoveryRoot: z.string().optional(),
-  commands: providerCommandsSchema,
-});
+}));
 
-const providerOverrideSchema = z.object({
+const providerOverrideSchema = z.preprocess(rejectRemovedKeys(REMOVED_PROVIDER_COMMANDS), z.object({
   enabled: z.boolean().optional(),
   discoveryRoot: z.string().optional(),
-  commands: z.object({
-    newCommand: z.array(z.string()).min(1).optional(),
-    resumeCommand: z.array(z.string()).min(1).optional(),
-    continueCommand: z.array(z.string()).min(1).optional(),
-    env: z.record(z.string(), z.string()).optional(),
-  }).partial().optional(),
-}).partial();
+}));
 
 export const projectConfigSchema = z.object({
   active: z.boolean().default(false),
@@ -57,19 +56,19 @@ const serverConfigSchema = z.object({
   webDistPath: '../web/dist',
 });
 
-const sessionsConfigSchema = z.object({
-  eagerRestoreHours: z.number().positive().default(1),
+const sessionsConfigSchema = z.preprocess(rejectRemovedKeys({
+  eagerRestoreHours: 'The tmux idle window was removed with the tmux transport. Delete this key; each provider sleeps after structuredSessions.<provider>.idleUnloadMinutes.',
+}), z.object({
   restoreGraceHours: z.number().positive().default(1),
   pressureSuspendAvailableMiB: z.number().positive().default(3072),
   pressureSuspendIdleMinutes: z.number().positive().default(60),
-}).default({
-  eagerRestoreHours: 1,
+})).default({
   restoreGraceHours: 1,
   pressureSuspendAvailableMiB: 3072,
   pressureSuspendIdleMinutes: 60,
 });
 
-// Structured (protocol-driven, non-tmux) sessions per provider. Off unless a provider is enabled explicitly.
+// The provider process of each provider's conversations. A provider whose lane is off cannot run conversations.
 function structuredProviderSchema(defaultCommand: readonly string[]) {
   return z.object({
     enabled: z.boolean().default(false),
@@ -92,14 +91,12 @@ export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURE
   return (provider === 'claude' ? claudeStructuredSchema : codexStructuredSchema).parse({});
 }
 
-const structuredSessionsConfigSchema = z.object({
-  // The transport a new conversation gets when the request does not name one (new chats, binds, granted launches), and
-  // the transport the backend moves existing tmux conversations to. Only effective for a provider whose lane is enabled.
-  defaultTransport: z.enum(SESSION_TRANSPORT_VALUES).default('tmux'),
+const structuredSessionsConfigSchema = z.preprocess(rejectRemovedKeys({
+  defaultTransport: 'Every conversation runs on the structured transport since the tmux transport was removed. Delete this key.',
+}), z.object({
   codex: codexStructuredSchema.default(() => defaultStructuredProviderConfig('codex')),
   claude: claudeStructuredSchema.default(() => defaultStructuredProviderConfig('claude')),
-}).default(() => ({
-  defaultTransport: 'tmux' as const,
+})).default(() => ({
   codex: defaultStructuredProviderConfig('codex'),
   claude: defaultStructuredProviderConfig('claude'),
 }));
@@ -134,26 +131,8 @@ export const appConfigSchema = z.object({
     tailscaleAllowedUserLogin: z.string().optional(),
   }),
   providers: z.object({
-    codex: providerSettingsSchema.default({
-      enabled: true,
-      discoveryRoot: '~/.codex',
-      commands: {
-        newCommand: ['codex', '--dangerously-bypass-approvals-and-sandbox', '--no-alt-screen'],
-        resumeCommand: ['codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--no-alt-screen', '{{conversationId}}'],
-        continueCommand: ['codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', '--no-alt-screen', '--last'],
-        env: {},
-      },
-    }),
-    claude: providerSettingsSchema.default({
-      enabled: true,
-      discoveryRoot: '~/.claude',
-      commands: {
-        newCommand: ['claude', '--dangerously-skip-permissions', '--effort', 'medium'],
-        resumeCommand: ['claude', '--dangerously-skip-permissions', '--resume', '{{conversationId}}', '--effort', 'medium'],
-        continueCommand: ['claude', '--dangerously-skip-permissions', '--continue', '--effort', 'medium'],
-        env: {},
-      },
-    }),
+    codex: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.codex' }),
+    claude: providerSettingsSchema.default({ enabled: true, discoveryRoot: '~/.claude' }),
   }),
   projects: z.record(z.string(), projectConfigSchema).default({}),
 });

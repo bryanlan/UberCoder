@@ -104,8 +104,8 @@ export interface TransportSession {
   unload(): Promise<void>;
   /**
    * True while the provider process is running work of its own that no turn covers (a background shell command or
-   * subagent). Idle sleep and memory pressure leave such a process alone, as they leave a tmux screen that shows
-   * background work. Optional: a plugin that cannot tell leaves it out and the host treats the session as having none.
+   * subagent). Idle sleep and memory pressure leave such a process alone, since ending it would kill that work.
+   * Optional: a plugin that cannot tell leaves it out and the host treats the session as having none.
    */
   hasBackgroundWork?(): boolean;
   /**
@@ -157,10 +157,10 @@ export interface OpenOptions {
   env?: Record<string, string>;
   /**
    * Per-session plugins only, and only when coordination is enabled: what a conversation's own coordination MCP config needs
-   * (the same runtime directory, helper script and session id the tmux launch pins).
+   * (this Console's runtime directory, its helper script and the conversation's session id).
    */
   consoleIdentity?: { sessionId: string; runtimeDir: string; helperPath: string };
-  /** The standing-authority text of a session a grant launched; the same text the tmux launch appends to the system prompt. */
+  /** The standing-authority text of a session a grant launched, appended to the provider's system prompt. */
   appendSystemPrompt?: string;
   /**
    * `'off'`: the provider rebuilds its system prompt on this launch instead of replaying the one recorded on the first
@@ -210,7 +210,7 @@ export interface PluginContext {
   /**
    * Present when Console coordination is enabled: this Console's runtime directory and the MCP helper script that
    * serves its coordination tools. A plugin points the provider's coordination MCP server at them so the agent's
-   * tool calls reach this Console and not whichever one the provider's own config names (the tmux launch does the same).
+   * tool calls reach this Console and not whichever one the provider's own config names.
    */
   coordination?: { runtimeDir: string; helperPath: string };
   log: { info(o: object, m: string): void; warn(o: object, m: string): void };

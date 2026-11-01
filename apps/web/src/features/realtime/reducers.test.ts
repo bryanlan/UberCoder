@@ -41,8 +41,6 @@ function session(overrides: Partial<BoundSession> = {}): BoundSession {
     provider: 'codex',
     projectSlug: 'demo',
     conversationRef: 'pending:one',
-    tmuxSessionName: 'ac-codex-demo-one',
-    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     title: 'Live pending',
@@ -163,11 +161,11 @@ describe('realtime reducers', () => {
       requestId: 'q1', kind: 'question' as const, summary: 'Strict or flexible?', openedAt: baseTime,
       questions: [{ id: 'schema', question: 'Strict or flexible?', options: [{ label: 'Strict' }] }],
     };
-    const current = conversationTimeline({ conversationRef: 'history-one', boundSession: session({ conversationRef: 'history-one', transport: 'structured' }) });
-    const asking = applySessionUpdateToTimeline(current, session({ conversationRef: 'history-one', transport: 'structured', pendingRequests: [request] }));
+    const current = conversationTimeline({ conversationRef: 'history-one', boundSession: session({ conversationRef: 'history-one' }) });
+    const asking = applySessionUpdateToTimeline(current, session({ conversationRef: 'history-one', pendingRequests: [request] }));
     expect(asking?.boundSession?.pendingRequests).toEqual([request]);
     // The update after the answer has no pendingRequests key at all; the old list must not survive the merge.
-    const answered = applySessionUpdateToTimeline(asking, session({ conversationRef: 'history-one', transport: 'structured' }));
+    const answered = applySessionUpdateToTimeline(asking, session({ conversationRef: 'history-one' }));
     expect(answered?.boundSession?.pendingRequests).toBeUndefined();
   });
 

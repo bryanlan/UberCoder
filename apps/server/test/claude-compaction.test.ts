@@ -4,7 +4,6 @@ import path from 'node:path';
 import fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppDatabase } from '../src/db/database.js';
-import { ClaudeProvider } from '../src/providers/claude-provider.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
 import { ClaudeRunMonitor } from '../src/providers/transcripts/claude-run-state.js';
 import { TRANSCRIPT_PARSER_VERSION } from '../src/providers/types.js';
@@ -12,7 +11,7 @@ import { IndexingService } from '../src/indexing/indexing-service.js';
 import { buildConversationSearchChunks, buildFtsQuery } from '../src/search/conversation-search.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { registerConversationRoutes } from '../src/routes/conversations.js';
-import { createRecoveryManager, FakeTmux, project, providerSettings } from './helpers/session-fixtures.js';
+import { project, providerSettings } from './helpers/session-fixtures.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
@@ -177,7 +176,7 @@ describe('Claude compaction history', () => {
     cleanup.push(() => app.close());
     await registerConversationRoutes(app, { ensureAuthenticated: async () => undefined } as never, db,
       { getProjectBySlug: async () => ({ slug: 'demo' }), getMergedProviderSettings: () => ({}) } as never,
-      { get: () => ({ getConversation: async () => null }) } as never, {} as never, new RealtimeEventBus());
+      { get: () => ({ getConversation: async () => null }) } as never, {} as never, new RealtimeEventBus(), undefined, ['claude']);
     const url = '/api/conversations/demo/claude/compacted/messages';
     const response = await app.inject({ method: 'GET', url: `${url}?limit=1` });
     expect(response.statusCode).toBe(200);
@@ -270,35 +269,6 @@ describe('Claude compaction search upgrade', () => {
 });
 
 describe('Claude compaction turn state', () => {
-  it('reconciles a falsely working binding after restart while preserving the response clock and unsent draft', async () => {
-    const { dir, filePath, parse } = await fixture([prompt, answer, boundary, summary]);
-    const db = new AppDatabase(path.join(dir, 'test.sqlite'));
-    cleanup.push(async () => { db.close(); });
-    db.conversationIndex.upsert((await parse()).summary);
-    const tmux = new FakeTmux();
-    tmux.paneText = 'Claude Code\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
-    const adapter = new ClaudeProvider();
-    const settings = { ...providerSettings, id: 'claude' as const, commands: { ...providerSettings.commands,
-      newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'] } };
-    const manager = createRecoveryManager(db, tmux, dir, new RealtimeEventBus(), adapter, settings);
-    cleanup.push(() => manager.stop());
-    const session = await manager.bindConversation({ project, provider: adapter, providerSettings: settings,
-      conversationRef: 'compacted', title: 'Compaction', kind: 'history' });
-    await expect.poll(() => db.boundSessions.getById(session.id)?.lastResponseAt).toBe(answer.timestamp);
-    await manager.stop();
-    db.boundSessions.upsert({ ...db.boundSessions.getById(session.id)!, isWorking: true });
-    tmux.paneText = 'Claude Code\n❯ is it live yet\n⏵⏵ bypass permissions on (shift+tab to cycle)';
-    const resumed = createRecoveryManager(db, tmux, dir, new RealtimeEventBus(), adapter, settings);
-    cleanup.push(() => resumed.stop());
-    await resumed.reconcileSessions();
-    await expect.poll(() => db.boundSessions.getById(session.id)?.isWorking).toBe(false);
-    expect(db.boundSessions.getById(session.id)?.lastResponseAt).toBe(answer.timestamp);
-    expect(tmux.created).toHaveLength(1);
-    expect(tmux.sent).toEqual([]);
-    expect(tmux.sentKeys).toEqual([]);
-    expect(tmux.paneText).toContain('❯ is it live yet');
-    expect(await new ClaudeRunMonitor().read(filePath)).toMatchObject({ status: 'completed' });
-  });
 
   it('keeps a completed response ready during idle compaction, including after monitor restart', async () => {
     const { filePath } = await fixture([prompt, answer]);

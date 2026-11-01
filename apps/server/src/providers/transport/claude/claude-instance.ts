@@ -207,7 +207,7 @@ export function buildClaudeArgv(input: {
   ];
 }
 
-/** The per-session coordination MCP server, as the tmux launch passes it. */
+/** The per-session coordination MCP server: this Console's helper, with the conversation's own session id. */
 export function buildMcpConfig(coordination: NonNullable<PluginContext['coordination']>, conversationId: string): string {
   return JSON.stringify({
     mcpServers: {
@@ -504,7 +504,7 @@ export class ClaudeInstance implements TransportInstance {
   }
 
   /**
-   * A conversation that has history this plugin never saw complete: a row moved over from tmux, or one whose turns completed
+   * A conversation that has history this plugin never saw complete: a row the removed tmux transport ran, or one whose turns completed
    * before the record above existed. Without the record `resume` would take a transcript the CLI has since deleted (it removes
    * old ones) for a chat that never ran, and relaunch it empty under the same id.
    */

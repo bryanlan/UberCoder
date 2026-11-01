@@ -82,29 +82,6 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
     return;
   }
 
-  if (event.type === 'session.raw-output') {
-    const matchesSelectedSession = eventTargetsSelectedConversation(context, event);
-    context.queryClient.setQueryData<TreeResponse | undefined>(
-      ['tree'],
-      (current) => applySessionActivityToTree(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
-    );
-    context.queryClient.setQueryData<ConversationTimeline | undefined>(
-      conversationMetaQueryKey(event.projectSlug, event.provider, event.conversationRef),
-      (current) => applySessionActivityToTimeline(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
-    );
-    if (event.sessionId === context.timelineBoundSessionId && context.debugOpen) {
-      context.queryClient.invalidateQueries({ queryKey: ['raw-output', event.sessionId] });
-    }
-    if (matchesSelectedSession && hasSelectedConversation(context)) {
-      context.scheduleTimelineMessageRefresh(
-        context.selectedProjectSlug,
-        context.selectedProvider,
-        context.selectedConversationRef,
-      );
-    }
-    return;
-  }
-
   if (event.type === 'session.transcript-updated') {
     const matchesSelectedSession = eventTargetsSelectedConversation(context, event);
     context.queryClient.setQueryData<TreeResponse | undefined>(

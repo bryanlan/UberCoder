@@ -111,7 +111,7 @@ export class CoordinationService {
    * `AGENT_CONSOLE_SESSION_ID` and is matched by `consoleSessionId` first.
    */
   private structuredSessionForThread(provider: string, nativeSessionId: string): string | undefined {
-    const rows = this.db.sqlite.prepare(`select id from bound_sessions where transport='structured' and provider=?
+    const rows = this.db.sqlite.prepare(`select id from bound_sessions where provider=?
       and (conversation_ref=? or resume_conversation_ref=?) and should_restore=1 limit 2`)
       .all(provider, nativeSessionId, nativeSessionId) as Array<{ id: string }>;
     return rows.length === 1 ? rows[0]!.id : undefined;
@@ -119,7 +119,7 @@ export class CoordinationService {
 
   /** The Console binding of a structured assignment: restorable, not yet released, and unique for its thread. */
   private structuredBinding(provider: string, nativeSessionId: string): { id: string } | undefined {
-    const rows = this.db.sqlite.prepare(`select id from bound_sessions where transport='structured' and provider=?
+    const rows = this.db.sqlite.prepare(`select id from bound_sessions where provider=?
       and (conversation_ref=? or resume_conversation_ref=?) and should_restore=1 and status in ('starting','bound') limit 2`)
       .all(provider, nativeSessionId, nativeSessionId) as Array<{ id: string }>;
     return rows.length === 1 ? rows[0] : undefined;

@@ -9,7 +9,10 @@ import { auditPeerWakes } from '../src/coordination/audit.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, setPeerWakePaused } from '../src/coordination/wake.js';
 import { WakeAlerts } from '../src/coordination/wake-alerts.js';
 import { GrantPushService } from '../src/grants/push.js';
-import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
+import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
+import { createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
+import { FakeTransportPlugin } from './helpers/structured-fixtures.js';
+import { structuredSessionsConfig } from './helpers/structured-session-fixture.js';
 
 const now = Date.parse('2026-10-11T04:30:00Z');
 const minute = 60_000;
@@ -18,14 +21,16 @@ afterEach(async () => { for (const fn of cleanups.splice(0).reverse()) await fn(
 async function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'peer-audit-'));
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
-  const manager = createRecoveryManager(db, new FakeTmux(), root);
+  const transportPlugins = new TransportPluginRegistry();
+  transportPlugins.register(new FakeTransportPlugin());
+  const manager = createRecoveryManager(db, root, undefined, provider, providerSettings, { transportPlugins, structuredSessions: structuredSessionsConfig });
   const service = new CoordinationService(db, { enabled: true, pilotPaths: [] });
   const native = randomUUID();
   const recipient = service.register({ provider: 'codex', nativeSessionId: native, token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
   const senderNative = randomUUID();
   const sender = service.register({ provider: 'claude', nativeSessionId: senderNative, token: randomUUID(), pid: process.pid, cwd: root }).assignmentId!;
-  const session = await manager.bindConversation({ project, provider, providerSettings, conversationRef: native, title: 'Audit fixture', kind: 'history' });
-  const reverse = { ...session, id: randomUUID(), provider: 'claude' as const, conversationRef: senderNative, tmuxSessionName: 'audit-reverse' };
+  const session = await manager.bindConversation({ project, provider, conversationRef: native, title: 'Audit fixture', kind: 'history' });
+  const reverse = { ...session, id: randomUUID(), provider: 'claude' as const, conversationRef: senderNative };
   db.boundSessions.upsert(reverse);
   cleanups.push(async () => { await manager.stop(); db.close(); fs.rmSync(root, { recursive: true, force: true }); });
   function add(at: number, options: { batch?: number; old?: boolean; fixture?: boolean; reverse?: boolean; failed?: boolean; acknowledged?: boolean } = {}) {

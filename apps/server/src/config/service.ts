@@ -62,22 +62,8 @@ export class ConfigService {
         webDistPath: path.resolve(path.dirname(this.configPath), config.server.webDistPath),
       },
       providers: {
-        codex: {
-          ...config.providers.codex,
-          discoveryRoot: normalizeFsPath(config.providers.codex.discoveryRoot ?? '~/.codex'),
-          commands: {
-            ...config.providers.codex.commands,
-            env: Object.fromEntries(Object.entries(config.providers.codex.commands.env).map(([key, value]) => [key, expandHome(value)])),
-          },
-        },
-        claude: {
-          ...config.providers.claude,
-          discoveryRoot: normalizeFsPath(config.providers.claude.discoveryRoot ?? '~/.claude'),
-          commands: {
-            ...config.providers.claude.commands,
-            env: Object.fromEntries(Object.entries(config.providers.claude.commands.env).map(([key, value]) => [key, expandHome(value)])),
-          },
-        },
+        codex: { ...config.providers.codex, discoveryRoot: normalizeFsPath(config.providers.codex.discoveryRoot ?? '~/.codex') },
+        claude: { ...config.providers.claude, discoveryRoot: normalizeFsPath(config.providers.claude.discoveryRoot ?? '~/.claude') },
       },
     };
   }
@@ -110,17 +96,6 @@ export class ConfigService {
       id: providerId,
       enabled: projectOverride?.enabled ?? globalProvider.enabled,
       discoveryRoot: normalizeFsPath(projectOverride?.discoveryRoot ?? globalProvider.discoveryRoot ?? (providerId === 'codex' ? '~/.codex' : '~/.claude')),
-      commands: {
-        newCommand: projectOverride?.commands?.newCommand ?? globalProvider.commands.newCommand,
-        resumeCommand: projectOverride?.commands?.resumeCommand ?? globalProvider.commands.resumeCommand,
-        continueCommand: projectOverride?.commands?.continueCommand ?? globalProvider.commands.continueCommand,
-        env: Object.fromEntries(
-          Object.entries({
-            ...globalProvider.commands.env,
-            ...(projectOverride?.commands?.env ?? {}),
-          }).map(([key, value]) => [key, expandHome(value)]),
-        ),
-      },
     };
   }
 

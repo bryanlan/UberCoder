@@ -19,7 +19,6 @@ import type {
   SessionRequestResponse,
   UiPreferences,
   SessionKeystrokeRequest,
-  SessionTransport,
   TreeResponse,
   UpdateGlobalSettingsRequest,
   UpdateProjectSettingsRequest,
@@ -191,7 +190,7 @@ export const api = {
     provider: string,
     conversationRef: string,
     csrfToken?: string,
-    options: { force?: boolean; initialPrompt?: string; confirmExternalHandoff?: boolean; transport?: SessionTransport } = {},
+    options: { force?: boolean; initialPrompt?: string; confirmExternalHandoff?: boolean } = {},
   ) => request<{ session: BoundSession }>(
     `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/${encodeURIComponent(conversationRef)}/bind`,
     {
@@ -199,16 +198,15 @@ export const api = {
       body: JSON.stringify({
         force: options.force === true,
         initialPrompt: options.initialPrompt,
-        ...(options.transport ? { transport: options.transport } : {}),
         ...(options.confirmExternalHandoff === true ? { confirmExternalHandoff: true } : {}),
       }),
     },
     csrfToken,
   ),
-  bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string, options: { transport?: SessionTransport } = {}) =>
+  bindNewConversation: (projectSlug: string, provider: string, csrfToken?: string) =>
     request<{ session: BoundSession; conversationRef: string }>(
       `/api/conversations/${encodeURIComponent(projectSlug)}/${provider}/new/bind`,
-      { method: 'POST', body: JSON.stringify(options.transport ? { transport: options.transport } : {}) },
+      { method: 'POST', body: JSON.stringify({}) },
       csrfToken,
     ),
   renameConversation: (projectSlug: string, provider: string, conversationRef: string, body: RenameConversationRequest, csrfToken?: string) =>

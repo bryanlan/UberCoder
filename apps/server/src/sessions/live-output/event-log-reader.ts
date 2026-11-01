@@ -1,7 +1,12 @@
 import fs from 'node:fs/promises';
 
+/**
+ * One line of a session's event log. `user-input` is a message the person sent, `agent-input` an automatic opening prompt (a
+ * granted launch), `status` a line the Console wrote. Logs an earlier build wrote can also hold `raw-output` lines, the terminal
+ * output of the tmux transport; nothing shows them.
+ */
 export interface SessionEventLine {
-  type: 'user-input' | 'raw-output' | 'status';
+  type: 'user-input' | 'agent-input' | 'status';
   text: string;
   timestamp: string;
 }
@@ -25,7 +30,6 @@ export interface EventLogReadPlan {
 export interface EventLogReadResult {
   text: string;
   startOffset: number;
-  lastUserInputBeforeText?: string;
 }
 
 const MAX_EVENT_LOG_ROW_BACKTRACK_BYTES = 4 * 1024 * 1024;
@@ -67,11 +71,7 @@ export async function readEventLogText(
     const rowStart = start + firstNewline + 1;
     const completeTail = bytes.subarray(firstNewline + 1).toString('utf8');
     if (completeTail.trim()) {
-      return {
-        text: completeTail,
-        startOffset: rowStart,
-        lastUserInputBeforeText: await findLastUserInputBefore(filePath, rowStart),
-      };
+      return { text: completeTail, startOffset: rowStart };
     }
   }
 
@@ -82,7 +82,6 @@ export async function readEventLogText(
   return {
     text: (await readFileBytes(filePath, rowStart, plan.size - rowStart)).toString('utf8'),
     startOffset: rowStart,
-    lastUserInputBeforeText: await findLastUserInputBefore(filePath, rowStart),
   };
 }
 
@@ -142,12 +141,9 @@ export async function readAppendedEventLogText(
   if (cutoff === 0) return { text: combined.toString('utf8'), startOffset: 0 };
   const newline = combined.indexOf(10, cutoff - previous.read.startOffset);
   if (newline < 0 || !combined.subarray(newline + 1).toString('utf8').trim()) return readEventLogText(filePath, plan);
-  const startOffset = previous.read.startOffset + newline + 1;
   return {
     text: combined.subarray(newline + 1).toString('utf8'),
-    startOffset,
-    lastUserInputBeforeText: startOffset === previous.read.startOffset
-      ? previous.read.lastUserInputBeforeText : await findLastUserInputBefore(filePath, startOffset),
+    startOffset: previous.read.startOffset + newline + 1,
   };
 }
 
@@ -185,22 +181,4 @@ async function findBoundedRowStart(filePath: string, offset: number): Promise<nu
     return backtrackStart + previousNewline + 1;
   }
   return backtrackStart === 0 ? 0 : undefined;
-}
-
-async function findLastUserInputBefore(filePath: string, offset: number): Promise<string | undefined> {
-  if (offset <= 0) {
-    return undefined;
-  }
-
-  const backtrackStart = Math.max(0, offset - MAX_EVENT_LOG_ROW_BACKTRACK_BYTES);
-  const prefix = (await readFileBytes(filePath, backtrackStart, offset - backtrackStart)).toString('utf8');
-  const lines = prefix.split(/\r?\n/).filter(Boolean);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const event = parseSessionEventLine(lines[index] ?? '');
-    if (event?.type === 'user-input') {
-      const text = event.text.trim();
-      return text || undefined;
-    }
-  }
-  return undefined;
 }

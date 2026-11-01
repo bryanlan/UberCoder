@@ -181,7 +181,7 @@ describe('assignment coordination', () => {
     const now = new Date().toISOString();
     const conversation = { projectSlug: 'demo', provider, conversationRef: nativeSessionId };
     db.boundSessions.upsert({ ...conversation, provider: provider as 'codex' | 'claude', id: sessionId,
-      status: 'bound', shouldRestore: true, tmuxSessionName: 'fixture-only', startedAt: now, updatedAt: now });
+      status: 'bound', shouldRestore: true, startedAt: now, updatedAt: now });
     service.finish(assignmentId, 'The previous human task is complete.');
     expect(service.conversationReference(conversation).recipientId).toBe(assignmentId);
     expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
@@ -310,7 +310,7 @@ describe('assignment coordination', () => {
     const sender = register(); const recipient = register('claude');
     const sessionId = randomUUID(); const timestamp = new Date().toISOString();
     db.boundSessions.upsert({ id: sessionId, provider: 'claude', projectSlug: 'demo', conversationRef: recipient.nativeSessionId,
-      tmuxSessionName: 'test-not-running', status: 'bound', shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: false });
+      status: 'bound', shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: false });
     const input = { priority:'P2' as const, id: randomUUID(), recipientId: recipient.id, text: 'Please check current overlap' };
     // Registration can still say active while the authoritative Console knows
     // this session has no working turn.
@@ -326,17 +326,18 @@ describe('assignment coordination', () => {
     expect(db.boundSessions.getById(sessionId)?.manualSuspendedAt).toBe(timestamp);
   });
 
-  it('checks process identity and treats released or ambiguous bindings as unavailable for resume', () => {
+  it('keeps a uniquely bound conversation reachable without its process, and treats released or ambiguous bindings as unavailable for resume', () => {
     const { db, service, register } = fixture();
     const sender = register(); const recipient = register();
     const timestamp = new Date().toISOString();
     const first = { id: randomUUID(), provider: 'codex' as const, projectSlug: 'one', conversationRef: recipient.nativeSessionId,
-      tmuxSessionName: 'first', status: 'bound' as const, shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: true };
+      status: 'bound' as const, shouldRestore: true, startedAt: timestamp, updatedAt: timestamp, isWorking: true };
     db.boundSessions.upsert(first);
     db.sqlite.prepare('update coordination_assignments set process_start=? where id=?').run('not-the-current-process', recipient.id);
     const input = { priority:'P2' as const, id: randomUUID(), recipientId: recipient.id, text: 'Queued for a stopped process' };
-    expect(service.send(sender.id, input)).toMatchObject({ delivery: 'on_resume', recipient: { status: 'stopped', resumableInConsole: true } });
-    db.boundSessions.upsert({ ...first, id: randomUUID(), projectSlug: 'two', tmuxSessionName: 'second' });
+    // The conversation loads on demand, so its binding, not the pid of the hook that last ran, says whether it is reachable.
+    expect(service.send(sender.id, input)).toMatchObject({ delivery: 'next_step', recipient: { status: 'working' } });
+    db.boundSessions.upsert({ ...first, id: randomUUID(), projectSlug: 'two' });
     expect(service.send(sender.id, input).recipient.resumableInConsole).toBe(false);
     db.sqlite.prepare("update bound_sessions set status='ended',should_restore=0").run();
     expect(service.send(sender.id, input).recipient.resumableInConsole).toBe(false);

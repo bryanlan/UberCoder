@@ -190,7 +190,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'released-result',
-      tmuxSessionName: 'ac-codex-demo-current',
       status: 'bound',
       shouldRestore: true,
       title: 'Released result',
@@ -268,13 +267,13 @@ describe('conversation search', () => {
     db.close();
   });
 
-  it('searches active pending sessions through normalized live event logs', async () => {
+  it('searches the messages of active pending sessions through their live event logs', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({ type: 'user-input', text: 'Please make search cover pending activity.', timestamp: '2026-06-18T12:00:00.000Z' }),
-      JSON.stringify({ type: 'raw-output', text: 'Sidebar search covers pending activity from normalized logs.', timestamp: '2026-06-18T12:01:00.000Z' }),
+      JSON.stringify({ type: 'raw-output', text: 'Terminal output an earlier build logged is never searched.', timestamp: '2026-06-18T12:01:00.000Z' }),
     ].join('\n'), 'utf8');
     db.pendingConversations.put({
       ref: 'pending:search',
@@ -293,7 +292,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:search',
-      tmuxSessionName: 'ac-codex-demo-search',
       status: 'bound',
       shouldRestore: true,
       title: 'New Codex conversation',
@@ -332,7 +330,7 @@ describe('conversation search', () => {
       isBound: true,
     });
     expect(liveResult?.role).toBe('user');
-    expect(await search.search('Sidebar search covers', 10)).toEqual([]);
+    expect(await search.search('earlier build logged', 10)).toEqual([]);
     expect(liveResult?.snippet).toContain('pending activity');
     db.close();
   });
@@ -344,7 +342,7 @@ describe('conversation search', () => {
     const eventLogPath = path.join(tempDir, 'events.jsonl');
     await fs.writeFile(eventLogPath, [
       JSON.stringify({ type: 'user-input', text: 'Please inspect the ranking test.', timestamp: updatedAt }),
-      JSON.stringify({ type: 'raw-output', text: 'scale needle scale needle scale needle scale needle', timestamp: updatedAt }),
+      JSON.stringify({ type: 'user-input', text: 'scale needle scale needle scale needle scale needle', timestamp: updatedAt }),
     ].join('\n'), 'utf8');
 
     db.searchIndex.replace('demo', 'claude', [{
@@ -380,7 +378,6 @@ describe('conversation search', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:live-stronger-score',
-      tmuxSessionName: 'ac-claude-demo-live-stronger-score',
       status: 'bound',
       shouldRestore: true,
       title: 'Live stronger score',
@@ -404,7 +401,7 @@ describe('conversation search', () => {
     db.close();
   });
 
-  it('does not search raw-output assistant chunks for transcript-backed sessions', async () => {
+  it('does not search terminal output an earlier build logged', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-search-live-history-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const eventLogPath = path.join(tempDir, 'events.jsonl');
@@ -429,7 +426,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-live',
-      tmuxSessionName: 'ac-codex-demo-history-live',
       status: 'bound',
       shouldRestore: true,
       title: 'History live session',
@@ -477,7 +473,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'old-history-live',
-      tmuxSessionName: 'ac-codex-demo-old-history-live',
       status: 'bound',
       shouldRestore: true,
       title: 'Old history live session',
@@ -515,7 +510,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'missing-index-history-live',
-      tmuxSessionName: 'ac-codex-demo-missing-index-history-live',
       status: 'bound',
       shouldRestore: true,
       title: 'Missing index history live session',
@@ -561,7 +555,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'restored-history',
-      tmuxSessionName: 'ac-codex-demo-restored-history',
       status: 'bound',
       shouldRestore: true,
       title: 'Restored history session',
@@ -606,7 +599,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'restored-history-live-activity',
-      tmuxSessionName: 'ac-codex-demo-restored-history-live-activity',
       status: 'bound',
       shouldRestore: true,
       title: 'Restored history live activity',
@@ -644,8 +636,7 @@ describe('conversation search', () => {
     });
     db.boundSessions.upsert({
       id: 'session-pending-maintenance', provider: 'codex', projectSlug: 'demo',
-      conversationRef: 'pending:maintenance', tmuxSessionName: 'ac-codex-demo-pending-maintenance',
-      status: 'bound', startedAt: '2026-06-18T12:00:00.000Z',
+      conversationRef: 'pending:maintenance', status: 'bound', startedAt: '2026-06-18T12:00:00.000Z',
       updatedAt: '2026-06-18T12:05:00.000Z', eventLogPath,
     });
     const search = new ConversationSearchService(db, { listActiveProjects: async () => [project] });
@@ -667,12 +658,12 @@ describe('conversation search', () => {
         timestamp: '2026-06-18T11:59:59.000Z',
       }),
       JSON.stringify({
-        type: 'raw-output',
+        type: 'user-input',
         text: `old-tail-needle ${'outside-tail '.repeat(60_000)}`,
         timestamp: '2026-06-18T12:00:00.000Z',
       }),
       JSON.stringify({
-        type: 'raw-output',
+        type: 'user-input',
         text: 'Only recent live output should be searched.',
         timestamp: '2026-06-18T12:01:00.000Z',
       }),
@@ -694,7 +685,6 @@ describe('conversation search', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:tail',
-      tmuxSessionName: 'ac-claude-demo-tail',
       status: 'bound',
       shouldRestore: true,
       title: 'Tail bounded pending',
@@ -737,7 +727,6 @@ describe('conversation search', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:metadata',
-      tmuxSessionName: 'ac-codex-demo-metadata',
       status: 'bound',
       shouldRestore: true,
       title: 'Metadata-only pending',
@@ -921,7 +910,6 @@ describe('conversation search', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: providerRoot,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     };
     const provider = {
       id: 'codex',
@@ -1001,7 +989,6 @@ describe('conversation search', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: providerRoot,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     };
     const provider = {
       id: 'codex',

@@ -151,7 +151,6 @@ describe('Recovery that was scheduled when the backend restarted', () => {
     await vi.waitFor(() => expect(recoveryTurns(backend.plugin)).toHaveLength(1), { timeout: 5000, interval: 20 });
     expect(backend.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(native);
     expect(f.row(session.id).runFailure).toMatchObject({ code: 'server_overloaded', status: 'retrying', attempts: 1 });
-    expect(backend.tmux.created).toEqual([]);
   });
 
   it('does not watch a thread that has no recovery to run', async () => {
@@ -178,7 +177,6 @@ describe('A restore the backend crashed in the middle of', () => {
 
     expect(f.row(session.id).status).toBe('bound');
     expect(backend.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(native);
-    expect(backend.tmux.created).toEqual([]);
   });
 });
 

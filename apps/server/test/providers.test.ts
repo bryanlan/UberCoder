@@ -28,66 +28,6 @@ function encodeClaudeProjectDir(projectPath: string): string {
 }
 
 describe('provider history discovery', () => {
-  it.each(['codex', 'claude'] as const)('preserves custom %s model, effort, flags and Console identity on launch and resume', (id) => {
-    const provider = id === 'codex' ? new CodexProvider() : new ClaudeProvider();
-    const settings = { id, enabled: true, discoveryRoot: '/tmp/provider', commands: {
-      newCommand: [id, '--model', 'configured-model'],
-      resumeCommand: id === 'codex' ? [id, 'resume', '{{conversationId}}', '--model', 'configured-model'] : [id, '--resume', '{{conversationId}}', '--model', 'configured-model'],
-      continueCommand: [id], env: {},
-    } } satisfies MergedProviderSettings;
-    for (const ref of [null, 'native-history']) {
-      const argv = provider.getLaunchCommand(project, ref, settings, { model: 'custom-model', effort: 'high', flags: ['--add-dir', '/tmp/helper'],
-        initialPrompt: 'Complete the delegated task.', authorityContext: 'Console supplied standing human grant.', consoleIdentity: { sessionId: 'console-session', runtimeDir: '/tmp/runtime', helperPath: '/tmp/agent-coord.mjs' } }).argv;
-      expect(argv).toContain('custom-model'); expect(argv).not.toContain('configured-model');
-      expect(argv).toContain('--add-dir'); expect(argv.join(' ')).toContain('/tmp/agent-coord.mjs');
-      expect(argv.join(' ')).toContain('AGENT_CONSOLE_SESSION_ID'); expect(argv.join(' ')).toContain('console-session');
-      if (id === 'claude') expect(argv.slice(-2)).toEqual(['--', 'Complete the delegated task.']);
-      if (id === 'claude') expect(argv).toContain('--append-system-prompt');
-      if (ref) expect(argv).toContain(ref);
-      if (id === 'codex' && ref) expect(argv.indexOf('resume')).toBeLessThan(argv.indexOf('--model'));
-    }
-  });
-
-  it.each([null, 'history-ref'])('disables startup update prompts for Codex launch %s', (conversationRef) => {
-    const provider = new CodexProvider();
-    const settings = {
-      id: 'codex', enabled: true, discoveryRoot: '/tmp/codex',
-      commands: {
-        newCommand: ['codex', '-c', 'check_for_update_on_startup=true'],
-        resumeCommand: ['codex', '-c', 'check_for_update_on_startup=true', 'resume', '{{conversationId}}'],
-        continueCommand: ['codex', 'resume', '--last'], env: {},
-      },
-    } satisfies MergedProviderSettings;
-    const launch = provider.getLaunchCommand(project, conversationRef, settings, { codexProfile: 'medium' });
-    expect(launch.argv.slice(-2)).toEqual(['-c', 'check_for_update_on_startup=false']);
-    expect(launch.argv).toContain('--model');
-    expect(launch.argv).toContain('--dangerously-bypass-approvals-and-sandbox');
-    if (conversationRef) expect(launch.argv).toContain(conversationRef);
-  });
-
-  it('passes an initial prompt through Codex resume launches', async () => {
-    const provider = new CodexProvider();
-    const settings = {
-      id: 'codex',
-      enabled: true,
-      discoveryRoot: path.resolve('test/fixtures/codex'),
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
-    } satisfies MergedProviderSettings;
-
-    const launch = provider.getLaunchCommand(project, 'history-ref', settings, {
-      initialPrompt: 'resume with this prompt',
-    });
-
-    expect(launch.argv).toEqual([
-      'codex',
-      '--dangerously-bypass-approvals-and-sandbox',
-      'resume',
-      'history-ref',
-      '-c',
-      'check_for_update_on_startup=false',
-      'resume with this prompt',
-    ]);
-  });
 
   it('discovers Codex transcripts for the selected project', async () => {
     const provider = new CodexProvider();
@@ -95,7 +35,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: path.resolve('test/fixtures/codex'),
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
@@ -156,138 +95,12 @@ describe('provider history discovery', () => {
     }
   });
 
-  it('finds pending Codex adoption candidates by parsed user hash when prompts contain escaped text', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-pending-hash-'));
-    const sessionsDir = path.join(tempDir, 'sessions', '2026', '03', '07');
-    await fs.mkdir(sessionsDir, { recursive: true });
-    const conversationRef = '11111111-2222-4333-8444-555555555555';
-    const transcriptPath = path.join(sessionsDir, `rollout-2026-03-07T10-00-00-${conversationRef}.jsonl`);
-    const prompt = 'Create the "must-hit" plan.\nKeep C:\\research\\inputs intact.';
-    await fs.writeFile(transcriptPath, [
-      JSON.stringify({
-        timestamp: '2026-03-07T15:00:00.000Z',
-        type: 'session_meta',
-        payload: { id: conversationRef, cwd: '/tmp/demo-project' },
-      }),
-      JSON.stringify({
-        timestamp: '2026-03-07T15:00:01.000Z',
-        type: 'response_item',
-        payload: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: prompt }],
-        },
-      }),
-    ].join('\n'));
-
-    const provider = new CodexProvider();
-    const settings = {
-      id: 'codex',
-      enabled: true,
-      discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
-    } satisfies MergedProviderSettings;
-    const pending = {
-      ref: 'pending:quoted-prompt',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-07T15:00:00.000Z',
-      updatedAt: '2026-03-07T15:00:01.000Z',
-      isBound: true,
-      degraded: false,
-      rawMetadata: {
-        pending: true,
-        lastUserInputHash: stableTextHash(normalizeComparableText(prompt)),
-        lastUserInputPreview: 'Create the "must-hit" plan. Keep C:\\research\\inputs intact.',
-        lastUserInputAt: '2026-03-07T15:00:01.000Z',
-      },
-    } as const;
-
-    const candidates = await provider.listPendingAdoptionCandidates(project, pending, settings);
-
-    expect(candidates.map((candidate) => candidate.ref)).toEqual([conversationRef]);
-  });
-
-  it('finds a pending Codex prompt between large instruction and output records', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-codex-pending-middle-'));
-    const sessionsDir = path.join(tempDir, 'sessions', '2026', '08', '14');
-    await fs.mkdir(sessionsDir, { recursive: true });
-    const conversationRef = '22222222-3333-4444-8555-666666666666';
-    const transcriptPath = path.join(sessionsDir, `rollout-2026-08-14T10-40-41-${conversationRef}.jsonl`);
-    const prompt = 'how was last nights run';
-    await fs.writeFile(transcriptPath, [
-      JSON.stringify({
-        timestamp: '2026-08-14T14:40:43.000Z',
-        type: 'session_meta',
-        payload: { id: conversationRef, cwd: '/tmp/demo-project' },
-      }),
-      JSON.stringify({
-        timestamp: '2026-08-14T14:40:44.000Z',
-        type: 'response_item',
-        payload: {
-          type: 'message',
-          role: 'developer',
-          content: [{ type: 'input_text', text: 'x'.repeat(80_000) }],
-        },
-      }),
-      JSON.stringify({
-        timestamp: '2026-08-14T14:40:46.000Z',
-        type: 'response_item',
-        payload: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: prompt }],
-        },
-      }),
-      JSON.stringify({
-        timestamp: '2026-08-14T14:44:27.000Z',
-        type: 'response_item',
-        payload: {
-          type: 'custom_tool_call_output',
-          output: 'y'.repeat(1_100_000),
-        },
-      }),
-    ].join('\n'));
-
-    const provider = new CodexProvider();
-    const settings = {
-      id: 'codex',
-      enabled: true,
-      discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
-    } satisfies MergedProviderSettings;
-    const pending = {
-      ref: 'pending:prompt-in-middle',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-08-14T14:40:41.000Z',
-      updatedAt: '2026-08-14T14:40:41.000Z',
-      isBound: true,
-      degraded: false,
-      rawMetadata: {
-        pending: true,
-        lastUserInputHash: stableTextHash(normalizeComparableText(prompt)),
-        lastUserInputPreview: prompt,
-        lastUserInputAt: '2026-08-14T14:40:41.000Z',
-      },
-    } as const;
-
-    const candidates = await provider.listPendingAdoptionCandidates(project, pending, settings);
-
-    expect(candidates.map((candidate) => candidate.ref)).toEqual([conversationRef]);
-  });
-
   it('discovers Claude transcripts from encoded project storage', async () => {
     const provider = new ClaudeProvider();
     const settings = {
       id: 'claude',
       enabled: true,
       discoveryRoot: path.resolve('test/fixtures/claude'),
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
     const conversations = await provider.listConversations(project, settings);
     expect(conversations).toHaveLength(1);
@@ -684,7 +497,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1136,7 +948,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1162,7 +973,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const nestedRepoProject: ActiveProject = {
@@ -1201,7 +1011,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const nestedRepoProject: ActiveProject = {
@@ -1272,7 +1081,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: path.join(tempDir, 'codex-home'),
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings);
     expect(codexConversations).toHaveLength(1);
     expect(codexConversations[0]?.title).toContain('Markerless Codex prompt');
@@ -1282,7 +1090,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: path.join(tempDir, 'claude-home'),
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings);
     expect(claudeConversations).toHaveLength(1);
     expect(claudeConversations[0]?.title).toContain('Markerless Claude prompt');
@@ -1346,7 +1153,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: path.join(tempDir, 'claude-home'),
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const explicitChildProject: ActiveProject = {
@@ -1407,7 +1213,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: path.join(tempDir, 'codex-home'),
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const explicitChildProject: ActiveProject = {
@@ -1442,7 +1247,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1483,7 +1287,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1528,7 +1331,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1586,7 +1388,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversation = await provider.getConversation(project, 'visible-history', settings);
@@ -1635,7 +1436,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1713,7 +1513,6 @@ describe('provider history discovery', () => {
       id: 'codex',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversation = await provider.getConversation(project, 'codex-wrapper-filter', settings);
@@ -1741,7 +1540,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1770,7 +1568,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversations = await provider.listConversations(project, settings);
@@ -1818,7 +1615,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversation = await provider.getConversation(project, 'metadata-leak', settings);
@@ -1869,7 +1665,6 @@ describe('provider history discovery', () => {
       id: 'claude',
       enabled: true,
       discoveryRoot: tempDir,
-      commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
     } satisfies MergedProviderSettings;
 
     const conversation = await provider.getConversation(project, 'local-command-filter', settings);

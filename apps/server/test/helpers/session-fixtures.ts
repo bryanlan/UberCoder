@@ -1,127 +1,11 @@
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { SessionManager } from '../../src/sessions/session-manager.js';
-import { assertTmuxSessionName, type TmuxClient } from '../../src/sessions/tmux-client.js';
 import type { ProviderAdapter } from '../../src/providers/types.js';
 import type { ActiveProject } from '../../src/projects/project-service.js';
 import type { MergedProviderSettings } from '../../src/config/service.js';
 import { AppDatabase } from '../../src/db/database.js';
 import { CoordinationService } from '../../src/coordination/service.js';
 import { randomUUID } from 'node:crypto';
-
-export class FakeTmux implements TmuxClient {
-  created: string[] = [];
-  createdCommands: string[] = [];
-  sent: string[] = [];
-  pasted: string[] = [];
-  sentKeys: string[][] = [];
-  pipedToFiles: Array<{ sessionName: string; filePath: string }> = [];
-  closedPipes: string[] = [];
-  alive = new Set<string>();
-  failPipePane = false;
-  failClosePipe = false;
-  failKill = false;
-  paneText = '';
-  captureSequence: string[] = [];
-  captureStartLines: Array<number | undefined> = [];
-  options: Array<{ sessionName: string; name: string; value: string }> = [];
-  hasSessionResults: Array<boolean | Error> = [];
-  windowSizeChecks: string[] = [];
-  sessionCreatedAt = '1970-01-01T00:00:01.000Z';
-
-  async newDetachedSession(sessionName: string, _cwd: string, shellCommand: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    if (this.created.length) this.sessionCreatedAt = new Date().toISOString();
-    this.created.push(sessionName);
-    this.createdCommands.push(shellCommand);
-    this.alive.add(sessionName);
-  }
-  async pipePaneToFile(sessionName: string, filePath: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    if (this.failPipePane) {
-      throw new Error('pipe-pane failed');
-    }
-    this.pipedToFiles.push({ sessionName, filePath });
-  }
-  async closePanePipe(sessionName: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    if (this.failClosePipe) {
-      throw new Error('close pipe failed');
-    }
-    this.closedPipes.push(sessionName);
-  }
-  async sendLiteralText(sessionName: string, text: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    this.sent.push(text);
-  }
-  async pasteText(sessionName: string, text: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    this.pasted.push(text);
-    this.sent.push(text);
-  }
-  async sendKeys(sessionName: string, keys: string[]): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    this.sentKeys.push(keys);
-  }
-  async capturePane(sessionName?: string, startLine?: number): Promise<string> {
-    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
-    this.captureStartLines.push(startLine);
-    if (this.captureSequence.length > 0) {
-      const next = this.captureSequence.shift();
-      if (next !== undefined) {
-        this.paneText = next;
-      }
-    }
-    return this.paneText;
-  }
-  async interrupt(sessionName?: string): Promise<void> {
-    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
-  }
-  async killSession(sessionName: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    if (this.failKill) {
-      throw new Error('kill failed');
-    }
-    this.alive.delete(sessionName);
-  }
-  async hasSession(sessionName: string): Promise<boolean> {
-    assertTmuxSessionName(sessionName);
-    const next = this.hasSessionResults.shift();
-    if (next instanceof Error) {
-      throw next;
-    }
-    if (next !== undefined) {
-      return next;
-    }
-    return this.alive.has(sessionName);
-  }
-  async getPanePid(sessionName?: string): Promise<number | undefined> {
-    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
-    return 4242;
-  }
-  async getSessionCreatedAt(sessionName?: string): Promise<string> {
-    if (sessionName !== undefined) assertTmuxSessionName(sessionName);
-    return this.sessionCreatedAt;
-  }
-  async ensureMinimumWindowSize(sessionName: string, _columns: number, _rows: number): Promise<boolean> {
-    assertTmuxSessionName(sessionName);
-    this.windowSizeChecks.push(sessionName);
-    return false;
-  }
-  async getOption(sessionName: string, name: string): Promise<string | undefined> {
-    assertTmuxSessionName(sessionName);
-    for (let index = this.options.length - 1; index >= 0; index -= 1) {
-      const option = this.options[index];
-      if (option?.sessionName === sessionName && option.name === name) {
-        return option.value;
-      }
-    }
-    return undefined;
-  }
-  async setOption(sessionName: string, name: string, value: string): Promise<void> {
-    assertTmuxSessionName(sessionName);
-    this.options.push({ sessionName, name, value });
-  }
-}
 
 export const project: ActiveProject = {
   slug: 'demo',
@@ -140,13 +24,6 @@ export const provider: ProviderAdapter = {
   async discoverLocalState() { return {}; },
   async listConversations() { return []; },
   async getConversation() { return null; },
-  getLaunchCommand(_project, _conversationRef, _settings, options) {
-    return {
-      cwd: '/srv/demo',
-      argv: ['codex', ...(options?.initialPrompt ? [options.initialPrompt] : [])],
-      env: {},
-    };
-  },
 };
 
 export const claudeProvider: ProviderAdapter = {
@@ -158,19 +35,17 @@ export const providerSettings = {
   id: 'codex',
   enabled: true,
   discoveryRoot: '/home/user/.codex',
-  commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} },
 } satisfies MergedProviderSettings;
 
 export function createRecoveryManager(
   db: AppDatabase,
-  tmux: TmuxClient,
   runtimeDir: string,
   eventBus = new RealtimeEventBus(),
   recoveryProvider: ProviderAdapter = provider,
   recoveryProviderSettings: MergedProviderSettings = providerSettings,
-  options: ConstructorParameters<typeof SessionManager>[6] = {},
+  options: ConstructorParameters<typeof SessionManager>[5] = {},
 ): SessionManager {
-  return new SessionManager(db, tmux, runtimeDir, eventBus, {
+  return new SessionManager(db, runtimeDir, eventBus, {
     projectService: {
       getProjectBySlug: async (slug: string) => slug === project.slug ? project : undefined,
       getMergedProviderSettings: () => recoveryProviderSettings,

@@ -4,10 +4,6 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CodexRunMonitor } from '../src/providers/transcripts/codex-run-state.js';
 import { parseCodexConversationFile } from '../src/providers/transcripts/codex.js';
-import { AppDatabase } from '../src/db/database.js';
-import { CodexProvider } from '../src/providers/codex-provider.js';
-import { createRecoveryManager, enableUnattendedRecovery, FakeTmux, project, provider, providerSettings } from './helpers/session-fixtures.js';
-import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.splice(0).map(p => fs.rm(p, { recursive: true, force: true }))); });
@@ -75,49 +71,5 @@ describe('Codex authoritative run state', () => {
     await fs.appendFile(p, record('task_started', 'turn2'));
     expect((await m.read(p))?.progressAt).toBeUndefined();
   });
-
-  it('observes a managed transcript failure without a conversation-page poll and cancels through the real input path', async () => {
-    const p = await file(); await fs.writeFile(p, record('task_started'));
-    const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
-    const tmux = new FakeTmux(); const events = new RealtimeEventBus();
-    const adapter = { ...provider, createRunMonitor: () => new CodexProvider().createRunMonitor() };
-    const manager = createRecoveryManager(db, tmux, path.dirname(p), events, adapter);
-    db.conversationIndex.replace('demo', 'codex', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'codex', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
-    try {
-      enableUnattendedRecovery(db, adapter.id, 'c1');
-      const session = await manager.bindConversation({ project, provider: adapter, providerSettings, conversationRef: 'c1', title: 'Recovery', kind: 'history' });
-      await fs.appendFile(p, record('task_complete', 'turn1', capacity));
-      const deadline = Date.now() + 4000;
-      while (!db.boundSessions.getById(session.id)?.runFailure && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-      expect(db.boundSessions.getById(session.id)).toMatchObject({ isWorking: false, runFailure: { status: 'scheduled', message: capacity.message } });
-      await manager.sendKeystrokes(session.id, { keys: ['Escape'] });
-      expect(db.boundSessions.getById(session.id)?.runFailure?.status).toBe('stopped');
-      expect(tmux.sent).toEqual([]);
-    } finally { await manager.stop(); db.close(); }
-  });
-  it('submits one automatic continuation through the owned Codex tmux session', async () => {
-    const p = await file(); await fs.writeFile(p, record('task_started'));
-    const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
-    const tmux = new FakeTmux();
-    tmux.paneText = 'OpenAI Codex\nSelected model is at capacity.\n› Ask Codex to do anything\ngpt-5.4 medium · 98% left · ~/demo';
-    const adapter = { ...provider, createRunMonitor: () => new CodexProvider().createRunMonitor() };
-    const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, providerSettings,
-      { queueCodexNotice: async (_ref, _settings, _cwd, text) => { tmux.sent.push(text); } });
-    db.conversationIndex.replace('demo', 'codex', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'codex', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
-    try {
-      enableUnattendedRecovery(db, adapter.id, 'c1');
-      const session = await manager.bindConversation({ project, provider: adapter, providerSettings, conversationRef: 'c1', title: 'Recovery', kind: 'history' });
-      await fs.appendFile(p, record('task_complete', 'turn1', capacity));
-      const deadline = Date.now() + 20_000;
-      while (!tmux.sent.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
-      expect(tmux.sent.join(''), JSON.stringify(db.boundSessions.getById(session.id)?.runFailure)).toContain('Automatic recovery after a transient provider failure');
-      expect(tmux.sentKeys).toEqual([]);
-      expect(db.boundSessions.getById(session.id)?.runFailure).toMatchObject({ attempts: 1, status: 'retrying' });
-      await fs.appendFile(p, record('task_started', 'retry1') + record('task_complete', 'retry1'));
-      const completionDeadline = Date.now() + 3000;
-      while (db.boundSessions.getById(session.id)?.runFailure && Date.now() < completionDeadline) await new Promise(resolve => setTimeout(resolve, 20));
-      expect(db.boundSessions.getById(session.id)?.runFailure).toBeUndefined();
-    } finally { await manager.stop(); db.close(); }
-  }, 25_000);
 
 });

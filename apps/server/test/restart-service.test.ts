@@ -84,7 +84,7 @@ it('closes a real browser event stream and releases the coordination socket for 
     coordination: { enabled: true, pilotPaths: [] },
     security: { passwordHash: 'unused', sessionSecret: 's'.repeat(64), trustTailscaleHeaders: true, tailscaleAllowedUserLogin: 'review@example.invalid' },
     providers: Object.fromEntries(['codex', 'claude'].map((provider) => [provider, {
-      enabled: false, discoveryRoot: path.join(root, provider), commands: { newCommand: ['false'], resumeCommand: ['false'] },
+      enabled: false, discoveryRoot: path.join(root, provider),
     }])),
     projects: {},
   }));

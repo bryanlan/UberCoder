@@ -225,11 +225,6 @@ function modelProfileRequestStatus(request: ModelProfileRequest): string {
   if (request.state === 'applying') return `Switching to ${label}…`;
   if (request.state === 'failed') return `Could not switch to ${label}: ${request.message}`;
   if (request.deferredReason === 'unsent_input') return `${label} queued. Send or clear the terminal draft first.`;
-  if (request.deferredReason === 'interactive_input') return `${label} queued. Finish the terminal selection first.`;
-  if (request.deferredReason === 'provider_message_queued') return `${label} queued. Resolve the provider's queued message first.`;
-  if (request.deferredReason === 'awaiting_native_conversation') return `${label} queued until the first turn can be resumed safely.`;
-  if (request.deferredReason === 'starting') return `${label} queued until the session finishes starting.`;
-  if (request.deferredReason === 'cannot_verify_idle') return `${label} queued until the server can verify the session is idle.`;
   return `${label} queued until this turn finishes.`;
 }
 
@@ -572,7 +567,7 @@ function LiveSessionInputBridge({
       while (pendingTextRef.current && generation === inputGenerationRef.current) {
         const text = pendingTextRef.current;
         pendingTextRef.current = '';
-        ok = await queueKeystrokes({ text, deferScreenUpdate: true });
+        ok = await queueKeystrokes({ text });
         if (!ok) {
           break;
         }
@@ -1582,7 +1577,7 @@ export function ConversationPane({
   const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
-  const structuredSession = boundSession?.transport === 'structured';
+  const structuredSession = Boolean(boundSession);
   // Claude runs headless; Codex runs through its app-server protocol. Neither has a terminal.
   const structuredLabel = boundSession?.provider === 'claude' ? 'headless' : 'app-server';
   const compactLiveLayout = workMode && liveMode;

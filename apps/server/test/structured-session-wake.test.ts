@@ -46,7 +46,6 @@ describe('Structured peer wake delivery', () => {
     expect(w.f.row(w.session.id).lastActivityAt).toBeTruthy();
     expect(eventLogLines(w.f.row(w.session.id)).some(line => line.type === 'status' && /peer-inbox response/.test(line.text))).toBe(true);
     // The notice is not typed into any terminal.
-    expect(w.f.tmuxTouched()).toBe(0);
 
     await w.f.manager.wakePendingAssignments();
     expect(w.turnTexts()).toEqual([PEER_WAKE_PROMPT]);
@@ -119,7 +118,6 @@ describe('Structured peer wake delivery', () => {
     expect(w.attempt(message.id)).toMatchObject({ status: 'submitted', restoration: 'restored' });
     expect(w.f.row(w.session.id).idleSuspendedAt).toBeUndefined();
     expect(w.turnTexts()).toEqual([PEER_WAKE_PROMPT]);
-    expect(w.f.tmuxTouched()).toBe(0);
   });
 
   it('loads the thread after a backend restart and delivers, never launching tmux', async () => {
@@ -130,7 +128,6 @@ describe('Structured peer wake delivery', () => {
     expect(backend.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(w.native);
     expect(backend.plugin.instance!.sessions[0]!.calls.filter(call => call.method === 'sendTurn')).toHaveLength(1);
     expect(w.attempt(message.id)).toMatchObject({ status: 'submitted', restoration: 'restored' });
-    expect(backend.tmux.created).toEqual([]);
   });
 
   it('does not wake a manually suspended session', async () => {
@@ -172,6 +169,5 @@ describe('Structured unattended continuation', () => {
     expect(w.turnTexts()).toEqual([UNATTENDED_CONTINUATION_PROMPT]);
     expect(continuationControl(w.f.db, w.recipient).recovery).toMatchObject({ status: 'submitted' });
     expect(eventLogLines(w.f.row(w.session.id)).some(line => /unattended continuation/.test(line.text))).toBe(true);
-    expect(w.f.tmuxTouched()).toBe(0);
   });
 });

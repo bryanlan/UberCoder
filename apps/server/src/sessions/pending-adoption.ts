@@ -1,15 +1,11 @@
 import type { BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
-import { getPendingConversationMatchTimestamp } from '../lib/pending-conversation-match.js';
 import { nowIso } from '../lib/time.js';
 import { normalizeComparableText, stableTextHash, truncate } from '../lib/text.js';
 import { imagePromptDisplay } from '../images/prompt.js';
 
-const PENDING_ADOPTION_MATCH_WINDOW_MS = 30 * 60 * 1000;
-
-export function pendingConversationHasRecordedUserInput(pending: ConversationSummary | undefined): boolean {
-  return typeof pending?.rawMetadata?.lastUserInputHash === 'string';
-}
+// A new chat starts as a pending alias (`pending:<uuid>`). Its bind learns the provider's native id at once, and the native
+// conversation adopts the alias here, so a read of the alias resolves to it.
 
 export function recordPendingUserInput(input: {
   db: AppDatabase;
@@ -38,88 +34,6 @@ export function recordPendingUserInput(input: {
     input.db.pendingConversations.put(updated);
     return updated;
   });
-}
-
-export function scorePendingMatch(
-  pendingLastUserHash: string | undefined,
-  conversation: ConversationSummary,
-): number {
-  const rawMetadata = conversation.rawMetadata ?? {};
-  const candidateHashes = [
-    rawMetadata.lastUserTextHash,
-    rawMetadata.firstUserTextHash,
-  ].filter((value): value is string => typeof value === 'string');
-
-  if (pendingLastUserHash) {
-    return candidateHashes.includes(pendingLastUserHash) ? 0 : -1;
-  }
-
-  return -1;
-}
-
-function coerceTimestamp(value: unknown): number {
-  return typeof value === 'string' ? Date.parse(value) : NaN;
-}
-
-function getCandidateMatchTimestamp(
-  pendingLastUserHash: string,
-  conversation: ConversationSummary,
-): number {
-  const rawMetadata = conversation.rawMetadata ?? {};
-  if (rawMetadata.lastUserTextHash === pendingLastUserHash) {
-    const lastUserAt = coerceTimestamp(rawMetadata.lastUserAt);
-    if (Number.isFinite(lastUserAt)) {
-      return lastUserAt;
-    }
-
-    const updatedAt = Date.parse(conversation.updatedAt);
-    if (Number.isFinite(updatedAt)) {
-      return updatedAt;
-    }
-  }
-
-  if (rawMetadata.firstUserTextHash === pendingLastUserHash) {
-    const firstUserAt = coerceTimestamp(rawMetadata.firstUserAt);
-    if (Number.isFinite(firstUserAt)) {
-      return firstUserAt;
-    }
-
-    const createdAt = Date.parse(conversation.createdAt ?? conversation.updatedAt);
-    if (Number.isFinite(createdAt)) {
-      return createdAt;
-    }
-  }
-
-  return Date.parse(conversation.createdAt ?? conversation.updatedAt);
-}
-
-export function findPendingAdoptionMatch(
-  pending: ConversationSummary,
-  conversations: ConversationSummary[],
-  options: { claimedRefs?: Set<string> } = {},
-): ConversationSummary | undefined {
-  const pendingTimestamp = getPendingConversationMatchTimestamp(pending);
-  const pendingLastUserHash = typeof pending.rawMetadata?.lastUserInputHash === 'string'
-    ? pending.rawMetadata.lastUserInputHash
-    : undefined;
-  if (!Number.isFinite(pendingTimestamp) || !pendingLastUserHash) {
-    return undefined;
-  }
-
-  const matches = conversations
-    .filter(conversation => conversation.provider !== 'codex' || (conversation.rawMetadata?.threadSource !== 'subagent'
-      && !conversation.rawMetadata?.forkedFromId))
-    .filter((conversation) => !options.claimedRefs?.has(conversation.ref) && conversation.ref !== pending.ref)
-    .map((conversation) => ({
-      conversation,
-      delta: Math.abs(getCandidateMatchTimestamp(pendingLastUserHash, conversation) - pendingTimestamp),
-      score: scorePendingMatch(pendingLastUserHash, conversation),
-    }))
-    .filter(({ delta, score }) => score >= 0 && Number.isFinite(delta) && delta <= PENDING_ADOPTION_MATCH_WINDOW_MS)
-    .map(({ conversation }) => conversation);
-  // Repeated prompts and inherited child histories are not proof of identity.
-  const unique = new Map(matches.map(conversation => [conversation.ref, conversation]));
-  return unique.size === 1 ? unique.values().next().value : undefined;
 }
 
 export function adoptPendingConversation(input: {
@@ -219,37 +133,5 @@ export function clearPendingRestoreBinding(input: {
     };
     input.db.boundSessions.upsert(ended);
     return ended;
-  });
-}
-
-export function markPendingSessionNotLive(input: {
-  db: AppDatabase;
-  session: BoundSession;
-  updatedAt?: string;
-}): { failed: BoundSession; shouldEmitFailure: boolean } {
-  const updatedAt = input.updatedAt ?? nowIso();
-  return input.db.transaction(() => {
-    const pending = input.session.conversationRef.startsWith('pending:')
-      ? input.db.pendingConversations.get(input.session.conversationRef)
-      : undefined;
-    if (pending) {
-      input.db.pendingConversations.put({
-        ...pending,
-        isBound: false,
-        boundSessionId: undefined,
-        updatedAt: pending.updatedAt,
-      });
-    }
-
-    const failed: BoundSession = {
-      ...input.session,
-      status: 'error',
-      updatedAt,
-      isWorking: false,
-      pid: undefined,
-    };
-    const shouldEmitFailure = input.session.status !== 'error';
-    input.db.boundSessions.upsert(failed);
-    return { failed, shouldEmitFailure };
   });
 }

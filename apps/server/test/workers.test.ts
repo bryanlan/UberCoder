@@ -128,8 +128,8 @@ describe('worker summary controller', () => {
     const f = await fixture(); await f.service.refresh(1); await f.service.settled();
     const before = await f.service.snapshot(); f.source.roster.mockClear(); f.source.collect.mockClear();
     f.advance(WORKER_IDLE_MS);
-    f.events.emit({ type: 'session.raw-output', sessionId: 'one', projectSlug: 'demo', provider: 'codex',
-      conversationRef: 'one', chunk: 'More agent work', timestamp: new Date().toISOString() });
+    f.events.emit({ type: 'session.transcript-updated', sessionId: 'one', projectSlug: 'demo', provider: 'codex',
+      conversationRef: 'one', timestamp: new Date().toISOString() });
     const paused = await f.service.refresh(1);
     expect(paused).toMatchObject({ pauseReason: 'inactivity', trackingEnabled: false, workers: before.workers });
     expect(f.source.roster).not.toHaveBeenCalled(); expect(f.source.collect).not.toHaveBeenCalled();

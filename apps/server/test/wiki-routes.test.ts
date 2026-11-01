@@ -22,8 +22,8 @@ it('serves a project wiki with authentication, CSRF protection and conflict resp
       sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     },
     providers: {
-      codex: { discoveryRoot: path.join(root, 'codex'), commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume'], continueCommand: ['codex'], env: {} } },
-      claude: { discoveryRoot: path.join(root, 'claude'), commands: { newCommand: ['claude'], resumeCommand: ['claude', 'resume'], continueCommand: ['claude'], env: {} } },
+      codex: { discoveryRoot: path.join(root, 'codex') },
+      claude: { discoveryRoot: path.join(root, 'claude') },
     },
     projects: { demo: { active: true, path: project } },
   }));

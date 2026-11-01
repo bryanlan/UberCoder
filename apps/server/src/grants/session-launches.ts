@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { AgentGrant, AgentGrantAction, AgentLaunchContext, BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
+import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, type AgentGrant, type AgentGrantAction, type AgentLaunchContext, type BoundSession, type ConversationSummary, type ProviderId } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
@@ -9,11 +9,25 @@ import { SessionInputRejectedError, type SessionManager } from '../sessions/sess
 import type { GrantService } from './service.js';
 import { AGENT_LAUNCH_PREFIX } from './authority.js';
 const SESSION_MEMORY_BYTES = 250 * 1024 * 1024;
+
+/**
+ * The model a launch or restart runs on, the way the session manager chooses it: a restart keeps the session's cost profile, or
+ * the model its launch named; a new launch runs the model it names, or the default Medium profile when it names neither model
+ * nor effort. Undefined when the provider picks the model itself. Grants that limit models compare against this.
+ */
+function launchModel(provider: ProviderId, target: BoundSession | undefined, input: { model?: string; effort?: string }): string | undefined {
+  const profiles = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
+  if (target) {
+    const profile = provider === 'codex' ? target.codexProfile : target.claudeProfile;
+    return profile ? profiles[profile].model : target.launchContext?.model;
+  }
+  return input.model ?? (input.effort ? undefined : profiles.medium.model);
+}
+
 interface LaunchInput {
-  projectSlug?: string; provider?: ProviderId; model?: string; effort?: string; flags?: string[];
+  projectSlug?: string; provider?: ProviderId; model?: string; effort?: string;
   prompt?: string; title?: string; supervisorId?: string; grantId?: string; sessionId?: string; targetAssignmentId?: string; requestId?: string;
-  previousPid?: number;
-  /** A structured session proves a restart by a new load epoch, not a new pid: a shared process keeps its pid across threads. */
+  /** A restart is proven by a new load epoch, not a new pid: a shared process keeps its pid across threads. */
   previousEpoch?: string;
 }
 interface RequestRow { id: string; assignment_id: string; grant_id: string; action: AgentGrantAction;
@@ -78,7 +92,7 @@ export class AgentSessionLaunches {
 
   async request(assignmentId: string, action: AgentGrantAction, raw: LaunchInput) {
     const input: LaunchInput = { projectSlug: raw.projectSlug, provider: raw.provider, model: raw.model, effort: raw.effort,
-      flags: raw.flags ?? [], prompt: raw.prompt, title: raw.title, supervisorId: raw.supervisorId,
+      prompt: raw.prompt, title: raw.title, supervisorId: raw.supervisorId,
       grantId: raw.grantId, sessionId: raw.sessionId, targetAssignmentId: raw.targetAssignmentId, requestId: raw.requestId };
     if (input.targetAssignmentId && (action !== 'restart_session' || input.sessionId))
       throw new Error('For restart choose either sessionId or targetAssignmentId.');
@@ -120,25 +134,14 @@ export class AgentSessionLaunches {
       target = this.db.boundSessions.getById(input.sessionId);
       if (!target?.shouldRestore || target.status === 'ended') throw new Error('This session is released or finished.');
       input.projectSlug = target.projectSlug; input.provider = target.provider;
-      input.previousPid = target.pid ?? undefined;
-      if (target.transport === 'structured') input.previousEpoch = this.db.meta.get(`structured-epoch:${target.id}`) || undefined;
+      input.previousEpoch = this.db.meta.get(`structured-epoch:${target.id}`) || undefined;
     }
     if (!input.projectSlug || !input.provider || (action === 'launch_session' && !input.prompt)) throw new Error('projectSlug, provider and an opening prompt are required for launch.');
     const project = await this.projects.getProjectBySlug(input.projectSlug);
     if (!project) throw new Error('Choose a configured active project.');
     const settings = this.projects.getMergedProviderSettings(project, input.provider);
     if (!settings.enabled) throw new Error('This provider is disabled for the project.');
-    const profile = target?.provider === 'codex' ? { codexProfile: target.codexProfile } : { claudeProfile: target?.claudeProfile };
-    const command = this.providers.get(input.provider).getLaunchCommand(project, target?.resumeConversationRef ?? null, settings,
-      target ? { ...profile, model: !target.codexProfile && !target.claudeProfile ? target.launchContext?.model : undefined,
-        effort: !target.codexProfile && !target.claudeProfile ? target.launchContext?.effort : undefined, flags: target.launchContext?.flags }
-        : { model: input.model, effort: input.effort, flags: input.flags });
-    let model: string | undefined;
-    for (let i = 1; i < command.argv.length; i++) {
-      const value = command.argv[i]!;
-      if (value === '--model' || value === '-m') model = command.argv[++i];
-      else if (value.startsWith('--model=')) model = value.slice(8);
-    }
+    const model = launchModel(input.provider, target, input);
     const grant = this.grants.grantsFor(assignmentId).find(candidate => (!input.grantId || input.grantId === candidate.id)
       && candidate.actions.includes(action) && (!candidate.projectSlugs.length || candidate.projectSlugs.includes(project.slug))
       && (!candidate.limits.models.length || (model && candidate.limits.models.includes(model))));
@@ -199,9 +202,7 @@ export class AgentSessionLaunches {
     }
     if (row.status === 'starting') {
       const prior = this.db.boundSessions.getById(row.session_id);
-      const restarted = prior?.transport === 'structured'
-        ? (this.db.meta.get(`structured-epoch:${prior.id}`) || undefined) !== input.previousEpoch
-        : Boolean(prior?.pid && prior.pid !== input.previousPid);
+      const restarted = prior !== undefined && (this.db.meta.get(`structured-epoch:${prior.id}`) || undefined) !== input.previousEpoch;
       if (prior?.shouldRestore && prior.status === 'bound' && (row.action === 'launch_session' || restarted)) {
         this.update(row, 'completed'); return;
       }
@@ -211,7 +212,7 @@ export class AgentSessionLaunches {
       if (prior && (!prior.shouldRestore || prior.status === 'error' || prior.status === 'ended')) {
         this.update(row, 'failed', 'The provider did not start.'); return;
       }
-      // No launch row means shutdown preceded bind. An unchanged restart PID
+      // No launch row means shutdown preceded bind. An unchanged restart epoch
       // means shutdown preceded replacement. Continue the original reservation.
       if (!this.update(row, 'queued')) return;
     }
@@ -228,17 +229,7 @@ export class AgentSessionLaunches {
     }
     if (grant.limits.models.length) {
       const target = row.action === 'restart_session' ? this.db.boundSessions.getById(row.session_id) : undefined;
-      const command = this.providers.get(input.provider!).getLaunchCommand(project, target?.resumeConversationRef ?? null, settings,
-        target ? { codexProfile: target.codexProfile, claudeProfile: target.claudeProfile,
-          model: !target.codexProfile && !target.claudeProfile ? target.launchContext?.model : undefined,
-          effort: !target.codexProfile && !target.claudeProfile ? target.launchContext?.effort : undefined, flags: target.launchContext?.flags }
-          : { model: input.model, effort: input.effort, flags: input.flags });
-      let model: string | undefined;
-      for (let i = 1; i < command.argv.length; i++) {
-        const value = command.argv[i]!;
-        if (value === '--model' || value === '-m') model = command.argv[++i];
-        else if (value.startsWith('--model=')) model = value.slice(8);
-      }
+      const model = launchModel(input.provider!, target, input);
       if (!model || !grant.limits.models.includes(model)) { this.update(row, 'cancelled', 'The current model is outside the grant.'); return; }
     }
     let available: number | undefined;
@@ -263,13 +254,13 @@ export class AgentSessionLaunches {
         const inherited = this.grants.grantsFor(row.assignment_id);
         const context: AgentLaunchContext = { launchedBy: row.assignment_id, launcherName: actor.description,
           grantIds: inherited.map(candidate => candidate.id), requestId: row.id,
-          model: input.model, effort: input.effort, flags: input.flags ?? [], supervisorId: input.supervisorId ?? row.assignment_id };
+          model: input.model, effort: input.effort, supervisorId: input.supervisorId ?? row.assignment_id };
         const prompt = `${AGENT_LAUNCH_PREFIX} Started by ${actor.description} (${row.assignment_id}) under Bryan's grant ${grant.id}.\nAuthorized work scope: ${JSON.stringify(grant.scope)}\nThe Console supplies this authority. You inherit the launcher's active grants; read agent_grants list and honor their scopes and limits. This session may continue unattended under those grants. Your assignment is the opening task below.\nOpening task from the launcher:\n${input.prompt}`;
         const pendingRef = `pending:${row.id}`, now = new Date().toISOString();
         const pending: ConversationSummary = { ref: pendingRef, kind: 'pending', projectSlug: project.slug, provider: input.provider!, title: input.title ?? `${input.provider} helper`,
           createdAt: now, updatedAt: now, isBound: true, boundSessionId: row.session_id, degraded: false, rawMetadata: { pending: true } };
         this.db.pendingConversations.put(pending);
-        await this.sessions.bindConversation({ project, provider: this.providers.get(input.provider!), providerSettings: this.projects.getMergedProviderSettings(project, input.provider!),
+        await this.sessions.bindConversation({ project, provider: this.providers.get(input.provider!),
           conversationRef: pendingRef, kind: 'pending', title: pending.title, initialPrompt: prompt, initialPromptIsHuman: false,
           launchContext: context, sessionId: row.session_id });
       }

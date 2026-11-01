@@ -31,7 +31,7 @@ function backdate(f: StructuredSessionFixture, sessionId: string, minutes: numbe
 }
 
 const launchContext: AgentLaunchContext = {
-  launchedBy: 'assignment-1', launcherName: 'Lead agent', grantIds: ['grant-1'], requestId: 'request-1', flags: [], supervisorId: 'assignment-1',
+  launchedBy: 'assignment-1', launcherName: 'Lead agent', grantIds: ['grant-1'], requestId: 'request-1', supervisorId: 'assignment-1',
 };
 
 function startOptions(f: StructuredSessionFixture, index = 0): OpenOptions {
@@ -181,7 +181,6 @@ describe('Per-session processes: sleep, pressure, release', () => {
     // The stopped state that follows an idle unload is a normal end: no error row, no connection-loss line.
     expect(eventLogLines(asleep).some(line => /connection ended/i.test(line.text))).toBe(false);
     expect(f.events.some(event => event.type === 'session.updated' && event.session.id === session.id && event.session.status === 'error')).toBe(false);
-    expect(f.tmuxTouched()).toBe(0);
 
     await new Promise(resolve => setTimeout(resolve, 5));
     const restored = await f.manager.sendInput(session.id, 'wake up');
@@ -227,7 +226,6 @@ describe('Per-session processes: sleep, pressure, release', () => {
     expect(first.calls.filter(call => call.method === 'unload')).toHaveLength(1);
     expect(eventLogLines(row).some(line => /available memory was low/i.test(line.text))).toBe(true);
     expect(eventLogLines(row).some(line => /connection ended/i.test(line.text))).toBe(false);
-    expect(f.tmuxTouched()).toBe(0);
 
     // Reconciling again neither resumes it nor suspends it twice.
     await f.manager.reconcileSessions();
@@ -354,9 +352,9 @@ describe('Per-session processes: a row with no cost profile', () => {
     const session = await f.bindHistory('native-history-2');
     expect(f.row(session.id).claudeProfile).toBeUndefined();
     await f.manager.requestModelProfile(session.id, 'low');
-    await settle(10);
+    // The switch applies on the next drain pass; wait for it rather than for a fixed delay, which a loaded host can outlast.
+    await expect.poll(() => f.row(session.id).claudeProfile, { timeout: 5000, interval: 20 }).toBe('low');
     await f.manager.sendInput(session.id, 'hello');
-    expect(f.row(session.id).claudeProfile).toBe('low');
     expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5', effort: 'high' });
   });
 

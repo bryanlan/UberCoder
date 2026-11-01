@@ -71,7 +71,6 @@ describe.each([
     expect(f.row(session.id).isWorking).toBe(true);
     // Finding the turn again is not new activity.
     expect(f.row(session.id).lastActivityAt).toBe(activityBefore);
-    expect(backend.tmux.created).toEqual([]);
 
     // The adopted turn is the session's turn: Stop reaches the provider, and a message steers it instead of starting another.
     const adopted = instance.sessions[0]!;
@@ -192,7 +191,6 @@ describe.each([
     expect(lossLines(f, session.id)).toEqual([]);
     expect(f.row(session.id).isWorking).toBe(true);
     expect(f.row(session.id).lastActivityAt).toBe(activityBefore);
-    expect(backend.tmux.created).toEqual([]);
 
     // The next load gets an answer: the survivor is adopted with its turn, as if it had answered at once.
     const polled = await backend.manager.getSessionScreen(session.id);
@@ -339,7 +337,6 @@ describe('A thread the app-server says is running a turn that no listing names',
     expect(methods(instance)).toEqual(['reattach']);
     expect(lossLines(f, session.id)).toEqual([]);
     expect(f.row(session.id).isWorking).toBe(true);
-    expect(backend.tmux.created).toEqual([]);
 
     // The first event of the turn adopts it; its terminal ends the row's work as usual.
     const adopted = instance.sessions[0]!;
@@ -478,7 +475,7 @@ describe('Stop and the steers queued behind the turn', () => {
     const updates = events.filter(event => event.type === 'session.updated' && event.session.id === session.id);
     expect(updates.length).toBeGreaterThan(0);
     const queued = (updates.at(-1) as Extract<SessionEvent, { type: 'session.updated' }>).session.queuedInputs ?? [];
-    expect(queued.find(item => item.requestId === steerId)).toMatchObject({ state: 'needs_review', reason: 'cancelled by Stop' });
+    expect(queued.find(item => item.requestId === steerId)).toMatchObject({ state: 'failed', reason: 'cancelled by Stop' });
   });
 
   it('leaves a steer alone that Stop did not cancel, and says so once for a message with no journal entry', async () => {
@@ -712,41 +709,15 @@ describe('A question the model asked in a message', () => {
 });
 
 // The structured Claude transport refuses to start a conversation over once its saved history is gone, and learns that a
-// conversation has history from a record the plugin writes when a turn completes. Rows that got their history elsewhere (moved
-// over from tmux) or before the record existed need it written for them. The record itself is covered by
-// `structured-claude-plugin` ("resume"); these tests cover that the host writes it.
+// conversation has history from a record the plugin writes when a turn completes. Rows that got their history elsewhere (run by
+// the removed tmux transport, see `structured-session-tmux-conversion`) or before the record existed need it written for them. The
+// record itself is covered by `structured-claude-plugin` ("resume"); these tests cover that the host writes it.
 describe('The history of a conversation the structured transport did not run itself', () => {
   function withHistoryNotes() {
     const history = recordHistoryNotes();
     historyNotes.push(history);
     return history;
   }
-
-  it('is recorded when a tmux conversation with a transcript moves over, and not for one that stays on tmux', async () => {
-    const history = withHistoryNotes();
-    const f = fixture({ plugin: PER_SESSION, manager: { defaultTransport: 'structured' } });
-    const bound = await f.manager.bindConversation({
-      project, provider: claudeProvider, providerSettings, conversationRef: 'claude-native-1', title: 'Claude work', kind: 'history', transport: 'tmux',
-    });
-    f.tmux.alive.delete(f.row(bound.id).tmuxSessionName);
-
-    // No transcript: the row stays on tmux, and nothing is recorded for it.
-    await f.manager.reconcileSessions();
-    expect(f.row(bound.id).transport).toBe('tmux');
-    expect(history.notes).toEqual([]);
-
-    // The first pass restored the dead tmux session; end it again so the row is converted without a live pane to guard.
-    f.tmux.alive.delete(f.row(bound.id).tmuxSessionName);
-    const transcript = path.join(f.root, 'claude-native-1.jsonl');
-    fs.writeFileSync(transcript, '{"type":"user"}\n');
-    f.db.conversationIndex.upsert({
-      ref: 'claude-native-1', kind: 'history', projectSlug: project.slug, provider: 'claude', title: 'Claude work',
-      updatedAt: new Date().toISOString(), transcriptPath: transcript, isBound: true, degraded: false,
-    });
-    await f.manager.reconcileSessions();
-    expect(f.row(bound.id)).toMatchObject({ transport: 'structured', conversationRef: 'claude-native-1' });
-    expect(history.notes).toEqual([{ conversationId: bound.id, nativeSessionId: 'claude-native-1' }]);
-  });
 
   it('is recorded at boot for a structured row that has had a response, once per boot, and not for one that has not', async () => {
     const history = withHistoryNotes();
@@ -771,6 +742,6 @@ describe('The history of a conversation the structured transport did not run its
     f.db.sqlite.prepare('update bound_sessions set last_response_at=? where id=?').run(new Date().toISOString(), session.id);
     const backend = await f.restartBackend();
     await expect(backend.manager.reconcileSessions()).resolves.toBeUndefined();
-    expect(f.row(session.id)).toMatchObject({ status: 'bound', transport: 'structured' });
+    expect(f.row(session.id)).toMatchObject({ status: 'bound' });
   });
 });

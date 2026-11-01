@@ -1,12 +1,12 @@
 // Process identity and gated termination for the session host's record file (`../session-host.ts`).
 //
-// The backend runs with `KillMode=process` (tmux must survive restarts), so provider processes survive it too,
-// and that is intended: each runs behind a session host that a restarted backend reconnects to. What this file
-// does is identify a recorded process safely before anything is signalled. A pid is trusted only together with
-// its start time (field 22 of `/proc/<pid>/stat`) and the kernel boot id, so a reused pid or a record from before
-// a reboot is never taken for the process it once named. The host record names the host, the provider child and the
-// child's process group; `terminateRecordedProcess` ends a recorded process (and, for a child that leads its own
-// group, the group: the npm `codex` is a Node launcher whose native server shares it) after those checks.
+// The backend runs with `KillMode=process`, so provider processes survive its restarts, and that is intended: each
+// runs behind a session host that a restarted backend reconnects to. What this file does is identify a recorded
+// process safely before anything is signalled. A pid is trusted only together with its start time (field 22 of
+// `/proc/<pid>/stat`) and the kernel boot id, so a reused pid or a record from before a reboot is never taken for the
+// process it once named. The host record names the host, the provider child and the child's process group;
+// `terminateRecordedProcess` ends a recorded process (and, for a child that leads its own group, the group: the npm
+// `codex` is a Node launcher whose native server shares it) after those checks.
 
 import fs from 'node:fs';
 

@@ -23,9 +23,8 @@ async function fixture(provider: ProviderId = 'codex', pending = false) {
   const db = new AppDatabase(path.join(directory, 'console.sqlite'));
   const session: BoundSession = {
     id: 'session-1', projectSlug: 'demo', provider, conversationRef: pending ? 'pending:image' : 'history-1',
-    tmuxSessionName: 'fixture', status: 'bound', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    transport: 'tmux',
-  };
+    status: 'bound', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
   if (pending) db.pendingConversations.put({
     ref: session.conversationRef, projectSlug: 'demo', provider, kind: 'pending', title: 'New chat',
     updatedAt: session.startedAt, isBound: true, degraded: false, boundSessionId: session.id,
@@ -49,7 +48,7 @@ async function fixture(provider: ProviderId = 'codex', pending = false) {
   registerImageRoutes(app, auth, sessions as never, store);
   await registerSessionRoutes(app, auth, db, {
     getProjectBySlug: async () => ({ slug: 'demo', path: directory }), getMergedProviderSettings: () => ({ enabled: true }),
-  } as never, { get: () => ({ id: provider }) } as never, sessions as never, store);
+  } as never, sessions as never, store);
   await app.ready();
   const login = await app.inject({ method: 'POST', url: '/fixture-login' });
   const authCookie = String(login.headers['set-cookie']).split(';')[0]!;
@@ -153,17 +152,6 @@ describe('clipboard image backend', () => {
     });
   }
 
-  it('includes uploaded images in the first pending Codex launch prompt', async () => {
-    const f = await fixture('codex', true);
-    try {
-      const image = (await f.upload()).json().image;
-      const response = await f.app.inject({ method: 'POST', url: '/api/sessions/session-1/keys', headers: f.headers, payload: { text: 'Check this', keys: ['Enter'], submittedText: 'Check this', imageIds: [image.id] } });
-      expect(response.statusCode).toBe(200);
-      expect(f.restartPendingSessionWithInitialPrompt).toHaveBeenCalledWith(expect.objectContaining({ initialPrompt: expect.stringContaining(image.id) }));
-      expect(f.sendKeystrokes).not.toHaveBeenCalled();
-      expect(response.json().recordedUserInput).toMatchObject({ text: 'Check this', images: [image] });
-    } finally { await f.close(); }
-  });
 });
 
 describe('imagePromptFiles', () => {

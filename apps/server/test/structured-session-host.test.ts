@@ -790,8 +790,15 @@ describe('the line transport factory', () => {
     const second = await open(other.make(), other.request());
     await second.transport.write(line({ cmd: 'exit', code: 0 }));
     await waitUntil(() => !running(second.transport.pid!), 8_000, 'the provider to end');
-    const ended = (await other.make()(other.request({ attachOnly: true })).catch((error: unknown) => error)) as LineTransportNotRunningError;
-    expect(ended.reason).toBe('ended'); // the host lingers, the provider is gone
+    // The host notices the exit a moment after the process is gone; on a loaded machine an attach can land in between and
+    // still connect. Ask again until the host has seen it.
+    let ended: unknown;
+    for (const deadline = Date.now() + 8_000; Date.now() < deadline; await sleep(50)) {
+      ended = await other.make()(other.request({ attachOnly: true })).catch((error: unknown) => error);
+      if (ended instanceof LineTransportNotRunningError) break;
+      await (ended as { close?: () => Promise<void> }).close?.();
+    }
+    expect((ended as LineTransportNotRunningError).reason).toBe('ended'); // the host lingers, the provider is gone
   });
 
   describe('replay', () => {

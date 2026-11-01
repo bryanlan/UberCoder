@@ -7,6 +7,7 @@ import type { BoundSession, ConversationSummary, NormalizedMessage, SessionScree
 import { AppDatabase } from '../src/db/database.js';
 import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { registerConversationRoutes } from '../src/routes/conversations.js';
+import { StructuredSessionDisabledError } from '../src/sessions/session-manager.js';
 
 describe('conversation routes', () => {
   it('force rebind releases an existing live session before creating a replacement', async () => {
@@ -29,8 +30,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-ref',
-      tmuxSessionName: 'ac-codex-demo-old',
-      transport: 'tmux',
       status: 'bound',
       title: 'Existing conversation',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -41,7 +40,6 @@ describe('conversation routes', () => {
     const replacementSession: BoundSession = {
       ...existingSession,
       id: 'session-new',
-      tmuxSessionName: 'ac-codex-demo-new',
       updatedAt: '2026-03-14T18:02:00.000Z',
       lastActivityAt: '2026-03-14T18:02:00.000Z',
     };
@@ -69,12 +67,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -88,7 +80,7 @@ describe('conversation routes', () => {
         releaseSession,
         getSessionScreen: async () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -140,8 +132,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: summary.ref,
-      tmuxSessionName: 'ac-claude-demo-moved',
-      transport: 'tmux',
       status: 'bound',
       title: summary.title,
       startedAt: summary.updatedAt,
@@ -162,7 +152,6 @@ describe('conversation routes', () => {
           id: 'claude',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} },
         }),
       } as never,
       { get: () => ({ getConversation: async () => ({ summary, messages: [] }) }) } as never,
@@ -170,7 +159,7 @@ describe('conversation routes', () => {
         bindConversation,
         getSessionByConversation: () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -248,8 +237,6 @@ describe('conversation routes', () => {
       projectSlug: 'demo',
       conversationRef: 'real-history',
       resumeConversationRef: 'real-history',
-      tmuxSessionName: 'ac-codex-demo-real-history',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       title: 'Adopted history',
@@ -278,12 +265,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -295,7 +276,7 @@ describe('conversation routes', () => {
         bindConversation,
         getSessionByConversation: vi.fn(() => undefined),
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -344,8 +325,6 @@ describe('conversation routes', () => {
       projectSlug: 'demo',
       conversationRef: 'real-provider-only',
       resumeConversationRef: 'real-provider-only',
-      tmuxSessionName: 'ac-codex-demo-provider-only-old',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       title: 'Provider only transcript',
@@ -355,7 +334,6 @@ describe('conversation routes', () => {
     const reboundSession: BoundSession = {
       ...existingSession,
       id: 'session-new-provider-only',
-      tmuxSessionName: 'ac-codex-demo-provider-only-new',
       updatedAt: '2026-03-14T18:13:00.000Z',
     };
     const getConversation = vi.fn(async () => ({
@@ -386,12 +364,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -404,7 +376,7 @@ describe('conversation routes', () => {
         getSessionByConversation: vi.fn(() => existingSession),
         releaseSession,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -443,138 +415,6 @@ describe('conversation routes', () => {
     }
   });
 
-  it('adopts a completed pending conversation on message read before using event-log history', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:stale-read',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'Pending stale read',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T20:10:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-stale-read',
-      degraded: false,
-      rawMetadata: {
-        pending: true,
-        lastUserInputHash: 'latest-user-hash',
-        lastUserInputAt: '2026-03-14T20:10:00.000Z',
-      },
-    });
-    db.boundSessions.upsert({
-      id: 'session-stale-read',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:stale-read',
-      tmuxSessionName: 'ac-codex-demo-stale-read',
-      status: 'bound',
-      shouldRestore: true,
-      title: 'Pending stale read',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T20:12:00.000Z',
-      isWorking: false,
-    });
-    const realSummary: ConversationSummary = {
-      ref: 'real-stale-read',
-      kind: 'history',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'Real stale read',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T20:12:00.000Z',
-      isBound: false,
-      degraded: false,
-      rawMetadata: {
-        firstUserTextHash: 'first-user-hash',
-        lastUserTextHash: 'latest-user-hash',
-        lastUserAt: '2026-03-14T20:10:00.000Z',
-      },
-    };
-    const durableMessages: NormalizedMessage[] = [{
-      id: 'durable-answer',
-      provider: 'codex',
-      role: 'assistant',
-      lifecycle: 'durable',
-      text: 'Durable provider transcript answer.',
-      timestamp: '2026-03-14T20:12:00.000Z',
-      conversationRef: 'real-stale-read',
-      source: 'history-file',
-    }];
-    const listPendingAdoptionCandidates = vi.fn(async () => [realSummary]);
-    const getConversation = vi.fn(async () => ({
-      summary: realSummary,
-      messages: durableMessages,
-      allMessages: durableMessages,
-    }));
-
-    const app = fastify();
-    await registerConversationRoutes(
-      app,
-      {
-        ensureAuthenticated: async () => undefined,
-      } as never,
-      db,
-      {
-        getProjectBySlug: async (projectSlug: string) => (
-          projectSlug === 'demo'
-            ? {
-                slug: 'demo',
-                displayName: 'Demo',
-              }
-            : undefined
-        ),
-        getMergedProviderSettings: () => ({
-          id: 'codex',
-          enabled: true,
-          discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
-        }),
-      } as never,
-      {
-        get: () => ({
-          listPendingAdoptionCandidates,
-          listConversations: async () => [],
-          getConversation,
-        }),
-      } as never,
-      {
-        getSessionByConversation: vi.fn(() => undefined),
-      } as never,
-      new RealtimeEventBus(),
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/conversations/demo/codex/pending%3Astale-read/messages',
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(listPendingAdoptionCandidates).toHaveBeenCalledOnce();
-      expect(getConversation).toHaveBeenCalledWith(
-        expect.objectContaining({ slug: 'demo' }),
-        'real-stale-read',
-        expect.any(Object),
-      );
-      expect(response.json().messages.map((message: NormalizedMessage) => message.text)).toEqual([
-        'Durable provider transcript answer.',
-      ]);
-      expect(db.pendingConversations.get('pending:stale-read')?.rawMetadata?.adoptedConversationRef).toBe('real-stale-read');
-      expect(db.boundSessions.getById('session-stale-read')?.conversationRef).toBe('real-stale-read');
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
   it('creates a new pending conversation when the old zero-turn pending bind cannot be restored and gets cleared', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-conversation-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
@@ -597,8 +437,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:stale',
-      tmuxSessionName: 'ac-claude-demo-stale',
-      transport: 'tmux',
       status: 'error',
       shouldRestore: true,
       title: 'New Claude conversation',
@@ -612,8 +450,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:new',
-      tmuxSessionName: 'ac-claude-demo-new',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       title: 'New Claude conversation',
@@ -659,12 +495,6 @@ describe('conversation routes', () => {
           id: 'claude',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -677,7 +507,7 @@ describe('conversation routes', () => {
         ensureSession,
         getSessionById,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -725,8 +555,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:stale',
-      tmuxSessionName: 'ac-claude-demo-stale',
-      transport: 'tmux',
       status: 'error',
       shouldRestore: true,
       title: 'New Claude conversation',
@@ -740,8 +568,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'demo',
       conversationRef: 'pending:new',
-      tmuxSessionName: 'ac-claude-demo-new',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       title: 'New Claude conversation',
@@ -772,12 +598,6 @@ describe('conversation routes', () => {
           id: 'claude',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -790,7 +610,7 @@ describe('conversation routes', () => {
         ensureSession,
         getSessionById: vi.fn(() => staleSession),
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -822,8 +642,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'real-adopted',
-      tmuxSessionName: 'ac-codex-demo-live-adopted',
-      transport: 'tmux',
       status: 'bound',
       title: 'Recovered live session',
       startedAt: '2026-03-14T17:00:00.000Z',
@@ -865,12 +683,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -881,7 +693,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -934,8 +746,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-ref',
-      tmuxSessionName: 'ac-codex-demo-old',
-      transport: 'tmux',
       status: 'error',
       shouldRestore: true,
       title: 'Existing conversation',
@@ -966,12 +776,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -985,7 +789,7 @@ describe('conversation routes', () => {
         getSessionById: vi.fn(() => existingSession),
         getSessionByConversation: vi.fn(() => existingSession),
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1073,12 +877,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1089,7 +887,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen: async () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1173,7 +971,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'working-history',
-      tmuxSessionName: 'ac-codex-demo-working',
       status: 'bound',
       title: 'Working conversation title',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -1206,12 +1003,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1222,7 +1013,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen: async () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1294,12 +1085,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1310,7 +1095,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen: async () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1453,12 +1238,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1469,7 +1248,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen: async () => undefined,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1539,8 +1318,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-ref',
-      tmuxSessionName: 'ac-codex-demo-live',
-      transport: 'tmux',
       status: 'bound',
       title: 'Planning schema',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -1619,12 +1396,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1635,7 +1406,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1689,8 +1460,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-pending-live',
-      tmuxSessionName: 'ac-codex-demo-pending-live',
-      transport: 'tmux',
       status: 'bound',
       title: 'Deployment checks',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -1779,12 +1548,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1795,7 +1558,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -1850,8 +1613,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-stale-short-scrollback',
-      tmuxSessionName: 'ac-codex-demo-stale-short-scrollback',
-      transport: 'tmux',
       status: 'bound',
       title: 'Deployment checks',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -1940,12 +1701,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -1956,7 +1711,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2053,8 +1808,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-usage-prod',
-      tmuxSessionName: 'ac-codex-demo-usage-prod',
-      transport: 'tmux',
       status: 'bound',
       title: 'Prod usage verification',
       startedAt: '2026-07-01T18:36:28.000Z',
@@ -2133,12 +1886,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2149,7 +1896,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2194,8 +1941,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-long-tail',
-      tmuxSessionName: 'ac-codex-demo-long-tail',
-      transport: 'tmux',
       status: 'bound',
       title: 'Long transcript',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -2261,12 +2006,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2277,7 +2016,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2319,8 +2058,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-chrome-tail',
-      tmuxSessionName: 'ac-codex-demo-chrome-tail',
-      transport: 'tmux',
       status: 'bound',
       title: 'Terminal chrome tail',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -2393,12 +2130,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2409,7 +2140,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2470,8 +2201,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'waltiumweb',
       conversationRef: 'claude-duplicate-tail',
-      tmuxSessionName: 'ac-claude-waltiumweb-duplicate-tail',
-      transport: 'tmux',
       status: 'bound',
       title: 'Claude duplicate tail',
       startedAt: '2026-06-30T12:30:00.000Z',
@@ -2556,12 +2285,6 @@ describe('conversation routes', () => {
           id: 'claude',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2572,7 +2295,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2617,8 +2340,6 @@ describe('conversation routes', () => {
       provider: 'claude',
       projectSlug: 'waltiumweb',
       conversationRef: 'claude-status-tail',
-      tmuxSessionName: 'ac-claude-waltiumweb-status-tail',
-      transport: 'tmux',
       status: 'bound',
       title: 'Claude status tail',
       startedAt: '2026-06-30T19:00:00.000Z',
@@ -2694,12 +2415,6 @@ describe('conversation routes', () => {
           id: 'claude',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2710,7 +2425,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2767,8 +2482,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-input-buffer',
-      tmuxSessionName: 'ac-codex-demo-input-buffer',
-      transport: 'tmux',
       status: 'bound',
       title: 'Input buffer trim',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -2847,12 +2560,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2863,7 +2570,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2913,8 +2620,6 @@ describe('conversation routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:event-tail',
-      tmuxSessionName: 'ac-codex-demo-event-tail',
-      transport: 'tmux',
       status: 'bound',
       title: 'New Codex conversation',
       startedAt: '2026-03-14T18:00:00.000Z',
@@ -2956,12 +2661,6 @@ describe('conversation routes', () => {
           id: 'codex',
           enabled: true,
           discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         }),
       } as never,
       {
@@ -2972,7 +2671,7 @@ describe('conversation routes', () => {
       {
         getSessionScreen,
       } as never,
-      new RealtimeEventBus(),
+      new RealtimeEventBus(), undefined, ['codex', 'claude'],
     );
     await app.ready();
 
@@ -2995,14 +2694,12 @@ describe('conversation routes', () => {
     }
   });
 
-  describe('structured transport binds', () => {
+  describe('new chat and history binds', () => {
     const baseSession = (overrides: Partial<BoundSession>): BoundSession => ({
       id: 'session-x',
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:x',
-      tmuxSessionName: 'ac-codex-demo-x',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       title: 'New Codex conversation',
@@ -3030,8 +2727,6 @@ describe('conversation routes', () => {
       tempDir: string;
       sessions: Record<string, unknown>;
       structuredProviders?: Array<'codex' | 'claude'>;
-      omitStructuredProviders?: boolean;
-      defaultTransport?: 'tmux' | 'structured';
     }) {
       const app = fastify();
       const args = [
@@ -3044,23 +2739,13 @@ describe('conversation routes', () => {
             id: 'codex',
             enabled: true,
             discoveryRoot: input.tempDir,
-            commands: {
-              newCommand: ['codex'],
-              resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-              continueCommand: ['codex', 'resume', '--last'],
-              env: {},
-            },
           }),
         } as never,
         { get: () => ({ getConversation: async () => null }) } as never,
         input.sessions as never,
         new RealtimeEventBus(),
       ] as const;
-      if (input.omitStructuredProviders) {
-        await registerConversationRoutes(...args);
-      } else {
-        await registerConversationRoutes(...args, undefined, input.structuredProviders ?? [], input.defaultTransport);
-      }
+      await registerConversationRoutes(...args, undefined, input.structuredProviders ?? []);
       await app.ready();
       return app;
     }
@@ -3076,46 +2761,36 @@ describe('conversation routes', () => {
       }
     }
 
-    it('refuses a structured new chat with 400 unless the provider lane is enabled', async () => {
+    const disabled = (provider: 'codex' | 'claude') => ({ error: new StructuredSessionDisabledError(provider).message });
+
+    it('refuses a new chat with 400, and starts nothing, unless the provider lane is enabled', async () => {
       await withDb(async (db, tempDir) => {
         const bindConversation = vi.fn();
-        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() } });
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['claude'] });
         try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
           expect(response.statusCode).toBe(400);
-          expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+          expect(response.json()).toEqual(disabled('codex'));
           expect(bindConversation).not.toHaveBeenCalled();
           expect(db.pendingConversations.list()).toEqual([]);
-
-          const claude = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/claude/new/bind',
-            payload: { transport: 'structured' },
-          });
-          expect(claude.statusCode).toBe(400);
         } finally {
           await app.close();
         }
       });
     });
 
-    it('refuses a structured new chat for a provider missing from the enabled list', async () => {
+    it('refuses a body that still names a transport, or any field the route does not take', async () => {
       await withDb(async (db, tempDir) => {
         const bindConversation = vi.fn();
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
-        });
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'] });
         try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/claude/new/bind',
-            payload: { transport: 'structured' },
-          });
-          expect(response.statusCode).toBe(400);
+          for (const payload of [{ transport: 'structured' }, { transport: 'tmux' }, { unknown: true }]) {
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload });
+            expect(response.statusCode).toBe(400);
+          }
+          const history = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: { transport: 'structured' } });
+          expect(history.statusCode).toBe(400);
+          expect(JSON.stringify(history.json())).toContain('transport');
           expect(bindConversation).not.toHaveBeenCalled();
         } finally {
           await app.close();
@@ -3123,109 +2798,62 @@ describe('conversation routes', () => {
       });
     });
 
-    it('rejects an unknown transport value', async () => {
-      await withDb(async (db, tempDir) => {
-        const bindConversation = vi.fn();
-        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() } });
-        try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'pty' },
-          });
-          expect(response.statusCode).toBe(400);
-          expect(response.json().error).toBe('Invalid bind payload.');
-          expect(bindConversation).not.toHaveBeenCalled();
-        } finally {
-          await app.close();
-        }
-      });
-    });
-
-    it('passes transport structured to the session manager and keeps an adopted alias intact', async () => {
+    it('writes the pending alias before the bind and keeps an alias the session manager adopted intact', async () => {
       await withDb(async (db, tempDir) => {
         let pendingSeenDuringBind: ConversationSummary | undefined;
         const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
           pendingSeenDuringBind = db.pendingConversations.get(input.conversationRef);
-          // The session manager adopts the alias as soon as the thread id is known.
+          // The session manager adopts the alias as soon as the native id is known.
           db.pendingConversations.put({
             ...pendingSeenDuringBind!,
             isBound: false,
             rawMetadata: { ...pendingSeenDuringBind!.rawMetadata, adoptedConversationRef: 'thread-1' },
           });
-          return baseSession({ id: 'session-structured', conversationRef: 'thread-1', transport: 'structured' });
+          return baseSession({ id: 'session-structured', conversationRef: 'thread-1' });
         });
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
-        });
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'] });
         try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
           expect(response.statusCode).toBe(200);
           const body = response.json() as { session: BoundSession; conversationRef: string };
           expect(body.session.id).toBe('session-structured');
           expect(body.conversationRef).toMatch(/^pending:/);
-          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({
-            transport: 'structured',
-            kind: 'pending',
-            conversationRef: body.conversationRef,
-          }));
-          // The alias exists before the bind so the session manager can adopt it.
+          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ kind: 'pending', conversationRef: body.conversationRef }));
+          expect(bindConversation.mock.calls[0]![0]).not.toHaveProperty('transport');
           expect(pendingSeenDuringBind).toMatchObject({ ref: body.conversationRef, isBound: false });
-          expect(db.pendingConversations.get(body.conversationRef)).toMatchObject({
-            isBound: false,
-            rawMetadata: { adoptedConversationRef: 'thread-1' },
-          });
+          expect(db.pendingConversations.get(body.conversationRef)).toMatchObject({ isBound: false, rawMetadata: { adoptedConversationRef: 'thread-1' } });
         } finally {
           await app.close();
         }
       });
     });
 
-    it('records the structured alias as bound when the session manager did not adopt it', async () => {
+    it('records the alias as bound when the session manager did not adopt it', async () => {
       await withDb(async (db, tempDir) => {
         const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
-          const session = baseSession({ id: 'session-structured', conversationRef: input.conversationRef, transport: 'structured' });
+          const session = baseSession({ id: 'session-structured', conversationRef: input.conversationRef });
           db.boundSessions.upsert(session);
           return session;
         });
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
-        });
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'] });
         try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
           expect(response.statusCode).toBe(200);
-          expect(db.pendingConversations.get(response.json().conversationRef)).toMatchObject({
-            isBound: true,
-            boundSessionId: 'session-structured',
-          });
+          expect(db.pendingConversations.get(response.json().conversationRef)).toMatchObject({ isBound: true, boundSessionId: 'session-structured' });
         } finally {
           await app.close();
         }
       });
     });
 
-    it('maps a session manager structured-disabled error to 400 and drops the alias', async () => {
+    it('maps a session manager lane-off error to 400 and drops the alias', async () => {
       await withDb(async (db, tempDir) => {
-        const bindConversation = vi.fn(async () => { throw new Error('Structured sessions are disabled for codex.'); });
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
-        });
+        const bindConversation = vi.fn(async () => { throw new StructuredSessionDisabledError('codex'); });
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'] });
         try {
-          const response = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
           expect(response.statusCode).toBe(400);
-          expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+          expect(response.json()).toEqual(disabled('codex'));
           expect(db.pendingConversations.list()).toEqual([]);
         } finally {
           await app.close();
@@ -3233,198 +2861,24 @@ describe('conversation routes', () => {
       });
     });
 
-    it('keeps the tmux default: no body means tmux, with the pending record written only after the bind', async () => {
+    it('reuses a bound pending chat instead of starting another', async () => {
       await withDb(async (db, tempDir) => {
-        let pendingSeenDuringBind: ConversationSummary | undefined;
-        const bindConversation = vi.fn(async (input: { conversationRef: string }) => {
-          pendingSeenDuringBind = db.pendingConversations.get(input.conversationRef);
-          const session = baseSession({ id: 'session-tmux', conversationRef: input.conversationRef });
-          db.boundSessions.upsert(session);
-          return session;
-        });
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'],
-        });
+        const existing = baseSession({ id: 'session-existing', conversationRef: 'pending:existing' });
+        db.boundSessions.upsert(existing);
+        db.pendingConversations.put(pendingRecord({}));
+        const ensureSession = vi.fn(async (id: string) => (id === existing.id ? existing : undefined));
+        const bindConversation = vi.fn(async () => baseSession({ id: 'session-new' }));
+        const getSessionById = vi.fn((id: string) => (id === existing.id ? existing : undefined));
+        const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, ensureSession, getSessionById }, structuredProviders: ['codex'] });
         try {
-          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind' });
+          const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
           expect(response.statusCode).toBe(200);
-          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ transport: 'tmux', kind: 'pending' }));
-          expect(pendingSeenDuringBind).toBeUndefined();
-          expect(db.pendingConversations.get(response.json().conversationRef)).toMatchObject({
-            isBound: true,
-            boundSessionId: 'session-tmux',
-          });
-        } finally {
-          await app.close();
-        }
-      });
-    });
-
-    it('still serves tmux binds when the route is built without a structured provider source', async () => {
-      await withDb(async (db, tempDir) => {
-        const bindConversation = vi.fn(async () => baseSession({ id: 'session-tmux' }));
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, omitStructuredProviders: true,
-        });
-        try {
-          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
-          expect(tmux.statusCode).toBe(200);
-          const structured = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
-          expect(structured.statusCode).toBe(400);
-        } finally {
-          await app.close();
-        }
-      });
-    });
-
-    it('reuses a bound pending chat only when its transport matches the request', async () => {
-      await withDb(async (db, tempDir) => {
-        const tmuxSession = baseSession({ id: 'session-existing', conversationRef: 'pending:existing' });
-        db.boundSessions.upsert(tmuxSession);
-        db.pendingConversations.put(pendingRecord({}));
-        const ensureSession = vi.fn(async (id: string) => (id === tmuxSession.id ? tmuxSession : undefined));
-        const bindConversation = vi.fn(async () => baseSession({ id: 'session-structured', transport: 'structured' }));
-        const getSessionById = vi.fn((id: string) => (id === tmuxSession.id ? tmuxSession : undefined));
-        const app = await buildBindApp({
-          db, tempDir, sessions: { bindConversation, ensureSession, getSessionById }, structuredProviders: ['codex'],
-        });
-        try {
-          const structured = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
-          expect(structured.statusCode).toBe(200);
-          expect(ensureSession).not.toHaveBeenCalled();
-          expect(bindConversation).toHaveBeenCalledOnce();
-          expect(structured.json().session.id).toBe('session-structured');
-
-          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
-          expect(tmux.statusCode).toBe(200);
           expect(ensureSession).toHaveBeenCalledWith('session-existing');
-          expect(bindConversation).toHaveBeenCalledOnce();
-          expect(tmux.json()).toMatchObject({ session: { id: 'session-existing' }, conversationRef: 'pending:existing' });
+          expect(bindConversation).not.toHaveBeenCalled();
+          expect(response.json()).toMatchObject({ session: { id: 'session-existing' }, conversationRef: 'pending:existing' });
         } finally {
           await app.close();
         }
-      });
-    });
-
-    it('does not reuse a bound structured pending chat for a tmux new chat', async () => {
-      await withDb(async (db, tempDir) => {
-        const structuredSession = baseSession({ id: 'session-existing', conversationRef: 'pending:existing', transport: 'structured' });
-        db.boundSessions.upsert(structuredSession);
-        db.pendingConversations.put(pendingRecord({}));
-        const ensureSession = vi.fn(async () => structuredSession);
-        const bindConversation = vi.fn(async () => baseSession({ id: 'session-tmux' }));
-        const app = await buildBindApp({
-          db,
-          tempDir,
-          sessions: { bindConversation, ensureSession, getSessionById: vi.fn(() => structuredSession) },
-          structuredProviders: ['codex'],
-        });
-        try {
-          const tmux = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
-          expect(tmux.statusCode).toBe(200);
-          expect(ensureSession).not.toHaveBeenCalled();
-          expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ transport: 'tmux' }));
-
-          const structured = await app.inject({
-            method: 'POST',
-            url: '/api/conversations/demo/codex/new/bind',
-            payload: { transport: 'structured' },
-          });
-          expect(structured.statusCode).toBe(200);
-          expect(ensureSession).toHaveBeenCalledWith('session-existing');
-          expect(structured.json().session.id).toBe('session-existing');
-        } finally {
-          await app.close();
-        }
-      });
-    });
-
-    describe('default transport', () => {
-      const history: ConversationSummary = {
-        ref: 'thread-history', kind: 'history', projectSlug: 'demo', provider: 'codex', title: 'Earlier chat',
-        createdAt: '2026-10-26T09:00:00.000Z', updatedAt: '2026-10-26T09:30:00.000Z', isBound: false, degraded: false,
-      };
-
-      it('gives a new chat that names no transport the configured default, for providers whose lane is on', async () => {
-        await withDb(async (db, tempDir) => {
-          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({ id: 'session-new', transport: input.transport === 'structured' ? 'structured' : 'tmux' }));
-          const app = await buildBindApp({
-            db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'], defaultTransport: 'structured',
-          });
-          try {
-            const codex = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
-            expect(codex.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'structured', kind: 'pending' }));
-
-            // The Claude lane is off, so its default stays tmux rather than failing the request.
-            const claude = await app.inject({ method: 'POST', url: '/api/conversations/demo/claude/new/bind', payload: {} });
-            expect(claude.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
-
-            // Naming tmux is still allowed.
-            const explicit = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: { transport: 'tmux' } });
-            expect(explicit.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
-          } finally {
-            await app.close();
-          }
-        });
-      });
-
-      it('keeps tmux for a new chat when tmux is the default, even with the structured lane on', async () => {
-        await withDb(async (db, tempDir) => {
-          const bindConversation = vi.fn(async () => baseSession({ id: 'session-new' }));
-          const app = await buildBindApp({
-            db, tempDir, sessions: { bindConversation, getSessionById: vi.fn() }, structuredProviders: ['codex'], defaultTransport: 'tmux',
-          });
-          try {
-            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/new/bind', payload: {} });
-            expect(response.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
-          } finally {
-            await app.close();
-          }
-        });
-      });
-
-      it('binds a history conversation that names no transport on the default, but returns a tmux owner that has not moved over', async () => {
-        await withDb(async (db, tempDir) => {
-          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
-          const owner = baseSession({ id: 'session-owner', conversationRef: 'thread-history' });
-          let current: BoundSession | undefined;
-          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({ id: 'session-history', conversationRef: 'thread-history', transport: input.transport === 'structured' ? 'structured' : 'tmux' }));
-          const ensureSession = vi.fn(async () => owner);
-          const app = await buildBindApp({
-            db,
-            tempDir,
-            sessions: { bindConversation, ensureSession, getSessionByConversation: vi.fn(() => current), getSessionById: vi.fn() },
-            structuredProviders: ['codex'],
-            defaultTransport: 'structured',
-          });
-          try {
-            const fresh = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
-            expect(fresh.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'structured', kind: 'history' }));
-
-            current = owner;
-            bindConversation.mockClear();
-            const bound = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
-            expect(bound.statusCode).toBe(200);
-            expect(bound.json().session.id).toBe('session-owner');
-            expect(ensureSession).toHaveBeenCalledWith('session-owner');
-            expect(bindConversation).not.toHaveBeenCalled();
-          } finally {
-            await app.close();
-          }
-        });
       });
     });
 
@@ -3441,23 +2895,15 @@ describe('conversation routes', () => {
         degraded: false,
       };
 
-      it('refuses a structured resume with 400 unless the provider lane is enabled', async () => {
+      it('refuses a history bind with 400 unless the provider lane is enabled', async () => {
         await withDb(async (db, tempDir) => {
           db.conversationIndex.replace('demo', 'codex', [history]);
           const bindConversation = vi.fn();
-          const app = await buildBindApp({
-            db,
-            tempDir,
-            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
-          });
+          const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() } });
           try {
-            const response = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: { transport: 'structured' },
-            });
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
             expect(response.statusCode).toBe(400);
-            expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+            expect(response.json()).toEqual(disabled('codex'));
             expect(bindConversation).not.toHaveBeenCalled();
           } finally {
             await app.close();
@@ -3465,97 +2911,20 @@ describe('conversation routes', () => {
         });
       });
 
-      it('passes the requested transport through and defaults to tmux', async () => {
+      it('binds the history conversation without a transport, and maps a lane-off error to 400', async () => {
         await withDb(async (db, tempDir) => {
           db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
-          const bindConversation = vi.fn(async (input: { transport?: string }) => baseSession({
-            id: 'session-history', conversationRef: 'thread-history', transport: input.transport === 'structured' ? 'structured' : 'tmux',
-          }));
-          const app = await buildBindApp({
-            db,
-            tempDir,
-            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
-            structuredProviders: ['codex'],
-          });
+          const bindConversation = vi.fn(async (_input: unknown) => baseSession({ id: 'session-history', conversationRef: 'thread-history' }));
+          const app = await buildBindApp({ db, tempDir, sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() }, structuredProviders: ['codex'] });
           try {
-            const structured = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: { transport: 'structured' },
-            });
-            expect(structured.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({
-              transport: 'structured', kind: 'history', conversationRef: 'thread-history',
-            }));
-
-            const tmux = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: {},
-            });
-            expect(tmux.statusCode).toBe(200);
-            expect(bindConversation).toHaveBeenLastCalledWith(expect.objectContaining({ transport: 'tmux' }));
-          } finally {
-            await app.close();
-          }
-        });
-      });
-
-      it('refuses a structured resume of a conversation that a live terminal session owns', async () => {
-        await withDb(async (db, tempDir) => {
-          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
-          const owner = baseSession({ id: 'session-owner', conversationRef: 'thread-history' });
-          const bindConversation = vi.fn();
-          const ensureSession = vi.fn(async () => owner);
-          const releaseSession = vi.fn(async () => undefined);
-          const app = await buildBindApp({
-            db,
-            tempDir,
-            sessions: { bindConversation, ensureSession, releaseSession, getSessionByConversation: vi.fn(() => owner), getSessionById: vi.fn() },
-            structuredProviders: ['codex'],
-          });
-          try {
-            const response = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: { transport: 'structured' },
-            });
-            expect(response.statusCode).toBe(409);
-            expect(ensureSession).not.toHaveBeenCalled();
-            expect(bindConversation).not.toHaveBeenCalled();
-
-            // A default request still returns the live owner, as before.
-            const tmux = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: {},
-            });
-            expect(tmux.statusCode).toBe(200);
-            expect(tmux.json().session.id).toBe('session-owner');
-          } finally {
-            await app.close();
-          }
-        });
-      });
-
-      it('maps a session manager structured-disabled error to 400', async () => {
-        await withDb(async (db, tempDir) => {
-          db.conversationIndex.replace('demo', 'codex', [{ ...history, transcriptPath: '/tmp/rollout.jsonl' }]);
-          const bindConversation = vi.fn(async () => { throw new Error('Structured sessions are not enabled for codex.'); });
-          const app = await buildBindApp({
-            db,
-            tempDir,
-            sessions: { bindConversation, getSessionByConversation: vi.fn(), getSessionById: vi.fn() },
-            structuredProviders: ['codex'],
-          });
-          try {
-            const response = await app.inject({
-              method: 'POST',
-              url: '/api/conversations/demo/codex/thread-history/bind',
-              payload: { transport: 'structured' },
-            });
-            expect(response.statusCode).toBe(400);
-            expect(response.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+            const bound = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
+            expect(bound.statusCode).toBe(200);
+            expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ kind: 'history', conversationRef: 'thread-history' }));
+            expect(bindConversation.mock.calls[0]![0]).not.toHaveProperty('transport');
+            bindConversation.mockImplementationOnce(async () => { throw new StructuredSessionDisabledError('codex'); });
+            const refused = await app.inject({ method: 'POST', url: '/api/conversations/demo/codex/thread-history/bind', payload: {} });
+            expect(refused.statusCode).toBe(400);
+            expect(refused.json()).toEqual(disabled('codex'));
           } finally {
             await app.close();
           }

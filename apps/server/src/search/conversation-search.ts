@@ -310,7 +310,6 @@ export class ConversationSearchService {
       })) {
         continue;
       }
-      const providerHasTranscript = Boolean(summary) && !isPendingConversation;
       const messages = await this.liveOutputReader.readLiveMessages(session, {
         maxBytesFromEnd: LIVE_SEARCH_EVENT_LOG_TAIL_BYTES,
       });
@@ -322,10 +321,8 @@ export class ConversationSearchService {
       );
 
       for (const message of messages) {
-        if (providerHasTranscript && message.role === 'assistant' && message.source === 'live-output') {
-          continue;
-        }
-        if (message.role !== 'user' && message.role !== 'assistant') {
+        // The live log holds the person's messages; what the agent said is searched in the indexed transcript.
+        if (message.role !== 'user') {
           continue;
         }
         const text = sanitizeSearchableProse(message.text);

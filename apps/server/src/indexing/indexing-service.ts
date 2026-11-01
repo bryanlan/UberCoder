@@ -18,7 +18,6 @@ import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { TRANSCRIPT_PARSER_VERSION, type ProviderAdapter } from '../providers/types.js';
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
 import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
-import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 import type { CoordinationTelemetryRecord } from '../coordination/telemetry.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
@@ -176,11 +175,10 @@ export class IndexingService {
     const projects = await this.projectService.listActiveProjects();
     this.projectCache = projects;
     this.persistProjectMetadata(projects);
-    const pendingConversations = this.db.pendingConversations.list();
     for (const providerId of PROVIDERS) {
       const provider = this.providerRegistry.get(providerId);
       if (providerId === 'codex' && provider instanceof CodexProvider) {
-        await this.refreshCodexProjects(projects, pendingConversations, provider);
+        await this.refreshCodexProjects(projects, provider);
         continue;
       }
 
@@ -192,12 +190,6 @@ export class IndexingService {
           continue;
         }
         const conversations = await provider.listConversations(project, settings);
-        this.reconcilePendingConversations(
-          project.slug,
-          providerId,
-          conversations,
-          pendingConversations,
-        );
         this.db.conversationIndex.replace(project.slug, providerId, conversations);
         await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
       }
@@ -223,13 +215,11 @@ export class IndexingService {
       this.db.conversationIndex.replace(project.slug, providerId, []);
       this.db.searchIndex.replace(project.slug, providerId, []);
     } else {
-      const pendingConversations = this.db.pendingConversations.list();
       const provider = this.providerRegistry.get(providerId);
       if (providerId === 'codex' && provider instanceof CodexProvider) {
-        await this.refreshCodexProjects([project], pendingConversations, provider);
+        await this.refreshCodexProjects([project], provider);
       } else {
         const conversations = await provider.listConversations(project, settings);
-        this.reconcilePendingConversations(project.slug, providerId, conversations, pendingConversations);
         this.db.conversationIndex.replace(project.slug, providerId, conversations);
         await this.replaceSearchIndex(project, providerId, provider, settings, conversations);
       }
@@ -415,38 +405,6 @@ export class IndexingService {
     return undefined;
   }
 
-  private reconcilePendingConversations(
-    projectSlug: string,
-    providerId: ProviderId,
-    conversations: ConversationSummary[],
-    pendingConversations: ConversationSummary[],
-  ): void {
-    const scopedPending = pendingConversations
-      .filter((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId)
-      .sort((a, b) => (a.createdAt ?? a.updatedAt).localeCompare(b.createdAt ?? b.updatedAt));
-
-    if (scopedPending.length === 0) return;
-
-    const claimedRefs = new Set<string>();
-    for (const pending of scopedPending) {
-      const matchedConversation = findPendingAdoptionMatch(pending, conversations, { claimedRefs });
-      if (!matchedConversation) continue;
-
-      const adoption = adoptPendingConversation({
-        db: this.db,
-        projectSlug,
-        providerId,
-        pendingRef: pending.ref,
-        matchedConversation,
-      });
-      if (!adoption.adopted) continue;
-      claimedRefs.add(matchedConversation.ref);
-      if (adoption.reboundSession) {
-        this.eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
-      }
-    }
-  }
-
   private persistProjectMetadata(projects: Awaited<ReturnType<ProjectService['listActiveProjects']>>): void {
     for (const project of projects) {
       const metaKey = `project:${project.slug}`;
@@ -619,7 +577,6 @@ export class IndexingService {
 
   private async refreshCodexProjects(
     projects: ActiveProject[],
-    pendingConversations: ConversationSummary[],
     provider: CodexProvider,
   ): Promise<void> {
     const groups = new Map<string, {
@@ -648,12 +605,6 @@ export class IndexingService {
       const conversationsByProject = await provider.listConversationsForProjects(group.projects, group.settings);
       for (const project of group.projects) {
         const conversations = conversationsByProject.get(project.slug) ?? [];
-        this.reconcilePendingConversations(
-          project.slug,
-          'codex',
-          conversations,
-          pendingConversations,
-        );
         this.db.conversationIndex.replace(project.slug, 'codex', conversations);
         await this.replaceSearchIndex(project, 'codex', provider, group.settings, conversations);
       }

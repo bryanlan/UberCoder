@@ -1,6 +1,5 @@
 import { codexRunState } from './codex-run-state.js';
 import fs from 'node:fs';
-import readline from 'node:readline';
 import type { NormalizedMessage } from '@agent-console/shared';
 import { normalizeComparableText, stableTextHash } from '../../lib/text.js';
 import {
@@ -171,33 +170,6 @@ export function codexOpeningUserText(record: Record<string, unknown>): string | 
   const message: NormalizedMessage = { id: '', provider: 'codex', role: 'user', text: extracted.text,
     timestamp: '', conversationRef: '', source: 'history-file', lifecycle: 'durable' };
   return shouldHideCodexDisplayMessage(message) ? undefined : sanitizeCodexDisplayText(extracted.text, 'user') || undefined;
-}
-
-function codexJsonlLineContainsUserHash(line: string, userTextHash: string): boolean {
-  if (!line.trim()) return false;
-  try {
-    const extracted = extractCodexMessage(JSON.parse(line) as Record<string, unknown>);
-    return extracted?.role === 'user'
-      && stableTextHash(normalizeComparableText(extracted.text)) === userTextHash;
-  } catch {
-    return false;
-  }
-}
-
-export async function codexJsonlFileContainsUserHash(filePath: string, userTextHash: string): Promise<boolean> {
-  const input = fs.createReadStream(filePath, { encoding: 'utf8' });
-  const lines = readline.createInterface({ input, crlfDelay: Infinity });
-  try {
-    for await (const line of lines) {
-      if (codexJsonlLineContainsUserHash(line, userTextHash)) {
-        return true;
-      }
-    }
-    return false;
-  } finally {
-    lines.close();
-    input.destroy();
-  }
 }
 
 function timestampMs(message: NormalizedMessage): number | undefined {

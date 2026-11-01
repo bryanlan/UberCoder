@@ -66,7 +66,6 @@ describe('Survivors after a backend restart: a per-session process', () => {
     expect(lines[0]!.type).toBe('status');
     // No connection-loss line, no tmux.
     expect(eventLogLines(f.row(session.id)).some(line => /connection ended/i.test(line.text))).toBe(false);
-    expect(backend.tmux.created).toHaveLength(0);
 
     // Later passes do not look again.
     await backend.manager.reconcileSessions();

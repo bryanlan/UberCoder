@@ -28,7 +28,6 @@ import { registerImageRoutes } from './images/routes.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
-import { ShellTmuxClient } from './sessions/tmux-client.js';
 import { GrantService } from './grants/service.js';
 import { GrantPushService } from './grants/push.js';
 import { WakeAlerts } from './coordination/wake-alerts.js';
@@ -53,7 +52,7 @@ import { ConversationTitleService } from './titles/service.js';
 
 export interface AppOptions {
   configPath?: string;
-  /** Replaces the structured transport plugins; tests inject fakes here. */
+  /** Replaces the provider transport plugins; tests inject fakes here. */
   transportPlugins?: TransportPluginRegistry;
 }
 
@@ -87,22 +86,20 @@ export async function buildApp(options: AppOptions = {}) {
     hostProgramPath: fileURLToPath(new URL('./providers/transport/session-host.js', import.meta.url)),
   });
   const imageStoreDir = path.join(path.dirname(config.databasePath), 'images');
-  const sessions = new SessionManager(db, new ShellTmuxClient(), config.runtimeDir, eventBus, {
+  const sessions = new SessionManager(db, config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
   }, app.log, {
     coordinationEnabled: config.coordination.enabled,
-    eagerRestoreWindowMs: config.sessions.eagerRestoreHours * 60 * 60 * 1000,
     restoreGraceMs: config.sessions.restoreGraceHours * 60 * 60 * 1000,
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
     structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude },
-    defaultTransport: config.structuredSessions.defaultTransport,
     lineTransport,
-    // A structured session attaches only the pasted images the image store holds, found directly in this directory.
+    // A message attaches only the pasted images the image store holds, found directly in this directory.
     imageStoreDir,
-    // Hooks and the coordination MCP inside a structured thread find this Console the way tmux sessions do.
+    // Hooks and the coordination MCP inside a provider process find this Console through these variables.
     structuredEnv: config.coordination.enabled ? { AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_CONFIG: configService.getConfigPath() } : undefined,
     hasActiveLaunchAuthority: session => {
       const assignment = db.sqlite.prepare('select id from coordination_assignments where provider=? and native_session_id=?')
@@ -175,14 +172,13 @@ export async function buildApp(options: AppOptions = {}) {
   });
 
   await registerAuthRoutes(app, authService, { max: config.security.loginRateLimitMax, timeWindow: config.security.loginRateLimitWindowMs });
-  // Structured lanes are fixed for the life of the process, like the rest of the session configuration. A provider is
-  // advertised only when its lane is enabled and a transport plugin serves it.
+  // Provider lanes are fixed for the life of the process, like the rest of the session configuration. A provider is
+  // advertised only when its lane is enabled and a transport plugin serves it; no other provider can run conversations.
   const structuredProviders = sessions.enabledStructuredProviders();
   await registerProjectRoutes(app, authService, indexing, sessions, structuredProviders);
   await registerSearchRoutes(app, authService, search);
-  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders,
-    config.structuredSessions.defaultTransport);
-  await registerSessionRoutes(app, authService, db, projectService, providerRegistry, sessions, images);
+  await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders);
+  await registerSessionRoutes(app, authService, db, projectService, sessions, images);
   registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);

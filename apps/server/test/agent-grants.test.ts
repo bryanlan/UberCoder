@@ -22,7 +22,7 @@ function fixture() {
   const sessionId = randomUUID(), log = path.join(root, 'events.jsonl');
   fs.writeFileSync(log, '');
   db.boundSessions.upsert({ id: sessionId, provider: 'codex', projectSlug: 'demo', conversationRef: native,
-    tmuxSessionName: 'fixture', status: 'bound', shouldRestore: true, title: 'Planner lead', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), eventLogPath: log });
+    status: 'bound', shouldRestore: true, title: 'Planner lead', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), eventLogPath: log });
   const input = (text: string, type = 'user-input') => {
     const offset = fs.statSync(log).size;
     fs.appendFileSync(log, JSON.stringify({ type, text, timestamp: new Date().toISOString() }) + '\n');
@@ -45,7 +45,7 @@ describe('Bryan standing grants', () => {
   it('supplies startup authority from active backend scope records without repeating the lead instructions', async () => {
     const f=fixture(), words='I authorize all needed planner work. First record this grant and launch the initial lane.';
     const grant=await f.grants.record(f.assignment,{...f.definition,scope:'All needed planner work.'},f.input(words));
-    const context={launchedBy:f.assignment,launcherName:'Planner lead',grantIds:[grant.id],requestId:randomUUID(),flags:[],supervisorId:f.assignment};
+    const context={launchedBy:f.assignment,launcherName:'Planner lead',grantIds:[grant.id],requestId:randomUUID(),supervisorId:f.assignment};
     expect(f.grants.authorityContext(context)).toContain('All needed planner work.');
     expect(f.grants.authorityContext(context)).not.toContain('First record this grant');
     expect(f.grants.authorityFor(f.assignment)[0]?.provenance).toEqual({kind:'human_message',messageId:grant.provenance?.messageId,sessionId:f.sessionId});

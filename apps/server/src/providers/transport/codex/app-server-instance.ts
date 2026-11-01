@@ -154,7 +154,7 @@ export function expandHome(value: string, home: string = os.homedir()): string {
  * The shared process serves every thread, so it must not carry the identity of one session: a stale
  * `AGENT_CONSOLE_SESSION_ID` or `CODEX_THREAD_ID` in the Console's own environment (or the configured `env`)
  * would be inherited by every hook process. Configured values win over the inherited environment, and `~`
- * in them is expanded, as for the tmux provider commands; `CODEX_HOME` is always expanded because spawn does
+ * in them is expanded; `CODEX_HOME` is always expanded because spawn does
  * not expand `~` and Codex would reject it.
  */
 export function buildAppServerEnv(base: NodeJS.ProcessEnv, home: string = os.homedir(), extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -181,8 +181,8 @@ export function threadConfig(options: Pick<OpenOptions, 'effort'>): NonNullable<
 /**
  * The app-server argv: the configured command, then the update check off, then (when coordination is on) this
  * Console's coordination MCP server. Codex starts that server from `~/.codex/config.toml`, whose entry names one
- * fixed runtime and checkout; the overrides point the agent's `agent_coordination` calls at this Console, as the
- * tmux launch does. Unlike tmux there is no `AGENT_CONSOLE_SESSION_ID`: the process serves every thread.
+ * fixed runtime and checkout; the overrides point the agent's `agent_coordination` calls at this Console. There is no
+ * `AGENT_CONSOLE_SESSION_ID`: the process serves every thread.
  */
 export function buildAppServerCommand(command: string[], coordination?: PluginContext['coordination']): string[] {
   return [
@@ -397,8 +397,8 @@ export class CodexAppServerInstance implements TransportInstance, CodexSessionHo
    * its rollout (probe of 2026-10-30, codex-cli 0.164.0). So once no conversation has had a thread loaded here for the idle
    * window (`idleUnloadMinutes`, the window after which an idle thread is unloaded) the app-server and its session host are
    * ended, and the next open starts a fresh one that resumes threads from their rollouts. Ending it also ends the background
-   * terminals of idle threads, as tmux idle sleep ended a TUI's children. A loaded thread cancels the recycle; a start in
-   * flight postpones it; a disposed instance never recycles (the next backend's instance arms its own timer).
+   * terminals of idle threads, which is what idle sleep is for. A loaded thread cancels the recycle; a start in flight
+   * postpones it; a disposed instance never recycles (the next backend's instance arms its own timer).
    */
   private armIdleRecycle(): void {
     this.clearIdleRecycle();

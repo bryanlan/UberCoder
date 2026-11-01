@@ -21,8 +21,8 @@ async function setup(): Promise<{ configPath: string; root: string }> {
       sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     },
     providers: {
-      codex: { commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} } },
-      claude: { commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} } },
+      codex: {},
+      claude: {},
     },
     projects: {
       demo: { active: true, path: path.join(root, 'demo', 'workspace'), displayName: 'Demo', allowedLocalhostPorts: [3000] },
@@ -79,8 +79,8 @@ describe('ProjectService', () => {
         sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       },
       providers: {
-        codex: { commands: { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], continueCommand: ['codex', 'resume', '--last'], env: {} } },
-        claude: { commands: { newCommand: ['claude'], resumeCommand: ['claude', '--resume', '{{conversationId}}'], continueCommand: ['claude', '--continue'], env: {} } },
+        codex: {},
+        claude: {},
       },
       projects: {
         cio: { active: true, explicit: true, path: childPath },

@@ -12,7 +12,7 @@ import {
   FAKE_APP_SERVER, FAST_TIMINGS, agentMessageItem, baseHandlers, itemCompleted, receivedRequests, turnCompleted, turnObject,
   turnStarted, userMessageItem, waitUntil, writeScenario,
 } from './helpers/codex-harness.js';
-import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
+import { createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 // The host and the real Codex plugin together, against a scripted stand-in for `codex app-server`.
 const THREAD = 'thread-codex-1';
@@ -32,10 +32,9 @@ async function codexFixture(turns: unknown[], scenario: Record<string, unknown> 
   fs.writeFileSync(rollout, '{}\n');
   const { scenarioPath, logFile } = writeScenario(root, { ...scenario, handlers: { ...baseHandlers(THREAD, rollout), 'turn/start': turns } });
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
-  const tmux = new FakeTmux();
   const registry = new TransportPluginRegistry();
   registry.register(createCodexAppServerPlugin({ timings: FAST_TIMINGS, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' }));
-  const manager = createRecoveryManager(db, tmux, root, new RealtimeEventBus(), provider, providerSettings, {
+  const manager = createRecoveryManager(db, root, new RealtimeEventBus(), provider, providerSettings, {
     transportPlugins: registry,
     structuredSessions: { codex: { enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60, env: {} } },
   });
@@ -48,16 +47,16 @@ async function codexFixture(turns: unknown[], scenario: Record<string, unknown> 
   };
   db.pendingConversations.put(pending);
   const bind = () => manager.bindConversation({
-    project, provider, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured',
+    project, provider, conversationRef: pendingRef, title: pending.title, kind: 'pending',
   });
   const session = options.bind === false ? undefined as never : await bind();
-  return { root, rollout, scenarioPath, db, tmux, manager, session, logFile, pendingRef, bind };
+  return { root, rollout, scenarioPath, db, manager, session, logFile, pendingRef, bind };
 }
 
 describe('Structured sessions on the Codex plugin', () => {
   it('binds on thread/start, runs a turn on turn/start and records the live result', async () => {
     const f = await codexFixture([completedTurn('turn-1', 'Done.')]);
-    expect(f.session).toMatchObject({ transport: 'structured', status: 'bound', conversationRef: THREAD, resumeConversationRef: THREAD });
+    expect(f.session).toMatchObject({ status: 'bound', conversationRef: THREAD, resumeConversationRef: THREAD });
     expect(f.session.pid).toBeGreaterThan(0);
     // The plugin records its shared process for the coordination liveness check.
     expect(JSON.parse(f.db.meta.get('structured-instance:codex')!)).toMatchObject({ pid: f.session.pid });
@@ -69,8 +68,6 @@ describe('Structured sessions on the Codex plugin', () => {
     expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ isWorking: false });
     expect(f.db.boundSessions.getById(f.session.id)?.lastOutputAt).toBeTruthy();
     await waitUntil(() => f.db.conversationIndex.get(project.slug, 'codex', THREAD)?.transcriptPath, 5_000, 'the transcript to be indexed');
-    expect(f.tmux.created).toEqual([]);
-    expect(f.tmux.captureStartLines).toEqual([]);
   });
 
   it('turns a server-overloaded turn into the failure Console recovers from', async () => {
@@ -90,10 +87,14 @@ describe('Structured sessions on the Codex plugin', () => {
     await f.manager.sendInput(f.session.id, 'first');
     await waitUntil(() => f.db.boundSessions.getById(f.session.id)?.lastResponseAt, 5_000, 'the first turn');
     const at = new Date(Date.now() - 3 * 3_600_000).toISOString();
-    f.db.sqlite.prepare('update bound_sessions set updated_at=?, last_activity_at=?, last_output_at=?, last_completed_at=?, last_response_at=?, started_at=?, is_working=0 where id=?')
-      .run(at, at, at, at, at, at, f.session.id);
-    await f.manager.reconcileSessions();
-    expect(f.db.boundSessions.getById(f.session.id)?.idleSuspendedAt).toBeTruthy();
+    // Age the row past the idle window and reconcile. On a loaded host the end of the first turn can still be landing and
+    // refresh the row's activity, so age it again on each pass until a pass puts it to sleep.
+    await expect.poll(async () => {
+      f.db.sqlite.prepare('update bound_sessions set updated_at=?, last_activity_at=?, last_output_at=?, last_completed_at=?, last_response_at=?, started_at=?, is_working=0 where id=?')
+        .run(at, at, at, at, at, at, f.session.id);
+      await f.manager.reconcileSessions();
+      return f.db.boundSessions.getById(f.session.id)?.idleSuspendedAt;
+    }, { timeout: 5_000, interval: 100 }).toBeTruthy();
     expect(receivedRequests(f.logFile, 'thread/unsubscribe')).toHaveLength(1);
 
     await f.manager.sendInput(f.session.id, 'second');

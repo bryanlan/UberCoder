@@ -40,7 +40,6 @@ describe('Structured human input', () => {
     expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn' });
     expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual(['Refactor the parser']);
     expect(f.row(session.id).lastActivityAt).toBeTruthy();
-    expect(f.tmuxTouched()).toBe(0);
     await settle();
     expect(f.row(session.id).isWorking).toBe(true);
   });
@@ -152,7 +151,7 @@ describe('Structured human input', () => {
     const requestId = randomUUID();
     const result = await send(f, session.id, 'use the new model', requestId);
 
-    expect(result.queuedInput).toMatchObject({ requestId, state: 'needs_review', reason: rejected.message });
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'failed', reason: rejected.message });
     expect(record(f, session.id, requestId)).toMatchObject({ state: 'failed', reason: rejected.message });
     // Nothing retries it: no timer is left to send it again, and a later message waits behind it for the person to decide.
     await new Promise(resolve => setTimeout(resolve, 1_300));
@@ -201,7 +200,7 @@ describe('Structured human input', () => {
     // The reason keeps the last refusal and says nothing was sent; it does not send the person to check for a message that never left.
     expect(record(f, session.id, requestId).reason).toMatch(/could not be sent for 10 minutes \(The fake connection is down\.\)\. Nothing was sent\./);
     expect(record(f, session.id, requestId).reason).not.toMatch(/Check the conversation/);
-    expect(f.row(session.id).queuedInputs?.find(item => item.requestId === requestId)).toMatchObject({ state: 'needs_review' });
+    expect(f.row(session.id).queuedInputs?.find(item => item.requestId === requestId)).toMatchObject({ state: 'failed' });
     const attempts = f.calls(session.conversationRef, 'sendTurn').length;
     await new Promise(resolve => setTimeout(resolve, 1_300));
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(attempts);
@@ -327,7 +326,6 @@ describe('Structured human input', () => {
     await settle();
     await f.manager.sendKeystrokes(session.id, { text: 'plain enter', keys: ['Enter'] });
     expect(f.calls(session.conversationRef, 'sendTurn').map(call => (call.args[0] as { text: string }).text)).toEqual(['via input route', 'plain enter']);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('treats a numeric message as ordinary text', async () => {
@@ -383,22 +381,21 @@ describe('Structured input that has no meaning without a terminal', () => {
     return (error as Error).message;
   };
 
-  it.each([['Tab'], ['Up'], ['Left'], ['BSpace'], ['C-c']])('rejects the %s key naming the structured transport, without pausing automatic input', async key => {
+  it.each([['Tab'], ['Up'], ['Left'], ['BSpace'], ['C-c']])('rejects the %s key with the message-or-Stop contract, without pausing automatic input', async key => {
     const f = fixture();
     const { session } = await f.bindNew();
     const assignment = enableUnattendedRecovery(f.db, 'codex', session.conversationRef);
     const message = await rejected(f.manager.sendKeystrokes(session.id, { keys: [key] }));
-    expect(message).toMatch(/structured/i);
+    expect(message).toMatch(/complete messages and Stop/);
     expect(peerWakePaused(f.db, assignment)).toBe(false);
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
     expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(0);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('rejects per-keystroke text, text with a non-Enter key and Escape with text', async () => {
     const f = fixture();
     const { session } = await f.bindNew();
-    await rejected(f.manager.sendKeystrokes(session.id, { text: 'typing', deferScreenUpdate: true }));
+    await rejected(f.manager.sendKeystrokes(session.id, { text: 'typing' }));
     await rejected(f.manager.sendKeystrokes(session.id, { text: '1', keys: ['Down'] }));
     await rejected(f.manager.sendKeystrokes(session.id, { text: 'x', keys: ['Escape'] }));
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
@@ -460,7 +457,6 @@ describe('Structured input that has no meaning without a terminal', () => {
       // What the Console stores and shows is unchanged: the journal and the conversation log keep the whole message.
       expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn', text });
       expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual([text]);
-      expect(f.tmuxTouched()).toBe(0);
     });
 
     it('attaches them to a steer, and to the direct input path', async () => {
@@ -527,12 +523,6 @@ describe('Structured input that has no meaning without a terminal', () => {
     });
   });
 
-  it('never answers a literal selection check with a pane capture', async () => {
-    const f = fixture();
-    const { session } = await f.bindNew();
-    expect(await f.manager.allowsLiteralSelectionKeystroke(session.id, '2')).toBe(false);
-    expect(f.tmux.captureStartLines).toEqual([]);
-  });
 });
 
 describe('Automatic delivery of a message the provider refuses for good', () => {

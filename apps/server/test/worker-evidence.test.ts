@@ -14,7 +14,7 @@ async function fixture() {
   const db = new AppDatabase(path.join(root, 'console.sqlite'));
   cleanups.push(async () => { db.close(); await fs.rm(root, { recursive: true, force: true }); });
   const session: BoundSession = { id: 'worker', provider: 'codex', projectSlug: 'demo', conversationRef: 'native-one',
-    status: 'bound', pid: process.pid, isWorking: true, tmuxSessionName: 'fixture', transport: 'tmux', shouldRestore: true,
+    status: 'bound', pid: process.pid, isWorking: true, shouldRestore: true,
     startedAt: '2026-10-12T12:00:00Z', updatedAt: '2026-10-12T12:00:00Z' };
   db.boundSessions.upsert(session);
   const conversation: ConversationSummary = { ref: session.conversationRef, provider: 'codex', projectSlug: 'demo', title: 'Original title',

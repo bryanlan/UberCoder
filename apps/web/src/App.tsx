@@ -13,7 +13,6 @@ import type {
   SessionEvent,
   SessionInputResponse,
   SessionKeystrokeRequest,
-  SessionTransport,
   TreeResponse,
   UiPreferences,
   UpdateUiPreferencesRequest,
@@ -500,8 +499,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   });
 
   const bindNewMutation = useMutation({
-    mutationFn: ({ projectSlug, provider, transport }: { projectSlug: string; provider: ProviderId; transport?: SessionTransport }) =>
-      api.bindNewConversation(projectSlug, provider, authQuery.data?.csrfToken, { transport }),
+    mutationFn: ({ projectSlug, provider }: { projectSlug: string; provider: ProviderId }) =>
+      api.bindNewConversation(projectSlug, provider, authQuery.data?.csrfToken),
     onSuccess: ({ conversationRef }, variables) => {
       setActionError(undefined);
       queryClient.invalidateQueries({ queryKey: ['tree'] });
@@ -652,13 +651,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  function handleNewConversation(projectSlug: string, provider: ProviderId, options: { transport?: SessionTransport } = {}): void {
-    const nextKey = options.transport === 'structured' ? `${projectSlug}:${provider}:structured` : `${projectSlug}:${provider}`;
+  function handleNewConversation(projectSlug: string, provider: ProviderId): void {
+    const nextKey = `${projectSlug}:${provider}`;
     if (bindNewMutation.isPending || creatingConversationKey) return;
     setActionError(undefined);
     setCreatingConversationKey(nextKey);
     bindNewMutation.mutate(
-      { projectSlug, provider, transport: options.transport },
+      { projectSlug, provider },
       {
         onError: (error) => {
           setActionError(describeError(error, 'Unable to start a new conversation.'));

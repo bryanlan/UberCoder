@@ -1,20 +1,15 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
-import { ProviderRegistry } from '../providers/registry.js';
 import { AuthService } from '../security/auth-service.js';
 import { SessionInputRejectedError, SessionManager, StructuredRequestNotFoundError, type SessionCommandResult } from '../sessions/session-manager.js';
-import { MAX_PROMPT_IMAGES, type BoundSession, type SessionInputResponse } from '@agent-console/shared';
+import { MAX_PROMPT_IMAGES, type SessionInputResponse } from '@agent-console/shared';
 import { ImageStore, ImageUploadError } from '../images/store.js';
 import { imagePromptSuffix } from '../images/prompt.js';
 import { InputQueue } from '../sessions/input-queue.js';
 
 const LIVE_INPUT_BODY_LIMIT_BYTES = 64 * 1024 * 1024;
-const RAW_OUTPUT_TAIL_BYTES = 256 * 1024;
-const DEBUG_OUTPUT_TAIL_BYTES = 64 * 1024;
 
 const inputBodySchema = z.object({
   text: z.string().min(1),
@@ -37,33 +32,28 @@ const sessionRequestBodySchema = z.discriminatedUnion('decision', [
   }),
   z.object({ decision: z.literal('decline') }),
 ]);
-const screenQuerySchema = z.object({
-  lines: z.coerce.number().int().min(50).max(20000).optional(),
-});
-const keystrokeKeySchema = z.enum(['Enter', 'Escape', 'Up', 'Down', 'Left', 'Right', 'BSpace', 'Tab', 'C-c']);
+// A session takes a complete message (`keys: ['Enter']` with text) or Stop (`keys: ['Escape']`, nothing else). Literal keys, text
+// typed into a terminal without Enter, and terminal controls went with the tmux transport.
+const KEYS_CONTRACT = "Send a complete message with keys ['Enter'] and text, or keys ['Escape'] alone to stop. Terminal keys and text without Enter are not supported.";
 const keystrokeBodySchema = z.object({
   submissionId: z.string().uuid().optional(),
   text: z.string().min(1).optional(),
-  keys: z.array(keystrokeKeySchema).min(1).optional(),
-  deferScreenUpdate: z.boolean().optional(),
+  keys: z.array(z.string()).optional(),
   submittedText: z.string().min(1).optional(),
   clientOptimisticMessageId: z.string().min(1).optional(),
   imageIds: z.array(z.string().uuid()).min(1).max(MAX_PROMPT_IMAGES).optional(),
-}).refine((value) => Boolean(value.text || value.keys?.length), {
-  message: 'Expected literal text or at least one key token.',
-}).refine((value) => !value.submissionId || (Boolean(value.submittedText?.trim()) && value.keys?.length === 1 && value.keys[0] === 'Enter'), {
+}).strict().refine((value) => value.keys?.length === 1 && (value.keys[0] === 'Enter'
+  ? Boolean((value.submittedText ?? value.text)?.trim()) || Boolean(value.imageIds)
+  : value.keys[0] === 'Escape' && !value.text && !value.submittedText && !value.submissionId && !value.imageIds), {
+  message: KEYS_CONTRACT,
+}).refine((value) => !value.submissionId || Boolean(value.submittedText?.trim()), {
   message: 'Queued submission requires a complete message and a single Enter.',
-}).refine((value) => !value.imageIds || (value.keys?.length === 1 && value.keys[0] === 'Enter' && new Set(value.imageIds).size === value.imageIds.length), {
-  message: 'Images require a single Enter submission and unique image IDs.',
+}).refine((value) => !value.imageIds || new Set(value.imageIds).size === value.imageIds.length, {
+  message: 'Images require unique image IDs.',
 });
 const modelProfileBodySchema = z.object({
   profile: z.enum(['high', 'medium', 'low']),
 });
-
-type PendingCodexFirstTurnRestartResult =
-  | { kind: 'not-applicable' }
-  | { kind: 'restarted'; result: SessionCommandResult }
-  | { kind: 'project-not-found' };
 
 function sessionInputResponse(result: SessionCommandResult): SessionInputResponse {
   return {
@@ -82,75 +72,11 @@ function parseSessionId(params: unknown, reply: FastifyReply): string | undefine
   return parsed.data.sessionId;
 }
 
-async function readUtf8Tail(filePath: string, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
-  const stat = await fs.stat(filePath);
-  const truncated = stat.size > maxBytes;
-  const start = truncated ? stat.size - maxBytes : 0;
-  const length = stat.size - start;
-  const file = await fs.open(filePath, 'r');
-  try {
-    const buffer = Buffer.alloc(length);
-    await file.read(buffer, 0, length, start);
-    return { text: buffer.toString('utf8'), truncated };
-  } finally {
-    await file.close();
-  }
-}
-
-function withTailMarker(label: string, output: { text: string; truncated: boolean }): string {
-  if (!output.truncated) {
-    return output.text;
-  }
-  return `[showing last ${label}]\n${output.text}`;
-}
-
-async function restartFirstPendingCodexTurnIfNeeded(input: {
-  db: AppDatabase;
-  projectService: ProjectService;
-  providerRegistry: ProviderRegistry;
-  sessions: SessionManager;
-  session: BoundSession;
-  text: string;
-  inputRevision?: number;
-  submissionId?: string;
-}): Promise<PendingCodexFirstTurnRestartResult> {
-  const pendingConversation = input.session.conversationRef.startsWith('pending:')
-    ? input.db.pendingConversations.get(input.session.conversationRef)
-    : undefined;
-  // The first-turn relaunch is a terminal concept; structured sessions deliver the first turn directly.
-  const isFirstPendingCodexTurn =
-    input.session.transport !== 'structured'
-    && input.session.provider === 'codex'
-    && Boolean(pendingConversation)
-    && typeof pendingConversation?.rawMetadata?.lastUserInputHash !== 'string';
-  if (!isFirstPendingCodexTurn) {
-    return { kind: 'not-applicable' };
-  }
-
-  const project = await input.projectService.getProjectBySlug(input.session.projectSlug);
-  if (!project) {
-    return { kind: 'project-not-found' };
-  }
-  const provider = input.providerRegistry.get(input.session.provider);
-  const providerSettings = input.projectService.getMergedProviderSettings(project, input.session.provider);
-  const restarted = await input.sessions.restartPendingSessionWithInitialPrompt({
-    sessionId: input.session.id,
-    project,
-    provider,
-    providerSettings,
-    initialPrompt: input.text,
-    inputRevision: input.inputRevision,
-    submissionId: input.submissionId,
-  });
-  return { kind: 'restarted', result: restarted };
-}
-
 export async function registerSessionRoutes(
   app: FastifyInstance,
   authService: AuthService,
   db: AppDatabase,
   projectService: ProjectService,
-  providerRegistry: ProviderRegistry,
   sessions: SessionManager,
   images?: ImageStore,
 ): Promise<void> {
@@ -234,25 +160,9 @@ export async function registerSessionRoutes(
     if (!sessionId) {
       return;
     }
-    const session = sessions.getSessionById(sessionId);
-    if (!session) {
+    if (!sessions.getSessionById(sessionId)) {
       reply.code(404).send({ error: 'Session not found.' });
       return;
-    }
-    const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
-      db,
-      projectService,
-      providerRegistry,
-      sessions,
-      session,
-      text: parsed.data.text,
-    });
-    if (pendingRestart.kind === 'project-not-found') {
-      reply.code(404).send({ error: 'Project not found.' });
-      return;
-    }
-    if (pendingRestart.kind === 'restarted') {
-      return sessionInputResponse(pendingRestart.result);
     }
     try {
       return sessionInputResponse(await sessions.sendInput(sessionId, parsed.data.text));
@@ -317,25 +227,12 @@ export async function registerSessionRoutes(
     }
   });
 
-  // Read-only dry run of moving tmux conversations to the structured transport: counts by what the next pass would do.
-  app.get('/api/sessions/structured-migration', async (request, reply) => {
-    try {
-      await authService.ensureAuthenticated(request, reply, false);
-    } catch {
-      return;
-    }
-    return await sessions.structuredMigrationReport();
-  });
-
+  // The status synthesized from the provider transport's state (working, idle or asleep, model, context left). An asleep or
+  // suspended conversation answers 404, as it always has. Any query string is ignored: there is no terminal scrollback to page.
   app.get('/api/sessions/:sessionId/screen', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply, false);
     } catch {
-      return;
-    }
-    const parsedQuery = screenQuerySchema.safeParse(request.query ?? {});
-    if (!parsedQuery.success) {
-      reply.code(400).send({ error: 'Invalid screen query.', details: parsedQuery.error.flatten() });
       return;
     }
     const sessionId = parseSessionId(request.params, reply);
@@ -347,58 +244,12 @@ export async function registerSessionRoutes(
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
-    const screenState = await sessions.getSessionScreen(sessionId, {
-      startLine: parsedQuery.data.lines ? -parsedQuery.data.lines : undefined,
-    });
+    const screenState = await sessions.getSessionScreen(sessionId);
     if (!screenState) {
       reply.code(404).send({ error: 'Session not found.' });
       return;
     }
     return screenState;
-  });
-
-  app.get('/api/sessions/:sessionId/raw-output', async (request, reply) => {
-    try {
-      await authService.ensureAuthenticated(request, reply, false);
-    } catch {
-      return;
-    }
-    const sessionId = parseSessionId(request.params, reply);
-    if (!sessionId) {
-      return;
-    }
-    const session = sessions.getSessionById(sessionId);
-    if (!session?.rawLogPath) {
-      reply.code(404).send({
-        error: session?.transport === 'structured'
-          ? 'Structured sessions have no raw terminal output.'
-          : 'Session not found.',
-      });
-      return;
-    }
-    try {
-      const rawText = withTailMarker(
-        `${Math.floor(RAW_OUTPUT_TAIL_BYTES / 1024)} KiB of raw session output`,
-        await readUtf8Tail(session.rawLogPath, RAW_OUTPUT_TAIL_BYTES),
-      );
-      const debugLogPath = path.join(path.dirname(session.rawLogPath), 'debug.log');
-      let debugText = '';
-      try {
-        debugText = withTailMarker(
-          `${Math.floor(DEBUG_OUTPUT_TAIL_BYTES / 1024)} KiB of session debug output`,
-          await readUtf8Tail(debugLogPath, DEBUG_OUTPUT_TAIL_BYTES),
-        );
-      } catch {
-        debugText = '';
-      }
-      return {
-        text: debugText.trim()
-          ? `${rawText}\n\n===== session-debug =====\n${debugText}`
-          : rawText,
-      };
-    } catch {
-      return { text: '' };
-    }
   });
 
   app.post('/api/sessions/:sessionId/keys', { bodyLimit: LIVE_INPUT_BODY_LIMIT_BYTES }, async (request, reply) => {
@@ -437,35 +288,7 @@ export async function registerSessionRoutes(
       }
       delete parsed.data.imageIds;
     }
-    const submittedPromptText = parsed.data.keys?.includes('Enter')
-      ? (parsed.data.submittedText ?? parsed.data.text)?.trim()
-      : undefined;
-    const shouldRestartFromSubmittedPrompt = Boolean(submittedPromptText && !submittedPromptText.startsWith('/'));
-    const isLiteralSelectionKeystroke = shouldRestartFromSubmittedPrompt && submittedPromptText
-      ? await sessions.allowsLiteralSelectionKeystroke(sessionId, submittedPromptText)
-      : false;
-    // Native choices and slash commands remain explicit controls.
-    if (isLiteralSelectionKeystroke || submittedPromptText?.startsWith('/')) delete parsed.data.submissionId;
     try {
-      if (submittedPromptText && shouldRestartFromSubmittedPrompt && !isLiteralSelectionKeystroke) {
-        const pendingRestart = await restartFirstPendingCodexTurnIfNeeded({
-          db,
-          projectService,
-          providerRegistry,
-          sessions,
-          session,
-          text: submittedPromptText,
-          inputRevision,
-          submissionId: parsed.data.submissionId,
-        });
-        if (pendingRestart.kind === 'project-not-found') {
-          reply.code(404).send({ error: 'Project not found.' });
-          return;
-        }
-        if (pendingRestart.kind === 'restarted') {
-          return sessionInputResponse(pendingRestart.result);
-        }
-      }
       return sessionInputResponse(await sessions.sendKeystrokes(sessionId, parsed.data, inputRevision));
     } catch (error) {
       if (error instanceof SessionInputRejectedError) {
@@ -476,7 +299,7 @@ export async function registerSessionRoutes(
     }
   });
 
-  // The person's answer to a question a structured session is holding open.
+  // The person's answer to a question a session is holding open.
   app.post('/api/sessions/:sessionId/requests/:requestId', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
@@ -487,7 +310,6 @@ export async function registerSessionRoutes(
     if (!body.success) return reply.code(400).send({ error: 'Invalid request answer.', details: body.error.flatten() });
     const session = sessions.getSessionById(params.data.sessionId);
     if (!session) return reply.code(404).send({ error: 'Session not found.' });
-    if (session.transport !== 'structured') return reply.code(409).send({ error: 'Only app-server sessions have questions to answer.' });
     try {
       return { session: await sessions.answerStructuredRequest(params.data.sessionId, params.data.requestId, body.data) };
     } catch (error) {

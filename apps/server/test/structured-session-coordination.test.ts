@@ -54,12 +54,11 @@ describe('Coordination registration for structured threads', () => {
     expect(c.f.db.meta.get(`console-session:${assignment}`)).toBeUndefined();
   });
 
-  it('keeps an explicit tmux console session id as it is', async () => {
+  it('keeps an explicit console session id as it is', async () => {
     const c = fixture();
-    c.f.tmux.paneText = 'OpenAI Codex\n› \ngpt-6.1-sol xhigh · 98% left · ~/demo';
-    const tmuxSession = await c.f.manager.bindConversation({ project, provider, providerSettings, conversationRef: 'tmux-thread', title: 'T', kind: 'history' });
-    const assignment = c.register('tmux-thread', { consoleSessionId: tmuxSession.id });
-    expect(c.f.db.meta.get(`console-session:${assignment}`)).toBe(tmuxSession.id);
+    const bound = await c.f.manager.bindConversation({ project, provider, conversationRef: 'history-thread', title: 'T', kind: 'history' });
+    const assignment = c.register('history-thread', { consoleSessionId: bound.id });
+    expect(c.f.db.meta.get(`console-session:${assignment}`)).toBe(bound.id);
   });
 });
 
@@ -137,14 +136,14 @@ describe('Granted restart of a structured session', () => {
     c.coordination.update(actor, { description: 'Planner lead', continuation: 'unattended' });
     const leadNative = c.f.db.sqlite.prepare('select native_session_id as n from coordination_assignments where id=?').get(actor) as { n: string };
     const now = new Date().toISOString();
-    c.f.db.boundSessions.upsert({ id: lead, provider: 'codex', projectSlug: project.slug, conversationRef: leadNative.n, tmuxSessionName: 'lead',
+    c.f.db.boundSessions.upsert({ id: lead, provider: 'codex', projectSlug: project.slug, conversationRef: leadNative.n,
       status: 'bound', shouldRestore: true, title: 'Planner lead', startedAt: now, updatedAt: now, eventLogPath: log } as never);
     const grant = await c.grants.record(actor, { grantee: { kind: 'assignment', id: actor }, scope: words, limits: { maxConcurrentSessions: 2, models: [] } }, `live:${lead}:0`);
     const launches = new AgentSessionLaunches(c.f.db, c.grants, c.f.manager,
       { getProjectBySlug: async slug => slug === project.slug ? project : undefined, getMergedProviderSettings: () => providerSettings },
       { get: () => adapter }, c.f.bus, 1024 * 1024, () => 'MemAvailable: 8000000 kB');
     open.push(async () => { await launches.stop(); });
-    const launchContext: AgentLaunchContext = { launchedBy: actor, launcherName: 'Planner lead', grantIds: [grant.id], requestId: 'r', flags: [], supervisorId: actor };
+    const launchContext: AgentLaunchContext = { launchedBy: actor, launcherName: 'Planner lead', grantIds: [grant.id], requestId: 'r', supervisorId: actor };
     const { session } = await c.f.bindNew({ launchContext });
     await c.f.manager.sendInput(session.id, 'earlier work');
     c.f.thread(session.conversationRef).completeTurn();
@@ -169,7 +168,6 @@ describe('Granted restart of a structured session', () => {
       .filter(call => call.method === 'sendTurn');
     expect(turns).toHaveLength(1);
     expect((turns[0]!.args[0] as { text: string }).text).toBe(GRANTED_RESTART_PROMPT);
-    expect(c.f.tmuxTouched()).toBe(0);
 
     // A request interrupted after the restart completed is finished by the epoch, not restarted again.
     c.f.db.sqlite.prepare("update agent_session_requests set status='starting' where id=?").run(requestId);

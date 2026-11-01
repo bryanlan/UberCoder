@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { BoundSession, ModelProfileKey, ModelProfileRequest, SessionTransport } from '@agent-console/shared';
+import type { BoundSession, ModelProfileKey, ModelProfileRequest } from '@agent-console/shared';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 import { InputQueue } from '../../sessions/input-queue.js';
 import { parsePendingRequests, structuredRequestsKey } from '../../sessions/structured/pending-requests.js';
@@ -15,8 +15,12 @@ function nextUpdatedAt(current: string, candidate: string): string {
   return new Date(currentMs + 1).toISOString();
 }
 
-/** Rows written by callers that do not choose a transport are tmux rows; an existing row keeps its transport. */
-export type BoundSessionInput = Omit<BoundSession, 'transport'> & { transport?: SessionTransport };
+/**
+ * The table keeps two columns from the tmux transport (schema 19) until a later schema version drops them: `tmux_session_name`
+ * (not null) and `transport`. New rows fill them with this placeholder and 'structured'; only the startup conversion of rows an
+ * earlier build left on tmux reads them (`listTmuxRows`).
+ */
+const TMUX_SESSION_NAME_PLACEHOLDER = 'structured:';
 
 export class BoundSessionsRepo {
   constructor(private readonly sqlite: Database.Database) {}
@@ -24,16 +28,13 @@ export class BoundSessionsRepo {
   private mapRow(row: SqliteRow): BoundSession {
     const session = mapBoundSessionRow(row);
     const queuedInputs = new InputQueue(this.sqlite).summaries(session.id);
-    // Only a structured session has a provider connection that can be waiting on the person.
-    const pendingRequests = session.transport === 'structured'
-      ? parsePendingRequests((this.sqlite.prepare('select value from meta where key = ?').get(structuredRequestsKey(session.id)) as { value: string } | undefined)?.value)
-      : [];
+    const pendingRequests = parsePendingRequests((this.sqlite.prepare('select value from meta where key = ?').get(structuredRequestsKey(session.id)) as { value: string } | undefined)?.value);
     return queuedInputs.length || pendingRequests.length
       ? { ...session, ...(queuedInputs.length ? { queuedInputs } : {}), ...(pendingRequests.length ? { pendingRequests } : {}) }
       : session;
   }
 
-  upsert(session: BoundSessionInput): void {
+  upsert(session: BoundSession): void {
     const shouldRestore = session.shouldRestore ?? ['starting', 'bound', 'releasing'].includes(session.status);
     const resumeConversationRef = session.resumeConversationRef
       ?? (!session.conversationRef.startsWith('pending:') ? session.conversationRef : undefined);
@@ -43,8 +44,8 @@ export class BoundSessionsRepo {
           id, provider, codex_profile, claude_profile, project_slug, conversation_ref, resume_conversation_ref, tmux_session_name, transport, status, should_restore, title,
           started_at, updated_at, last_activity_at, last_output_at, last_completed_at, last_response_at, auto_tracked_at, is_working, pid, raw_log_path, event_log_path
         ) values (
-          @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, coalesce(@transport, 'tmux'), @status, @should_restore, @title,
-          @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, @raw_log_path, @event_log_path
+          @id, @provider, @codex_profile, @claude_profile, @project_slug, @conversation_ref, @resume_conversation_ref, @tmux_session_name, 'structured', @status, @should_restore, @title,
+          @started_at, @updated_at, @last_activity_at, @last_output_at, @last_completed_at, @last_response_at, @auto_tracked_at, @is_working, @pid, null, @event_log_path
         )
         on conflict(id) do update set
           conversation_ref = excluded.conversation_ref,
@@ -57,8 +58,6 @@ export class BoundSessionsRepo {
             else bound_sessions.claude_profile
           end,
           resume_conversation_ref = excluded.resume_conversation_ref,
-          tmux_session_name = excluded.tmux_session_name,
-          transport = coalesce(@transport, bound_sessions.transport),
           status = excluded.status,
           should_restore = excluded.should_restore,
           title = excluded.title,
@@ -73,7 +72,6 @@ export class BoundSessionsRepo {
           auto_tracked_at = excluded.auto_tracked_at,
           is_working = excluded.is_working,
           pid = excluded.pid,
-          raw_log_path = excluded.raw_log_path,
           event_log_path = excluded.event_log_path
       `).run({
         id: session.id,
@@ -83,8 +81,7 @@ export class BoundSessionsRepo {
         project_slug: session.projectSlug,
         conversation_ref: session.conversationRef,
         resume_conversation_ref: resumeConversationRef ?? null,
-        tmux_session_name: session.tmuxSessionName,
-        transport: session.transport ?? null,
+        tmux_session_name: `${TMUX_SESSION_NAME_PLACEHOLDER}${session.id}`,
         status: session.status,
         should_restore: boolAsInt(shouldRestore),
         title: session.title ?? null,
@@ -97,7 +94,6 @@ export class BoundSessionsRepo {
         auto_tracked_at: session.autoTrackedAt ?? null,
         is_working: boolAsInt(Boolean(session.isWorking)),
         pid: session.pid ?? null,
-        raw_log_path: session.rawLogPath ?? null,
         event_log_path: session.eventLogPath ?? null,
       });
       if (shouldRestore && ['starting', 'bound', 'releasing'].includes(session.status)) {
@@ -191,16 +187,26 @@ export class BoundSessionsRepo {
     })();
   }
 
+  /** Restorable rows an earlier build left on the tmux transport, with the hidden tmux session each one ran in. */
+  listTmuxRows(): Array<{ session: BoundSession; tmuxSessionName: string }> {
+    const rows = this.sqlite.prepare(`
+      select * from bound_sessions
+      where transport = 'tmux' and should_restore = 1 and status <> 'ended'
+      order by updated_at desc
+    `).all() as SqliteRow[];
+    return rows.map(row => ({ session: this.mapRow(row), tmuxSessionName: String(row.tmux_session_name) }));
+  }
+
   /**
    * Moves a tmux row to the structured transport in one step: the row stops naming a tmux session, raw log or process, and
    * starts asleep, so the next input resumes the same native conversation through the provider's transport. Compare-and-set on
    * the transport: undefined when the row is gone or is not a tmux row. An existing sleep marker keeps its time.
    */
-  setTransport(id: string, change: { tmuxSessionName: string; idleSuspendedAt?: string; updatedAt: string }): BoundSession | undefined {
+  convertTmuxRow(id: string, change: { idleSuspendedAt?: string; updatedAt: string }): BoundSession | undefined {
     return this.sqlite.transaction(() => {
       const current = this.getById(id);
-      if (!current || current.transport !== 'tmux') return undefined;
-      this.sqlite.prepare(`
+      if (!current) return undefined;
+      const changed = this.sqlite.prepare(`
         update bound_sessions
         set transport = 'structured',
             tmux_session_name = ?,
@@ -210,8 +216,8 @@ export class BoundSessionsRepo {
             idle_suspended_at = coalesce(idle_suspended_at, ?),
             updated_at = ?
         where id = ? and transport = 'tmux'
-      `).run(change.tmuxSessionName, change.idleSuspendedAt ?? null, nextUpdatedAt(current.updatedAt, change.updatedAt), id);
-      return this.getById(id);
+      `).run(`${TMUX_SESSION_NAME_PLACEHOLDER}${id}`, change.idleSuspendedAt ?? null, nextUpdatedAt(current.updatedAt, change.updatedAt), id).changes;
+      return changed ? this.getById(id) : undefined;
     })();
   }
 
@@ -333,8 +339,6 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     projectSlug: String(row.project_slug),
     conversationRef: String(row.conversation_ref),
     resumeConversationRef: optionalString(row.resume_conversation_ref),
-    tmuxSessionName: String(row.tmux_session_name),
-    transport: String(row.transport) as SessionTransport,
     status: String(row.status) as BoundSession['status'],
     shouldRestore: Boolean(row.should_restore),
     title: optionalString(row.title),
@@ -350,7 +354,6 @@ export function mapBoundSessionRow(row: SqliteRow): BoundSession {
     idleSuspendedAt: optionalString(row.idle_suspended_at),
     isWorking: Boolean(row.is_working),
     pid: numberOrUndefined(row.pid),
-    rawLogPath: optionalString(row.raw_log_path),
     eventLogPath: optionalString(row.event_log_path),
     launchContext: typeof row.launch_context_json === 'string' ? JSON.parse(row.launch_context_json) as BoundSession['launchContext'] : undefined,
   };

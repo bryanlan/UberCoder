@@ -1,11 +1,5 @@
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { AppDatabase } from '../src/db/database.js';
-import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { SessionRuntimeRegistry, type SlowSessionCommandEvent } from '../src/sessions/session-runtime.js';
-import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -44,210 +38,24 @@ describe('Session runtime queue', () => {
     await expect(command).resolves.toBe('done');
   });
 
-  it('serializes mutating sends for the same session', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-runtime-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const firstWrite = deferred();
+  it('runs the commands of one session one after another, in the order they were queued', async () => {
+    const registry = new SessionRuntimeRegistry();
     const firstStarted = deferred();
+    const releaseFirst = deferred();
     const events: string[] = [];
-    class BlockingTmux extends FakeTmux {
-      override async sendLiteralText(sessionName: string, text: string): Promise<void> {
-        events.push(`start:${text}`);
-        if (text === 'first') {
-          firstStarted.resolve();
-          await firstWrite.promise;
-        }
-        await super.sendLiteralText(sessionName, text);
-        events.push(`end:${text}`);
-      }
-    }
-    const tmux = new BlockingTmux();
-    const manager = createRecoveryManager(db, tmux, tempDir, new RealtimeEventBus());
-
-    try {
-      const session = await manager.bindConversation({
-        project,
-        provider,
-        providerSettings,
-        conversationRef: 'runtime-queue',
-        title: 'Runtime queue',
-        kind: 'history',
-      });
-
-      const first = manager.sendKeystrokes(session.id, { text: 'first', deferScreenUpdate: true });
-      await firstStarted.promise;
-      const second = manager.sendKeystrokes(session.id, { text: 'second', deferScreenUpdate: true });
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(events).toEqual(['start:first']);
-
-      firstWrite.resolve();
-      await Promise.all([first, second]);
-      expect(events).toEqual(['start:first', 'end:first', 'start:second', 'end:second']);
-    } finally {
-      manager.stop();
-      db.close();
-    }
-  });
-
-  it('keeps screen reads off the mutating queue while observation waits its turn', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-runtime-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const firstWrite = deferred();
-    const firstStarted = deferred();
-    class BlockingTmux extends FakeTmux {
-      override paneText = 'Session ready\n> ';
-
-      override async sendLiteralText(sessionName: string, text: string): Promise<void> {
-        if (text === 'blocked') {
-          firstStarted.resolve();
-          await firstWrite.promise;
-        }
-        await super.sendLiteralText(sessionName, text);
-      }
-    }
-    const tmux = new BlockingTmux();
-    const manager = createRecoveryManager(db, tmux, tempDir, new RealtimeEventBus());
-
-    try {
-      const session = await manager.bindConversation({
-        project,
-        provider,
-        providerSettings,
-        conversationRef: 'runtime-screen-read',
-        title: 'Runtime screen read',
-        kind: 'history',
-      });
-
-      const send = manager.sendKeystrokes(session.id, { text: 'blocked', deferScreenUpdate: true });
-      await firstStarted.promise;
-
-      const screenRead = manager.getSessionScreen(session.id);
-      await expect(Promise.race([
-        screenRead.then((state) => state?.screen.content),
-        new Promise((resolve) => setTimeout(() => resolve('blocked-by-send'), 100)),
-      ])).resolves.not.toBe('blocked-by-send');
-
-      const observation = manager.observeSessions();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const duringSend = db.boundSessions.getById(session.id);
-      expect(duringSend?.status).toBe('bound');
-
-      firstWrite.resolve();
-      await send;
-      await observation;
-
-      const finalSession = db.boundSessions.getById(session.id);
-      expect(finalSession?.status).toBe('bound');
-      expect(finalSession?.lastActivityAt).toBeDefined();
-    } finally {
-      manager.stop();
-      db.close();
-    }
-  });
-
-  it('coalesces concurrent screen-triggered restores for the same session', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-runtime-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const tmux = new FakeTmux();
-    const manager = createRecoveryManager(db, tmux, tempDir, new RealtimeEventBus());
-
-    try {
-      const session = await manager.bindConversation({
-        project,
-        provider,
-        providerSettings,
-        conversationRef: 'runtime-concurrent-screen-restore',
-        title: 'Concurrent screen restore',
-        kind: 'history',
-      });
-      tmux.alive.clear();
-
-      const screens = await Promise.all([
-        manager.getSessionScreen(session.id),
-        manager.getSessionScreen(session.id),
-        manager.getSessionScreen(session.id),
-      ]);
-
-      expect(screens.every(Boolean)).toBe(true);
-      expect(tmux.created).toHaveLength(2);
-      const eventLog = await fs.readFile(session.eventLogPath!, 'utf8');
-      expect(eventLog.match(/Restoring bound session\./g)).toHaveLength(1);
-      expect(eventLog.match(/Restored bound session\./g)).toHaveLength(1);
-    } finally {
-      manager.stop();
-      db.close();
-    }
-  });
-
-  it('does not let a stale screen read reclaim superseded conversation ownership', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-runtime-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const livenessChecked = deferred();
-    const continueLiveness = deferred();
-    class BlockingDeadCheckTmux extends FakeTmux {
-      blockedSessionName: string | undefined;
-      private blocked = false;
-
-      override async hasSession(sessionName: string): Promise<boolean> {
-        if (sessionName === this.blockedSessionName && !this.blocked) {
-          this.blocked = true;
-          const wasAlive = await super.hasSession(sessionName);
-          livenessChecked.resolve();
-          await continueLiveness.promise;
-          return wasAlive;
-        }
-        return await super.hasSession(sessionName);
-      }
-    }
-    const tmux = new BlockingDeadCheckTmux();
-    const manager = createRecoveryManager(db, tmux, tempDir, new RealtimeEventBus());
-
-    try {
-      const stale = await manager.bindConversation({
-        project,
-        provider,
-        providerSettings,
-        conversationRef: 'runtime-superseded-screen-restore',
-        title: 'Superseded screen restore',
-        kind: 'history',
-      });
-      tmux.alive.clear();
-      tmux.blockedSessionName = stale.tmuxSessionName;
-
-      const screenRead = manager.getSessionScreen(stale.id);
-      await livenessChecked.promise;
-
-      const supersededAt = new Date(Date.now() + 1_000).toISOString();
-      db.boundSessions.upsert({
-        ...stale,
-        status: 'ended',
-        shouldRestore: false,
-        updatedAt: supersededAt,
-        isWorking: false,
-      });
-      const replacement = {
-        ...stale,
-        id: 'replacement-session',
-        tmuxSessionName: 'replacement-tmux-session',
-        status: 'bound' as const,
-        shouldRestore: true,
-        updatedAt: new Date(Date.now() + 2_000).toISOString(),
-      };
-      tmux.alive.add(replacement.tmuxSessionName);
-      db.boundSessions.upsert(replacement);
-      continueLiveness.resolve();
-
-      await expect(screenRead).resolves.toBeUndefined();
-      expect(tmux.created).toHaveLength(1);
-      expect(db.boundSessions.getById(stale.id)?.shouldRestore).toBe(false);
-      expect(db.boundSessions.getRestorableByConversation(
-        stale.projectSlug,
-        stale.provider,
-        stale.conversationRef,
-      )?.id).toBe(replacement.id);
-    } finally {
-      manager.stop();
-      db.close();
-    }
+    const first = registry.run('session-1', 'first', async () => {
+      events.push('start:first');
+      firstStarted.resolve();
+      await releaseFirst.promise;
+      events.push('end:first');
+    });
+    const second = registry.run('session-1', 'second', async () => { events.push('start:second'); });
+    const other = registry.run('session-2', 'other', async () => { events.push('start:other'); });
+    await firstStarted.promise;
+    await other;
+    expect(events).toEqual(['start:first', 'start:other']);
+    releaseFirst.resolve();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['start:first', 'start:other', 'end:first', 'start:second']);
   });
 });

@@ -22,15 +22,12 @@ describe('Structured session bind', () => {
     const thread = f.plugin.instance!.sessions[0]!;
 
     expect(session).toMatchObject({
-      transport: 'structured',
       status: 'bound',
       shouldRestore: true,
       conversationRef: thread.nativeSessionId,
       resumeConversationRef: thread.nativeSessionId,
-      tmuxSessionName: `structured:${session.id}`,
       pid: process.pid,
       codexProfile: 'medium',
-      rawLogPath: undefined,
     });
     expect(session.eventLogPath).toBeTruthy();
     expect(fs.existsSync(path.join(f.root, session.id, 'raw.log'))).toBe(false);
@@ -39,7 +36,6 @@ describe('Structured session bind', () => {
     expect(f.db.conversationIndex.get(project.slug, 'codex', thread.nativeSessionId)).toMatchObject({ kind: 'history' });
     expect(f.db.meta.get(`structured-epoch:${session.id}`)).toBeTruthy();
     expect(f.plugin.instance!.calls.filter(call => call.method === 'start')).toHaveLength(1);
-    expect(f.tmuxTouched()).toBe(0);
     expect(f.eventTypes()).toContain('session.updated');
   });
 
@@ -59,7 +55,7 @@ describe('Structured session bind', () => {
     const f = await fixture();
     const { session, pendingRef } = await f.bindNew();
     const again = await f.manager.bindConversation({
-      project, provider, providerSettings, conversationRef: pendingRef, title: 'New Codex conversation', kind: 'pending', transport: 'structured',
+      project, provider, conversationRef: pendingRef, title: 'New Codex conversation', kind: 'pending',
     });
     expect(again.id).toBe(session.id);
     expect(f.plugin.instance!.calls.filter(call => call.method === 'start')).toHaveLength(1);
@@ -70,15 +66,14 @@ describe('Structured session bind', () => {
     const error = await f.bindNew().catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(StructuredSessionDisabledError);
     expect((error as StructuredSessionDisabledError).statusCode).toBe(400);
-    expect((error as Error).message).toMatch(/structured.*not enabled/i);
+    expect((error as Error).message).toMatch(/not enabled for codex: structuredSessions\.codex\.enabled/);
     expect(f.plugin.instances).toHaveLength(0);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('fails clearly when the pending alias row is missing', async () => {
     const f = await fixture();
     await expect(f.manager.bindConversation({
-      project, provider, providerSettings, conversationRef: 'pending:missing', title: 'x', kind: 'pending', transport: 'structured',
+      project, provider, conversationRef: 'pending:missing', title: 'x', kind: 'pending',
     })).rejects.toThrow(/must exist/);
     expect(f.plugin.instances).toHaveLength(0);
   });
@@ -88,10 +83,9 @@ describe('Structured session bind', () => {
     const session = await f.bindHistory('native-history-1');
     expect(f.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe('native-history-1');
     expect(session).toMatchObject({
-      transport: 'structured', status: 'bound', conversationRef: 'native-history-1', resumeConversationRef: 'native-history-1',
-      tmuxSessionName: `structured:${session.id}`, pid: process.pid,
+      status: 'bound', conversationRef: 'native-history-1', resumeConversationRef: 'native-history-1',
+      pid: process.pid,
     });
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('ends a failed history bind as an error row and leaves nothing to restore', async () => {
@@ -99,19 +93,7 @@ describe('Structured session bind', () => {
     await expect(f.bindHistory('native-missing')).rejects.toThrow(/resume/i);
     const rows = f.db.boundSessions.list();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ status: 'error', shouldRestore: false, transport: 'structured' });
-    expect(f.tmuxTouched()).toBe(0);
-  });
-
-  it('refuses to rebind a conversation that a tmux session already owns', async () => {
-    const f = await fixture();
-    const tmuxOwner = await f.manager.bindConversation({
-      project, provider, providerSettings, conversationRef: 'tmux-owned', title: 'Owned', kind: 'history',
-    });
-    f.tmux.paneText = 'OpenAI Codex\n› \ngpt-6.1-sol xhigh · 98% left · ~/demo';
-    await expect(f.bindHistory('tmux-owned')).rejects.toBeInstanceOf(SessionInputRejectedError);
-    expect(f.db.boundSessions.getById(tmuxOwner.id)?.transport).toBe('tmux');
-    expect(f.plugin.instances).toHaveLength(0);
+    expect(rows[0]).toMatchObject({ status: 'error', shouldRestore: false });
   });
 
   it('journals the opening prompt and sends it as the first turn', async () => {
@@ -163,7 +145,6 @@ describe('Structured session screen', () => {
     await f.manager.sendInput(session.id, 'work');
     await settle();
     expect((await f.manager.getSessionScreen(session.id))!.screen.status).toBe('Codex (app-server) working');
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('keeps the poll cheap: a loaded session never reloads or locks', async () => {
@@ -172,15 +153,8 @@ describe('Structured session screen', () => {
     const thread = f.plugin.instance!;
     for (let index = 0; index < 5; index += 1) await f.manager.getSessionScreen(session.id);
     expect(thread.calls.filter(call => call.method === 'resume')).toHaveLength(0);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
-  it('answers literal selection checks without a pane', async () => {
-    const f = await fixture();
-    const { session } = await f.bindNew();
-    expect(await f.manager.allowsLiteralSelectionKeystroke(session.id, '1')).toBe(false);
-    expect(f.tmuxTouched()).toBe(0);
-  });
 });
 
 describe('Structured recency and working state', () => {
@@ -281,7 +255,6 @@ describe('Structured sleep, restore and release', () => {
     expect(f.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(threadId);
     expect(f.db.meta.get(`structured-epoch:${session.id}`)).not.toBe(epochBefore);
     expect(f.row(session.id)).toMatchObject({ status: 'bound', pid: process.pid });
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('does not sleep a thread with a running turn or queued input', async () => {
@@ -326,7 +299,6 @@ describe('Structured sleep, restore and release', () => {
     const resumed = await f.manager.resumeSession(session.id);
     expect(resumed.manualSuspendedAt).toBeUndefined();
     expect(f.plugin.instance!.calls.filter(call => call.method === 'resume')).toHaveLength(1);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('reads asleep while the thread is unloaded (manual and idle sleep), and idle again once it is restored', async () => {
@@ -368,7 +340,6 @@ describe('Structured sleep, restore and release', () => {
     expect(f.row(session.id)).toMatchObject({ status: 'ended', shouldRestore: false, isWorking: false, pid: undefined });
     expect(f.db.meta.get(`structured-epoch:${session.id}`)).toBeUndefined();
     expect(f.eventTypes()).toContain('session.released');
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('releases an idle structured session after the nine-day work window, ending its thread', async () => {
@@ -384,7 +355,6 @@ describe('Structured sleep, restore and release', () => {
     await f.manager.reconcileSessions();
     expect(f.row(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
     expect(f.calls(session.conversationRef, 'close')[0]!.args[0]).toBe('release');
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('does not reload the thread of a finished assignment, keeping its inbox restorable', async () => {
@@ -398,7 +368,6 @@ describe('Structured sleep, restore and release', () => {
     expect(backend.plugin.instances.flatMap(instance => instance.calls).filter(call => call.method === 'resume')).toHaveLength(0);
     expect(f.row(session.id)).toMatchObject({ status: 'bound', shouldRestore: true });
     expect(f.row(session.id).idleSuspendedAt).toBeTruthy();
-    expect(backend.tmux.created).toEqual([]);
   });
 
   it('keeps the binding when releasing the thread fails', async () => {
@@ -420,8 +389,6 @@ describe('Structured startup and connection loss', () => {
     const backend = await f.restartBackend();
     await backend.manager.reconcileSessions();
     expect(backend.plugin.instances.flatMap(instance => instance.calls).filter(call => call.method === 'resume')).toHaveLength(0);
-    expect(backend.tmux.created).toEqual([]);
-    expect(backend.tmux.captureStartLines).toEqual([]);
     expect(f.row(session.id)).toMatchObject({ status: 'bound', isWorking: false });
     expect(eventLogLines(f.row(session.id)).some(line => /connection ended/.test(line.text))).toBe(true);
   });
@@ -433,7 +400,6 @@ describe('Structured startup and connection loss', () => {
     const screen = await backend.manager.getSessionScreen(session.id);
     expect(screen?.screen.status).toBe('Codex (app-server) idle');
     expect(backend.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(session.conversationRef);
-    expect(backend.tmux.created).toEqual([]);
   });
 
   it('marks a lost connection on the session and reconnects with a fresh instance on next use', async () => {
@@ -452,7 +418,6 @@ describe('Structured startup and connection loss', () => {
     expect(restored?.status).toBe('bound');
     expect(f.plugin.instances).toHaveLength(2);
     expect(f.plugin.instances[1]!.calls.find(call => call.method === 'resume')?.args[0]).toBe(session.conversationRef);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('records a status when the provider declines a request', async () => {
@@ -480,7 +445,6 @@ describe('Structured model profile', () => {
     await f.manager.sendInput(session.id, 'after the switch');
     expect(f.calls(session.conversationRef, 'sendTurn').at(-1)?.args[0]).toMatchObject({ model: 'gpt-6-astra', effort: 'xhigh' });
     expect((await f.manager.getSessionScreen(session.id))!.screen.model).toBe('gpt-6-astra xhigh');
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('defers a switch while a turn runs and completes it at the next terminal', async () => {

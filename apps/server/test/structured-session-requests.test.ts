@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PendingRequestSummary, SessionEvent } from '@agent-console/shared';
-import { SessionInputRejectedError, StructuredRequestNotFoundError } from '../src/sessions/session-manager.js';
+import { StructuredRequestNotFoundError } from '../src/sessions/session-manager.js';
 import type { StructuredQuestionNotice } from '../src/sessions/structured/pending-requests.js';
 import type { TransportEvent } from '../src/providers/transport/types.js';
 import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
@@ -77,7 +77,6 @@ describe('A structured question', () => {
       sessionId: session.id, projectSlug: session.projectSlug, provider: 'codex', conversationRef: session.conversationRef,
       requestId: 'q1', summary: `Fixture: ${QUESTION_TEXT}`,
     });
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('is announced once when the transport announces it again', async () => {
@@ -291,14 +290,5 @@ describe('Requests the service still declines', () => {
     expect(responses()[0]!.args).toEqual(['q0', { decision: 'decline' }]);
     expect(pending()).toEqual([]);
     expect(notify).not.toHaveBeenCalled();
-  });
-});
-
-describe('Answering on a row that is not structured', () => {
-  it('is refused', async () => {
-    const f = fixture();
-    const { session } = await f.bindNew();
-    f.db.sqlite.prepare("update bound_sessions set transport = 'tmux' where id = ?").run(session.id);
-    await expect(f.manager.answerStructuredRequest(session.id, 'q1', { decision: 'decline' })).rejects.toBeInstanceOf(SessionInputRejectedError);
   });
 });

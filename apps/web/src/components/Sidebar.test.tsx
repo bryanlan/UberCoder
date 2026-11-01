@@ -26,7 +26,7 @@ it.each([
   const tree: TreeResponse = {
     boundSessions: [{
       id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
-      tmuxSessionName: 'fixture-only', status: 'bound', transport: 'tmux',
+      status: 'bound',
       startedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
       lastResponseAt: new Date(now).toISOString(),
     }],
@@ -97,8 +97,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
   const responseAt = new Date(now - hours * 60 * 60 * 1000).toISOString();
   const session: BoundSession = {
     id: 'session-1', provider: 'codex', projectSlug: 'demo', conversationRef: 'conversation-1',
-    tmuxSessionName: 'ac-codex-demo', status: 'bound', shouldRestore: true,
-    transport: 'tmux',
+    status: 'bound', shouldRestore: true,
     startedAt: responseAt, updatedAt: new Date(now).toISOString(),
     lastResponseAt: responseAt, lastActivityAt: responseAt, isWorking: false,
     [marker]: new Date(now).toISOString(),
@@ -144,11 +143,10 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
   expect(within(row).getByText('Suspended')).toBeInTheDocument();
 });
 
-describe('structured New Chat option', () => {
-  function treeWith(structuredProviders?: TreeResponse['structuredProviders']): TreeResponse {
+describe('New Chat options', () => {
+  function treeWithProject(): TreeResponse {
     return {
       boundSessions: [],
-      ...(structuredProviders ? { structuredProviders } : {}),
       projects: [{
         slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',
         tags: [], allowedLocalhostPorts: [],
@@ -181,92 +179,30 @@ describe('structured New Chat option', () => {
     return onNewConversation;
   }
 
-  async function openProjectMenu(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
-  }
-
-  it('offers Codex (app-server) beside the unchanged terminal actions when the tree advertises codex', async () => {
-    const onNewConversation = renderSidebar(treeWith(['codex']));
+  it('starts a conversation for each provider from the project menu', async () => {
+    const onNewConversation = renderSidebar(treeWithProject());
     const user = userEvent.setup();
 
-    await openProjectMenu(user);
-    expect(screen.getByRole('button', { name: 'New Codex conversation' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'New Claude conversation' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Codex (app-server)' }));
-    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'codex', { transport: 'structured' });
-
-    await openProjectMenu(user);
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
     await user.click(screen.getByRole('button', { name: 'New Codex conversation' }));
     expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'codex');
+
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    await user.click(screen.getByRole('button', { name: 'New Claude conversation' }));
+    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude');
   });
 
-  it('offers Claude (headless) only when the tree advertises claude, and creates it with the structured transport', async () => {
-    const onNewConversation = renderSidebar(treeWith(['claude']));
-    const user = userEvent.setup();
-
-    await openProjectMenu(user);
-    expect(screen.queryByRole('button', { name: 'Codex (app-server)' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Claude (headless)' }));
-    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude', { transport: 'structured' });
-  });
-
-  it('adds Claude (headless) to the mobile new-chat picker beside Codex (app-server) when both are advertised', async () => {
+  it('offers one button per provider in the mobile new-chat picker', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
     }));
     try {
       const user = userEvent.setup();
-      const onNewConversation = renderSidebar(treeWith(['codex', 'claude']));
-      await user.click(screen.getByRole('button', { name: 'New chat' }));
-      expect(screen.getByRole('button', { name: 'Codex (app-server)' })).toBeInTheDocument();
-      await user.click(screen.getByRole('button', { name: 'Claude (headless)' }));
-      expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude', { transport: 'structured' });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it.each([
-    ['an absent list', undefined],
-    ['an empty list', []],
-    ['a list without codex', ['claude'] as TreeResponse['structuredProviders']],
-  ])('hides Codex (app-server) for %s', async (_name, structuredProviders) => {
-    renderSidebar(treeWith(structuredProviders));
-    const user = userEvent.setup();
-
-    await openProjectMenu(user);
-
-    expect(screen.getByRole('button', { name: 'New Codex conversation' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Codex (app-server)' })).not.toBeInTheDocument();
-  });
-
-  it('adds the option to the mobile new-chat picker only when advertised', async () => {
-    vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    }));
-    try {
-      const user = userEvent.setup();
-      const onNewConversation = renderSidebar(treeWith(['codex']));
+      const onNewConversation = renderSidebar(treeWithProject());
       await user.click(screen.getByRole('button', { name: 'New chat' }));
       expect(screen.getByRole('button', { name: 'Codex' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Claude' })).toBeInTheDocument();
-      await user.click(screen.getByRole('button', { name: 'Codex (app-server)' }));
-      expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'codex', { transport: 'structured' });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('keeps the mobile new-chat picker to the two terminal providers when nothing is advertised', async () => {
-    vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
-    }));
-    try {
-      const user = userEvent.setup();
-      renderSidebar(treeWith());
-      await user.click(screen.getByRole('button', { name: 'New chat' }));
-      expect(screen.getByRole('button', { name: 'Codex' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: 'Codex (app-server)' })).not.toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Claude' }));
+      expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'claude');
     } finally {
       vi.unstubAllGlobals();
     }

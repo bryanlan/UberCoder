@@ -1,22 +1,5 @@
 import type { BoundSession } from '@agent-console/shared';
 
-export function latestTimestamp(...timestamps: Array<string | undefined>): string | undefined {
-  let latest: string | undefined;
-  let latestMs = Number.NEGATIVE_INFINITY;
-  for (const timestamp of timestamps) {
-    if (!timestamp) {
-      continue;
-    }
-    const parsed = Date.parse(timestamp);
-    if (!Number.isFinite(parsed) || parsed <= latestMs) {
-      continue;
-    }
-    latest = timestamp;
-    latestMs = parsed;
-  }
-  return latest;
-}
-
 export function isRecentTimestamp(timestamp: string | undefined, referenceTimestamp: string, maxAgeMs: number): boolean {
   if (!timestamp) {
     return false;
@@ -31,49 +14,34 @@ export function isRecentTimestamp(timestamp: string | undefined, referenceTimest
   return referenceMs - valueMs <= maxAgeMs;
 }
 
-export function nextScreenWorkingState(
+/**
+ * The working flag a row should carry now. The provider's own turn state decides it (a conversation that is not loaded runs
+ * nothing); a stopped run failure holds it down. Output that arrived after the last completion keeps an expiry armed, so the row's
+ * completion time is recorded once the output has been quiet for the idle window.
+ */
+export function nextWorkingState(
   session: BoundSession,
   input: {
-    screenShowsWorking: boolean;
-    /** Authoritative provider lifecycle, when available; independent of recency. */
-    turnIsWorking?: boolean;
+    /** Authoritative provider lifecycle; independent of recency. */
+    turnIsWorking: boolean;
     capturedAt: string;
-    idleMs: number;
   },
 ): {
   nextIsWorking: boolean;
-  nextLastCompletedAt: string | undefined;
   expiryHeartbeatAt?: string;
   clearExpiry: boolean;
   updatedSession?: BoundSession;
 } {
-  const workingHeartbeatAt = latestTimestamp(
-    session.lastOutputAt,
-    input.screenShowsWorking ? session.lastActivityAt : undefined,
-  );
-  const outputIsCoolingDown = isRecentTimestamp(session.lastOutputAt, input.capturedAt, input.idleMs);
   const failureStopped = session.runFailure && session.runFailure.status !== 'retrying';
-  const nextIsWorking = !failureStopped && (input.turnIsWorking ?? (outputIsCoolingDown
-    || (input.screenShowsWorking && isRecentTimestamp(workingHeartbeatAt, input.capturedAt, input.idleMs))));
-  const nextLastCompletedAt = session.lastCompletedAt;
-  const pendingCompletion = input.turnIsWorking === false && session.lastOutputAt
-    && session.lastOutputAt !== session.lastCompletedAt;
-  const expiryHeartbeatAt = nextIsWorking || pendingCompletion
-    ? session.lastOutputAt ?? workingHeartbeatAt
-    : undefined;
-
-  const updatedSession = session.isWorking === nextIsWorking && session.lastCompletedAt === nextLastCompletedAt
+  const nextIsWorking = !failureStopped && input.turnIsWorking;
+  const pendingCompletion = !input.turnIsWorking && session.lastOutputAt && session.lastOutputAt !== session.lastCompletedAt;
+  const expiryHeartbeatAt = nextIsWorking || pendingCompletion ? session.lastOutputAt : undefined;
+  const updatedSession = session.isWorking === nextIsWorking
     ? undefined
-    : {
-        ...session,
-        updatedAt: input.capturedAt,
-        isWorking: nextIsWorking,
-        lastCompletedAt: nextLastCompletedAt,
-      };
+    : { ...session, updatedAt: input.capturedAt, isWorking: nextIsWorking };
 
   return {
     nextIsWorking,
-    nextLastCompletedAt,
     expiryHeartbeatAt,
     clearExpiry: !expiryHeartbeatAt,
     updatedSession,
@@ -93,7 +61,7 @@ export function nextIdleExpiryDecision(
     idleMs: number;
     turnIsWorking?: boolean;
     /**
-     * The provider says a turn is running that the transport has not named (structured sessions only). Its terminal event may
+     * The provider says a turn is running that the transport has not named. Its terminal event may
      * never come: the unnamed period can end by the thread going idle, with the turn's own end dropped. So the expiry looks again
      * after an idle window instead of ending, and the first look after the period ends settles the row.
      */

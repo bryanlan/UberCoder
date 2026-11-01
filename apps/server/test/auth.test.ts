@@ -23,13 +23,11 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
     runtimeDir: '/tmp/runtime',
     databasePath: '/tmp/agent-console.sqlite',
     sessions: {
-      eagerRestoreHours: 48,
       restoreGraceHours: 24,
       pressureSuspendAvailableMiB: 3072,
       pressureSuspendIdleMinutes: 60,
     },
     structuredSessions: {
-      defaultTransport: 'tmux',
       codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
       claude: { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} },
     },
@@ -48,22 +46,10 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       codex: {
         enabled: true,
         discoveryRoot: '~/.codex',
-        commands: {
-          newCommand: ['codex'],
-          resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-          continueCommand: ['codex', 'resume', '--last'],
-          env: {},
-        },
       },
       claude: {
         enabled: true,
         discoveryRoot: '~/.claude',
-        commands: {
-          newCommand: ['claude'],
-          resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-          continueCommand: ['claude', '--continue'],
-          env: {},
-        },
       },
     },
     projects: {},

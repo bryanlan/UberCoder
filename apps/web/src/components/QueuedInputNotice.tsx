@@ -23,10 +23,10 @@ export function QueuedInputNotice({ sessionId, inputs, csrfToken, compact = fals
   const notice = <div className="border-b border-sky-800/60 bg-sky-950/40 px-4 py-2 text-sm text-sky-100" role="status">
     {inputs.map(input => <div key={input.requestId} className="py-1">
       <div className="flex items-center gap-3">
-        <span className="font-medium">{input.state === 'needs_review' ? 'Check delivery' : input.state === 'submitting' ? 'Sending…' : 'Queued'}</span>
+        <span className="font-medium">{input.state === 'failed' ? 'Check delivery' : input.state === 'submitting' ? 'Sending…' : 'Queued'}</span>
         <span>{input.reason}</span>
         {input.state !== 'submitting' && <button type="button" className="ml-auto text-sky-300 hover:text-sky-200" onClick={() => { void cancel(input.requestId); }}>
-          {input.state === 'needs_review' ? 'Dismiss' : 'Cancel queued send'}
+          {input.state === 'failed' ? 'Dismiss' : 'Cancel queued send'}
         </button>}
       </div>
       <div className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap text-slate-300">{input.text}</div>
@@ -34,7 +34,7 @@ export function QueuedInputNotice({ sessionId, inputs, csrfToken, compact = fals
     {error && <div className="text-rose-300">{error}</div>}
   </div>;
   if (!compact) return notice;
-  const summary = inputs.some(input => input.state === 'needs_review') ? 'Check message delivery'
+  const summary = inputs.some(input => input.state === 'failed') ? 'Check message delivery'
     : inputs.some(input => input.state === 'submitting') ? 'Sending message…'
     : `${inputs.length} queued message${inputs.length === 1 ? '' : 's'}`;
   return <details className="shrink-0 border-b border-sky-800/60 bg-sky-950/40 text-xs text-sky-100">

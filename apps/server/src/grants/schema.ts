@@ -19,7 +19,9 @@ export const grantAgentSchema = z.object({
   sessionId: z.string().uuid().optional(), targetAssignmentId: z.string().uuid().optional(), requestId: z.string().uuid().optional(),
   projectSlug: z.string().min(1).optional(), provider: z.enum(['codex', 'claude']).optional(),
   model: z.string().min(1).max(160).optional(), effort: z.string().min(1).max(40).optional(),
-  flags: z.array(z.string().max(4096)).max(100).default([]),
+  // Launch flags were command-line arguments of the tmux transport, and the structured transport passes none. An empty list is
+  // still accepted because existing callers send `flags: []`; any flag fails the request instead of being dropped in silence.
+  flags: z.array(z.string()).max(0, { message: 'Launch flags are not supported: sessions run on the structured transport, which takes no command-line flags. Send no flags.' }).optional(),
   prompt: z.string().min(1).max(100_000).optional(), title: z.string().min(1).max(300).optional(),
   supervisorId: z.string().uuid().optional(),
 }).strict();

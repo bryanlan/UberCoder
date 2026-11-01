@@ -126,8 +126,6 @@ function boundSession(overrides: Partial<BoundSession> = {}): BoundSession {
     provider: 'codex',
     projectSlug: 'demo',
     conversationRef: 'conversation-1',
-    tmuxSessionName: 'ac-codex-demo',
-    transport: 'tmux',
     status: 'bound',
     shouldRestore: true,
     title: 'Demo conversation',
@@ -1191,7 +1189,7 @@ describe('ConversationPane external Claude handoff', () => {
 });
 
 describe('ConversationPane app-server (structured) sessions', () => {
-  const structured = { transport: 'structured' as const, tmuxSessionName: 'acs-session-1' };
+  const structured = {};
   const terminalOnlyButtons = ['Text Bypass', 'Backspace', 'Tab', '↑', '↓', '←', '→'];
 
   it('hides every terminal-only control and shows the app-server badge', () => {
@@ -1330,7 +1328,7 @@ describe('ConversationPane app-server (structured) sessions', () => {
 
 
 describe('ConversationPane agent question card', () => {
-  const structured = { transport: 'structured' as const, tmuxSessionName: 'acs-session-1' };
+  const structured = {};
   const ask = (overrides: Partial<PendingRequestSummary> = {}): PendingRequestSummary => ({
     requestId: 'q1',
     kind: 'question',

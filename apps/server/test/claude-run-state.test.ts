@@ -4,10 +4,6 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ClaudeRunMonitor } from '../src/providers/transcripts/claude-run-state.js';
 import { parseClaudeConversationFile } from '../src/providers/transcripts/claude.js';
-import { ClaudeProvider } from '../src/providers/claude-provider.js';
-import { AppDatabase } from '../src/db/database.js';
-import { RealtimeEventBus } from '../src/realtime/event-bus.js';
-import { createRecoveryManager, enableUnattendedRecovery, FakeTmux, project, providerSettings } from './helpers/session-fixtures.js';
 
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.splice(0).map(p => fs.rm(p, { recursive: true, force: true }))); });
@@ -58,80 +54,6 @@ describe('Claude authoritative failed turns', () => {
     await m.read(p); expect(m.takeChildActivity()).toEqual([]);
   });
 
-  it('automatically continues an owned Claude session after the bounded capacity delay', async () => {
-    const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
-    const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
-    const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
-    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
-    const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
-    const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings);
-    db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
-    try {
-      enableUnattendedRecovery(db, adapter.id, 'c1');
-      const session = await manager.bindConversation({ project, provider: adapter, providerSettings: settings, conversationRef: 'c1', title: 'Recovery', kind: 'history' });
-      await fs.appendFile(p, line(failure('API Error: 529 Overloaded')));
-      await expect.poll(() => tmux.sent.join(''), { timeout: 20_000 }).toContain('Automatic recovery after a transient provider failure');
-      expect(tmux.sentKeys.filter(keys => keys.includes('Enter'))).toHaveLength(1);
-      expect(db.boundSessions.getById(session.id)?.runFailure).toMatchObject({ attempts: 1, status: 'retrying' });
-      expect(await fs.readFile(session.eventLogPath!, 'utf8')).toContain('Provider recovery scheduled');
-    } finally { await manager.stop(); db.close(); }
-  }, 25_000);
-
-  it('never sends Enter when Stop arrives during automatic text entry', async () => {
-    const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
-    const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
-    const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
-    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
-    const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
-    const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings);
-    db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
-    let stopCommand: Promise<unknown> | undefined;
-    try {
-      enableUnattendedRecovery(db, adapter.id, 'c1');
-      const session = await manager.bindConversation({ project, provider: adapter, providerSettings: settings, conversationRef: 'c1', title: 'Recovery', kind: 'history' });
-      let stopped = false;
-      const stop = () => {
-        if (!stopped) { stopped = true; stopCommand = manager.sendKeystrokes(session.id, { keys: ['Escape'] }); }
-      };
-      const literal = tmux.sendLiteralText.bind(tmux); const paste = tmux.pasteText.bind(tmux);
-      tmux.sendLiteralText = async (...args) => { await literal(...args); stop(); };
-      tmux.pasteText = async (...args) => { await paste(...args); stop(); };
-      await fs.appendFile(p, line(failure('API Error: 529 Overloaded')));
-      await expect.poll(() => stopped, { timeout: 20_000 }).toBe(true);
-      await expect.poll(() => db.boundSessions.getById(session.id)?.runFailure?.status).toBe('stopped');
-      expect(tmux.sentKeys.some(keys => keys.includes('Enter'))).toBe(false);
-      expect(db.boundSessions.getById(session.id)?.runFailure?.stoppedReason).toContain('cancelled by user');
-    } finally { await stopCommand; await manager.stop(); db.close(); }
-  }, 25_000);
-
-  it('protects paused sessions, input waits, native drafts, ownership and memory limits', async () => {
-    const checks = await Promise.allSettled(['manual_pause', 'pressure_pause', 'low_memory', 'draft', 'approval', 'ownership'].map(async (guard) => {
-      const p = await file([prompt]); const db = new AppDatabase(path.join(path.dirname(p), 'test.sqlite'));
-      const tmux = new FakeTmux(); tmux.paneText = 'Claude Code\nAPI Error: 529 Overloaded\n❯ \n⏵⏵ bypass permissions on (shift+tab to cycle)';
-      const enterText = tmux.sendLiteralText.bind(tmux), readyPane = tmux.paneText; let composer = '';
-    tmux.sendLiteralText = async (name, text) => { await enterText(name, text); composer += text; tmux.paneText = readyPane.replace('❯ ', '❯ ' + composer); };
-    const adapter = new ClaudeProvider(); const settings = { ...providerSettings, id: 'claude' as const };
-      const manager = createRecoveryManager(db, tmux, path.dirname(p), new RealtimeEventBus(), adapter, settings,
-        guard === 'low_memory' ? { pressureSuspendAvailableBytes: 1024 * 1024, readMemInfo: () => 'MemAvailable: 100 kB' } : {});
-      db.conversationIndex.replace('demo', 'claude', [{ ref: 'c1', kind: 'history', projectSlug: 'demo', provider: 'claude', title: 'Recovery', updatedAt: new Date().toISOString(), transcriptPath: p, isBound: false, degraded: false }]);
-      try {
-        enableUnattendedRecovery(db, adapter.id, 'c1');
-      const session = await manager.bindConversation({ project, provider: adapter, providerSettings: settings, conversationRef: 'c1', title: 'Recovery', kind: 'history' });
-        await fs.appendFile(p, line(failure('API Error: 529 Overloaded')));
-        await expect.poll(() => db.boundSessions.getById(session.id)?.runFailure?.status, { timeout: 2000, message: `${guard} observes failure` }).toBe('scheduled');
-        if (guard === 'manual_pause') db.boundSessions.setManualSuspendedAt(session.id, new Date().toISOString());
-        if (guard === 'pressure_pause') db.boundSessions.setPressureSuspendedAt(session.id, new Date().toISOString());
-        if (guard === 'draft') tmux.paneText = tmux.paneText.replace('❯ ', '❯ KEEP_UNSENT');
-        if (guard === 'approval') tmux.paneText = 'Claude Code\nDo you want to proceed?\n❯ 1. Yes\n  2. No\nEnter to confirm · Esc to cancel\n⏵⏵ bypass permissions on';
-        if (guard === 'ownership') await tmux.setOption(session.tmuxSessionName, '@agent_console_session_id', 'another-session');
-        const screen = tmux.paneText;
-        await expect.poll(() => db.boundSessions.getById(session.id)?.runFailure?.status, { timeout: 20_000, message: `${guard} stops recovery` }).toBe('stopped');
-        expect(tmux.sent).toEqual([]); expect(tmux.sentKeys).toEqual([]); expect(tmux.paneText).toBe(screen);
-        expect(db.boundSessions.getById(session.id)?.runFailure?.attempts).toBe(0);
-      } finally { await manager.stop(); db.close(); }
-    }));
-    for (const result of checks) if (result.status === 'rejected') throw result.reason;
-  }, 25_000);
 });
 
 describe('Claude native interruption', () => {

@@ -13,7 +13,7 @@ function fixture(provider: BoundSession['provider'] = 'codex') {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-14T15:00:00Z'));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'console-recovery-'));
   const db = new AppDatabase(path.join(dir, 'test.sqlite'));
-  const session: BoundSession = { id: 's1', provider, projectSlug: 'demo', conversationRef: 'c1', tmuxSessionName: 'ac-s1', transport: 'tmux', status: 'bound', shouldRestore: true, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isWorking: true };
+  const session: BoundSession = { id: 's1', provider, projectSlug: 'demo', conversationRef: 'c1', status: 'bound', shouldRestore: true, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), isWorking: true };
   db.boundSessions.upsert(session);
   let run: ProviderRunState | undefined;
   let queue = Promise.resolve();

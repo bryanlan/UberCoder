@@ -237,31 +237,13 @@ describe('api.bindConversation', () => {
 });
 
 describe('api.bindNewConversation', () => {
-  it('sends an empty body for a terminal chat, as before', async () => {
+  it('sends an empty body', async () => {
     const fetchMock = installSuccessfulFetch();
 
     await api.bindNewConversation('demo', 'codex', 'csrf-token');
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/conversations/demo/codex/new/bind');
     expect(requestBody(fetchMock)).toEqual({});
-  });
-
-  it('sends the structured transport when the caller asks for an app-server chat', async () => {
-    const fetchMock = installSuccessfulFetch();
-
-    await api.bindNewConversation('demo', 'codex', 'csrf-token', { transport: 'structured' });
-
-    expect(requestBody(fetchMock)).toEqual({ transport: 'structured' });
-  });
-});
-
-describe('api.bindConversation transport', () => {
-  it('sends the transport only when one is requested', async () => {
-    const fetchMock = installSuccessfulFetch();
-
-    await api.bindConversation('demo', 'codex', 'conversation-3', 'csrf-token', { transport: 'structured' });
-
-    expect(requestBody(fetchMock)).toEqual({ force: false, transport: 'structured' });
   });
 });
 

@@ -107,26 +107,8 @@ async function main(): Promise<void> {
       trustTailscaleHeaders: false,
     },
     providers: {
-      codex: {
-        enabled: true,
-        discoveryRoot: codexHome,
-        commands: {
-          newCommand: ['codex'],
-          resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-          continueCommand: ['codex', 'resume', '--last'],
-          env: {},
-        },
-      },
-      claude: {
-        enabled: true,
-        discoveryRoot: claudeHome,
-        commands: {
-          newCommand: ['claude'],
-          resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-          continueCommand: ['claude', '--continue'],
-          env: {},
-        },
-      },
+      codex: { enabled: true, discoveryRoot: codexHome },
+      claude: { enabled: true, discoveryRoot: claudeHome },
     },
     projects: {
       UberCoder: {

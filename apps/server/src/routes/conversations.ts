@@ -3,12 +3,10 @@ import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
 import {
   PROVIDERS,
-  SESSION_TRANSPORTS,
   type BoundSession,
   type ConversationSummary,
   type NormalizedMessage,
   type ProviderId,
-  type SessionTransport,
 } from '@agent-console/shared';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { AppDatabase } from '../db/database.js';
@@ -19,14 +17,12 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { AuthService } from '../security/auth-service.js';
 import { LiveOutputReader } from '../sessions/live-output/reader.js';
-import { SessionManager } from '../sessions/session-manager.js';
-import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
+import { SessionManager, StructuredSessionDisabledError } from '../sessions/session-manager.js';
 import { statFileSafe } from '../providers/file-utils.js';
 import { nowIso } from '../lib/time.js';
 import { saveConversationTitle } from '../lib/conversation-title.js';
 import { TITLE_GENERATION_AWAITING_MESSAGE } from '../titles/service.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
-import { resolveDefaultTransport } from '../sessions/structured/default-transport.js';
 
 const providerSchema = z.enum(PROVIDERS);
 const projectProviderParamsSchema = z.object({
@@ -36,17 +32,14 @@ const projectProviderParamsSchema = z.object({
 const conversationParamsSchema = projectProviderParamsSchema.extend({
   conversationRef: z.string().min(1),
 });
-// Omitted: the configured default transport (structuredSessions.defaultTransport), resolved per provider by the route.
-const transportSchema = z.enum(SESSION_TRANSPORTS).optional();
-const newConversationBodySchema = z.object({
-  transport: transportSchema,
-});
+// Strict: a field the route does not take fails with its name. `transport` in particular was removed with the tmux transport, and
+// ignoring it would let a request for tmux start a structured conversation in silence.
+const newConversationBodySchema = z.object({}).strict();
 const bindConversationBodySchema = z.object({
-  transport: transportSchema,
   force: z.boolean().optional(),
   initialPrompt: z.string().trim().min(1).optional(),
   confirmExternalHandoff: z.literal(true).optional(),
-});
+}).strict();
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
 });
@@ -83,23 +76,12 @@ function parseConversationParams(params: unknown, reply: FastifyReply): Conversa
   return parsed.data;
 }
 
-const STRUCTURED_DISABLED_MESSAGE = 'Structured sessions are not enabled for this provider.';
-
-function isStructuredDisabledError(error: unknown): boolean {
-  return error instanceof Error && /structured/i.test(error.message) && /not enabled|disabled/i.test(error.message);
-}
-
-/** Replies 400 and returns false when a structured bind is requested for a provider whose lane is off. */
-function structuredTransportAllowed(
-  transport: SessionTransport,
-  providerId: ProviderId,
-  structuredProviders: readonly ProviderId[],
-  reply: FastifyReply,
-): boolean {
-  if (transport !== 'structured' || structuredProviders.includes(providerId)) {
+/** Replies 400 and returns false when the provider's lane is off: it cannot run conversations. */
+function providerLaneEnabled(providerId: ProviderId, structuredProviders: readonly ProviderId[], reply: FastifyReply): boolean {
+  if (structuredProviders.includes(providerId)) {
     return true;
   }
-  reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+  reply.code(400).send({ error: new StructuredSessionDisabledError(providerId).message });
   return false;
 }
 
@@ -190,61 +172,6 @@ function clearUnrestorablePendingBinding(db: AppDatabase, pending: ConversationS
   });
 }
 
-async function resolvePendingAdoptionForRead(input: {
-  db: AppDatabase;
-  project: Awaited<ReturnType<ProjectService['getProjectBySlug']>>;
-  projectSlug: string;
-  providerId: ConversationSummary['provider'];
-  provider: ReturnType<ProviderRegistry['get']>;
-  providerSettings: ReturnType<ProjectService['getMergedProviderSettings']>;
-  pending: ConversationSummary | undefined;
-  eventBus: RealtimeEventBus;
-}): Promise<ConversationSummary | undefined> {
-  const { db, project, projectSlug, providerId, provider, providerSettings, pending, eventBus } = input;
-  if (
-    !project
-    || !pending
-    || typeof pending.rawMetadata?.adoptedConversationRef === 'string'
-    || typeof pending.rawMetadata?.lastUserInputHash !== 'string'
-  ) {
-    return pending;
-  }
-
-  const boundSession = pending.boundSessionId
-    ? db.boundSessions.getById(pending.boundSessionId)
-    : db.boundSessions.getRestorableByConversation(projectSlug, providerId, pending.ref);
-  // Codex writes structured messages during the first turn. Waiting for terminal
-  // idle here leaves that entire turn on the pending event-log path.
-  if (boundSession?.isWorking === true && providerId !== 'codex') {
-    return pending;
-  }
-
-  const indexedCandidates = db.conversationIndex.list()
-    .filter((conversation) => conversation.projectSlug === projectSlug && conversation.provider === providerId);
-  const indexedMatch = findPendingAdoptionMatch(pending, indexedCandidates);
-  const providerCandidates = indexedMatch
-    ? []
-    : provider.listPendingAdoptionCandidates
-      ? await provider.listPendingAdoptionCandidates(project, pending, providerSettings)
-      : await provider.listConversations(project, providerSettings);
-  const matchedConversation = indexedMatch ?? findPendingAdoptionMatch(pending, providerCandidates);
-  if (!matchedConversation) {
-    return pending;
-  }
-
-  const adoption = adoptPendingConversation({
-    db,
-    projectSlug,
-    providerId,
-    pendingRef: pending.ref,
-    matchedConversation,
-  });
-  if (adoption.reboundSession) {
-    eventBus.emit({ type: 'session.updated', session: adoption.reboundSession });
-  }
-  return db.pendingConversations.get(pending.ref) ?? pending;
-}
-
 export async function registerConversationRoutes(
   app: FastifyInstance,
   authService: AuthService,
@@ -254,9 +181,8 @@ export async function registerConversationRoutes(
   sessions: SessionManager,
   eventBus: RealtimeEventBus,
   liveOutputReader: LiveOutputReader = new LiveOutputReader(),
-  structuredProviders: readonly ProviderId[] = [],
-  /** `structuredSessions.defaultTransport`: what a bind that names no transport gets, for providers with the structured lane on. */
-  defaultTransport: SessionTransport = 'tmux',
+  /** Providers whose lane is enabled: only these can bind conversations. */
+  structuredProviders: readonly ProviderId[],
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
@@ -283,17 +209,7 @@ export async function registerConversationRoutes(
     const providerSettings = projectService.getMergedProviderSettings(project, providerId);
     const provider = providerRegistry.get(providerId);
 
-    let pendingSummary = db.pendingConversations.get(conversationRef);
-    pendingSummary = await resolvePendingAdoptionForRead({
-      db,
-      project,
-      projectSlug,
-      providerId,
-      provider,
-      providerSettings,
-      pending: pendingSummary,
-      eventBus,
-    });
+    const pendingSummary = db.pendingConversations.get(conversationRef);
     const adoptedConversationRef = resolveAdoptedConversationRef(pendingSummary);
     const resolvedConversationRef = adoptedConversationRef ?? conversationRef;
     const cachedSummary = db.conversationIndex.get(projectSlug, providerId, resolvedConversationRef);
@@ -411,8 +327,7 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId } = parsedParams;
-    const transport = parsedBody.data.transport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
-    if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
+    if (!providerLaneEnabled(providerId, structuredProviders, reply)) {
       return;
     }
     const project = await projectService.getProjectBySlug(projectSlug);
@@ -426,18 +341,10 @@ export async function registerConversationRoutes(
       reply.code(404).send({ error: 'Provider is disabled for this project.' });
       return;
     }
-    // A bound pending chat is reused only when it runs on the requested transport.
-    let existingPending: ConversationSummary | undefined;
-    let existingSession: BoundSession | undefined;
-    for (const candidate of db.pendingConversations.list()) {
-      if (candidate.projectSlug !== projectSlug || candidate.provider !== providerId || !candidate.isBound) continue;
-      const candidateSession = candidate.boundSessionId ? sessions.getSessionById(candidate.boundSessionId) : undefined;
-      if ((candidateSession?.transport ?? 'tmux') === transport) {
-        existingPending = candidate;
-        existingSession = candidateSession;
-        break;
-      }
-    }
+    // A bound pending chat is reused.
+    const existingPending = db.pendingConversations.list()
+      .find((candidate) => candidate.projectSlug === projectSlug && candidate.provider === providerId && candidate.isBound);
+    const existingSession = existingPending?.boundSessionId ? sessions.getSessionById(existingPending.boundSessionId) : undefined;
     if (existingPending && existingSession?.shouldRestore) {
       const liveSession = await sessions.ensureSession(existingSession.id);
       if (liveSession) {
@@ -467,19 +374,15 @@ export async function registerConversationRoutes(
       // A generated title replaces the placeholder after the first human message.
       rawMetadata: { pending: true, titleGeneration: TITLE_GENERATION_AWAITING_MESSAGE },
     };
-    if (transport === 'structured') {
-      // The thread id is known at bind time, so the session manager adopts this alias immediately.
-      db.pendingConversations.put(pendingConversation);
-    }
+    // The native id is known at bind time, so the session manager adopts this alias immediately.
+    db.pendingConversations.put(pendingConversation);
     try {
       const session = await sessions.bindConversation({
         project,
         provider,
-        providerSettings,
         conversationRef: pendingRef,
         title: pendingConversation.title,
         kind: 'pending',
-        transport,
       });
       // An adopted alias already points at the native conversation; do not overwrite that record.
       if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {
@@ -488,8 +391,8 @@ export async function registerConversationRoutes(
       return { session, conversationRef: pendingRef };
     } catch (error) {
       db.pendingConversations.delete(pendingRef);
-      if (isStructuredDisabledError(error)) {
-        reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+      if (error instanceof StructuredSessionDisabledError) {
+        reply.code(400).send({ error: error.message });
         return;
       }
       throw error;
@@ -512,9 +415,7 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId, conversationRef } = parsedParams;
-    const requestedTransport = parsedBody.data.transport;
-    const transport = requestedTransport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
-    if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
+    if (!providerLaneEnabled(providerId, structuredProviders, reply)) {
       return;
     }
     const project = await projectService.getProjectBySlug(projectSlug);
@@ -551,14 +452,6 @@ export async function registerConversationRoutes(
       );
     if (!parsedBody.data.force) {
       if (existingSession?.shouldRestore) {
-        // Never answer an explicit app-server request with a terminal session. A bind that named no transport takes the
-        // conversation as it is bound: a tmux conversation that has not moved over yet stays on tmux until it does.
-        if (requestedTransport === 'structured' && existingSession.transport !== 'structured') {
-          reply.code(409).send({
-            error: 'Conversation is already bound to a terminal session. Release it before starting an app-server session.',
-          });
-          return;
-        }
         const liveSession = await sessions.ensureSession(existingSession.id);
         if (liveSession) {
           return { session: liveSession };
@@ -599,18 +492,16 @@ export async function registerConversationRoutes(
       const session = await sessions.bindConversation({
         project,
         provider,
-        providerSettings,
         conversationRef: resolvedConversationRef,
         title: bindableSummary.title,
         kind: 'history',
         initialPrompt: parsedBody.data.initialPrompt,
         codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
-        transport,
       });
       return { session };
     } catch (error) {
-      if (isStructuredDisabledError(error)) {
-        reply.code(400).send({ error: STRUCTURED_DISABLED_MESSAGE });
+      if (error instanceof StructuredSessionDisabledError) {
+        reply.code(400).send({ error: error.message });
         return;
       }
       throw error;

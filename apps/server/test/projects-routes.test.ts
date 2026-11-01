@@ -256,18 +256,14 @@ describe('project routes', () => {
 });
 
 describe('structured provider configuration wiring', () => {
-  async function buildConfiguredApp(structuredSessions?: { defaultTransport?: 'tmux' | 'structured'; codex?: { enabled: boolean }; claude?: { enabled: boolean } }) {
+  async function buildConfiguredApp(structuredSessions?: { codex?: { enabled: boolean }; claude?: { enabled: boolean } }) {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-structured-wiring-'));
     const root = path.join(tempDir, 'projects');
     await fs.mkdir(path.join(root, 'demo'), { recursive: true });
     await fs.writeFile(path.join(root, 'demo', 'AGENTS.md'), '# Demo');
     await fs.mkdir(path.join(tempDir, 'codex-home'), { recursive: true });
     await fs.mkdir(path.join(tempDir, 'claude-home'), { recursive: true });
-    const provider = (discoveryRoot: string, command: string) => ({
-      enabled: true,
-      discoveryRoot,
-      commands: { newCommand: [command], resumeCommand: [command, 'resume'], continueCommand: [command, 'continue'], env: {} },
-    });
+    const provider = (discoveryRoot: string) => ({ enabled: true, discoveryRoot });
     const configPath = path.join(tempDir, 'config.json');
     await fs.writeFile(configPath, JSON.stringify({
       server: { host: '127.0.0.1', port: 4317, webDistPath: '../web/dist' },
@@ -285,8 +281,8 @@ describe('structured provider configuration wiring', () => {
         trustTailscaleHeaders: false,
       },
       providers: {
-        codex: provider(path.join(tempDir, 'codex-home'), 'codex'),
-        claude: provider(path.join(tempDir, 'claude-home'), 'claude'),
+        codex: provider(path.join(tempDir, 'codex-home')),
+        claude: provider(path.join(tempDir, 'claude-home')),
       },
       projects: { demo: { active: true, path: path.join(root, 'demo'), displayName: 'Demo', allowedLocalhostPorts: [], tags: [] } },
     }, null, 2));
@@ -301,34 +297,34 @@ describe('structured provider configuration wiring', () => {
     };
   }
 
-  it('advertises codex and refuses structured claude when only the Codex lane is enabled', async () => {
+  it('advertises codex and refuses claude when only the Codex lane is enabled', async () => {
     const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true } });
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual(['codex']);
 
       const claude = await app.inject({
-        method: 'POST', url: '/api/conversations/demo/claude/new/bind', headers, payload: { transport: 'structured' },
+        method: 'POST', url: '/api/conversations/demo/claude/new/bind', headers, payload: {},
       });
       expect(claude.statusCode).toBe(400);
-      expect(claude.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+      expect(claude.json()).toEqual({ error: 'Conversations are not enabled for claude: structuredSessions.claude.enabled is off.' });
     } finally {
       await app.close();
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
 
-  it('advertises nothing and refuses structured binds when the config leaves the lane off', async () => {
+  it('advertises nothing and refuses binds when the config leaves the lanes off', async () => {
     const { app, headers, tempDir } = await buildConfiguredApp();
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual([]);
 
       const codex = await app.inject({
-        method: 'POST', url: '/api/conversations/demo/codex/new/bind', headers, payload: { transport: 'structured' },
+        method: 'POST', url: '/api/conversations/demo/codex/new/bind', headers, payload: {},
       });
       expect(codex.statusCode).toBe(400);
-      expect(codex.json()).toEqual({ error: 'Structured sessions are not enabled for this provider.' });
+      expect(codex.json()).toEqual({ error: 'Conversations are not enabled for codex: structuredSessions.codex.enabled is off.' });
     } finally {
       await app.close();
       await fs.rm(tempDir, { recursive: true, force: true });
@@ -345,7 +341,7 @@ describe('structured provider configuration wiring', () => {
       await fs.rm(claudeOnly.tempDir, { recursive: true, force: true });
     }
 
-    const both = await buildConfiguredApp({ defaultTransport: 'tmux', codex: { enabled: true }, claude: { enabled: true } });
+    const both = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: true } });
     try {
       const tree = await both.app.inject({ method: 'GET', url: '/api/projects/tree', headers: both.headers });
       expect(tree.json().structuredProviders).toEqual(['codex', 'claude']);
@@ -355,18 +351,15 @@ describe('structured provider configuration wiring', () => {
     }
   });
 
-  it('serves the migration dry run behind login, reporting the configured default and no conversations to move', async () => {
-    const { app, headers, tempDir } = await buildConfiguredApp({ defaultTransport: 'structured', claude: { enabled: true } });
+  it('refuses a bind that still names a transport, saying which field', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true } });
     try {
-      const anonymous = await app.inject({ method: 'GET', url: '/api/sessions/structured-migration' });
-      expect(anonymous.statusCode).toBe(401);
-
-      const report = await app.inject({ method: 'GET', url: '/api/sessions/structured-migration', headers });
-      expect(report.statusCode).toBe(200);
-      expect(report.json()).toMatchObject({
-        defaultTransport: 'structured', providers: ['claude'], structuredRows: 0, rows: [],
-        outcomes: { dead: 0, idle: 0, working: 0, pending: 0, noTranscript: 0 },
-      });
+      for (const url of ['/api/conversations/demo/codex/new/bind', '/api/conversations/demo/codex/history-ref/bind']) {
+        const response = await app.inject({ method: 'POST', url, headers, payload: { transport: 'structured' } });
+        expect(response.statusCode).toBe(400);
+        expect(JSON.stringify(response.json())).toContain('transport');
+      }
+      expect((await app.inject({ method: 'GET', url: '/api/sessions/structured-migration', headers })).statusCode).toBe(404);
     } finally {
       await app.close();
       await fs.rm(tempDir, { recursive: true, force: true });

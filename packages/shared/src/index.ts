@@ -37,12 +37,7 @@ export function visibleModelMatchesProfile(provider: ProviderId, profile: ModelP
 
 export type ModelProfileDeferredReason =
   | 'turn_running'
-  | 'unsent_input'
-  | 'interactive_input'
-  | 'provider_message_queued'
-  | 'starting'
-  | 'awaiting_native_conversation'
-  | 'cannot_verify_idle';
+  | 'unsent_input';
 
 interface ModelProfileRequestBase {
   requestId: string;
@@ -77,10 +72,6 @@ export type MessageLifecycle = 'durable' | 'pending' | 'status';
 
 export const SESSION_STATUSES = ['starting', 'bound', 'releasing', 'ended', 'error'] as const;
 export type BoundSessionStatus = (typeof SESSION_STATUSES)[number];
-
-/** Which runtime owns a bound session: a hidden tmux terminal or a structured provider protocol. */
-export const SESSION_TRANSPORTS = ['tmux', 'structured'] as const;
-export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
 
 export type ConversationKind = 'history' | 'pending';
 
@@ -158,6 +149,7 @@ export interface NormalizedMessage {
   rawMetadata?: Record<string, unknown>;
 }
 
+/** What `GET /api/sessions/:id/screen` serves: a status synthesized from the provider transport's state. There is no terminal. */
 export interface SessionScreen {
   content: string;
   contentAnsi?: string;
@@ -238,9 +230,6 @@ export interface BoundSession {
   projectSlug: string;
   conversationRef: string;
   resumeConversationRef?: string;
-  tmuxSessionName: string;
-  /** Chosen at bind time and persisted; existing rows keep their transport when a config flag changes. */
-  transport: SessionTransport;
   status: BoundSessionStatus;
   title?: string;
   shouldRestore?: boolean;
@@ -263,7 +252,6 @@ export interface BoundSession {
   /** Structured sessions: requests the provider is waiting on (a question for the person). Projected from backend state. */
   pendingRequests?: PendingRequestSummary[];
   pid?: number | null;
-  rawLogPath?: string;
   eventLogPath?: string;
 }
 
@@ -281,7 +269,6 @@ export interface RefreshTreeRequest {
 
 /** Body of `POST /api/conversations/:projectSlug/:provider/new/bind` and `.../:conversationRef/bind`. */
 export interface BindConversationRequest {
-  transport?: SessionTransport;
   force?: boolean;
   initialPrompt?: string;
   confirmExternalHandoff?: true;
@@ -304,7 +291,8 @@ export interface SessionQueuedInput {
   requestId: string;
   text: string;
   requestedAt: string;
-  state: 'queued' | 'waiting_for_input' | 'submitting' | 'needs_review';
+  /** `failed`: the message was not delivered, or its delivery is uncertain; `reason` says which. The person dismisses it. */
+  state: 'queued' | 'submitting' | 'failed';
   reason: string;
 }
 
@@ -338,12 +326,15 @@ export type SessionRequestResponse =
   | { decision: 'answer'; answers: Record<string, string[]>; text?: string }
   | { decision: 'decline' };
 
+/**
+ * Body of `POST /api/sessions/:id/keys`: a complete message with `keys: ['Enter']` (queued when it carries a `submissionId`), or
+ * `keys: ['Escape']` to stop the running turn.
+ */
 export interface SessionKeystrokeRequest {
   /** Idempotent, server-owned delivery of a complete chat draft. */
   submissionId?: string;
   text?: string;
   keys?: string[];
-  deferScreenUpdate?: boolean;
   submittedText?: string;
   clientOptimisticMessageId?: string;
   imageIds?: string[];
@@ -381,7 +372,7 @@ export interface EditableProjectSettings {
 export interface TreeResponse {
   projects: ProjectSummary[];
   boundSessions: BoundSession[];
-  /** Providers whose structured (non-tmux) lane is enabled in config. */
+  /** Providers whose lane is enabled in config (`structuredSessions.<provider>.enabled`): only these can run conversations. */
   structuredProviders?: ProviderId[];
   lastIndexedAt?: string;
 }
@@ -467,15 +458,6 @@ export type SessionEvent =
       provider: ProviderId;
       conversationRef: string;
       screen: SessionScreen;
-      timestamp: string;
-    }
-  | {
-      type: 'session.raw-output';
-      sessionId: string;
-      projectSlug: string;
-      provider: ProviderId;
-      conversationRef: string;
-      chunk: string;
       timestamp: string;
     }
   | {
@@ -606,7 +588,6 @@ export interface AgentLaunchContext {
   requestId: string;
   model?: string;
   effort?: string;
-  flags: string[];
   supervisorId: string;
 }
 export interface AgentGrantsSnapshot { grants: AgentGrant[]; uses: AgentGrantUse[]; nextUseOffset: number | null }

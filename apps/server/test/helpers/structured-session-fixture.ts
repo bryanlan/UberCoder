@@ -9,7 +9,7 @@ import { AppDatabase } from '../../src/db/database.js';
 import { RealtimeEventBus } from '../../src/realtime/event-bus.js';
 import { TransportPluginRegistry } from '../../src/providers/transport/registry.js';
 import { TransportBusyError, TransportUnavailableError, type TransportInstance } from '../../src/providers/transport/types.js';
-import { FakeTmux, claudeProvider, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
+import { claudeProvider, createRecoveryManager, project, provider, providerSettings } from './session-fixtures.js';
 import { FakeTransportInstance, FakeTransportPlugin, type FakeTransportPluginOptions, type FakeTransportSession } from './structured-fixtures.js';
 
 export const structuredSessionsConfig = {
@@ -22,18 +22,17 @@ export interface StructuredSessionFixtureOptions {
   plugin?: FakeTransportPluginOptions;
   /** More plugins registered beside the main one (for example a Claude plugin beside the Codex one). */
   extraPlugins?: FakeTransportPluginOptions[];
-  manager?: Parameters<typeof createRecoveryManager>[6];
+  manager?: Parameters<typeof createRecoveryManager>[5];
   /** Leave the structured lane off to prove binds are refused. */
   disabled?: boolean;
   /** The provider adapter the manager sees (for example one with a run monitor over a rollout file). */
   provider?: ProviderAdapter;
 }
 
-/** Everything a structured-session test needs: a database, a FakeTmux that must stay untouched, and a fake plugin. */
+/** Everything a session test needs: a database and a fake transport plugin behind the real session manager. */
 export function structuredSessionFixture(options: StructuredSessionFixtureOptions = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'structured-session-'));
   const db = new AppDatabase(path.join(root, 'state.sqlite'));
-  const tmux = new FakeTmux();
   const plugin = new FakeTransportPlugin(options.plugin);
   const extraPlugins = (options.extraPlugins ?? []).map(extra => new FakeTransportPlugin(extra));
   const registry = new TransportPluginRegistry();
@@ -45,7 +44,7 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   const bus = new RealtimeEventBus();
   const events: SessionEvent[] = [];
   bus.subscribe((event) => { events.push(event); });
-  const manager = createRecoveryManager(db, tmux, root, bus, adapter, providerSettings, {
+  const manager = createRecoveryManager(db, root, bus, adapter, providerSettings, {
     transportPlugins: registry,
     structuredSessions: options.disabled ? undefined : structuredSessionsConfig,
     ...options.manager,
@@ -61,14 +60,14 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     };
     db.pendingConversations.put(pending);
     const session = await manager.bindConversation({
-      project, provider: adapter, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured', ...extra,
+      project, provider: adapter, conversationRef: pendingRef, title: pending.title, kind: 'pending', ...extra,
     });
     return { session, pendingRef };
   };
 
   const bindHistory = (conversationRef: string, extra: Partial<Parameters<typeof manager.bindConversation>[0]> = {}) =>
     manager.bindConversation({
-      project, provider: adapter, providerSettings, conversationRef, title: 'History', kind: 'history', transport: 'structured', ...extra,
+      project, provider: adapter, conversationRef, title: 'History', kind: 'history', ...extra,
     });
 
   const row = (id: string): BoundSession => db.boundSessions.getById(id)!;
@@ -79,12 +78,9 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     thread(nativeSessionId).calls.filter(call => !method || call.method === method);
   const eventTypes = () => events.map(event => event.type);
 
-  const tmuxTouched = () => tmux.created.length + tmux.sent.length + tmux.pasted.length + tmux.sentKeys.length
-    + tmux.options.length + tmux.pipedToFiles.length + tmux.captureStartLines.length + tmux.windowSizeChecks.length;
-
-  const restarted: Array<{ manager: typeof manager; plugin: FakeTransportPlugin; tmux: FakeTmux }> = [];
+  const restarted: Array<{ manager: typeof manager; plugin: FakeTransportPlugin }> = [];
   /**
-   * A new backend process over the same database: fresh plugin instances, fresh tmux fake, no loaded threads. `survivors`
+   * A new backend process over the same database: fresh plugin instances, no loaded threads. `survivors`
    * names the provider processes that outlived the old backend behind their session hosts (native id -> pid), and `survivorTurns`
    * the turn each of them is running (native id -> turn id). A lookup that fails comes from {@link failReattach}.
    */
@@ -99,11 +95,10 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     const nextRegistry = new TransportPluginRegistry();
     nextRegistry.register(nextPlugin);
     for (const extra of options.extraPlugins ?? []) nextRegistry.register(new FakeTransportPlugin(extra));
-    const nextTmux = new FakeTmux();
-    const nextManager = createRecoveryManager(db, nextTmux, root, bus, adapter, providerSettings, {
+    const nextManager = createRecoveryManager(db, root, bus, adapter, providerSettings, {
       transportPlugins: nextRegistry, structuredSessions: structuredSessionsConfig, ...options.manager,
     });
-    const next = { manager: nextManager, plugin: nextPlugin, tmux: nextTmux };
+    const next = { manager: nextManager, plugin: nextPlugin };
     restarted.push(next);
     return next;
   };
@@ -115,7 +110,7 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
     fs.rmSync(root, { recursive: true, force: true });
   };
 
-  return { root, db, tmux, plugin, extraPlugins, providerId, adapter, registry, bus, events, manager, restartBackend, bindNew, bindHistory, row, thread, calls, eventTypes, tmuxTouched, cleanup };
+  return { root, db, plugin, extraPlugins, providerId, adapter, registry, bus, events, manager, restartBackend, bindNew, bindHistory, row, thread, calls, eventTypes, cleanup };
 }
 
 export type StructuredSessionFixture = ReturnType<typeof structuredSessionFixture>;

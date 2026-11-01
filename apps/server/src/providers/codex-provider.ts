@@ -1,12 +1,11 @@
 import path from 'node:path';
 import { CodexRunMonitor } from './transcripts/codex-run-state.js';
-import { CODEX_COST_PROFILES, type CodexCostProfileKey, type ConversationSummary } from '@agent-console/shared';
+import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
-import { renderTemplateTokens } from '../lib/shell.js';
 import { listFilesRecursive, pathExists, readTextHead, statFileSafe, type FileFingerprint } from './file-utils.js';
-import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation, ProviderLaunchOptions, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
+import { compareConversationDiscoveryOrder } from './provider-utils.js';
+import type { ProviderAdapter, ProviderConversation, TranscriptParseCache, TranscriptParseCacheEntry } from './types.js';
 import {
   conversationBelongsToProject,
   deriveConversationRef,
@@ -14,65 +13,7 @@ import {
   loadCachedTranscriptParse,
   type CachedTranscriptParse,
 } from './transcripts/base.js';
-import { codexJsonlFileContainsUserHash, parseCodexConversationFile } from './transcripts/codex.js';
-
-const PENDING_USER_HASH_MEMO_MAX_ENTRIES = 4096;
-
-function isReasoningConfig(value: string | undefined): boolean {
-  return /^model_reasoning_effort\s*=/.test(value ?? '');
-}
-
-function hasConfiguredModelProfile(argv: string[]): boolean {
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]!;
-    if (arg === '--model' || arg === '-m' || arg.startsWith('--model=') || arg.startsWith('-m=')) {
-      return true;
-    }
-    if ((arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
-      return true;
-    }
-    if ((arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function withoutConfiguredModelProfile(argv: string[], removeModel = true, removeEffort = true): string[] {
-  const result: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]!;
-    if (removeModel && (arg === '--model' || arg === '-m')) {
-      index += 1;
-      continue;
-    }
-    if (removeModel && (arg.startsWith('--model=') || arg.startsWith('-m='))) continue;
-    if (removeEffort && (arg === '-c' || arg === '--config') && isReasoningConfig(argv[index + 1])) {
-      index += 1;
-      continue;
-    }
-    if (removeEffort && (arg.startsWith('-c=') || arg.startsWith('--config=')) && isReasoningConfig(arg.slice(arg.indexOf('=') + 1))) {
-      continue;
-    }
-    result.push(arg);
-  }
-  return result;
-}
-
-function withModelOptions(argv: string[], options: string[]): string[] {
-  // Resume parses its own model configuration. Put overrides on that command,
-  // otherwise the resumed turn can silently use the host's default effort.
-  const resume = argv.indexOf('resume');
-  const position = resume >= 0 ? resume + 1 : 1;
-  return [...argv.slice(0, position), ...options, ...argv.slice(position)];
-}
-
-interface PendingUserHashMatchMemoEntry {
-  size: number;
-  mtimeMs: number;
-  userTextHash: string;
-  matches: boolean;
-}
+import { parseCodexConversationFile } from './transcripts/codex.js';
 
 export class CodexProvider implements ProviderAdapter {
   readonly id = 'codex' as const;
@@ -99,86 +40,6 @@ export class CodexProvider implements ProviderAdapter {
         conversationRef: deriveConversationRef(filePath),
       }),
     });
-  }
-
-  private candidateSessionDayDirs(
-    sessionsRoot: string,
-    pending: ConversationSummary,
-  ): string[] {
-    const rawMetadata = pending.rawMetadata ?? {};
-    const timestamps = [
-      typeof rawMetadata.lastUserInputAt === 'string' ? rawMetadata.lastUserInputAt : undefined,
-      pending.updatedAt,
-      pending.createdAt,
-    ].filter((value): value is string => typeof value === 'string');
-    const dirs = new Set<string>();
-
-    for (const timestamp of timestamps) {
-      const parsed = Date.parse(timestamp);
-      if (!Number.isFinite(parsed)) continue;
-      for (const offsetDays of [-1, 0, 1]) {
-        const candidate = new Date(parsed + offsetDays * 24 * 60 * 60 * 1000);
-        dirs.add(path.join(
-          sessionsRoot,
-          String(candidate.getUTCFullYear()),
-          String(candidate.getUTCMonth() + 1).padStart(2, '0'),
-          String(candidate.getUTCDate()).padStart(2, '0'),
-        ));
-      }
-    }
-
-    return [...dirs].sort();
-  }
-
-  private async parseProjectConversationsFromFiles(
-    project: ActiveProject,
-    files: string[],
-  ): Promise<ConversationSummary[]> {
-    const conversations: ConversationSummary[] = [];
-    for (const filePath of files) {
-      const fingerprint = await statFileSafe(filePath);
-      const parsed = await this.loadOrParseFile(filePath, fingerprint, project.slug);
-      const projectPaths = parsed.authoritativeProjectPaths.size > 0 ? parsed.authoritativeProjectPaths : parsed.projectPaths;
-      if (projectPaths.size === 0 || !conversationBelongsToProject(project.matchPaths, projectPaths)) {
-        continue;
-      }
-      conversations.push({
-        ...parsed.summary,
-        projectSlug: project.slug,
-        degraded: parsed.summary.degraded || parsed.authoritativeProjectPaths.size === 0,
-      });
-    }
-    return conversations.sort(compareConversationDiscoveryOrder);
-  }
-
-  private readonly pendingUserHashMatchMemo = new Map<string, PendingUserHashMatchMemoEntry>();
-
-  private async fileContainsPendingUserHash(filePath: string, userTextHash: string): Promise<boolean> {
-    const fingerprint = await statFileSafe(filePath);
-    const memoized = fingerprint ? this.pendingUserHashMatchMemo.get(filePath) : undefined;
-    if (
-      memoized
-      && memoized.size === fingerprint!.size
-      && memoized.mtimeMs === fingerprint!.mtimeMs
-      && memoized.userTextHash === userTextHash
-    ) {
-      return memoized.matches;
-    }
-
-    const matches = await codexJsonlFileContainsUserHash(filePath, userTextHash);
-    if (fingerprint) {
-      // Keyed by path so a changed file replaces its own entry; evict the oldest
-      // entries (insertion order) rather than clearing the whole memo.
-      this.pendingUserHashMatchMemo.delete(filePath);
-      this.pendingUserHashMatchMemo.set(filePath, { ...fingerprint, userTextHash, matches });
-      for (const oldestPath of this.pendingUserHashMatchMemo.keys()) {
-        if (this.pendingUserHashMatchMemo.size <= PENDING_USER_HASH_MEMO_MAX_ENTRIES) {
-          break;
-        }
-        this.pendingUserHashMatchMemo.delete(oldestPath);
-      }
-    }
-    return matches;
   }
 
   async listConversationsForProjects(
@@ -268,34 +129,6 @@ export class CodexProvider implements ProviderAdapter {
     return (await this.listConversationsForProjects([project], settings)).get(project.slug) ?? [];
   }
 
-  async listPendingAdoptionCandidates(
-    project: ActiveProject,
-    pending: ConversationSummary,
-    settings: MergedProviderSettings,
-  ): Promise<ConversationSummary[]> {
-    const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
-    if (!(await pathExists(sessionsRoot))) return [];
-    const pendingUserHash = pending.rawMetadata?.lastUserInputHash;
-    if (typeof pendingUserHash !== 'string') return [];
-
-    const files = new Set<string>();
-    for (const dayDir of this.candidateSessionDayDirs(sessionsRoot, pending)) {
-      if (!(await pathExists(dayDir))) continue;
-      for (const filePath of await listFilesRecursive(dayDir, (candidate) => candidate.endsWith('.jsonl'))) {
-        files.add(filePath);
-      }
-    }
-
-    const candidateFiles: string[] = [];
-    for (const filePath of [...files].sort()) {
-      if (await this.fileContainsPendingUserHash(filePath, pendingUserHash)) {
-        candidateFiles.push(filePath);
-      }
-    }
-
-    return this.parseProjectConversationsFromFiles(project, candidateFiles);
-  }
-
   async getConversation(project: ActiveProject, conversationRef: string, settings: MergedProviderSettings): Promise<ProviderConversation | null> {
     const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
     if (!(await pathExists(sessionsRoot))) return null;
@@ -312,64 +145,6 @@ export class CodexProvider implements ProviderAdapter {
       summary: parsed.summary,
       messages: parsed.displayMessages,
       allMessages: parsed.messages,
-    };
-  }
-
-  getLaunchCommand(
-    project: ActiveProject,
-    conversationRef: string | null,
-    settings: MergedProviderSettings,
-    options?: ProviderLaunchOptions,
-  ): LaunchCommand {
-    const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
-    const initialPrompt = options?.initialPrompt?.trim();
-    let baseArgv = ensureProviderFlag(
-      renderTemplateTokens(template, {
-        conversationId: conversationRef ?? '',
-        projectPath: project.path,
-        projectSlug: project.slug,
-      }),
-      '--dangerously-bypass-approvals-and-sandbox',
-    );
-    const profileKey = options?.codexProfile
-      ?? (!conversationRef && !options?.model && !hasConfiguredModelProfile(baseArgv) ? 'medium' : undefined);
-    if (profileKey) {
-      const profile = CODEX_COST_PROFILES[profileKey];
-      const withoutProfileArgs = withoutConfiguredModelProfile(baseArgv);
-      const executable = withoutProfileArgs[0];
-      if (!executable) {
-        throw new Error('Codex launch command is empty.');
-      }
-      baseArgv = withModelOptions(withoutProfileArgs, [
-        '--model',
-        profile.model,
-        '-c',
-        `model_reasoning_effort="${profile.reasoningEffort}"`,
-      ]);
-    }
-    if (options?.model || options?.effort) {
-      const cleaned = withoutConfiguredModelProfile(baseArgv, !!options.model, !!options.effort);
-      baseArgv = withModelOptions(cleaned, [...(options.model ? ['--model', options.model] : []),
-        ...(options.effort ? ['-c', `model_reasoning_effort="${options.effort}"`] : [])]);
-    }
-    return {
-      cwd: project.path,
-      argv: [
-        ...baseArgv,
-        ...(options?.flags ?? []),
-        ...(options?.consoleIdentity ? [
-          '-c', 'mcp_servers.agent_console_coordination.command="node"',
-          '-c', `mcp_servers.agent_console_coordination.args=${JSON.stringify([options.consoleIdentity.helperPath, 'mcp'])}`,
-          '-c', `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(options.consoleIdentity.runtimeDir)}`,
-          '-c', `mcp_servers.agent_console_coordination.env.AGENT_CONSOLE_SESSION_ID=${JSON.stringify(options.consoleIdentity.sessionId)}`,
-        ] : []),
-        // Console launches must reach the composer. Host CLI updates are
-        // managed outside restored conversations, never through chat input.
-        '-c',
-        'check_for_update_on_startup=false',
-        ...(initialPrompt ? [initialPrompt] : []),
-      ],
-      env: settings.commands.env,
     };
   }
 }

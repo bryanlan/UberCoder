@@ -13,7 +13,7 @@ import {
   FAKE_APP_SERVER, FAST_TIMINGS, HOST_PROGRAM, agentMessageItem, baseHandlers, commandItem, itemCompleted, itemStarted, readLog, receivedRequests, serverRequest,
   threadResult, turnCompleted, turnObject, turnStarted, userMessageItem, waitUntil, writeScenario,
 } from './helpers/codex-harness.js';
-import { FakeTmux, createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
+import { createRecoveryManager, project, provider, providerSettings } from './helpers/session-fixtures.js';
 import { eventLogLines } from './helpers/structured-session-fixture.js';
 
 // A turn the shared Codex app-server is running survives a Console backend restart, because the app-server runs behind a
@@ -60,14 +60,13 @@ async function restartFixture(scenarioExtra: Record<string, unknown>, turn: unkn
   const backend = () => {
     const registry = new TransportPluginRegistry();
     registry.register(createCodexAppServerPlugin({ timings: FAST_TIMINGS, baseEnv: { PATH: process.env.PATH }, clientVersion: '9.9.9' }));
-    const tmux = new FakeTmux();
-    const manager = createRecoveryManager(db, tmux, root, bus, provider, providerSettings, {
+      const manager = createRecoveryManager(db, root, bus, provider, providerSettings, {
       transportPlugins: registry,
       structuredSessions: { codex: { enabled: true, command: [process.execPath, FAKE_APP_SERVER, scenarioPath], idleUnloadMinutes: 60, env: {} } },
       lineTransport: createLineTransportFactory({ runtimeDir: root, log, hostProgramPath: HOST_PROGRAM }),
     });
     backends.push(manager);
-    return { manager, tmux };
+    return { manager };
   };
   cleanups.push(async () => {
     for (const manager of backends.splice(0)) await manager.stop().catch(() => undefined);
@@ -84,7 +83,7 @@ async function restartFixture(scenarioExtra: Record<string, unknown>, turn: unkn
   db.pendingConversations.put(pending);
   const first = backend();
   const session = await first.manager.bindConversation({
-    project, provider, providerSettings, conversationRef: pendingRef, title: pending.title, kind: 'pending', transport: 'structured',
+    project, provider, conversationRef: pendingRef, title: pending.title, kind: 'pending',
   });
   const row = () => db.boundSessions.getById(session.id)!;
   const lossLines = () => eventLogLines(row()).filter(line => /connection ended/.test(line.text));
@@ -125,7 +124,6 @@ describe('A Codex turn that runs across a backend restart, through the host', ()
     expect(f.row().isWorking).toBe(false);
     expect(receivedRequests(f.logFile, 'turn/start')).toHaveLength(1);
     expect(f.lossLines()).toEqual([]);
-    expect(second.tmux.created).toEqual([]);
   });
 
   it('can be stopped by the new backend: Stop reaches the app-server for the adopted turn', async () => {

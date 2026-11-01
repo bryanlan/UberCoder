@@ -87,7 +87,7 @@ export interface StructuredSessionServiceOptions {
   hostEnv?: Record<string, string>;
   /**
    * The standing-authority text for a session a grant launched (`launchContext` on its row). Passed to a plugin as
-   * `OpenOptions.appendSystemPrompt`; the text is the same one the tmux launch appends to the system prompt.
+   * `OpenOptions.appendSystemPrompt`, which the provider appends to its system prompt.
    */
   authorityContext?: (context: AgentLaunchContext) => string | undefined;
   logger?: { warn(bindings: object, message: string): void };
@@ -139,8 +139,8 @@ const TERMINAL_MEMORY = 64;
 export const BACKGROUND_WORK_STALE_MS = 4 * 3_600_000;
 
 /**
- * What a per-session Claude conversation with no cost profile runs on: the effort the tmux resume template names, with no model
- * of its own (the CLI picks it, as it does for a tmux resume). No profile is stored on the row.
+ * What a per-session Claude conversation with no cost profile runs on: effort `medium` and no model of its own (the CLI picks
+ * it). No profile is stored on the row.
  */
 const UNPROFILED_CLAUDE_EFFORT = 'medium';
 
@@ -441,9 +441,9 @@ export class StructuredSessionService {
   }
 
   /**
-   * The loaded session's process is running background work of its own (a shell command or subagent no turn covers). The
-   * tmux path refuses idle sleep while its screen shows the same; this is the structured counterpart. False for a session
-   * that is not loaded, for a plugin that cannot tell, and once the transport has said nothing for `BACKGROUND_WORK_STALE_MS`.
+   * The loaded session's process is running background work of its own (a shell command or subagent no turn covers), so idle
+   * sleep and memory pressure must not end it. False for a session that is not loaded, for a plugin that cannot tell, and once
+   * the transport has said nothing for `BACKGROUND_WORK_STALE_MS`.
    */
   hasBackgroundWork(session: Pick<BoundSession, 'id'>): boolean {
     const state = this.sessions.get(session.id);
@@ -521,8 +521,8 @@ export class StructuredSessionService {
   }
 
   /**
-   * Tells a plugin that guards a conversation's history that this row already has some: a row moved over from tmux, or one whose
-   * turns completed before the plugin kept its own record. Without it a resume that finds the saved history deleted would start
+   * Tells a plugin that guards a conversation's history that this row already has some: a row the tmux transport ran before it
+   * was removed (Phase B), or one whose turns completed before the plugin kept its own record. Without it a resume that finds the saved history deleted would start
    * the conversation again, empty, under the same id. Idempotent; a plugin without the guard ignores it.
    */
   noteConversationHistory(session: Pick<BoundSession, 'id' | 'provider' | 'conversationRef' | 'resumeConversationRef'>): void {
@@ -838,9 +838,9 @@ export class StructuredSessionService {
   }
 
   /**
-   * The model and effort a conversation runs on when its row has no cost profile (a migrated tmux row, a history bind) and no
-   * launch named its own: what the tmux resume template gives it, effort `medium` and no model, so a resumed headless Claude
-   * process does not start on the CLI's own effort. Nothing is stored on the row. Codex has none: its shared process keeps the
+   * The model and effort a conversation runs on when its row has no cost profile (a history bind, or a row converted from the
+   * removed tmux transport) and no launch named its own: effort `medium` and no model, so a resumed headless Claude process
+   * does not start on the CLI's own effort. Nothing is stored on the row. Codex has none: its shared process keeps the
    * model it was configured with.
    */
   private fallbackModel(

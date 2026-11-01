@@ -1,7 +1,7 @@
 // Fits an image to what the Messages API accepts before it goes to the CLI as a base64 block.
 //
 // The API rejects an image above 5 MB and downsizes one above about 1568 px on its long edge anyway. The CLI does not
-// resize a block it is handed (the tmux path never met this: Claude opened the file with `Read`, which downsizes), so an
+// resize a block it is handed (only its `Read` tool downsizes, and an attached block never goes through it), so an
 // oversized block would end the turn with an image error and could leave the image in the transcript, where it fails
 // every later turn. The Console stores an image as the person pasted it (up to 10 MiB and 20 megapixels).
 //

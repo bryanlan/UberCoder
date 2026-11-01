@@ -21,21 +21,19 @@
     "pilotPaths": []
   },
   "sessions": {
-    "eagerRestoreHours": 1,
     "restoreGraceHours": 1,
     "pressureSuspendAvailableMiB": 3072,
     "pressureSuspendIdleMinutes": 60
   },
   "structuredSessions": {
-    "defaultTransport": "tmux",
     "codex": {
-      "enabled": false,
+      "enabled": true,
       "command": ["codex", "app-server"],
       "idleUnloadMinutes": 60,
       "env": {}
     },
     "claude": {
-      "enabled": false,
+      "enabled": true,
       "command": ["claude"],
       "idleUnloadMinutes": 60,
       "env": {}
@@ -54,23 +52,11 @@
   "providers": {
     "codex": {
       "enabled": true,
-      "discoveryRoot": "~/.codex",
-      "commands": {
-        "newCommand": ["codex", "--no-alt-screen"],
-        "resumeCommand": ["codex", "resume", "--no-alt-screen", "{{conversationId}}"],
-        "continueCommand": ["codex", "resume", "--no-alt-screen", "--last"],
-        "env": {}
-      }
+      "discoveryRoot": "~/.codex"
     },
     "claude": {
       "enabled": true,
-      "discoveryRoot": "~/.claude",
-      "commands": {
-        "newCommand": ["claude", "--effort", "medium"],
-        "resumeCommand": ["claude", "--resume", "{{conversationId}}", "--effort", "medium"],
-        "continueCommand": ["claude", "--continue", "--effort", "medium"],
-        "env": {}
-      }
+      "discoveryRoot": "~/.claude"
     }
   },
   "projects": {
@@ -79,16 +65,7 @@
       "displayName": "Demo Web",
       "allowedLocalhostPorts": [3000, 5173],
       "tags": ["frontend", "primary"],
-      "notes": "Main web surface",
-      "providers": {
-        "codex": {
-          "commands": {
-            "env": {
-              "CODEX_HOME": "~/.codex"
-            }
-          }
-        }
-      }
+      "notes": "Main web surface"
     },
     "api-service": {
       "active": true,

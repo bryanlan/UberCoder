@@ -59,7 +59,6 @@ describe('Structured run failure and recovery', () => {
     expect(r.turnTexts()[1]).toContain('Recovery attempt 1 of 3.');
     expect(r.failure()).toMatchObject({ status: 'retrying', attempts: 1 });
     expect(r.f.row(r.session.id).isWorking).toBe(true);
-    expect(r.f.tmuxTouched()).toBe(0);
 
     // Real output from the new turn acknowledges the retry and clears the notice.
     r.thread.push({ type: 'turn.started', turnId: 'turn-2', origin: 'user', replay: false });
@@ -170,7 +169,6 @@ describe('Structured run failure and recovery', () => {
     expect(r.f.plugin.instances[1]!.calls.find(call => call.method === 'resume')?.args[0]).toBe(r.native);
     const resumed = r.f.plugin.instances[1]!.sessions[0]!;
     expect((resumed.calls.find(call => call.method === 'sendTurn')!.args[0] as { text: string }).text).toContain(RECOVERY_PROMPT);
-    expect(r.f.tmuxTouched()).toBe(0);
   });
 
   it('recovers unattended work that was running when the whole backend restarted', async () => {
@@ -189,7 +187,6 @@ describe('Structured run failure and recovery', () => {
     expect(backend.plugin.instance!.calls.find(call => call.method === 'resume')?.args[0]).toBe(r.native);
     const resumed = backend.plugin.instance!.sessions[0]!;
     expect((resumed.calls.find(call => call.method === 'sendTurn')!.args[0] as { text: string }).text).toContain(RECOVERY_PROMPT);
-    expect(backend.tmux.created).toEqual([]);
   });
 
   it('does not recover a lost connection without unattended work', async () => {
@@ -203,7 +200,7 @@ describe('Structured run failure and recovery', () => {
 
 describe('Structured granted restart and close', () => {
   const launchContext: AgentLaunchContext = {
-    launchedBy: 'launcher-assignment', launcherName: 'Launcher', grantIds: [], requestId: 'request-1', flags: [], supervisorId: 'launcher-assignment',
+    launchedBy: 'launcher-assignment', launcherName: 'Launcher', grantIds: [], requestId: 'request-1', supervisorId: 'launcher-assignment',
   };
 
   it('refuses to restart while a turn is running, as on tmux, and leaves the turn alone', async () => {
@@ -232,7 +229,7 @@ describe('Structured granted restart and close', () => {
     await settle();
     await new Promise(resolve => setTimeout(resolve, 5));
     const restarted = await f.manager.restartGrantedSession(session.id, undefined, () => true);
-    expect(restarted).toMatchObject({ status: 'bound', transport: 'structured' });
+    expect(restarted).toMatchObject({ status: 'bound' });
     expect(f.db.meta.get(`structured-epoch:${session.id}`)).not.toBe(epochBefore);
   });
 
@@ -251,7 +248,7 @@ describe('Structured granted restart and close', () => {
 
     const restarted = await f.manager.restartGrantedSession(session.id, undefined, () => true);
 
-    expect(restarted).toMatchObject({ status: 'bound', transport: 'structured', pid: process.pid });
+    expect(restarted).toMatchObject({ status: 'bound', pid: process.pid });
     expect(thread.calls.map(call => call.method)).toEqual(expect.arrayContaining(['unload']));
     expect(thread.calls.map(call => call.method)).not.toContain('interrupt');
     const reloaded = f.plugin.instance!.sessions.filter(candidate => candidate.nativeSessionId === native);
@@ -259,7 +256,6 @@ describe('Structured granted restart and close', () => {
     expect(reloaded[1]!.resumed).toBe(true);
     expect((reloaded[1]!.calls.find(call => call.method === 'sendTurn')!.args[0] as { text: string }).text).toBe(GRANTED_RESTART_PROMPT);
     expect(f.db.meta.get(`structured-epoch:${session.id}`)).not.toBe(epochBefore);
-    expect(f.tmuxTouched()).toBe(0);
   });
 
   it('releases the thread when its launcher closes it', async () => {
@@ -275,6 +271,5 @@ describe('Structured granted restart and close', () => {
     await f.manager.closeGrantedSession(session.id, 'launcher-assignment', () => true);
     expect(f.row(session.id)).toMatchObject({ status: 'ended', shouldRestore: false });
     expect(f.calls(session.conversationRef, 'close')[0]!.args[0]).toBe('release');
-    expect(f.tmuxTouched()).toBe(0);
   });
 });

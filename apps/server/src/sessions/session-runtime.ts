@@ -1,24 +1,6 @@
-export interface DeferredSelectionInput {
-  text: string;
-  expiresAt: number;
-}
-
 export interface SessionRuntimeState {
-  lastUserInput?: import('./last-user-input.js').LastUserInputCache;
-  rawOutputFlush?: Promise<void>;
-  rawOutputGeneration?: number;
-  lastScreenHash?: string;
-  deferredTextReadyUntil?: number;
-  deferredSelectionInput?: DeferredSelectionInput;
   workingIdleTimer?: NodeJS.Timeout;
-  rawOutputScreenUpdateTimer?: NodeJS.Timeout;
-  liveSessionModel?: string;
-  codexProfile?: import('@agent-console/shared').CodexCostProfileKey;
-  claudeProfile?: import('@agent-console/shared').ClaudeCostProfileKey;
   submittedTurnAt?: string;
-  claudeFolderTrustPending?: boolean;
-  /** Native process whose hidden pane already has the Console minimum size. */
-  paneSizedPid?: number;
   /** Verified live writer's epoch; historical transcript turns cannot own it. */
   nativeProcess?: { pid: number; startedAt: string };
 }
@@ -92,14 +74,7 @@ export class SessionRuntimeRegistry {
 
   clearEphemeral(sessionId: string): void {
     const state = this.state(sessionId);
-    state.lastScreenHash = undefined;
-    state.deferredTextReadyUntil = undefined;
-    state.deferredSelectionInput = undefined;
-    state.liveSessionModel = undefined;
-    state.codexProfile = undefined;
-    state.claudeProfile = undefined;
     state.submittedTurnAt = undefined;
-    state.claudeFolderTrustPending = undefined;
     state.nativeProcess = undefined;
   }
 

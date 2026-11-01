@@ -26,7 +26,7 @@ function bind(provider: ProviderId, overrides: Partial<BoundSession> = {}) {
   const nativeSessionId = randomUUID();
   const session: BoundSession = {
     id: randomUUID(), projectSlug: 'other-project', provider, conversationRef: nativeSessionId,
-    title: 'Review the console', tmuxSessionName: 'fixture-only', transport: 'tmux', status: 'bound', shouldRestore: true,
+    title: 'Review the console', status: 'bound', shouldRestore: true,
     startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...overrides,
   };
   db.boundSessions.upsert(session);
@@ -121,6 +121,8 @@ it.each(['closed', 'dead', 'full'] as const)('does not reopen a %s finished reci
   }
   const send = () => service.send(sender, { priority: 'P2', id: randomUUID(), recipientId: assignmentId, text: 'New peer question' });
   if (condition === 'full') expect(send).toThrow('inbox is full');
+  // A conversation that is still bound loads on demand, so a dead process alone does not make it unreachable.
+  else if (condition === 'dead') expect(send()).toMatchObject({ queued: true, delivery: 'next_turn', recipient: { status: 'idle' } });
   else expect(send()).toMatchObject({ queued: true, delivery: 'on_resume', recipient: { status: 'stopped' } });
   expect(service.agentStatus(assignmentId).assignment?.status).toBe('finished');
 });

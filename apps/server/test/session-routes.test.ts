@@ -18,7 +18,7 @@ describe('session routes', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-queued-route-'));
     const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
     const session: BoundSession = { id: 'queued-session', provider: 'claude', projectSlug: 'demo', conversationRef: 'native-chat',
-      tmuxSessionName: 'fixture', transport: 'tmux', status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
+      status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
     const submissionId = 'd5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5';
     const queuedInput = { requestId: submissionId, text: 'my draft', requestedAt: session.updatedAt,
       state: 'queued' as const, reason: 'Waiting for input.' };
@@ -26,8 +26,8 @@ describe('session routes', () => {
     const cancelQueuedInput = vi.fn(async () => ({ session }));
     const ensureAuthenticated = vi.fn(async () => undefined);
     const app = fastify();
-    await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never, {} as never,
-      { getSessionById: () => session, allowsLiteralSelectionKeystroke: async () => false, sendKeystrokes, cancelQueuedInput } as never);
+    await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never,
+      { getSessionById: () => session, sendKeystrokes, cancelQueuedInput } as never);
     try {
       const payload = { submissionId, text: 'my draft', submittedText: 'my draft', keys: ['Enter'] };
       const accepted = await app.inject({ method: 'POST', url: '/api/sessions/queued-session/keys', payload });
@@ -44,60 +44,7 @@ describe('session routes', () => {
     } finally { await app.close(); db.close(); await fs.rm(tempDir, { recursive: true, force: true }); }
   });
 
-  it('bounds raw output responses to the useful tail of large session logs', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    const sessionDir = path.join(tempDir, 'runtime', 'session-raw');
-    await fs.mkdir(sessionDir, { recursive: true });
-    const rawLogPath = path.join(sessionDir, 'raw.log');
-    const debugLogPath = path.join(sessionDir, 'debug.log');
-    await fs.writeFile(rawLogPath, `${'old raw line\n'.repeat(40_000)}latest raw tail`);
-    await fs.writeFile(debugLogPath, 'debug tail');
-    const session: BoundSession = {
-      id: 'session-raw',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'history-raw',
-      tmuxSessionName: 'ac-codex-demo-raw',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      rawLogPath,
-    };
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {} as never,
-      {} as never,
-      {
-        getSessionById: vi.fn(() => session),
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'GET',
-        url: '/api/sessions/session-raw/raw-output',
-      });
-
-      expect(response.statusCode).toBe(200);
-      const body = response.json() as { text: string };
-      expect(body.text).toContain('[showing last 256 KiB of raw session output]');
-      expect(body.text).toContain('latest raw tail');
-      expect(body.text).toContain('===== session-debug =====');
-      expect(body.text).toContain('debug tail');
-      expect(body.text.length).toBeLessThan(350_000);
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('accepts live input bridge paste payloads larger than the old route limit', async () => {
+  it('accepts message payloads larger than the old route limit', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const session: BoundSession = {
@@ -105,8 +52,6 @@ describe('session routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-large',
-      tmuxSessionName: 'ac-codex-demo-large',
-      transport: 'tmux',
       status: 'bound',
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:00:00.000Z',
@@ -118,10 +63,8 @@ describe('session routes', () => {
       { ensureAuthenticated: async () => undefined } as never,
       db,
       {} as never,
-      {} as never,
       {
         getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
         sendKeystrokes,
       } as never,
     );
@@ -132,18 +75,18 @@ describe('session routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/sessions/session-large/keys',
-        payload: { text: largeText },
+        payload: { text: largeText, keys: ['Enter'] },
       });
 
       expect(response.statusCode).toBe(200);
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-large', { text: largeText }, 0);
+      expect(sendKeystrokes).toHaveBeenCalledWith('session-large', { text: largeText, keys: ['Enter'] }, 0);
     } finally {
       await app.close();
       db.close();
     }
   });
 
-  it('rejects live input bridge payloads above the expanded session route limit', async () => {
+  it('rejects message payloads above the expanded session route limit', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
     const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
     const session: BoundSession = {
@@ -151,8 +94,6 @@ describe('session routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-too-large',
-      tmuxSessionName: 'ac-codex-demo-too-large',
-      transport: 'tmux',
       status: 'bound',
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:00:00.000Z',
@@ -164,10 +105,8 @@ describe('session routes', () => {
       { ensureAuthenticated: async () => undefined } as never,
       db,
       {} as never,
-      {} as never,
       {
         getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
         sendKeystrokes,
       } as never,
     );
@@ -178,7 +117,7 @@ describe('session routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/sessions/session-too-large/keys',
-        payload: { text: tooLargeText },
+        payload: { text: tooLargeText, keys: ['Enter'] },
       });
 
       expect(response.statusCode).toBe(413);
@@ -197,8 +136,6 @@ describe('session routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-recorded',
-      tmuxSessionName: 'ac-codex-demo-recorded',
-      transport: 'tmux',
       status: 'bound',
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:00:00.000Z',
@@ -215,7 +152,6 @@ describe('session routes', () => {
       app,
       { ensureAuthenticated: async () => undefined } as never,
       db,
-      {} as never,
       {} as never,
       {
         getSessionById: vi.fn(() => session),
@@ -248,8 +184,6 @@ describe('session routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-missing',
-      tmuxSessionName: 'ac-codex-demo-missing',
-      transport: 'tmux',
       status: 'bound',
       startedAt: '2026-03-14T18:00:00.000Z',
       updatedAt: '2026-03-14T18:00:00.000Z',
@@ -260,10 +194,8 @@ describe('session routes', () => {
       { ensureAuthenticated: async () => undefined } as never,
       db,
       {} as never,
-      {} as never,
       {
         getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
         sendKeystrokes: vi.fn(async () => {
           throw new SessionInputRejectedError('Session is no longer running. Rebind or restore the conversation before sending input.');
         }),
@@ -275,382 +207,13 @@ describe('session routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/sessions/session-missing/keys',
-        payload: { text: 'try ssd now' },
+        payload: { text: 'try ssd now', keys: ['Enter'] },
       });
 
       expect(response.statusCode).toBe(409);
       expect(response.json()).toEqual({
         error: 'Session is no longer running. Rebind or restore the conversation before sending input.',
       });
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('restarts a first-turn pending Codex session from combined text and Enter keystrokes', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:first-turn',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-pending',
-      degraded: false,
-      rawMetadata: { pending: true },
-    } satisfies ConversationSummary);
-    const session: BoundSession = {
-      id: 'session-pending',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:first-turn',
-      tmuxSessionName: 'ac-codex-demo-pending',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-    };
-    const restartedSession: BoundSession = {
-      ...session,
-      id: 'session-restarted',
-      tmuxSessionName: 'ac-codex-demo-restarted',
-      shouldRestore: true,
-      updatedAt: '2026-03-14T18:01:00.000Z',
-      lastActivityAt: '2026-03-14T18:01:00.000Z',
-    };
-    const restartPendingSessionWithInitialPrompt = vi.fn(async () => {
-      db.boundSessions.upsert(restartedSession);
-      return commandResult(restartedSession);
-    });
-    const sendKeystrokes = vi.fn(async () => commandResult(session));
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {
-        getProjectBySlug: vi.fn(async () => ({ slug: 'demo', displayName: 'Demo' })),
-        getMergedProviderSettings: vi.fn(() => ({
-          id: 'codex',
-          enabled: true,
-          discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
-        })),
-      } as never,
-      {
-        get: vi.fn(() => ({ id: 'codex' })),
-      } as never,
-      {
-        getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
-        restartPendingSessionWithInitialPrompt,
-        sendKeystrokes,
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/sessions/session-pending/keys',
-        payload: { text: 'fix the stuck pending console', keys: ['Enter'] },
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({ session: { id: 'session-restarted' } });
-      expect(restartPendingSessionWithInitialPrompt).toHaveBeenCalledWith(expect.objectContaining({
-        sessionId: 'session-pending',
-        initialPrompt: 'fix the stuck pending console',
-      }));
-      expect(sendKeystrokes).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('restarts a first-turn pending Codex session from the full submittedText when Enter also carries transport text', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:first-turn-submitted',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-pending',
-      degraded: false,
-      rawMetadata: { pending: true },
-    } satisfies ConversationSummary);
-    const session: BoundSession = {
-      id: 'session-pending',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:first-turn-submitted',
-      tmuxSessionName: 'ac-codex-demo-pending',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-    };
-    const restartedSession: BoundSession = {
-      ...session,
-      id: 'session-restarted',
-      tmuxSessionName: 'ac-codex-demo-restarted',
-      shouldRestore: true,
-      updatedAt: '2026-03-14T18:01:00.000Z',
-      lastActivityAt: '2026-03-14T18:01:00.000Z',
-    };
-    const restartPendingSessionWithInitialPrompt = vi.fn(async () => {
-      db.boundSessions.upsert(restartedSession);
-      return commandResult(restartedSession);
-    });
-    const sendKeystrokes = vi.fn(async () => commandResult(session));
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {
-        getProjectBySlug: vi.fn(async () => ({ slug: 'demo', displayName: 'Demo' })),
-        getMergedProviderSettings: vi.fn(() => ({
-          id: 'codex',
-          enabled: true,
-          discoveryRoot: tempDir,
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
-        })),
-      } as never,
-      {
-        get: vi.fn(() => ({ id: 'codex' })),
-      } as never,
-      {
-        getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
-        restartPendingSessionWithInitialPrompt,
-        sendKeystrokes,
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/sessions/session-pending/keys',
-        payload: { text: 'delta only', keys: ['Enter'], submittedText: 'fix via text bypass' },
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({ session: { id: 'session-restarted' } });
-      expect(restartPendingSessionWithInitialPrompt).toHaveBeenCalledWith(expect.objectContaining({
-        sessionId: 'session-pending',
-        initialPrompt: 'fix via text bypass',
-      }));
-      expect(sendKeystrokes).not.toHaveBeenCalled();
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('keeps first-turn pending Codex slash commands on the live session bridge', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:slash-command',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-pending',
-      degraded: false,
-      rawMetadata: { pending: true },
-    } satisfies ConversationSummary);
-    const session: BoundSession = {
-      id: 'session-pending',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:slash-command',
-      tmuxSessionName: 'ac-codex-demo-pending',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-    };
-    const restartPendingSessionWithInitialPrompt = vi.fn(async () => commandResult(session));
-    const sendKeystrokes = vi.fn(async () => commandResult(session));
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {} as never,
-      {} as never,
-      {
-        getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke: vi.fn(async () => false),
-        restartPendingSessionWithInitialPrompt,
-        sendKeystrokes,
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/sessions/session-pending/keys',
-        payload: { keys: ['Enter'], submittedText: '/model' },
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { keys: ['Enter'], submittedText: '/model' }, 0);
-      expect(db.pendingConversations.get('pending:slash-command')?.rawMetadata?.lastUserInputPreview).toBeUndefined();
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('keeps first-turn pending Codex selection keystrokes on the live session bridge', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:selection',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-pending',
-      degraded: false,
-      rawMetadata: { pending: true },
-    } satisfies ConversationSummary);
-    const session: BoundSession = {
-      id: 'session-pending',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:selection',
-      tmuxSessionName: 'ac-codex-demo-pending',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-    };
-    db.boundSessions.upsert({ ...session, shouldRestore: true });
-    const allowsLiteralSelectionKeystroke = vi.fn(async () => true);
-    const restartPendingSessionWithInitialPrompt = vi.fn(async () => commandResult(session));
-    const sendKeystrokes = vi.fn(async () => commandResult(session));
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {} as never,
-      {} as never,
-      {
-        getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke,
-        restartPendingSessionWithInitialPrompt,
-        sendKeystrokes,
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/sessions/session-pending/keys',
-        payload: { text: '1', keys: ['Enter'] },
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(allowsLiteralSelectionKeystroke).toHaveBeenCalledWith('session-pending', '1');
-      expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: '1', keys: ['Enter'] }, 0);
-      expect(db.pendingConversations.get('pending:selection')?.boundSessionId).toBe('session-pending');
-    } finally {
-      await app.close();
-      db.close();
-    }
-  });
-
-  it('keeps text-only pending Codex keystrokes on the live session bridge', async () => {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-    db.pendingConversations.put({
-      ref: 'pending:text-only',
-      kind: 'pending',
-      projectSlug: 'demo',
-      provider: 'codex',
-      title: 'New Codex conversation',
-      createdAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-      isBound: true,
-      boundSessionId: 'session-pending',
-      degraded: false,
-      rawMetadata: { pending: true },
-    } satisfies ConversationSummary);
-    const session: BoundSession = {
-      id: 'session-pending',
-      provider: 'codex',
-      projectSlug: 'demo',
-      conversationRef: 'pending:text-only',
-      tmuxSessionName: 'ac-codex-demo-pending',
-      transport: 'tmux',
-      status: 'bound',
-      startedAt: '2026-03-14T18:00:00.000Z',
-      updatedAt: '2026-03-14T18:00:00.000Z',
-    };
-    const restartPendingSessionWithInitialPrompt = vi.fn(async () => commandResult(session));
-    const sendKeystrokes = vi.fn(async () => commandResult(session));
-    const app = fastify();
-    await registerSessionRoutes(
-      app,
-      { ensureAuthenticated: async () => undefined } as never,
-      db,
-      {} as never,
-      {} as never,
-      {
-        getSessionById: vi.fn(() => session),
-        restartPendingSessionWithInitialPrompt,
-        sendKeystrokes,
-      } as never,
-    );
-    await app.ready();
-
-    try {
-      const response = await app.inject({
-        method: 'POST',
-        url: '/api/sessions/session-pending/keys',
-        payload: { text: 'buffered bridge text' },
-      });
-
-      expect(response.statusCode).toBe(200);
-      expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-      expect(sendKeystrokes).toHaveBeenCalledWith('session-pending', { text: 'buffered bridge text' }, 0);
     } finally {
       await app.close();
       db.close();
@@ -666,8 +229,6 @@ describe('session routes', () => {
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'history-profile',
-      tmuxSessionName: 'ac-codex-demo-profile',
-      transport: 'tmux',
       status: 'bound',
       shouldRestore: true,
       startedAt: '2026-09-18T18:00:00.000Z',
@@ -694,7 +255,6 @@ describe('session routes', () => {
         getProjectBySlug: vi.fn(async () => ({ slug: 'demo' })),
         getMergedProviderSettings: vi.fn(() => ({ enabled: true })),
       } as never,
-      {} as never,
       {
         getSessionById: vi.fn(() => session),
         requestModelProfile,
@@ -726,48 +286,71 @@ describe('session routes', () => {
     }
   });
 
+  it('takes a message with Enter or Stop with Escape, and refuses every other key, text without Enter and removed fields', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-keys-contract-'));
+    const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
+    const session: BoundSession = { id: 'keys-session', provider: 'codex', projectSlug: 'demo', conversationRef: 'native-keys',
+      status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
+    const sendKeystrokes = vi.fn(async () => commandResult(session));
+    const app = fastify();
+    await registerSessionRoutes(app, { ensureAuthenticated: async () => undefined } as never, db, {} as never,
+      { getSessionById: () => session, sendKeystrokes } as never);
+    const post = (payload: object) => app.inject({ method: 'POST', url: '/api/sessions/keys-session/keys', payload });
+    try {
+      expect((await post({ text: 'hello', keys: ['Enter'] })).statusCode).toBe(200);
+      expect((await post({ submittedText: 'hello', keys: ['Enter'] })).statusCode).toBe(200);
+      expect((await post({ keys: ['Escape'] })).statusCode).toBe(200);
+      expect(sendKeystrokes).toHaveBeenCalledTimes(3);
+
+      for (const payload of [
+        { keys: ['Tab'] }, { keys: ['Up'] }, { keys: ['C-c'] }, { text: 'typed', keys: ['Down'] },
+        { text: 'typed without Enter' }, { keys: ['Enter'] }, { keys: ['Escape', 'Enter'] },
+        { text: 'stop with text', keys: ['Escape'] },
+      ]) {
+        const response = await post(payload);
+        expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+        expect(JSON.stringify(response.json())).toContain("keys ['Enter'] and text, or keys ['Escape'] alone");
+      }
+      const removedField = await post({ text: 'typing', keys: ['Enter'], deferScreenUpdate: true });
+      expect(removedField.statusCode).toBe(400);
+      expect(JSON.stringify(removedField.json())).toContain('deferScreenUpdate');
+      expect(sendKeystrokes).toHaveBeenCalledTimes(3);
+    } finally { await app.close(); db.close(); await fs.rm(tempDir, { recursive: true, force: true }); }
+  });
+
+  it('serves the synthesized status on /screen, whatever the query, and no longer serves terminal routes', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'console-screen-route-'));
+    const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
+    const session: BoundSession = { id: 'screen-session', provider: 'claude', projectSlug: 'demo', conversationRef: 'native-screen',
+      status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
+    const screen = { content: '', inputText: '', inputActive: true, status: 'Claude idle', capturedAt: '2026-10-14T00:00:01.000Z' };
+    const getSessionScreen = vi.fn(async () => ({ session, screen }));
+    const app = fastify();
+    await registerSessionRoutes(app, { ensureAuthenticated: async () => undefined } as never, db, {} as never,
+      { getSessionById: () => session, getSessionScreen } as never);
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/sessions/screen-session/screen?lines=120' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ session, screen });
+      expect(getSessionScreen).toHaveBeenCalledWith('screen-session');
+      expect((await app.inject({ method: 'GET', url: '/api/sessions/screen-session/raw-output' })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'GET', url: '/api/sessions/structured-migration' })).statusCode).toBe(404);
+    } finally { await app.close(); db.close(); await fs.rm(tempDir, { recursive: true, force: true }); }
+  });
+
   describe('structured sessions', () => {
     const structuredSession: BoundSession = {
       id: 'session-structured',
       provider: 'codex',
       projectSlug: 'demo',
       conversationRef: 'pending:structured-first-turn',
-      tmuxSessionName: 'acs-session-structured',
-      transport: 'structured',
       status: 'bound',
       shouldRestore: true,
       startedAt: '2026-10-26T10:00:00.000Z',
       updatedAt: '2026-10-26T10:00:00.000Z',
     };
 
-    it('answers raw-output with a 404 that explains structured sessions have no terminal output', async () => {
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-      const app = fastify();
-      await registerSessionRoutes(
-        app,
-        { ensureAuthenticated: async () => undefined } as never,
-        db,
-        {} as never,
-        {} as never,
-        { getSessionById: vi.fn((id: string) => (id === structuredSession.id ? structuredSession : undefined)) } as never,
-      );
-      await app.ready();
-      try {
-        const structured = await app.inject({ method: 'GET', url: '/api/sessions/session-structured/raw-output' });
-        expect(structured.statusCode).toBe(404);
-        expect(structured.json()).toEqual({ error: 'Structured sessions have no raw terminal output.' });
-
-        const missing = await app.inject({ method: 'GET', url: '/api/sessions/unknown/raw-output' });
-        expect(missing.statusCode).toBe(404);
-        expect(missing.json()).toEqual({ error: 'Session not found.' });
-      } finally {
-        await app.close();
-        db.close();
-      }
-    });
-
-    it('attaches stored images to a structured session message, as it does for a terminal session', async () => {
+    it('attaches stored images to a message', async () => {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
       const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
       const imageId = 'd5f77c99-fdf8-48f7-a4ae-4b7f2caa04c5';
@@ -780,8 +363,7 @@ describe('session routes', () => {
         { ensureAuthenticated: async () => undefined } as never,
         db,
         {} as never,
-        {} as never,
-        { getSessionById: vi.fn(() => structuredSession), allowsLiteralSelectionKeystroke: vi.fn(async () => false), sendKeystrokes } as never,
+        { getSessionById: vi.fn(() => structuredSession), sendKeystrokes } as never,
         { resolve } as never,
       );
       await app.ready();
@@ -812,7 +394,7 @@ describe('session routes', () => {
         const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
         const ensureAuthenticated = vi.fn(async () => undefined);
         const app = fastify();
-        await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never, {} as never,
+        await registerSessionRoutes(app, { ensureAuthenticated } as never, db, {} as never,
           { getSessionById: vi.fn((id: string) => (id === structuredSession.id ? session : undefined)), ...manager } as never);
         await app.ready();
         return { app, ensureAuthenticated, close: async () => { await app.close(); db.close(); } };
@@ -863,16 +445,6 @@ describe('session routes', () => {
         } finally { await r.close(); }
       });
 
-      it('answers 409 for a terminal session', async () => {
-        const answerStructuredRequest = vi.fn();
-        const r = await routes({ answerStructuredRequest }, { ...structuredSession, transport: 'tmux' });
-        try {
-          const response = await r.app.inject({ method: 'POST', url: requestUrl, payload: { decision: 'decline' } });
-          expect(response.statusCode).toBe(409);
-          expect(answerStructuredRequest).not.toHaveBeenCalled();
-        } finally { await r.close(); }
-      });
-
       it('passes a refusal from the session on with its status', async () => {
         const answerStructuredRequest = vi.fn(async () => { throw new SessionInputRejectedError('Not now.'); });
         const r = await routes({ answerStructuredRequest });
@@ -903,61 +475,5 @@ describe('session routes', () => {
       });
     });
 
-    it('never relaunches a structured session as a first-turn pending terminal chat', async () => {
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-session-route-'));
-      const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
-      db.pendingConversations.put({
-        ref: structuredSession.conversationRef,
-        kind: 'pending',
-        projectSlug: 'demo',
-        provider: 'codex',
-        title: 'New Codex conversation',
-        createdAt: '2026-10-26T10:00:00.000Z',
-        updatedAt: '2026-10-26T10:00:00.000Z',
-        isBound: true,
-        boundSessionId: structuredSession.id,
-        degraded: false,
-        rawMetadata: { pending: true },
-      } satisfies ConversationSummary);
-      const restartPendingSessionWithInitialPrompt = vi.fn();
-      const sendKeystrokes = vi.fn(async () => commandResult(structuredSession));
-      const sendInput = vi.fn(async () => commandResult(structuredSession));
-      const app = fastify();
-      await registerSessionRoutes(
-        app,
-        { ensureAuthenticated: async () => undefined } as never,
-        db,
-        {} as never,
-        {} as never,
-        {
-          getSessionById: vi.fn(() => structuredSession),
-          allowsLiteralSelectionKeystroke: vi.fn(async () => false),
-          restartPendingSessionWithInitialPrompt,
-          sendKeystrokes,
-          sendInput,
-        } as never,
-      );
-      await app.ready();
-      try {
-        const keys = await app.inject({
-          method: 'POST',
-          url: '/api/sessions/session-structured/keys',
-          payload: { text: 'first prompt', keys: ['Enter'] },
-        });
-        expect(keys.statusCode).toBe(200);
-        const input = await app.inject({
-          method: 'POST',
-          url: '/api/sessions/session-structured/input',
-          payload: { text: 'second prompt' },
-        });
-        expect(input.statusCode).toBe(200);
-        expect(restartPendingSessionWithInitialPrompt).not.toHaveBeenCalled();
-        expect(sendKeystrokes).toHaveBeenCalledOnce();
-        expect(sendInput).toHaveBeenCalledWith('session-structured', 'second prompt');
-      } finally {
-        await app.close();
-        db.close();
-      }
-    });
   });
 });

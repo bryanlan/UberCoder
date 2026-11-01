@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ConfigService } from '../src/config/service.js';
-import { defaultStructuredProviderConfig } from '../src/config/schema.js';
+import { appConfigSchema, defaultStructuredProviderConfig } from '../src/config/schema.js';
 
 async function writeTempConfig(body: object): Promise<string> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-config-'));
@@ -44,22 +44,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: { CODEX_HOME: '~/.codex' },
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {
@@ -69,12 +57,8 @@ describe('ConfigService', () => {
           displayName: 'Demo Project',
           allowedLocalhostPorts: [3000, 5173],
           providers: {
-            codex: {
-              commands: {
-                resumeCommand: ['codex', 'resume', '--last'],
-                env: { CODEX_HOME: '/srv/codex-home' },
-              },
-            },
+            codex: { discoveryRoot: '/srv/codex-home' },
+            claude: { enabled: false },
           },
         },
       },
@@ -85,9 +69,9 @@ describe('ConfigService', () => {
     const globalMerged = service.getMergedProviderSettings('__global__', 'codex');
 
     expect(service.getConfig().projectsRoot).toBe(projectsRoot);
-    expect(merged.commands.resumeCommand).toEqual(['codex', 'resume', '--last']);
-    expect(merged.commands.env).toEqual({ CODEX_HOME: '/srv/codex-home' });
-    expect(globalMerged.commands.env).toEqual({ CODEX_HOME: path.join(os.homedir(), '.codex') });
+    expect(merged).toEqual({ id: 'codex', enabled: true, discoveryRoot: '/srv/codex-home' });
+    expect(globalMerged).toEqual({ id: 'codex', enabled: true, discoveryRoot: path.join(os.homedir(), '.codex') });
+    expect(service.getMergedProviderSettings('demo', 'claude')).toEqual({ id: 'claude', enabled: false, discoveryRoot: path.join(os.homedir(), '.claude') });
     expect(service.getProjectConfig('demo')?.allowedLocalhostPorts).toEqual([3000, 5173]);
   });
 
@@ -107,22 +91,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {
@@ -176,22 +148,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {},
@@ -226,22 +186,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {
@@ -279,22 +227,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {
@@ -332,22 +268,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {},
@@ -386,22 +310,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {},
@@ -437,22 +349,10 @@ describe('ConfigService', () => {
         codex: {
           enabled: true,
           discoveryRoot: '~/.codex',
-          commands: {
-            newCommand: ['codex'],
-            resumeCommand: ['codex', 'resume', '{{conversationId}}'],
-            continueCommand: ['codex', 'resume', '--last'],
-            env: {},
-          },
         },
         claude: {
           enabled: true,
           discoveryRoot: '~/.claude',
-          commands: {
-            newCommand: ['claude'],
-            resumeCommand: ['claude', '--resume', '{{conversationId}}'],
-            continueCommand: ['claude', '--continue'],
-            env: {},
-          },
         },
       },
       projects: {},
@@ -483,9 +383,9 @@ describe('ConfigService', () => {
     const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
     const codexDefaults = { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
     const claudeDefaults = { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} };
-    const defaults = { defaultTransport: 'tmux', codex: codexDefaults, claude: claudeDefaults };
+    const defaults = { codex: codexDefaults, claude: claudeDefaults };
 
-    it('defaults to disabled, on tmux, when the block is absent or partial', async () => {
+    it('defaults to disabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
       const emptyCodex = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: {} } });
       const emptyClaude = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: {} } });
@@ -517,34 +417,30 @@ describe('ConfigService', () => {
 
     it('parses an enabled block and fills the fields it omits', async () => {
       const full = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
-        structuredSessions: { defaultTransport: 'structured', codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
+        structuredSessions: { codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
           claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } } } });
       const enabledOnly = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: true }, claude: { enabled: true } } });
       const invalid = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { command: [] } } });
       const invalidClaude = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { command: [] } } });
       const invalidIdle = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { idleUnloadMinutes: 0 } } });
       const invalidEnv = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { env: { PORT: 1 } } } });
-      const invalidTransport = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { defaultTransport: 'screen' } });
       try {
         expect(new ConfigService(full).getConfig().structuredSessions).toEqual({
-          defaultTransport: 'structured',
           codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
           claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } },
         });
         expect(new ConfigService(enabledOnly).getConfig().structuredSessions).toEqual({
-          defaultTransport: 'tmux',
           codex: { ...codexDefaults, enabled: true },
           claude: { ...claudeDefaults, enabled: true },
         });
-        for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv, invalidTransport]) expect(() => new ConfigService(configPath)).toThrow();
+        for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv]) expect(() => new ConfigService(configPath)).toThrow();
       } finally {
-        for (const configPath of [full, enabledOnly, invalid, invalidClaude, invalidIdle, invalidEnv, invalidTransport]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+        for (const configPath of [full, enabledOnly, invalid, invalidClaude, invalidIdle, invalidEnv]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
     });
 
     it('survives every persist path without loss', async () => {
       const block = {
-        defaultTransport: 'structured',
         codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } },
         claude: { enabled: true, command: ['claude', '--debug'], idleUnloadMinutes: 7, env: { OTHER: '2' } },
       };
@@ -569,9 +465,34 @@ describe('ConfigService', () => {
       } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
     });
 
-    it('ships both lanes off and the default on tmux in the example config', async () => {
+    it('ships both lanes on in the example config, which parses', async () => {
       const example = JSON.parse(await fs.readFile(new URL('../../../config/agent-console.example.json', import.meta.url), 'utf8'));
-      expect(example.structuredSessions).toEqual(defaults);
+      expect(example.structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: true }, claude: { ...claudeDefaults, enabled: true } });
+      expect(() => appConfigSchema.parse(example)).not.toThrow();
+    });
+  });
+
+  // The tmux transport was removed (Phase B). A config that still carries one of its settings fails at startup with the key's
+  // path, instead of having a setting nothing reads any more look as if it worked.
+  describe('removed tmux settings', () => {
+    const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
+    const commands = { newCommand: ['codex'], resumeCommand: ['codex', 'resume', '{{conversationId}}'], env: {} };
+
+    it.each([
+      ['providers.codex.commands', { providers: { codex: { commands } } }],
+      ['projects.demo.providers.claude.commands', { providers: {}, projects: { demo: { path: '/tmp/demo', providers: { claude: { commands: { env: {} } } } } } }],
+      ['structuredSessions.defaultTransport', { providers: {}, structuredSessions: { defaultTransport: 'structured' } }],
+      ['sessions.eagerRestoreHours', { providers: {}, sessions: { eagerRestoreHours: 1 } }],
+    ])('fails at startup on %s, naming it', async (key, extra) => {
+      const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', security, ...extra });
+      try {
+        let error: unknown;
+        try { new ConfigService(configPath); } catch (caught) { error = caught; }
+        expect(error).toBeInstanceOf(Error);
+        const issues = (error as { issues?: Array<{ path: Array<string | number>; message: string }> }).issues ?? [];
+        expect(issues.map(issue => issue.path.join('.'))).toContain(key);
+        expect(issues.find(issue => issue.path.join('.') === key)?.message).toMatch(/removed|Delete this key/);
+      } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
     });
   });
 });

@@ -1,37 +1,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { CLAUDE_COST_PROFILES, type ClaudeCostProfileKey, type ConversationSummary } from '@agent-console/shared';
+import type { ConversationSummary } from '@agent-console/shared';
 import type { MergedProviderSettings } from '../config/service.js';
 import type { ActiveProject } from '../projects/project-service.js';
-import { renderTemplateTokens } from '../lib/shell.js';
 import { toPosixPath } from '../lib/path-utils.js';
 import { listFilesRecursive, pathExists, statFileSafe } from './file-utils.js';
-import { compareConversationDiscoveryOrder, ensureProviderFlag } from './provider-utils.js';
-import type { LaunchCommand, ProviderAdapter, ProviderConversation, ProviderLaunchOptions, TranscriptParseCache } from './types.js';
+import { compareConversationDiscoveryOrder } from './provider-utils.js';
+import type { ProviderAdapter, ProviderConversation, TranscriptParseCache } from './types.js';
 import { conversationBelongsToProject, deriveConversationRef, loadCachedTranscriptParse } from './transcripts/base.js';
 import { parseClaudeConversationFile } from './transcripts/claude.js';
 import { ClaudeRunMonitor } from './transcripts/claude-run-state.js';
 
 function isTopLevelClaudeTranscript(filePath: string): boolean {
   return filePath.endsWith('.jsonl') && !filePath.split(path.sep).includes('subagents');
-}
-
-function hasConfiguredClaudeModel(argv: string[]): boolean {
-  return argv.some((arg) => arg === '--model' || arg.startsWith('--model='));
-}
-
-function withoutConfiguredClaudeProfile(argv: string[], removeModel = true, removeEffort = true): string[] {
-  const result: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index]!;
-    if ((removeModel && arg === '--model') || (removeEffort && arg === '--effort')) {
-      index += 1;
-      continue;
-    }
-    if ((removeModel && arg.startsWith('--model=')) || (removeEffort && arg.startsWith('--effort='))) continue;
-    result.push(arg);
-  }
-  return result;
 }
 
 function encodeClaudeCandidates(projectPaths: string[]): string[] {
@@ -158,57 +139,6 @@ export class ClaudeProvider implements ProviderAdapter {
       summary: parsed.summary,
       messages: parsed.displayMessages,
       allMessages: parsed.messages,
-    };
-  }
-
-  getLaunchCommand(
-    project: ActiveProject,
-    conversationRef: string | null,
-    settings: MergedProviderSettings,
-    options?: ProviderLaunchOptions,
-  ): LaunchCommand {
-    const template = conversationRef ? settings.commands.resumeCommand : settings.commands.newCommand;
-    const initialPrompt = options?.initialPrompt?.trim();
-    let baseArgv = ensureProviderFlag(
-      renderTemplateTokens(template, {
-        conversationId: conversationRef ?? '',
-        projectPath: project.path,
-        projectSlug: project.slug,
-      }),
-      '--dangerously-skip-permissions',
-    );
-    const profileKey = options?.claudeProfile
-      ?? (!conversationRef && !options?.model && !hasConfiguredClaudeModel(baseArgv) ? 'medium' : undefined);
-    if (profileKey) {
-      const profile = CLAUDE_COST_PROFILES[profileKey];
-      const withoutProfileArgs = withoutConfiguredClaudeProfile(baseArgv);
-      const executable = withoutProfileArgs[0];
-      if (!executable) throw new Error('Claude launch command is empty.');
-      baseArgv = [
-        executable, '--model', profile.model, '--effort', profile.reasoningEffort,
-        ...withoutProfileArgs.slice(1),
-      ];
-    }
-    if (options?.model || options?.effort) {
-      const cleaned = withoutConfiguredClaudeProfile(baseArgv, !!options.model, !!options.effort);
-      baseArgv = [cleaned[0]!, ...(options.model ? ['--model', options.model] : []),
-        ...(options.effort ? ['--effort', options.effort] : []), ...cleaned.slice(1)];
-    }
-    return {
-      cwd: project.path,
-      argv: [
-        ...baseArgv,
-        ...(options?.flags ?? []),
-        ...(options?.authorityContext ? ['--append-system-prompt', options.authorityContext] : []),
-        ...(options?.consoleIdentity ? ['--mcp-config', JSON.stringify({ mcpServers: {
-          agent_console_coordination: { command: 'node', args: [options.consoleIdentity.helperPath, 'mcp'],
-            env: { AGENT_COORD_RUNTIME: options.consoleIdentity.runtimeDir, AGENT_CONSOLE_SESSION_ID: options.consoleIdentity.sessionId } },
-        } })] : []),
-        // --mcp-config accepts multiple values. End option parsing so the
-        // opening task is not consumed as another MCP configuration path.
-        ...(initialPrompt ? ['--', initialPrompt] : []),
-      ],
-      env: settings.commands.env,
     };
   }
 }
