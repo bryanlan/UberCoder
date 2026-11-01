@@ -30,8 +30,7 @@ if (!process.argv.includes('--run')) {
   process.exit(2);
 }
 
-const { createProofKit, pollWithinWindow, sleep, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText } = await import('./structured-proof-kit.mjs');
-const { CLAUDE_COST_PROFILES } = await import('@agent-console/shared');
+const { createProofKit, pollWithinWindow, sleep, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, readModelProfiles } = await import('./structured-proof-kit.mjs');
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
 const RUN_TAG = randomBytes(4).toString('hex');
@@ -202,6 +201,8 @@ const converse = async (text, marker, extra) => {
   await waitForReply(marker, before);
   return sent;
 };
+/** What a profile means now: the Console's own model list (`GET /api/model-profiles`, from the workflow_optimizer catalog). `launchName` is the model name the process is switched to; `effort` is its reasoning effort. */
+const profileLevel = async profile => (await readModelProfiles(api)).claude.levels[profile];
 const switchProfile = async profile => {
   const response = await call('POST', `/api/sessions/${sessionId}/model-profile`, { profile });
   assert.ok(response.status < 300, `model-profile ${profile}: HTTP ${response.status} ${response.body?.error ?? ''}`);
@@ -307,8 +308,9 @@ try {
   }, { fatal: true });
 
   await step('c', 'first message completes; transcript, human turn origin and index', async values => {
-    // The default profile (medium: Opus) is the launch model. The proof switches to the low profile before the first turn to
-    // keep the turns cheap; that also settles that a profile change reaches an already running process (set_model).
+    // A new chat starts on Auto, which has no model until a message is routed. The proof switches to the Low profile before the
+    // first turn to keep the turns cheap and the router out of them; that also settles that a profile change reaches an already
+    // running process (set_model).
     const pidBefore = claudePid();
     await switchProfile('low');
     assert.equal(claudePid(), pidBefore, 'The claude process must not restart for a model change.');
@@ -330,10 +332,11 @@ try {
     assert.ok(prompt, 'The transcript has no user row for the prompt.');
     assert.equal(prompt.turnOrigin, 'human', 'The transcript must record the turn as human-originated.');
     assert.equal(prompt.origin?.kind, 'human');
+    const low = await profileLevel('low');
     const models = modelRequestsSince(0);
-    assert.ok(models.length > 0 && models.every(model => model.includes(CLAUDE_COST_PROFILES.low.model)), `The first turn must run on the low profile's model (saw ${models.join(', ')}).`);
+    assert.ok(models.length > 0 && models.every(model => model.includes(low.launchName)), `The first turn must run on the low profile's model ${low.launchName} (saw ${models.join(', ')}).`);
     const firstEfforts = effortRequestsSince(0);
-    assert.deepEqual(firstEfforts, [CLAUDE_COST_PROFILES.low.reasoningEffort], `The first turn must carry the low profile's effort (saw ${firstEfforts.join(', ')}).`);
+    assert.deepEqual(firstEfforts, [low.effort], `The first turn must carry the low profile's effort ${low.effort} (saw ${firstEfforts.join(', ')}).`);
     evidence.models.firstTurn = `${models[0]} ${firstEfforts.join('/')}`;
     Object.assign(values, {
       turnId: record.turnId, deliveryMode: record.deliveryMode, lastResponseAt: session.lastResponseAt, transcript: tilde(file), records: all.length,
@@ -502,9 +505,9 @@ try {
       await converse(prompt, marker);
       const models = modelRequestsSince(skip);
       const efforts = effortRequestsSince(skip);
-      const expected = CLAUDE_COST_PROFILES[profile];
-      assert.ok(models.length > 0 && models.every(model => model.includes(expected.model)), `The ${profile} turn must use ${expected.model} (saw ${models.join(', ')}).`);
-      assert.deepEqual(efforts, [expected.reasoningEffort], `The ${profile} turn must carry effort ${expected.reasoningEffort} (saw ${efforts.join(', ')}).`);
+      const expected = await profileLevel(profile);
+      assert.ok(models.length > 0 && models.every(model => model.includes(expected.launchName)), `The ${profile} turn must use ${expected.launchName} (saw ${models.join(', ')}).`);
+      assert.deepEqual(efforts, [expected.effort], `The ${profile} turn must carry effort ${expected.effort} (saw ${efforts.join(', ')}).`);
       evidence.models[`${profile}Turn`] = `${models[0]} ${efforts.join('/')}`;
       return { models, efforts, modelRows: records().slice(skip).filter(entry => entry.type === 'user' && textOf(entry).includes('<command-name>/model')).length };
     };

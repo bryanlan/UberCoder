@@ -93,6 +93,10 @@ The launch proof injects a capacity failure envelope into its disposable provide
 then verifies native recovery, granted restart (a new load epoch, model and effort kept), a Claude helper and relayed scope
 under one grant. The capacity stage message goes as P3, which only the recovery turn delivers; every other stage goes to an
 agent that has ended its turn, so it is sent as P1 with a wake reason (P2 and P3 never wake an idle agent).
+The staged capacity records continue the rollout's `ordinal` numbering: Codex (0.166.0 and later) refuses to resume a thread whose
+last record has none. The helper stage asks the Codex lane to launch a Claude helper, and the lane asks the model router first
+(`wo route --launcher claude_agent`), so it only passes while the router has a Claude model to offer. When `wo quota` shows Claude
+`near_cap`, the lane reports the delegation blocked and the stage times out (2026-11-01): that is the host's quota, not the proof.
 
 ## Assignment coordination
 
@@ -219,7 +223,7 @@ Opt-in real Codex proof: after `npm run build`, run
 `env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log`.
 It starts an isolated backend (temp database, runtime and scratch git project, free port in 14390-14399) with `structuredSessions.codex.enabled`, and drives one real structured Codex conversation
 through the HTTP API in 16 steps. It needs the host Codex login, runs about fourteen short real turns (about 150 seconds when the
-provider is not rate limited), and removes its temp root and any app-server it started. Each step id and what it proves:
+provider is not rate limited), and removes its temp root and any app-server it started. The proofs hold no model names: they read what the High, Medium and Low profiles mean from the isolated Console's `GET /api/model-profiles` (the real `wo` catalog on this host) and compare it with what the provider received. A new chat starts on Auto, so each proof switches to the low profile before its first turn. Each step id and what it proves:
 
 - a. The project tree advertises `codex` as the structured provider.
 - b. The bind returns a thread UUID, and the stored row holds the `structured:` placeholder name. The app-server's environment names the proof's runtime and config (and no session id), its argv pins the coordination MCP server to this Console, it leads its own process group, and it is a child of its session host, whose record matches `/proc`.

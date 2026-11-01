@@ -35,6 +35,22 @@ export const pollWithinWindow = (wait, label, predicate, since, windowMs, interv
   return elapsed;
 };
 
+// ---- model profiles -----------------------------------------------------------------------------------------------
+/**
+ * The High, Medium and Low models of each provider as the Console serves them (`GET /api/model-profiles`: the workflow_optimizer
+ * catalog, read through `wo`). The proofs hold no model names. They compare what the provider received with what the Console says a
+ * profile means: `providers.<provider>.levels.<high|medium|low>` has `model`, `label`, `effort` and `launchName`, and `launchName`
+ * is the name the provider is started or switched with. `api` is the proof's `(method, url) => body`, which throws on an HTTP error.
+ */
+export const readModelProfiles = async api => {
+  const { providers } = await api('GET', '/api/model-profiles');
+  for (const provider of ['codex', 'claude']) for (const level of ['high', 'medium', 'low']) {
+    const entry = providers?.[provider]?.levels?.[level];
+    assert.ok(entry?.launchName && entry?.effort, `GET /api/model-profiles has no ${level} model and effort for ${provider}.`);
+  }
+  return providers;
+};
+
 // ---- images ------------------------------------------------------------------------------------------------
 const pngChunk = (type, data) => {
   const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);

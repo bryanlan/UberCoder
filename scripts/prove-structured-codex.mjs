@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, scryptSync } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
-import { pollWithinWindow, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, installExitBackstop, endProofProcesses, scanProofProcesses, summarizeProcesses } from './structured-proof-kit.mjs';
+import { pollWithinWindow, solidPng, noisyPng, readEventLog, lostTurnStatusLines, consoleControlTexts, findControlText, installExitBackstop, endProofProcesses, scanProofProcesses, summarizeProcesses, readModelProfiles } from './structured-proof-kit.mjs';
 
 if (!process.argv.includes('--run')) {
   process.stderr.write('Use --run to opt into a real Codex app-server proof (several short turns on the host login). Run `npm run build` first.\n');
@@ -35,7 +35,6 @@ if (!process.argv.includes('--run')) {
 
 const repoRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const { buildApp } = await import(new URL('../apps/server/dist/app.js', import.meta.url));
-const { CODEX_COST_PROFILES } = await import('@agent-console/shared');
 const { terminateHost } = await import(new URL('../apps/server/dist/providers/transport/line-transport.js', import.meta.url));
 
 // ---- prompts (the only message text this proof ever sends) -----------------------------------------------
@@ -162,6 +161,8 @@ const api = async (method, url, payload) => {
   assert.ok(status < 300, `${method} ${url.replace(/[0-9a-f-]{36}/g, ':id')}: HTTP ${status} ${body?.error ?? ''}`);
   return body;
 };
+/** What a profile means now: the Console's own model list (`GET /api/model-profiles`, from the workflow_optimizer catalog). `launchName` is the model name a turn carries. */
+const profileLevel = async profile => (await readModelProfiles(api)).codex.levels[profile];
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // The first signal stops the proof at its next poll so the cleanup below runs; a second one leaves at once (the `exit` backstop still cleans up).
 let interrupted = false;
@@ -449,9 +450,10 @@ try {
     Object.assign(values, { sessionId, threadId, pid: stored.pid, hostPid: record.host.pid, coordEnv: 'ok', mcpPinned: 'ok', processGroup: record.child.processGroup, groupMembers: members.length });
   }, { fatal: true });
 
-  // The default (medium) profile's model is rate limited on this host at times: Codex then waits out a long 429
-  // backoff and the turn only looks hung. The profile is therefore switched before the first turn; step j returns to
-  // the medium profile and checks that its model reaches the provider without waiting for that model to answer.
+  // A new chat starts on Auto, which would route the first message to whatever model the router picks. The proof pins the first
+  // turn instead: the medium profile's model is rate limited on this host at times (Codex then waits out a long 429 backoff and
+  // the turn only looks hung), so the low profile is switched in before the first turn; step j returns to the medium profile and
+  // checks that its model reaches the provider without waiting for that model to answer.
   await step('c', 'model profile: low applies before the first turn, with no restart', async values => {
     const pidBefore = row().pid;
     const response = await call('POST', `/api/sessions/${sessionId}/model-profile`, { profile: 'low' });
@@ -486,7 +488,7 @@ try {
     assert.equal(records.find(record => record.type === 'session_meta')?.payload?.id, threadId);
     const context = records.find(record => record.type === 'turn_context');
     assert.ok(context, 'The rollout has no turn_context.');
-    assert.equal(context.payload.model, CODEX_COST_PROFILES.low.model, 'The first turn must carry the profile chosen before it.');
+    assert.equal(context.payload.model, (await profileLevel('low')).launchName, 'The first turn must carry the profile chosen before it.');
     const effort = context.payload.effort ?? context.payload.collaboration_mode?.settings?.reasoning_effort;
     evidence.models.firstTurn = `${context.payload.model} ${effort}`;
     Object.assign(values, { rollout: path.basename(file), records: records.length, model: context.payload.model, effort });
@@ -684,7 +686,7 @@ try {
     await send(PROMPTS.model);
     // The turn's model is recorded when the turn starts; do not wait for that model to answer (it can be rate limited).
     const context = await wait('the medium turn to start', () => rolloutRecords().slice(skip).find(record => record.type === 'turn_context'), 60_000, 250);
-    assert.equal(context.payload.model, CODEX_COST_PROFILES.medium.model);
+    assert.equal(context.payload.model, (await profileLevel('medium')).launchName);
     evidence.models.mediumTurn = context.payload.model;
     values.model = context.payload.model;
     if ((await sessionState()).isWorking === true) {
