@@ -523,24 +523,38 @@ export class CoordinationService {
     expireMessages(this.db);
     this.reconcileProcesses();
     const repository = directory ? checkoutIdentity(directory).repository : undefined;
-    const scopes = this.db.sqlite.prepare(`select ${scopeColumns} from coordination_scopes`).all() as CoordinationScope[];
+    // Resolve the repository's assignments first (indexed), so only those rows are expanded
+    // and the message queries never scan the whole message history (2026-11-01: each poll
+    // took ~3 s and stalled every hook and tool call).
+    const scopes = (repository
+      ? this.db.sqlite.prepare(`select ${scopeColumns} from coordination_scopes where repository=?`).all(repository)
+      : this.db.sqlite.prepare(`select ${scopeColumns} from coordination_scopes`).all()) as CoordinationScope[];
+    const scopedIds = repository ? new Set(scopes.map((scope) => scope.assignmentId)) : undefined;
     const assignments = (this.db.sqlite.prepare(`select ${assignmentColumns} from coordination_assignments order by started_at desc`).all() as CoordinationAssignment[])
-      .map((assignment) => this.assignment(assignment.id))
-      .filter((assignment) => !repository || scopes.some((scope) => scope.assignmentId === assignment.id && scope.repository === repository));
+      .filter((assignment) => !scopedIds || scopedIds.has(assignment.id))
+      .map((assignment) => this.assignment(assignment.id));
     const ids = new Set(assignments.map((a) => a.id));
     const repositoryFilter = repository ?? null;
-    const messageFilter = `(? is null or exists(select 1 from coordination_scopes s
-      where s.repository=? and s.assignment_id in (m.sender_id, m.recipient_id)))`;
+    const scopedAssignments = '(select assignment_id from coordination_scopes where repository=?)';
+    const messageFilter = `(? is null or m.sender_id in ${scopedAssignments} or m.recipient_id in ${scopedAssignments})`;
+    const filterArgs = [repositoryFilter, repositoryFilter, repositoryFilter];
     const pending = this.db.sqlite.prepare(`select count(*) as count from coordination_messages m
-      where acknowledged_at is null and ${messageFilter}`).get(repositoryFilter, repositoryFilter) as { count: number };
+      where acknowledged_at is null and ${messageFilter}`).get(...filterArgs) as { count: number };
+    // Unacknowledged first, then acknowledged, newest first: the same order as before, each
+    // half served by its own index instead of sorting the whole table.
+    const unacknowledged = this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m
+      where acknowledged_at is null and ${messageFilter} order by created_at desc, rowid desc limit 50`)
+      .all(...filterArgs) as CoordinationMessage[];
+    const acknowledged = unacknowledged.length >= 50 ? [] : this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m
+      where acknowledged_at is not null and ${messageFilter} order by created_at desc, rowid desc limit ?`)
+      .all(...filterArgs, 50 - unacknowledged.length) as CoordinationMessage[];
     return {
       enabled: this.settings.enabled, assignments,
       scopes: scopes.filter((s) => ids.has(s.assignmentId)),
       events: this.db.sqlite.prepare(`select ${eventColumns} from coordination_events e where
         (? is null or exists(select 1 from coordination_scopes s where s.repository=? and s.assignment_id=e.assignment_id))
         order by seq desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationEvent[],
-      messages: (this.db.sqlite.prepare(`select ${messageColumns} from coordination_messages m where ${messageFilter}
-        order by (acknowledged_at is null) desc, created_at desc, rowid desc limit 50`).all(repositoryFilter, repositoryFilter) as CoordinationMessage[]).map(m => ({ ...withMessagePolicy(this.db,m), channel: this.messageChannel(m) })),
+      messages: [...unacknowledged, ...acknowledged].map(m => ({ ...withMessagePolicy(this.db,m), channel: this.messageChannel(m) })),
       pendingMessageCount: pending.count,
     };
   }

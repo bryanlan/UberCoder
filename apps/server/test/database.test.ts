@@ -123,7 +123,7 @@ describe('AppDatabase', () => {
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
     before.boundSessions.upsert(boundSession({ id: 'auto-session', conversationRef: 'auto-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column grok_profile; alter table bound_sessions drop column auto_route_json; delete from schema_version where version in (20, 21)');
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; alter table bound_sessions drop column auto_route_json; delete from schema_version where version in (20, 21, 22)');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 19 });
     before.close();
 
@@ -383,7 +383,7 @@ describe('AppDatabase', () => {
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
     before.boundSessions.upsert(boundSession({ id: 'old-session', provider: 'claude', claudeProfile: 'low', conversationRef: 'old-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column grok_profile; delete from schema_version where version = 21');
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; delete from schema_version where version in (21, 22)');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 20 });
     before.close();
 

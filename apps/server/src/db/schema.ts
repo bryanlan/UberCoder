@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 21;
+export const CURRENT_SCHEMA_VERSION = 22;
 
 interface Migration {
   version: number;
@@ -313,6 +313,17 @@ const MIGRATIONS: Migration[] = [
   { version: 21, name: 'grok-cost-profile', up(sqlite) {
     // The model profile of a Grok session, beside codex_profile and claude_profile.
     if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'grok_profile', 'grok_profile text');
+  } },
+  { version: 22, name: 'coordination-snapshot-indexes', up(sqlite) {
+    // The activity snapshot filters messages by repository and counts unacknowledged ones on
+    // every poll. Without these, each poll read all ~47k message rows (about 3 s on the live
+    // 760 MB file) and stalled the event loop for every hook and tool call (2026-11-01).
+    if (tableExists(sqlite, 'coordination_scopes')) sqlite.exec(
+      'create index if not exists coordination_scopes_repository on coordination_scopes(repository, assignment_id)');
+    if (tableExists(sqlite, 'coordination_messages')) sqlite.exec(`
+      create index if not exists coordination_messages_unacknowledged on coordination_messages(created_at) where acknowledged_at is null;
+      create index if not exists coordination_messages_created on coordination_messages(created_at);
+      create index if not exists coordination_messages_sender on coordination_messages(sender_id, created_at);`);
   } },
 ];
 

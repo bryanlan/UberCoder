@@ -136,7 +136,9 @@ function rpc(payload, endpoint = '/rpc') {
   const started = performance.now();
   let timer;
   return new Promise((resolve, reject) => {
-    const remaining = Math.min(3000, (hookDeadline ?? Infinity) - performance.now() - 100);
+    // Hooks keep their 2.4s provider budget. A tool call (wiki, status, update) is not bounded
+    // by a hook and may wait out a brief server stall instead of failing (2026-11-01).
+    const remaining = hookDeadline ? Math.min(3000, hookDeadline - performance.now() - 100) : 15000;
     if (remaining <= 0) { reject(new Error('Coordination server timed out.')); return; }
     const request = http.request({ socketPath: path.join(directory, 'agent.sock'), path: endpoint, method: 'POST', headers: { 'Content-Type': 'application/json' } }, (response) => {
       let body = '';

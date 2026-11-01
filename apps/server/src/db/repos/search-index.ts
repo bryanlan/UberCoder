@@ -135,6 +135,21 @@ export class SearchIndexRepo {
         where project_slug=@project_slug and provider=@provider and conversation_ref=@conversation_ref)`);
   }
 
+  // Every index write leaves small FTS5 segments and delete markers behind; without merging,
+  // the index reached 489 MB for 97 MB of text (2026-11-01) and slowed every query on the
+  // shared database file. A bounded incremental merge after a batch of writes keeps it compact.
+  private writesSinceMerge = 0;
+  private static readonly MERGE_EVERY_WRITES = 50;
+  private static readonly MERGE_PAGES = 200;
+
+  private noteWrite(): void {
+    this.writesSinceMerge += 1;
+    if (this.writesSinceMerge < SearchIndexRepo.MERGE_EVERY_WRITES) return;
+    this.writesSinceMerge = 0;
+    this.sqlite.prepare(`insert into conversation_search_fts(conversation_search_fts, rank) values('merge', ?)`)
+      .run(SearchIndexRepo.MERGE_PAGES);
+  }
+
   hasRows(): boolean {
     const row = this.sqlite.prepare(`select 1 from conversation_search_fts limit 1`).get() as { 1: number } | undefined;
     return Boolean(row);
@@ -164,6 +179,7 @@ export class SearchIndexRepo {
       }
     });
     tx();
+    this.noteWrite();
   }
 
   private insertChunk(chunk: ConversationSearchIndexChunk): void {
@@ -241,6 +257,7 @@ export class SearchIndexRepo {
       );
     });
     tx();
+    this.noteWrite();
   }
 
   deleteConversation(projectSlug: string, provider: ProviderId, conversationRef: string): void {
@@ -250,6 +267,7 @@ export class SearchIndexRepo {
       this.deleteConversationStateStatement.run(projectSlug, provider, conversationRef);
     });
     tx();
+    this.noteWrite();
   }
 
   updateTitle(projectSlug: string, provider: ProviderId, conversationRef: string, title: string): void {
@@ -259,6 +277,7 @@ export class SearchIndexRepo {
       where rowid = (select min(fts_rowid) from conversation_search_rows
         where project_slug = ? and provider = ? and conversation_ref = ?)
     `).run(title, projectSlug, provider, conversationRef);
+    this.noteWrite();
   }
 
   updateProjectMetadata(input: {
@@ -273,6 +292,7 @@ export class SearchIndexRepo {
       where rowid in (select min(fts_rowid) from conversation_search_rows where project_slug = ?
         group by provider,conversation_ref)
     `).run(input.displayName, input.path, input.tags.join(' '), input.projectSlug);
+    this.noteWrite();
   }
 
   close(): Promise<void> {
