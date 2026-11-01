@@ -1,40 +1,9 @@
 import type { BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
 import { AppDatabase } from '../db/database.js';
 import { nowIso } from '../lib/time.js';
-import { normalizeComparableText, stableTextHash, truncate } from '../lib/text.js';
-import { imagePromptDisplay } from '../images/prompt.js';
 
 // A new chat starts as a pending alias (`pending:<uuid>`). Its bind learns the provider's native id at once, and the native
 // conversation adopts the alias here, so a read of the alias resolves to it.
-
-export function recordPendingUserInput(input: {
-  db: AppDatabase;
-  pendingRef: string;
-  boundSessionId: string;
-  text: string;
-  inputAt?: string;
-}): ConversationSummary | undefined {
-  return input.db.transaction(() => {
-    const pending = input.db.pendingConversations.get(input.pendingRef);
-    if (!pending) {
-      return undefined;
-    }
-    const inputAt = input.inputAt ?? nowIso();
-    const rawMetadata = { ...(pending.rawMetadata ?? {}) } as Record<string, unknown>;
-    rawMetadata.lastUserInputHash = stableTextHash(normalizeComparableText(input.text));
-    rawMetadata.lastUserInputPreview = truncate(imagePromptDisplay(input.text).text || 'Image message', 120);
-    rawMetadata.lastUserInputAt = inputAt;
-    const updated = {
-      ...pending,
-      updatedAt: inputAt,
-      isBound: true,
-      boundSessionId: input.boundSessionId,
-      rawMetadata,
-    };
-    input.db.pendingConversations.put(updated);
-    return updated;
-  });
-}
 
 export function adoptPendingConversation(input: {
   db: AppDatabase;

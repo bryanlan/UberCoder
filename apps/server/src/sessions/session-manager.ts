@@ -30,7 +30,6 @@ import { STRUCTURED_REQUESTS_KEY_PREFIX, type StructuredQuestionNotice } from '.
 import {
   adoptPendingConversation,
   clearPendingRestoreBinding as clearPendingConversationRestoreBinding,
-  recordPendingUserInput,
 } from './pending-adoption.js';
 import { nextIdleExpiryDecision, nextWorkingState } from './working-state.js';
 import { RecoverySubmitDeferredError, RecoverySubmitRejectedError, RunRecovery } from './run-recovery.js';
@@ -1630,9 +1629,6 @@ export class SessionManager {
       await this.verifyNativeProcessEpoch(bound);
       let current = bound;
       if (pendingRef) {
-        if (initialPrompt) {
-          recordPendingUserInput({ db: this.db, pendingRef, boundSessionId: sessionId, text: initialPrompt, inputAt: now });
-        }
         const adoption = adoptPendingConversation({
           db: this.db,
           projectSlug: input.project.slug,
