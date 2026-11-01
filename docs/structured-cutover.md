@@ -638,6 +638,20 @@ controls (Text Bypass, key and menu buttons, the live screen panel) that the web
 started; the real proofs, including the rewritten `prove-agent-grants.mjs` and `prove-granted-launches.mjs`, have not
 been run.
 
+**Web (2026-11-01, the web lane of the same branch).** The web no longer has a terminal surface. `ConversationPane.tsx`
+lost `LiveSessionInputBridge`, Text Bypass, the key and menu buttons, numeric menu choices, the live screen panel, the
+"Needs your input" bar, the mirrored live draft, the raw-output debug panel and its toggle, and the app-server/headless
+badge; its message box is now `SessionComposer`, which sends one complete message (Enter or the Send button; an empty
+message sends nothing) and stops the running turn (Stop, Escape). `api.ts` lost `rawOutput` and the screen line count, the
+conversation data hook lost the raw-output query, and the `ansi_up` dependency is gone. The sidebar offers New conversation
+only for the providers in `tree.structuredProviders`. The `/keys` route name, the `onSendKeystrokes` prop and
+`SessionKeystrokeRequest` keep their names because they are the backend contract. The 35 failing tests were deleted or
+adapted (web: 19 files, 182 tests, all passing); the browser specs moved to the message-and-Stop model, and the Close failure
+specs now fail the provider close on the fake transport plugin (68 browser tests pass; no provider process was started).
+Both structured lanes now default to on in the schema, and the coordination text no longer promises that drafts defer peer
+wakes. Left for the backend: `SessionKeystrokeRequest.clientOptimisticMessageId` (the web no longer sends it), and the
+slash-command and picker-number checks of the title service and of `optimisticSubmittedTextForKeystrokes` in `App.tsx`.
+
 ## Verification
 
 - Unit: the Claude plugin against a scripted fake `claude` (`structured-claude-plugin`, and `structured-claude-reattach`
