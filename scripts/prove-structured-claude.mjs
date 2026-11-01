@@ -65,8 +65,8 @@ const { evidence, say, finding, call, api, wait, alive, pgrep, step } = kit;
 say(claudeVersion);
 
 kit.writeConfig(config => {
-  // The lane under test is Claude's; the Codex lane stays off.
-  config.structuredSessions = { claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
+  // The lane under test is Claude's. Both lanes default to on, so the Codex lane is switched off by name.
+  config.structuredSessions = { codex: { enabled: false }, claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
 });
 
 // ---- where Claude keeps the transcript ---------------------------------------------------------------------

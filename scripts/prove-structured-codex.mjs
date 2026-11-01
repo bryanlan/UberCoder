@@ -97,8 +97,9 @@ Object.assign(config, {
   workerSummaries: { enabled: false },
   conversationTitles: { enabled: false, runtimeCommand: config.conversationTitles.runtimeCommand },
   // The global ~/.codex coordination MCP entry names the live runtime and checkout. Nothing here overrides it: the
-  // product adds the per-Console overrides to the app-server argv, and step b and f check that it did.
-  structuredSessions: { codex: { enabled: true, idleUnloadMinutes: 60, env: {}, command: ['codex', 'app-server'] } },
+  // product adds the per-Console overrides to the app-server argv, and step b and f check that it did. Both lanes default to
+  // on, so the Claude lane is switched off by name.
+  structuredSessions: { codex: { enabled: true, idleUnloadMinutes: 60, env: {}, command: ['codex', 'app-server'] }, claude: { enabled: false } },
 });
 Object.assign(config.server, { host: '127.0.0.1', port, publicBaseUrl: `http://127.0.0.1:${port}`, webDistPath: path.join(repoRoot, 'apps/web/dist') });
 Object.assign(config.security, {
