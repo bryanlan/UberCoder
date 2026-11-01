@@ -151,9 +151,6 @@ function timeline(input: {
     messages: input.messages ?? [],
     boundSession: session,
     liveScreen: {
-      content: '',
-      inputText: '',
-      inputActive: true,
       status: input.screenStatus ?? 'Session active',
       capturedAt: baseTime,
       model: input.screenModel,

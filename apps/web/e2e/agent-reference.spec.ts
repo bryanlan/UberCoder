@@ -22,7 +22,7 @@ async function openConversation(page: Page, provider: ProviderId, unavailable = 
     conversation: current, boundSession: session, messages: [], messagePage: { hasOlder: false, total: 0 },
   } }));
   await page.route('**/api/sessions/current-session/screen**', route => route.fulfill({ json: { session, screen: {
-    content: '', inputText: '', inputActive: true, capturedAt: stamp, status: 'Ready',
+    capturedAt: stamp, status: 'Ready',
   } } }));
   await page.route('**/api/sessions/*/keys', route => {
     inputCalls.push(route.request().postDataJSON());

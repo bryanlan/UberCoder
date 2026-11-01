@@ -731,7 +731,7 @@ export class StructuredSessionService {
 
   // ---- projection ------------------------------------------------------------------------------------
 
-  /** A synthesized screen: structured sessions have no terminal, but the web still polls /screen. */
+  /** The status the web polls on /screen: there is no terminal, so it is synthesized from the session's state. */
   screen(session: BoundSession): SessionScreen {
     const state = this.sessions.get(session.id);
     const profile = state?.profile ?? sessionProfile(session);
@@ -741,11 +741,7 @@ export class StructuredSessionService {
     const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId || state.transport.turnUnidentified ? 'working' : 'idle'}`;
     const used = state?.usage?.used, max = state?.usage?.max;
     return {
-      content: '',
-      inputText: '',
-      inputActive: true,
       status,
-      statusAnsi: status,
       capturedAt: nowIso(),
       ...(model ? { model } : {}),
       ...(used !== undefined && max ? { contextPercent: Math.max(0, Math.min(100, Math.round(100 - (used / max) * 100))) } : {}),

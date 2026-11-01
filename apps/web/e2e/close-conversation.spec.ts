@@ -41,7 +41,7 @@ async function openChat(page: Page, provider: ProviderId, kind: ConversationKind
     messages: [], messagePage: { hasOlder: false, total: 0 },
   } }));
   await page.route('**/api/sessions/*/screen**', route => route.fulfill({ json: { session, screen: {
-    content: '', inputText: '', capturedAt: stamp, status: 'Ready',
+    capturedAt: stamp, status: 'Ready',
   } } }));
   await page.route('**/api/conversations/**/bind', route => {
     calls.binds += 1;

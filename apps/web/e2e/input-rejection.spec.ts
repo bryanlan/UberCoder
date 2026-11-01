@@ -36,7 +36,7 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
   await page.route('**/api/sessions/*/screen**', route => {
     screenSessions.push(session.id);
     return route.fulfill({ json: { session, screen: {
-      content: '', inputText: '', inputActive: true, capturedAt: stamp,
+      capturedAt: stamp,
       status: provider === 'claude' ? 'Claude idle' : 'Codex idle',
     } } });
   });

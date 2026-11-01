@@ -47,7 +47,7 @@ async function openConversation(page: Page, provider: ProviderId, outcome: Outco
     json: { conversation, boundSession: session, messages, messagePage: { hasOlder: false, total: messages.length } },
   }));
   await page.route('**/api/sessions/*/screen**', route => route.fulfill({ json: { session, screen: {
-    content: '', inputText: '', inputActive: true, capturedAt: stamp,
+    capturedAt: stamp,
     status: provider === 'claude' ? 'Claude idle' : 'Codex idle',
   } } }));
   await page.route('**/api/sessions/*/keys', async route => {

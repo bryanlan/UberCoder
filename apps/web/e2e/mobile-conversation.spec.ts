@@ -53,7 +53,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   await page.route('**/api/sessions/*/screen**', route => {
     const ref = route.request().url().split('/sessions/')[1]!.split('/')[0];
     return route.fulfill({ json: { session: sessions.find(session => session.id === ref), screen: {
-      content: '', inputText: '', inputActive: true, capturedAt: stamp, status: 'Codex idle',
+      capturedAt: stamp, status: 'Codex idle',
     } } });
   });
   await page.route('**/api/sessions/*/keys', route => {

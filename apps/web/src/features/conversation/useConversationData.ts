@@ -368,7 +368,7 @@ export function useConversationData({
     const messageCount = timeline?.messages.length ?? 0;
     const lastMessage = timeline?.messages.at(-1);
     if (liveMode && boundSession && liveScreen) {
-      return `live:${boundSession.id}:${liveScreen.capturedAt}:${liveScreen.content.length}:${lastMessage?.id ?? 'no-history'}:${messageCount}`;
+      return `live:${boundSession.id}:${liveScreen.capturedAt}:${lastMessage?.id ?? 'no-history'}:${messageCount}`;
     }
     if (lastMessage) {
       return `history:${lastMessage.id}:${messageCount}`;

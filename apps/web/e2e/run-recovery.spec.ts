@@ -13,7 +13,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
     await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
     await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects: [project], boundSessions: [session] } }));
     await page.route('**/api/conversations/demo/codex/c1/messages**', route => route.fulfill({ json: { conversation, boundSession: session, messages: [{ id: 'm1', provider: 'codex', role: 'status', statusKind: 'run-failure', lifecycle: 'durable', text: 'Run stopped: Selected model is at capacity.', timestamp: stamp, conversationRef: 'c1', source: 'history-file' }] } }));
-    await page.route('**/api/sessions/recovery-fixture/screen**', route => route.fulfill({ json: { session, screen: { content: '', inputText: '', status: '98% left', capturedAt: stamp, contextPercent: 98 } } }));
+    await page.route('**/api/sessions/recovery-fixture/screen**', route => route.fulfill({ json: { session, screen: { status: '98% left', capturedAt: stamp, contextPercent: 98 } } }));
     await page.route('**/api/sessions/recovery-fixture/keys', async route => {
       expect(route.request().postDataJSON().keys).toEqual(['Escape']); stopCalls += 1;
       session.runFailure = { ...session.runFailure!, status: 'stopped', stoppedReason: 'Automatic recovery cancelled by user input or Stop.' };

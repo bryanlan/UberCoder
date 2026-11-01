@@ -139,9 +139,7 @@ describe('Structured session screen', () => {
     const f = await fixture();
     const { session } = await f.bindNew({ initialPrompt: undefined });
     const idle = await f.manager.getSessionScreen(session.id);
-    expect(idle!.screen).toMatchObject({
-      inputActive: true, inputText: '', content: '', status: 'Codex (app-server) idle', model: 'gpt-6.1-sol xhigh',
-    });
+    expect(idle!.screen).toEqual({ status: 'Codex (app-server) idle', capturedAt: expect.any(String), model: 'gpt-6.1-sol xhigh' });
     await f.manager.sendInput(session.id, 'work');
     await settle();
     expect((await f.manager.getSessionScreen(session.id))!.screen.status).toBe('Codex (app-server) working');

@@ -149,14 +149,12 @@ export interface NormalizedMessage {
   rawMetadata?: Record<string, unknown>;
 }
 
-/** What `GET /api/sessions/:id/screen` serves: a status synthesized from the provider transport's state. There is no terminal. */
+/**
+ * What `GET /api/sessions/:id/screen` serves: a status synthesized from the provider transport's state (the provider and whether
+ * it is working, idle or asleep), the model of the active profile and the share of context left. There is no terminal.
+ */
 export interface SessionScreen {
-  content: string;
-  contentAnsi?: string;
-  inputText: string;
-  inputActive: boolean;
   status: string;
-  statusAnsi?: string;
   capturedAt: string;
   model?: string;
   contextPercent?: number;

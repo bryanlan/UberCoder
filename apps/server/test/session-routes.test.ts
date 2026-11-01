@@ -323,7 +323,7 @@ describe('session routes', () => {
     const db = new AppDatabase(path.join(tempDir, 'console.sqlite'));
     const session: BoundSession = { id: 'screen-session', provider: 'claude', projectSlug: 'demo', conversationRef: 'native-screen',
       status: 'bound', startedAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z' };
-    const screen = { content: '', inputText: '', inputActive: true, status: 'Claude idle', capturedAt: '2026-10-14T00:00:01.000Z' };
+    const screen = { status: 'Claude idle', capturedAt: '2026-10-14T00:00:01.000Z' };
     const getSessionScreen = vi.fn(async () => ({ session, screen }));
     const app = fastify();
     await registerSessionRoutes(app, { ensureAuthenticated: async () => undefined } as never, db, {} as never,

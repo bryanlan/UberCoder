@@ -27,7 +27,7 @@ for (const provider of ['claude', 'codex'] as const satisfies readonly ProviderI
       } }], boundSessions: [session],
     } }));
     await page.route(`**/api/conversations/demo/${provider}/image-chat/messages**`, route => route.fulfill({ json: { conversation, boundSession: session, messages, messagePage: { hasOlder: false, total: messages.length } } }));
-    await page.route('**/api/sessions/image-session/screen**', route => route.fulfill({ json: { session, screen: { content: '', inputText: '', inputActive: true, capturedAt: timestamp, status: provider === 'codex' ? 'Codex idle' : 'Claude idle' } } }));
+    await page.route('**/api/sessions/image-session/screen**', route => route.fulfill({ json: { session, screen: { capturedAt: timestamp, status: provider === 'codex' ? 'Codex idle' : 'Claude idle' } } }));
     await page.route('**/api/sessions/image-session/images', async route => {
       uploads++;
       expect(route.request().headers()['x-csrf-token']).toBe('fixture-csrf');

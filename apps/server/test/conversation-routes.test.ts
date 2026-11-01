@@ -654,9 +654,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: 'Still working through the direct-load case…',
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T17:02:01.000Z',
       } satisfies SessionScreen,
@@ -1368,9 +1365,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: `${liveTranscriptTail}\nFresh live-only follow-up.`,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
@@ -1520,9 +1514,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: repeatedReply,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:02.000Z',
       } satisfies SessionScreen,
@@ -1673,9 +1664,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: `${staleTranscriptReply}\nPending streamed answer.`,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:03.000Z',
       } satisfies SessionScreen,
@@ -1858,9 +1846,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: flattenedRepeat,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-07-01T18:37:21.000Z',
       } satisfies SessionScreen,
@@ -1978,9 +1963,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: `${providerMessages.map((message) => message.text).join('\n')}\nFresh live-only follow-up.`,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:16:01.000Z',
       } satisfies SessionScreen,
@@ -2097,14 +2079,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: [
-          transcriptLineA,
-          '⎿ Updated apps/web/src/ManagedAccountsClient.tsx',
-          transcriptLineB,
-          'Fresh active terminal line.',
-        ].join('\n'),
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:01.000Z',
       } satisfies SessionScreen,
@@ -2251,15 +2225,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: [
-          'hat "completed" was just the launcher returning — the actual codex run is detached via `nohup`. Let me check its progress:',
-          '',
-          'Ran 1 shell command',
-          '',
-          '● Good news in the run log: this retry ran the proof-of-read wc -l successfully — so local file access is working (the bwrap bypass holds), and Codex is now analyzing. It\'s still running (detached via nohup), output is written at the end. Let me wait for it to finish:',
-        ].join('\n'),
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-06-30T12:35:42.000Z',
       } satisfies SessionScreen,
@@ -2377,19 +2342,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: [
-          '✻ Baked for 12m 40s',
-          '',
-          '● Background command "Proof-gated Codex review of ingest layer" failed with exit',
-          'code 144',
-          '',
-          '❯ what happene',
-          '',
-          '✽ Gusting…',
-          '  tmux focus-events off · add \'set -g focus-events on\' to ~/.tmux.conf and rea…',
-        ].join('\n'),
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-06-30T19:14:02.000Z',
       } satisfies SessionScreen,
@@ -2532,9 +2484,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: `${liveTranscriptTail}\nLive model menu is waiting for a selection.`,
-        inputText: activeInput,
-        inputActive: true,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
@@ -2633,9 +2582,6 @@ describe('conversation routes', () => {
     const getSessionScreen = vi.fn(async () => ({
       session,
       screen: {
-        content: `${eventOnlyAnswer}\nFresh active terminal line.`,
-        inputText: '',
-        inputActive: false,
         status: 'Session active',
         capturedAt: '2026-03-14T18:02:08.000Z',
       } satisfies SessionScreen,
