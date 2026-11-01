@@ -473,7 +473,7 @@ See [the audit contract](peer-wake-audit.md).
 
 Every conversation runs through a provider protocol: Codex through `codex app-server` and Claude through its headless
 stream-json CLI. A provider can run conversations only while its lane is on (`structuredSessions.<provider>.enabled`,
-default off); a bind for a provider whose lane is off answers 400. The tmux transport that came before was removed in Phase B
+default on); a bind for a provider whose lane is off answers 400. The tmux transport that came before was removed in Phase B
 (see [the cutover plan](structured-cutover.md), "Phase B record"). The plan, contracts and verification evidence are in
 [the lane plan](structured-providers.md) (Codex) and [the cutover plan](structured-cutover.md) (relay, Claude, questions,
 removal of tmux); this section is the summary.

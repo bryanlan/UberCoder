@@ -68,10 +68,10 @@ const sessionsConfigSchema = z.preprocess(rejectRemovedKeys({
   pressureSuspendIdleMinutes: 60,
 });
 
-// The provider process of each provider's conversations. A provider whose lane is off cannot run conversations.
+// The provider process of each provider's conversations. Both lanes are on by default; a provider whose lane is switched off cannot run conversations.
 function structuredProviderSchema(defaultCommand: readonly string[]) {
   return z.object({
-    enabled: z.boolean().default(false),
+    enabled: z.boolean().default(true),
     // The provider executable and any leading arguments; a fresh array per parse so a config never shares the default.
     command: z.array(z.string()).min(1).default(() => [...defaultCommand]),
     idleUnloadMinutes: z.number().positive().default(60),
@@ -86,7 +86,7 @@ const claudeStructuredSchema = structuredProviderSchema(STRUCTURED_PROVIDER_DEFA
 
 /** One provider's structured-session settings. The host service and the provider's transport plugin both take this shape. */
 export type StructuredProviderConfig = z.output<typeof codexStructuredSchema>;
-/** What a provider without a `structuredSessions` entry gets: the lane is off. A fresh object per call. */
+/** What a provider without a `structuredSessions` entry gets: the lane is on. A fresh object per call. */
 export function defaultStructuredProviderConfig(provider: keyof typeof STRUCTURED_PROVIDER_DEFAULT_COMMANDS): StructuredProviderConfig {
   return (provider === 'claude' ? claudeStructuredSchema : codexStructuredSchema).parse({});
 }

@@ -48,7 +48,7 @@ export async function registerProjectRoutes(
   let treeObservationPromise: Promise<void> | undefined;
   let treeObservationTimer: NodeJS.Timeout | undefined;
 
-  // The tree tells the web which providers offer the structured (app-server) New Chat option.
+  // The tree tells the web which providers can run conversations (their lane is enabled), so it offers New conversation only for those.
   function withStructuredProviders(tree: TreeResponse): TreeResponse {
     return { ...tree, structuredProviders: [...structuredProviders] };
   }

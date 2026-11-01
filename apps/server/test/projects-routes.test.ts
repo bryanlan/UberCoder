@@ -297,8 +297,8 @@ describe('structured provider configuration wiring', () => {
     };
   }
 
-  it('advertises codex and refuses claude when only the Codex lane is enabled', async () => {
-    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true } });
+  it('advertises codex and refuses claude when only the Codex lane is on', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: true }, claude: { enabled: false } });
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual(['codex']);
@@ -314,8 +314,8 @@ describe('structured provider configuration wiring', () => {
     }
   });
 
-  it('advertises nothing and refuses binds when the config leaves the lanes off', async () => {
-    const { app, headers, tempDir } = await buildConfiguredApp();
+  it('advertises nothing and refuses binds when the config switches both lanes off', async () => {
+    const { app, headers, tempDir } = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: false } });
     try {
       const tree = await app.inject({ method: 'GET', url: '/api/projects/tree', headers });
       expect(tree.json().structuredProviders).toEqual([]);
@@ -331,8 +331,8 @@ describe('structured provider configuration wiring', () => {
     }
   });
 
-  it('advertises claude when its lane is enabled, beside codex when both are', async () => {
-    const claudeOnly = await buildConfiguredApp({ claude: { enabled: true } });
+  it('advertises claude when its lane is on, beside codex when both are, and both when the config says nothing', async () => {
+    const claudeOnly = await buildConfiguredApp({ codex: { enabled: false }, claude: { enabled: true } });
     try {
       const tree = await claudeOnly.app.inject({ method: 'GET', url: '/api/projects/tree', headers: claudeOnly.headers });
       expect(tree.json().structuredProviders).toEqual(['claude']);
@@ -348,6 +348,15 @@ describe('structured provider configuration wiring', () => {
     } finally {
       await both.app.close();
       await fs.rm(both.tempDir, { recursive: true, force: true });
+    }
+
+    const unconfigured = await buildConfiguredApp();
+    try {
+      const tree = await unconfigured.app.inject({ method: 'GET', url: '/api/projects/tree', headers: unconfigured.headers });
+      expect(tree.json().structuredProviders).toEqual(['codex', 'claude']);
+    } finally {
+      await unconfigured.app.close();
+      await fs.rm(unconfigured.tempDir, { recursive: true, force: true });
     }
   });
 

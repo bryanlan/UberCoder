@@ -381,11 +381,11 @@ describe('ConfigService', () => {
 
   describe('structuredSessions', () => {
     const security = { passwordHash: 'fixture', sessionSecret: 'x'.repeat(64) };
-    const codexDefaults = { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
-    const claudeDefaults = { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} };
+    const codexDefaults = { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
+    const claudeDefaults = { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} };
     const defaults = { codex: codexDefaults, claude: claudeDefaults };
 
-    it('defaults to disabled when the block is absent or partial', async () => {
+    it('defaults to enabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
       const emptyCodex = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: {} } });
       const emptyClaude = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: {} } });
@@ -412,6 +412,17 @@ describe('ConfigService', () => {
         expect(defaultStructuredProviderConfig('codex')).toEqual(codexDefaults);
       } finally {
         for (const configPath of [first, second]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
+      }
+    });
+
+    it('lets a lane be switched off and leaves the other on', async () => {
+      const codexOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: false } } });
+      const claudeOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { enabled: false } } });
+      try {
+        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults });
+        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false } });
+      } finally {
+        for (const configPath of [codexOff, claudeOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
     });
 
@@ -457,7 +468,7 @@ describe('ConfigService', () => {
       } finally { await fs.rm(path.dirname(configPath), { recursive: true, force: true }); }
     });
 
-    it('writes the disabled defaults when an older config without the block is persisted', async () => {
+    it('writes the defaults when an older config without the block is persisted', async () => {
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
       try {
         new ConfigService(configPath).setWorkerTracking(true);

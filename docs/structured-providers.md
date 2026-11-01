@@ -1,9 +1,9 @@
 # Structured provider lane
 
 Date: 2026-10-26. Branch: `feature/structured-provider-lane`. Status: slice 1 implemented; see
-Verification evidence. The lane ships behind a config flag that defaults off. Nothing in this document
-changes the running Console until the flag is turned on for a provider. The text below was corrected to the
-implementation on 2026-10-26; where it still differs from the code, the code governs. The cutover work that
+Verification evidence. History note: the lane shipped behind a config flag that defaulted off. Since Phase B
+(2026-11-01) the flag defaults on, because the lane is the only way to run a conversation. The text below was
+corrected to the implementation on 2026-10-26; where it still differs from the code, the code governs. The cutover work that
 followed (relay, Claude plugin, questions, images, re-adoption across restarts, migration) is in
 `docs/structured-cutover.md`; this document keeps the slice 1 record and the plugin contract.
 
@@ -130,13 +130,13 @@ Phase B removed `SESSION_TRANSPORTS`, `SessionTransport`, `BoundSession.transpor
 ```json
 "structuredSessions": {
   "codex": {
-    "enabled": false,
+    "enabled": true,
     "command": ["codex", "app-server"],
     "idleUnloadMinutes": 60,
     "env": {}
   },
   "claude": {
-    "enabled": false,
+    "enabled": true,
     "command": ["claude"],
     "idleUnloadMinutes": 60,
     "env": {}
@@ -155,9 +155,9 @@ runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordinatio
 argv whenever coordination is enabled (see "Codex app-server plugin"); no configuration is needed, and an
 isolated Console (the proof script) gets its own runtime this way.
 
-- Absent block or `enabled: false` means the lane is off: the provider has no New Chat option, a bind returns 400,
-  and no provider process is started for a new conversation. The schema default is off; the example config turns
-  both lanes on.
+- `enabled: false` means the lane is off: the provider has no New conversation option, a bind returns 400, and no
+  provider process is started for a new conversation. The schema default is on (an absent block or an absent
+  `enabled` leaves the lane on); the example config lists the same values.
 - Turning a lane off later does not change bound rows; they keep working until released.
 
 ## Plugin contract (`apps/server/src/providers/transport/types.ts`)
