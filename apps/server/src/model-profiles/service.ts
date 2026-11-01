@@ -9,6 +9,7 @@ import {
   type FixedModelProfileKey,
   type ModelProfileEntry,
   type ModelProfilesResponse,
+  PROVIDER_NAMES,
   type ProviderId,
 } from '@agent-console/shared';
 
@@ -20,8 +21,26 @@ export const DEFAULT_ROUTE_TIMEOUT_MS = 8_000;
 export const DEFAULT_PROFILES_CACHE_MS = 5 * 60_000;
 /** The part of a prompt the router sees. */
 export const ROUTE_TASK_MAX_CHARS = 2_000;
+/** How much of the last assistant reply a re-route reads. */
+export const ROUTE_REPLY_MAX_CHARS = 500;
 
-const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic'> = { codex: 'openai', claude: 'anthropic' };
+/**
+ * The text a provisional Auto choice is routed again from: the new prompt, the start of the last assistant reply, then the earlier
+ * prompt, newest first, at most 2,000 characters. The newest words come first so a long earlier prompt is the part that is cut.
+ */
+export function composeRerouteTask(input: { prompt: string; assistantReply?: string; previousPrompt?: string }): string {
+  const parts = [input.prompt.trim(), input.assistantReply?.trim().slice(0, ROUTE_REPLY_MAX_CHARS), input.previousPrompt?.trim()]
+    .filter((part): part is string => !!part);
+  return parts.join('\n\n').slice(0, ROUTE_TASK_MAX_CHARS);
+}
+
+const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic' | 'xai'> = { codex: 'openai', claude: 'anthropic', grok: 'xai' };
+const ROUTER_VENDORS = ['openai', 'anthropic', 'xai'] as const;
+
+/** The Console provider that runs a router vendor's models, or undefined for a vendor the Console has no provider for. */
+export function providerForRouterVendor(vendor: string | null | undefined): ProviderId | undefined {
+  return (Object.keys(ROUTER_PROVIDER) as ProviderId[]).find(id => ROUTER_PROVIDER[id] === vendor);
+}
 
 export class ModelProfilesUnavailableError extends Error {
   constructor(reason: string) {
@@ -60,16 +79,24 @@ const levelSchema = z.object({
   launch_name: z.string().min(1),
 });
 const providerSchema = z.object({
-  provider: z.enum(['openai', 'anthropic']),
+  provider: z.enum(ROUTER_VENDORS),
   levels: z.object({ high: levelSchema, medium: levelSchema, low: levelSchema }),
 });
-const profilesSchema = z.object({ profiles: z.object({ codex: providerSchema, claude: providerSchema }) });
+const profilesSchema = z.object({ profiles: z.object({ codex: providerSchema, claude: providerSchema, grok: providerSchema }) });
 
 const classifierSchema = z.object({
   status: z.string().optional(),
   role_choice: z.string().nullable().optional(),
   role_probabilities: z.record(z.string(), z.number()).nullable().optional(),
   difficulty_choice: z.string().nullable().optional(),
+}).passthrough();
+const optionSchema = z.object({
+  provider: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  effort: z.string().nullable().optional(),
+  launch_name: z.string().nullable().optional(),
+  quota_state: z.string().nullable().optional(),
 }).passthrough();
 const routeSchema = z.object({
   status: z.string(),
@@ -81,7 +108,10 @@ const routeSchema = z.object({
   launch_name: z.string().nullable().optional(),
   quota_state: z.string().nullable().optional(),
   reason: z.string().optional(),
+  // True when the classifier could not tell the kind of task. An older router does not send it, which means false.
+  provisional: z.boolean().optional(),
   classifier: classifierSchema.nullable().optional(),
+  alternatives: z.array(optionSchema).optional(),
 }).passthrough();
 
 /** A short, single-line reason for a failed `wo` call, safe to show to the person. */
@@ -96,8 +126,13 @@ function failureReason(error: unknown, timeoutMs: number, woPath: string): strin
 }
 
 export type AutoRouteOutcome =
-  | { ok: true; decision: AutoDecision }
+  | { ok: true; decision: AutoDecision; provider: ProviderId }
   | { ok: false; reason: string };
+
+export interface RouteOptions {
+  /** For a provider-neutral route: the providers a session can be created on now. The first router option on one of them is used. */
+  acceptProvider?: (provider: ProviderId) => boolean;
+}
 
 /**
  * The Console's one source of model choices: the High/Medium/Low profiles and the Auto router both come from the
@@ -164,7 +199,7 @@ export class ModelProfileService {
       throw new ModelProfilesUnavailableError('wo profiles returned an unreadable answer');
     }
     const providers = {} as ModelProfilesResponse['providers'];
-    for (const id of ['codex', 'claude'] as const) {
+    for (const id of ['codex', 'claude', 'grok'] as const) {
       const entry = parsed.profiles[id];
       if (entry.provider !== ROUTER_PROVIDER[id]) {
         throw new ModelProfilesUnavailableError(`wo profiles lists ${entry.provider} models for ${id}`);
@@ -182,17 +217,19 @@ export class ModelProfileService {
   }
 
   /**
-   * Asks the router for the model of a session's next turns. The router sees the first 2,000 characters of the prompt and only
-   * models of the session's own vendor. Never throws: a failure is returned so the caller can fall back to Medium.
+   * Asks the router for the model of a session's next turns. The router sees the first 2,000 characters of the prompt. With a
+   * `provider` it sees only models of that vendor (a session cannot change vendor); with none, any vendor can win and
+   * `options.acceptProvider` says which of them a new session can be created on. Never throws: a failure is returned so the
+   * caller can fall back to Medium.
    */
-  async route(provider: ProviderId, prompt: string): Promise<AutoRouteOutcome> {
+  async route(provider: ProviderId | undefined, prompt: string, options: RouteOptions = {}): Promise<AutoRouteOutcome> {
     const task = prompt.slice(0, ROUTE_TASK_MAX_CHARS);
     if (!task.trim()) return { ok: false, reason: 'the message has no text to route' };
     let stdout: string;
     try {
       ({ stdout } = await this.run(
         this.woPath,
-        ['route', '--task', task, '--launcher', 'console', '--provider', ROUTER_PROVIDER[provider], '--json'],
+        ['route', '--task', task, '--launcher', 'console', ...(provider ? ['--provider', ROUTER_PROVIDER[provider]] : []), '--json'],
         { timeoutMs: this.routeTimeoutMs },
       ));
     } catch (error) {
@@ -207,11 +244,39 @@ export class ModelProfileService {
     if (result.status !== 'route' || !result.launch_name || !result.model || !result.label || !result.effort) {
       return { ok: false, reason: result.reason ? `the router chose no model (${result.reason})` : 'the router chose no model' };
     }
-    // The session is bound to one vendor: a model from the other one could not run in it.
-    if (result.provider && result.provider !== ROUTER_PROVIDER[provider]) {
+    // The router always names the vendor; an answer without one can only mean the session's own, when a vendor was asked for.
+    const chosenProvider = result.provider ? providerForRouterVendor(result.provider) : provider;
+    if (!chosenProvider) {
+      return { ok: false, reason: `the router chose a model from ${result.provider ?? 'an unknown vendor'}, which the Console cannot run` };
+    }
+    // A session is bound to one vendor: a model from another one could not run in it.
+    if (provider && chosenProvider !== provider) {
       return { ok: false, reason: `the router chose a model from ${result.provider} for a ${provider} session` };
     }
-    return { ok: true, decision: this.decisionFrom(result) };
+    if (!provider && options.acceptProvider && !options.acceptProvider(chosenProvider)) {
+      return this.nextAcceptable(result, options.acceptProvider);
+    }
+    return { ok: true, decision: this.decisionFrom(result), provider: chosenProvider };
+  }
+
+  /** The router's first choice is on a provider that cannot take new sessions: use its best alternative that can. */
+  private nextAcceptable(result: z.infer<typeof routeSchema>, accept: (provider: ProviderId) => boolean): AutoRouteOutcome {
+    for (const option of result.alternatives ?? []) {
+      const alternative = providerForRouterVendor(option.provider);
+      if (!alternative || !accept(alternative) || !option.launch_name || !option.model || !option.label || !option.effort) continue;
+      const decision = this.decisionFrom({
+        ...result,
+        provider: option.provider,
+        model: option.model,
+        label: option.label,
+        effort: option.effort,
+        launch_name: option.launch_name,
+        quota_state: option.quota_state ?? null,
+        reason: `${result.reason ?? ''} ${option.label} was used because ${PROVIDER_NAMES[providerForRouterVendor(result.provider)!]} is not available for new chats.`.trim(),
+      });
+      return { ok: true, decision, provider: alternative };
+    }
+    return { ok: false, reason: 'the router chose no model that a new chat can run on' };
   }
 
   private routeFailure(error: unknown): string {
@@ -228,10 +293,11 @@ export class ModelProfileService {
 
   private decisionFrom(result: z.infer<typeof routeSchema>): AutoDecision {
     const classifier = result.classifier ?? undefined;
-    const answered = classifier?.status === 'ok';
-    const roleChoice = answered ? classifier?.role_choice ?? undefined : undefined;
+    // The labels are shown whatever the classifier's status says: a classifier that could not tell the task kind still
+    // reports the difficulty and the role probabilities it read.
+    const roleChoice = classifier?.role_choice ?? undefined;
     const probability = roleChoice ? classifier?.role_probabilities?.[roleChoice] : undefined;
-    const difficulty = answered && classifier?.difficulty_choice && ['lighter', 'standard', 'heavier'].includes(classifier.difficulty_choice)
+    const difficulty = classifier?.difficulty_choice && ['lighter', 'standard', 'heavier'].includes(classifier.difficulty_choice)
       ? classifier.difficulty_choice : undefined;
     return {
       source: 'router',
@@ -246,6 +312,7 @@ export class ModelProfileService {
       ...(classifier?.status ? { classifierStatus: classifier.status } : {}),
       ...(result.quota_state ? { quotaState: result.quota_state } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
+      ...(result.provisional === true ? { provisional: true } : {}),
     };
   }
 }
@@ -261,10 +328,10 @@ export function fallbackDecision(reason: string, medium: ModelProfileEntry | und
   };
 }
 
-type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'autoRoute'>;
+type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'autoRoute'>;
 
-export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile'>): ModelProfileKey | undefined {
-  return session.provider === 'codex' ? session.codexProfile : session.claudeProfile;
+export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile'>): ModelProfileKey | undefined {
+  return session.provider === 'codex' ? session.codexProfile : session.provider === 'grok' ? session.grokProfile : session.claudeProfile;
 }
 
 /** The target an Auto row runs on: its latest decision, or none before the first message has been routed. */

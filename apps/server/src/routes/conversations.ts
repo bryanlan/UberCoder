@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
 import {
+  PROVIDER_NAMES,
   PROVIDERS,
   SESSION_TRANSPORTS,
   type BoundSession,
@@ -19,7 +20,7 @@ import { ProviderRegistry } from '../providers/registry.js';
 import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { AuthService } from '../security/auth-service.js';
 import { LiveOutputReader } from '../sessions/live-output/reader.js';
-import { SessionManager } from '../sessions/session-manager.js';
+import { SessionManager, profilePatch } from '../sessions/session-manager.js';
 import { adoptPendingConversation, findPendingAdoptionMatch } from '../sessions/pending-adoption.js';
 import { statFileSafe } from '../providers/file-utils.js';
 import { nowIso } from '../lib/time.js';
@@ -27,6 +28,8 @@ import { saveConversationTitle } from '../lib/conversation-title.js';
 import { TITLE_GENERATION_AWAITING_MESSAGE } from '../titles/service.js';
 import { mergeTimelineMessages, messagesShareTimelinePageRun } from '../sessions/timeline-merge.js';
 import { resolveDefaultTransport } from '../sessions/structured/default-transport.js';
+import { StartUnavailableError, startConversation, type StartDefault } from '../sessions/start-conversation.js';
+import type { ModelProfileService } from '../model-profiles/service.js';
 
 const providerSchema = z.enum(PROVIDERS);
 const projectProviderParamsSchema = z.object({
@@ -46,6 +49,9 @@ const bindConversationBodySchema = z.object({
   force: z.boolean().optional(),
   initialPrompt: z.string().trim().min(1).optional(),
   confirmExternalHandoff: z.literal(true).optional(),
+});
+const startConversationBodySchema = z.object({
+  prompt: z.string().trim().min(1).max(100_000),
 });
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -84,6 +90,7 @@ function parseConversationParams(params: unknown, reply: FastifyReply): Conversa
 }
 
 const STRUCTURED_DISABLED_MESSAGE = 'Structured sessions are not enabled for this provider.';
+const GROK_STRUCTURED_ONLY_MESSAGE = 'Grok runs on the structured transport only.';
 
 function isStructuredDisabledError(error: unknown): boolean {
   return error instanceof Error && /structured/i.test(error.message) && /not enabled|disabled/i.test(error.message);
@@ -257,6 +264,8 @@ export async function registerConversationRoutes(
   structuredProviders: readonly ProviderId[] = [],
   /** `structuredSessions.defaultTransport`: what a bind that names no transport gets, for providers with the structured lane on. */
   defaultTransport: SessionTransport = 'tmux',
+  /** What the provider-neutral Start needs. Without it the Start route is not registered. */
+  start?: { modelProfiles: ModelProfileService; startDefault: StartDefault },
 ): Promise<void> {
   app.get('/api/conversations/:projectSlug/:provider/:conversationRef/messages', { logLevel: 'warn' }, async (request, reply) => {
     try {
@@ -395,6 +404,40 @@ export async function registerConversationRoutes(
     };
   });
 
+  if (start) {
+    app.post('/api/conversations/:projectSlug/start', async (request, reply) => {
+      try {
+        await authService.ensureAuthenticated(request, reply);
+      } catch {
+        return;
+      }
+      const parsedBody = startConversationBodySchema.safeParse(request.body ?? {});
+      if (!parsedBody.success) {
+        reply.code(400).send({ error: 'Invalid start payload.', details: parsedBody.error.flatten() });
+        return;
+      }
+      const parsedParams = z.object({ projectSlug: z.string().min(1) }).safeParse(request.params);
+      if (!parsedParams.success) {
+        reply.code(400).send({ error: 'Invalid conversation route.', details: parsedParams.error.flatten() });
+        return;
+      }
+      const project = await projectService.getProjectBySlug(parsedParams.data.projectSlug);
+      if (!project) {
+        reply.code(404).send({ error: 'Project not found.' });
+        return;
+      }
+      try {
+        return await startConversation({ db, projectService, providerRegistry, sessions, modelProfiles: start.modelProfiles, startDefault: start.startDefault }, { project, prompt: parsedBody.data.prompt });
+      } catch (error) {
+        if (error instanceof StartUnavailableError || isStructuredDisabledError(error)) {
+          reply.code(400).send({ error: error instanceof StartUnavailableError ? error.message : STRUCTURED_DISABLED_MESSAGE });
+          return;
+        }
+        throw error;
+      }
+    });
+  }
+
   app.post('/api/conversations/:projectSlug/:provider/new/bind', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);
@@ -411,7 +454,11 @@ export async function registerConversationRoutes(
       return;
     }
     const { projectSlug, provider: providerId } = parsedParams;
-    const transport = parsedBody.data.transport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
+    if (providerId === 'grok' && parsedBody.data.transport === 'tmux') {
+      reply.code(400).send({ error: GROK_STRUCTURED_ONLY_MESSAGE });
+      return;
+    }
+    const transport = providerId === 'grok' ? 'structured' : (parsedBody.data.transport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId));
     if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
       return;
     }
@@ -459,7 +506,7 @@ export async function registerConversationRoutes(
       kind: 'pending',
       projectSlug,
       provider: providerId,
-      title: `New ${providerId === 'codex' ? 'Codex' : 'Claude'} conversation`,
+      title: `New ${PROVIDER_NAMES[providerId]} conversation`,
       createdAt: nowIso(),
       updatedAt: nowIso(),
       isBound: false,
@@ -481,7 +528,7 @@ export async function registerConversationRoutes(
         kind: 'pending',
         transport,
         // A new chat started from the UI picks its model per message (Auto). A terminal-backed chat cannot, so it keeps Medium.
-        ...(transport === 'structured' ? (providerId === 'codex' ? { codexProfile: 'auto' as const } : { claudeProfile: 'auto' as const }) : {}),
+        ...(transport === 'structured' ? profilePatch(providerId, 'auto') : {}),
       });
       // An adopted alias already points at the native conversation; do not overwrite that record.
       if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {
@@ -515,7 +562,11 @@ export async function registerConversationRoutes(
     }
     const { projectSlug, provider: providerId, conversationRef } = parsedParams;
     const requestedTransport = parsedBody.data.transport;
-    const transport = requestedTransport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId);
+    if (providerId === 'grok' && requestedTransport === 'tmux') {
+      reply.code(400).send({ error: GROK_STRUCTURED_ONLY_MESSAGE });
+      return;
+    }
+    const transport = providerId === 'grok' ? 'structured' : (requestedTransport ?? resolveDefaultTransport(defaultTransport, structuredProviders, providerId));
     if (!structuredTransportAllowed(transport, providerId, structuredProviders, reply)) {
       return;
     }
@@ -607,6 +658,7 @@ export async function registerConversationRoutes(
         kind: 'history',
         initialPrompt: parsedBody.data.initialPrompt,
         codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
+        grokProfile: providerId === 'grok' ? existingSession?.grokProfile : undefined,
         transport,
       });
       return { session };

@@ -4,9 +4,9 @@ import { imagePromptDisplay, imagePromptFiles } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { PROVIDERS, visibleModelMatchesTarget, type AgentLaunchContext, type AutoRoute, type BoundSession, type ConversationSummary, type ModelTarget, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
+import { MAX_PROVISIONAL_ROUTES, PROVIDER_NAMES, PROVIDERS, visibleModelMatchesTarget, type AgentLaunchContext, type AutoDecision, type AutoRoute, type BoundSession, type ConversationSummary, type ModelTarget, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen, type SessionTransport } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
-import { ModelProfileService, ModelProfilesUnavailableError, fallbackDecision, peekSessionModelTarget, rowProfile, sessionModelTarget } from '../model-profiles/service.js';
+import { ModelProfileService, ModelProfilesUnavailableError, ROUTE_TASK_MAX_CHARS, composeRerouteTask, fallbackDecision, peekSessionModelTarget, rowProfile, sessionModelTarget } from '../model-profiles/service.js';
 import { commandToShell } from '../lib/shell.js';
 import { sleep } from '../lib/async.js';
 import { AppDatabase } from '../db/database.js';
@@ -101,6 +101,8 @@ const SESSION_MODEL_PROFILE_REQUEST_METADATA_KEY = '@agent_console_model_profile
 const SESSION_PROFILE_METADATA_KEYS = {
   codex: '@agent_console_codex_profile',
   claude: '@agent_console_claude_profile',
+  // Grok has no terminal; the key only keeps this table complete for every provider.
+  grok: '@agent_console_grok_profile',
 } as const;
 
 function activeModelProfile(session: BoundSession): ModelProfileKey | undefined {
@@ -112,8 +114,27 @@ interface AppliedModel extends ModelTarget {
   label?: string;
 }
 
-function profilePatch(provider: ProviderId, profile: ModelProfileKey | undefined) {
-  return provider === 'codex' ? { codexProfile: profile } : { claudeProfile: profile };
+export function profilePatch(provider: ProviderId, profile: ModelProfileKey | undefined) {
+  return provider === 'codex' ? { codexProfile: profile } : provider === 'grok' ? { grokProfile: profile } : { claudeProfile: profile };
+}
+
+/** The profile a bind asked for, from the field that belongs to the provider. */
+function requestedProfileOf(providerId: ProviderId, input: { codexProfile?: ModelProfileKey; claudeProfile?: ModelProfileKey; grokProfile?: ModelProfileKey }): ModelProfileKey | undefined {
+  return providerId === 'codex' ? input.codexProfile : providerId === 'grok' ? input.grokProfile : input.claudeProfile;
+}
+
+/** The status line that records an Auto choice made when a chat was started. */
+function autoChoiceText(decision: AutoDecision): string {
+  if (decision.source === 'fallback') return decision.warning ?? 'Auto fell back to the default model.';
+  const model = decision.label ? `${decision.label}, ${decision.effort ?? 'default effort'}` : 'no model change yet';
+  return `Auto chose ${model}${decision.reason ? `: ${decision.reason}` : '.'}`;
+}
+
+/** The Auto state a decision leaves on the row: a provisional choice is routed again with the next prompt (three times at most). */
+function autoRouteFor(decision: AutoDecision, prompt: string, routes: number): AutoRoute {
+  if (decision.provisional !== true) return { routePending: false, decision };
+  if (routes >= MAX_PROVISIONAL_ROUTES) return { routePending: false, decision: { ...decision, provisional: false } };
+  return { routePending: true, decision, provisionalRoutes: routes, previousPrompt: prompt.slice(0, ROUTE_TASK_MAX_CHARS) };
 }
 
 function describeAppliedModel(applied: AppliedModel | undefined): string {
@@ -2071,6 +2092,14 @@ export class SessionManager {
     /** The profile to start on. `auto` applies to structured sessions only: a tmux launch gets the default Medium profile. */
     codexProfile?: ModelProfileKey;
     claudeProfile?: ModelProfileKey;
+    grokProfile?: ModelProfileKey;
+    /**
+     * A structured chat started with a routing already made (the provider-neutral Start): the session starts on this Auto decision,
+     * runs on its model from the first turn, and the initial prompt is not routed again. Needs the provider's `auto` profile.
+     */
+    autoDecision?: AutoDecision;
+    /** A status line recorded on a new structured chat (Start tells the person it fell back to its default). */
+    startNotice?: string;
     autoTrackedAt?: string;
     /** Session transport. Omitted: the configured default. 'structured' drives the provider through a transport plugin. */
     transport?: SessionTransport;
@@ -2342,6 +2371,9 @@ export class SessionManager {
     sessionId?: string;
     codexProfile?: ModelProfileKey;
     claudeProfile?: ModelProfileKey;
+    grokProfile?: ModelProfileKey;
+    autoDecision?: AutoDecision;
+    startNotice?: string;
     autoTrackedAt?: string;
     transport?: SessionTransport;
   }, sessionId: string): Promise<SessionCommandResult> {
@@ -2356,12 +2388,16 @@ export class SessionManager {
       }
       throw new Error(`Conversation ${input.conversationRef} is still bound but could not be restored.`);
     }
+    // Grok has no terminal: it is always structured, and a disabled lane is reported by the structured bind itself.
+    if (input.provider.id === 'grok' && input.transport === 'tmux') {
+      throw new SessionInputRejectedError('Grok runs on the structured transport only.');
+    }
     // A bind that names no transport gets the configured default (tmux unless the structured lane is the default).
-    const transport = input.transport ?? this.defaultTransportFor(input.provider.id);
+    const transport = input.provider.id === 'grok' ? 'structured' : (input.transport ?? this.defaultTransportFor(input.provider.id));
     // The structured transport sends no command-line flags (`--add-dir`, `--permission-mode` and the like). A granted launch that
     // carries some must not run without them in silence: asked for structured it is refused, and under the default it keeps tmux.
     const unappliedFlags = transport === 'structured' && input.launchContext?.flags?.length ? input.launchContext.flags : undefined;
-    if (unappliedFlags && input.transport === 'structured') {
+    if (unappliedFlags && (input.transport === 'structured' || input.provider.id === 'grok')) {
       throw new SessionInputRejectedError('Structured sessions do not apply launch flags. Start this session on the tmux transport. Nothing was started.');
     }
     if (unappliedFlags) {
@@ -2380,7 +2416,7 @@ export class SessionManager {
     fs.writeFileSync(eventLogPath, '', { flag: 'a' });
 
     // Auto routes each message through the structured transport; a tmux launch has no such hook and starts on the default.
-    const requestedProfile = input.provider.id === 'codex' ? input.codexProfile : input.claudeProfile;
+    const requestedProfile = requestedProfileOf(input.provider.id, input);
     const tmuxProfile = requestedProfile === 'auto' ? undefined : requestedProfile;
     const profileEntry = tmuxProfile ? await this.modelProfiles.entry(input.provider.id, tmuxProfile) : undefined;
     const defaultEntry = !profileEntry && input.kind === 'pending' && !input.launchContext?.model
@@ -3263,6 +3299,7 @@ export class SessionManager {
       initialPrompt: input.initialPrompt,
       codexProfile: session.codexProfile,
       claudeProfile: session.claudeProfile,
+      grokProfile: session.grokProfile,
     }, randomUUID());
   }
 
@@ -3293,7 +3330,7 @@ export class SessionManager {
         throw new SessionInputRejectedError('The session project is unavailable.');
       }
       if (!dependencies.projectService.getMergedProviderSettings(project, session.provider).enabled) {
-        throw new SessionInputRejectedError(`${session.provider === 'codex' ? 'Codex' : 'Claude'} is disabled for this project.`);
+        throw new SessionInputRejectedError(`${PROVIDER_NAMES[session.provider]} is disabled for this project.`);
       }
       let target: AppliedModel | undefined;
       try {
@@ -4947,31 +4984,94 @@ export class SessionManager {
 
   private async routeAutoNow(session: BoundSession, text: string): Promise<void> {
     try {
-      const outcome = await this.modelProfiles.route(session.provider, text);
-      const medium = outcome.ok ? undefined : await this.modelProfiles.entry(session.provider, 'medium').catch(() => undefined);
-      const decision = outcome.ok ? outcome.decision : fallbackDecision(outcome.reason, medium);
+      // A provisional choice (the classifier could not tell the kind of task) is routed again from the conversation so far. Pressing
+      // A again starts afresh: it keeps the decision but not the notes of a provisional run (`previousPrompt`).
+      const previous = session.autoRoute;
+      const rerouting = previous?.decision?.source === 'router' && previous.decision.provisional === true && previous.previousPrompt !== undefined;
+      const task = rerouting
+        ? composeRerouteTask({ prompt: text, assistantReply: await this.lastAssistantReplyStart(session), previousPrompt: previous?.previousPrompt })
+        : text;
+      const outcome = await this.modelProfiles.route(session.provider, task);
       const latest = this.db.boundSessions.getById(session.id);
       // The row may have changed while the router ran (released, or a different profile chosen).
       if (!latest || activeModelProfile(latest) !== 'auto' || !latest.autoRoute?.routePending || this.hasLiveModelProfileRequest(latest)) return;
-      const target = decision.launchName && decision.effort ? { model: decision.launchName, effort: decision.effort } : undefined;
-      const startedAt = nowIso();
-      const applying: Extract<ModelProfileRequest, { state: 'applying' }> = {
-        requestId: randomUUID(),
-        profile: 'auto',
-        requestedAt: startedAt,
-        state: 'applying',
-        startedAt,
-        previousProfile: 'auto',
-        resumeConversationRef: latest.resumeConversationRef ?? latest.conversationRef,
-        autoRoute: { routePending: false, decision },
-        ...(target ? { target } : {}),
-      };
-      const stored = this.db.boundSessions.replaceModelProfileRequest(latest.id, applying, startedAt);
-      if (!stored) return;
-      await this.completeStructuredModelProfile(stored, applying);
+      if (rerouting && latest.autoRoute.decision) {
+        await this.applyReroute(latest, outcome, text, previous?.provisionalRoutes ?? 1);
+        return;
+      }
+      const medium = outcome.ok ? undefined : await this.modelProfiles.entry(session.provider, 'medium').catch(() => undefined);
+      const decision = outcome.ok ? outcome.decision : fallbackDecision(outcome.reason, medium);
+      await this.applyAutoDecision(latest, decision, outcome.ok ? autoRouteFor(decision, text, 1) : { routePending: false, decision });
     } catch (error) {
       // Never block the message: it runs on the model the session already has.
       this.logger?.warn({ err: error, sessionId: session.id }, 'Auto routing failed; the message runs on the current model.');
+    }
+  }
+
+  /** Applies a decision through the same switch the H, M and L buttons use, and commits `route` as the row's Auto state with it. */
+  private async applyAutoDecision(latest: BoundSession, decision: AutoDecision, route: AutoRoute): Promise<void> {
+    const target = decision.launchName && decision.effort ? { model: decision.launchName, effort: decision.effort } : undefined;
+    const startedAt = nowIso();
+    const applying: Extract<ModelProfileRequest, { state: 'applying' }> = {
+      requestId: randomUUID(),
+      profile: 'auto',
+      requestedAt: startedAt,
+      state: 'applying',
+      startedAt,
+      previousProfile: 'auto',
+      resumeConversationRef: latest.resumeConversationRef ?? latest.conversationRef,
+      autoRoute: route,
+      ...(target ? { target } : {}),
+    };
+    const stored = this.db.boundSessions.replaceModelProfileRequest(latest.id, applying, startedAt);
+    if (!stored) return;
+    await this.completeStructuredModelProfile(stored, applying);
+  }
+
+  /**
+   * The next prompt of a session whose Auto choice is provisional. A clear answer ends the re-routing; a provisional one counts
+   * toward {@link MAX_PROVISIONAL_ROUTES}, after which the last choice is kept and marked final. A router failure keeps the
+   * choice (and counts), because a first guess is better than dropping to Medium. A changed model or effort is applied through the
+   * ordinary profile switch; the same model only updates the row.
+   */
+  private async applyReroute(latest: BoundSession, outcome: Awaited<ReturnType<ModelProfileService['route']>>, text: string, priorRoutes: number): Promise<void> {
+    const kept = latest.autoRoute!.decision!;
+    const routes = priorRoutes + 1;
+    const decision = outcome.ok ? outcome.decision : kept;
+    const route: AutoRoute = outcome.ok
+      ? autoRouteFor(decision, text, routes)
+      : routes >= MAX_PROVISIONAL_ROUTES
+        ? { routePending: false, decision: { ...kept, provisional: false } }
+        : { routePending: true, decision: kept, provisionalRoutes: routes, previousPrompt: text.slice(0, ROUTE_TASK_MAX_CHARS) };
+    const changed = outcome.ok && (decision.launchName !== kept.launchName || decision.effort !== kept.effort);
+    if (changed) {
+      await this.applyAutoDecision(latest, decision, route);
+      return;
+    }
+    const now = nowIso();
+    const updated = this.db.boundSessions.setAutoRoute(latest.id, route, now);
+    if (!updated) return;
+    if (!outcome.ok) {
+      this.appendEvent(updated, { type: 'status', text: `Auto could not re-route (${outcome.reason.replace(/[.\s]+$/, '')}). Keeping ${describeAppliedModel({ model: kept.launchName ?? '', effort: kept.effort ?? '', label: kept.label })}.`, timestamp: now });
+    }
+    this.eventBus.emit({ type: 'session.updated', session: updated });
+  }
+
+  /** The start of the last assistant reply in the conversation, read from the provider's transcript. Best effort: undefined when it cannot be read. */
+  private async lastAssistantReplyStart(session: BoundSession): Promise<string | undefined> {
+    const dependencies = this.recoveryDependencies;
+    const ref = session.resumeConversationRef ?? session.conversationRef;
+    if (!dependencies || ref.startsWith('pending:')) return undefined;
+    try {
+      const project = await dependencies.projectService.getProjectBySlug(session.projectSlug);
+      if (!project) return undefined;
+      const settings = dependencies.projectService.getMergedProviderSettings(project, session.provider);
+      const conversation = await dependencies.providerRegistry.get(session.provider).getConversation(project, ref, settings);
+      const reply = [...(conversation?.messages ?? [])].reverse().find(message => message.role === 'assistant' && message.text.trim());
+      return reply?.text.trim();
+    } catch (error) {
+      this.logger?.warn({ err: error, sessionId: session.id }, 'The last assistant reply could not be read for re-routing.');
+      return undefined;
     }
   }
 
@@ -5106,13 +5206,17 @@ export class SessionManager {
     fs.writeFileSync(eventLogPath, '', { flag: 'a' });
     const initialPrompt = input.initialPrompt?.trim();
     const defaultProfile = input.kind === 'pending' && !input.launchContext?.model && !input.launchContext?.effort;
-    const requestedProfile = providerId === 'codex' ? input.codexProfile : input.claudeProfile;
+    const requestedProfile = input.autoDecision ? 'auto' : requestedProfileOf(providerId, input);
     const startProfile = requestedProfile ?? (defaultProfile ? 'medium' : undefined);
+    // A session that starts on Auto has no model until its first message is routed, unless the routing was already made for that message.
+    const startRoute: AutoRoute | undefined = startProfile !== 'auto' ? undefined
+      : input.autoDecision ? autoRouteFor(input.autoDecision, initialPrompt ?? '', 1) : { routePending: true };
     const session: BoundSession = {
       launchContext: input.launchContext,
       id: sessionId,
       provider: providerId,
       ...profilePatch(providerId, startProfile),
+      ...(startRoute ? { autoRoute: startRoute } : {}),
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,
       resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
@@ -5132,8 +5236,7 @@ export class SessionManager {
     };
     this.db.boundSessions.upsert(session);
     if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
-    // A session that starts on Auto has no model yet: its first message is routed.
-    if (startProfile === 'auto') this.db.boundSessions.setAutoRoute(sessionId, { routePending: true }, now);
+    if (startRoute) this.db.boundSessions.setAutoRoute(sessionId, startRoute, now);
 
     try {
       let nativeRef = input.conversationRef;
@@ -5186,8 +5289,11 @@ export class SessionManager {
         current = adoption.reboundSession ?? this.mustGetSession(sessionId);
       }
       let recordedInitialUserInput: RecordedUserInput | undefined;
+      // Recorded before the first message, where the status line of an ordinary Auto routing falls.
+      if (input.autoDecision) this.appendEvent(current, { type: 'status', text: autoChoiceText(input.autoDecision), timestamp: nowIso() });
+      if (input.startNotice) this.appendEvent(current, { type: 'status', text: input.startNotice, timestamp: nowIso() });
       if (initialPrompt) {
-        if (input.initialPromptIsHuman !== false) await this.routeAutoBeforeTurn(current, initialPrompt);
+        if (input.initialPromptIsHuman !== false && !input.autoDecision) await this.routeAutoBeforeTurn(current, initialPrompt);
         await this.structured.submitHuman(current, { requestId: randomUUID(), text: initialPrompt });
         recordedInitialUserInput = recordedUserInputFromEvent(this.appendEvent(current, {
           type: input.initialPromptIsHuman === false ? 'agent-input' : 'user-input',
@@ -5415,7 +5521,7 @@ export class SessionManager {
       before: screen,
       after: screen,
     });
-    const providerLabel = session.provider === 'claude' ? 'Claude' : 'Codex';
+    const providerLabel = PROVIDER_NAMES[session.provider];
     throw new SessionKeystrokeRejectedError(`${providerLabel} is waiting for an approval or menu selection. Answer it in the live session before resending your message. The draft was not submitted.`);
   }
 

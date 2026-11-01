@@ -117,6 +117,14 @@ Rules:
   session host's record file (`docs/structured-cutover.md`, "Session host relay"), not by this key. `structured-epoch:<sessionId>` = ISO time the thread was last loaded
   on the current connection (recency and run-epoch guard).
 
+### Schema version 21
+
+- `bound_sessions.grok_profile TEXT`: the model profile (`auto`, `high`, `medium`, `low`) of a Grok session, beside `codex_profile` and
+  `claude_profile`. It is written and kept like them (a stale upsert cannot overwrite a newer profile; the completion of a
+  model-profile request writes the column of the row's provider). Old rows read as having none.
+- `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 21 in the same change.
+- Provisional Auto routing and the provider-neutral Start add no column: they live in the existing `auto_route_json`.
+
 ### Shared contracts (`packages/shared/src/index.ts`)
 
 ```ts
@@ -143,13 +151,21 @@ export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
     "command": ["claude"],
     "idleUnloadMinutes": 60,
     "env": {}
+  },
+  "grok": {
+    "enabled": false,
+    "command": ["grok"],
+    "idleUnloadMinutes": 60,
+    "env": {}
   }
 }
 ```
 
 `defaultTransport` (`tmux` or `structured`, default `tmux`) is the transport of a bind that names none and the switch for
 moving existing tmux conversations over; it only takes effect for a provider whose lane is enabled. The Claude block has
-the same shape as the Codex one; `command` is the `claude` executable and any leading arguments. See
+the same shape as the Codex one; `command` is the `claude` executable and any leading arguments. So does the Grok block
+(`command` is the `grok` executable); Grok has no terminal transport, so with its lane off Grok is not offered at all and
+a bind that names it fails with the structured-disabled message. See
 `docs/structured-cutover.md`, "Per-session host support, default transport and migration (lane C2)".
 
 `env` is extra environment for the provider process. The Console first sets `AGENT_COORD_RUNTIME` (its
@@ -785,6 +801,74 @@ model request, so every thread starts with `mcp_optional_startup_grace_ms: 10000
 The prove script verifies hook registration and an MCP coordination call from inside a structured turn, and that the
 MCP server it ran is this Console's (pinned by the app-server argv, see "Coordination MCP pinning").
 
+## Grok plugin (`apps/server/src/providers/transport/grok/`)
+
+Added 2026-11-01, branch `feature/grok-and-start`. Grok Build (`grok` 1.0.70, signed in with the grok.com subscription) is
+the third provider and the first ACP agent in the lane. It runs on the structured transport only. What the plugin relies on was
+checked against the real CLI on 2026-11-01 with scratch sessions; the stand-in used by the tests (`test/helpers/fake-grok.mjs`)
+reproduces those shapes.
+
+**Process.** `grok agent --always-approve [--model M] [--reasoning-effort E] stdio`, started through the session host relay
+with host id `grok-<conversationId>` in the project directory. One process per conversation (`processModel: 'per-session'`).
+The command line a conversation was launched with is recorded in plugin meta (`grok-launch:<conversationId>`) because the host
+is keyed by it; the model on the command line is only the starting model. The environment drops everything that names the
+starting session (`CLAUDECODE`, `CLAUDE_CODE_*`, `TMUX`, `CODEX_THREAD_ID`, `AGENT_CONSOLE_*`, `AGENT_COORD_*`, `NODE_OPTIONS`,
+`DEBUG`) and adds the conversation's own `AGENT_CONSOLE_SESSION_ID`; Grok loads the Claude hooks, so the coordination hook
+registers the process as `grok` as before.
+
+**Protocol (ACP, JSON-RPC 2.0 on stdio, newline framing).**
+
+| Console action | ACP | Notes |
+| --- | --- | --- |
+| start | `initialize`, `session/new {cwd, mcpServers, _meta: {yoloMode: true, rules?}}` | Grok returns the session id; the models and the current model and effort are in the reply. `mcpServers` carries this conversation's coordination MCP server (ACP's list of `{name, command, args, env: [{name, value}]}`); `_meta.rules` carries a grant's authority text. |
+| resume, no process left | `initialize`, `_x.ai/sessions/list`, `session/load {sessionId, cwd, mcpServers}` | `session/load` streams the saved history back as `session/update` notifications before it answers; the plugin drops them. The saved model and effort are restored. An unknown id answers `-32603` with `FS_NOT_FOUND`, which becomes `ResumeFailedError`. |
+| resume, process survived | attach-only connect, `initialize` again, `_x.ai/sessions/list` | The roster says whether the session is resident and whether its `activity` is `working`. A working session becomes an adopted turn. See below. |
+| send | `session/prompt {sessionId, prompt: [image blocks..., text]}` | Stays open for the whole turn. Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`; Grok's `_x.ai/session_notification` carries `turn_completed {stop_reason, usage}`. The answer is `{stopReason}`: `end_turn`, `cancelled`, `refusal`, `max_tokens`, `max_turn_requests`. |
+| switch model or effort | `session/set_config_option {sessionId, configId: 'model' \| 'reasoning_effort', value}` | `value` is a plain string (an object is rejected). Applied at once and kept in the saved session. Sent before the prompt, model first, only when it differs from what the session runs on; an unknown model is a definite refusal (`SendRejectedError`). |
+| Stop | `session/cancel` (notification) | Grok ends the turn with `stopReason: 'cancelled'` and the session takes the next prompt. If no answer comes within 10 seconds the turn is closed locally as interrupted. |
+
+**Events.** `session.native` (the session id, and the `updates.jsonl` path), `session.state ready`, `turn.started`
+(`origin: 'user'` for a prompt the Console sent; `origin: 'provider'` for content Grok produces by itself, a background task
+waking it), `item.completed` (one per block of streamed text, closed when the kind of block changes, and one per finished tool
+call; chunks are not reported one by one), `usage.updated` (context fill from Grok's token total and the model's context
+window), `turn.terminal` exactly once per turn (whichever of the prompt answer and `turn_completed` comes first), `notice`
+(output limit, model-call retries). `request.opened` is raised for an ACP `session/request_permission`; the host has no approval
+UI and declines it, which the plugin answers as `cancelled`. `hasBackgroundWork()` follows `task_backgrounded`, `task_completed`
+and `background_tasks`.
+
+**Capabilities.** `processModel: 'per-session'`, `nativeIds: 'server-allocated'`, `steer: 'none'` (a second prompt sent mid-turn
+would queue inside Grok behind the running one, so the Console keeps it in its own queue and sends it when the turn ends),
+`interrupt: 'terminal-follows'`, `images: true`, `modelSwitch: 'next-turn'`.
+
+**After a backend restart.** The process keeps running behind its session host, so the new backend does not start another:
+`reattach` (startup) and `resume` (first use) connect attach-only with the recorded argv, send a repeated `initialize`
+(Grok accepts it) and read the roster. A session that is `working` becomes the adopted turn (`TransportSession.activeTurn`),
+under the turn id the earlier backend recorded in `grok-turn:<conversationId>`; its end arrives as `turn_completed` on the new
+connection, or as the JSON-RPC answer to the old `session/prompt`, which no request of the new client is waiting for and which
+`JsonRpcClient` hands to `onUnmatchedResponse`. A request id that is larger than any used before (the clock) keeps that late
+answer from ever matching a new request. A survivor whose roster cannot be read is taken for busy when a turn record exists. A
+host that runs but does not answer is left alone (`TransportBusyError`); after five minutes of consecutive silence an ordinary
+open ends it and starts a new process, as the other plugins do. When the process is gone, `resume` starts a new one and runs
+`session/load`.
+
+**Past conversations.** Grok saves each conversation under `<grok home>/sessions/<URL-encoded working directory>/<session id>/`
+(`summary.json` with the directory, title and model; `updates.jsonl`, the ACP update stream). `GrokProvider` lists the ones
+saved for a project's paths (the directory in `summary.json` decides, so a past Grok chat can be opened and bound like a past
+Codex chat; `session/load` resumes it), and `parseGrokConversationFile` joins the chunks into messages. This works without a
+running Grok. The index watches the sessions folder for new conversations.
+
+**Limits and open points.** The turn that was running while the backend was down is found from the roster only when Grok still
+holds the session in memory; a turn that ended while no backend was connected leaves no trace except the saved history. Grok
+under `--always-approve` raised no permission request in any run; the decline path is covered by the stand-in only. Whether Grok
+accepts a second `initialize` on every future version is unverified beyond 1.0.70 (a refusal would be treated as a failed
+handshake). Grok's weekly usage is read by workflow_optimizer (`wo quota`) from the CLI's own `_x.ai/billing` call; the Console
+does not read it.
+
+**Verification (2026-11-01).** `test/structured-grok-plugin.test.ts` (20 tests: launch, event mapping, profile switch, images,
+cancel, errors, permission, process death, `session/load`, adoption of an idle and a running survivor behind a real session
+host), `grok-provider.test.ts`, `start-conversation.test.ts`, `model-profiles.test.ts` and the Auto tests. One manual run
+against the real CLI: see the report of the work for the transcript.
+
 ## SessionManager seams (slice 1)
 
 Each is an early `if (session.transport === 'structured')` that delegates to
@@ -1170,7 +1254,7 @@ after W4, then a fix loop, then the full test run and the proof script again.
 2. Approvals and questions UI with push notifications; thread policy `on-request`.
 3. Claude plugin (Agent SDK, one process per conversation; steer cancels running tools; interrupt ends
    the process and the next turn resumes). Resolve the Anthropic third-party login clause first.
-4. ACP plugin (Mistral Vibe, Grok): one process per session, host-enforced permissions, steer as
-   interrupt plus new turn, per-agent failure classification.
+4. ACP plugin: Grok is done (see "Grok plugin"). Mistral Vibe and other ACP agents could reuse the same JSON-RPC client and
+   the roster-free parts of the plugin; each needs its own failure classification.
 5. Retire the tmux path per provider once the structured path has carried real work for a while; then
    supersede `design/extension-agent-lane`.

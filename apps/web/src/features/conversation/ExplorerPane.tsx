@@ -1,18 +1,19 @@
-import { Bot, ChevronRight, FolderTree, Sparkles } from 'lucide-react';
-import type { ProjectSummary, ProviderId } from '@agent-console/shared';
+import { ChevronRight, FolderTree } from 'lucide-react';
+import { PROVIDERS, PROVIDER_NAMES, type ProjectSummary, type ProviderId } from '@agent-console/shared';
 import clsx from 'clsx';
 import { Link } from 'react-router-dom';
+import { PROVIDER_ICONS } from '../../lib/provider-icons';
+
+function ProviderGlyph({ provider, className }: { provider: ProviderId; className: string }) {
+  const Icon = PROVIDER_ICONS[provider];
+  return <Icon className={className} />;
+}
 
 function ProviderPill({ provider }: { provider: ProviderId }) {
-  return provider === 'codex' ? (
+  return (
     <>
-      <Sparkles className="h-4 w-4 text-sky-300" />
-      Codex
-    </>
-  ) : (
-    <>
-      <Bot className="h-4 w-4 text-sky-300" />
-      Claude
+      <ProviderGlyph provider={provider} className="h-4 w-4 text-sky-300" />
+      {PROVIDER_NAMES[provider]}
     </>
   );
 }
@@ -107,8 +108,8 @@ export function ExplorerPane({
             <h1 className="text-2xl font-semibold text-slate-100">{project.displayName}</h1>
             <p className="mt-1 text-sm text-slate-400">Choose a provider to browse indexed conversations for this project.</p>
           </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            {(['codex', 'claude'] as const).map((provider) => (
+          <div className="grid gap-4 md:grid-cols-3">
+            {PROVIDERS.map((provider) => (
               <Link
                 key={provider}
                 to={`/projects/${encodeURIComponent(project.slug)}/${provider}`}
@@ -116,7 +117,7 @@ export function ExplorerPane({
               >
                 <div className="flex items-start gap-3">
                   <div className="rounded-2xl border border-slate-700 bg-slate-950 p-3 text-sky-300">
-                    {provider === 'codex' ? <Sparkles className="h-5 w-5" /> : <Bot className="h-5 w-5" />}
+                    <ProviderGlyph provider={provider} className="h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="inline-flex items-center gap-2 text-lg font-semibold text-slate-100">

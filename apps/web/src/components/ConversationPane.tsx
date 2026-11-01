@@ -2,13 +2,13 @@ import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
 import { PendingQuestionCard } from './PendingQuestionCard';
 import { Bug, Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
-import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_SHORTCUTS, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_SHORTCUTS, PROVIDER_NAMES, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type NormalizedMessage, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import { AnsiUp } from 'ansi_up';
 import clsx from 'clsx';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import { api } from '../lib/api';
-import { activeProfileTarget, offeredProfileKeys, type ModelProfilesState } from '../lib/model-profiles';
+import { activeProfileTarget, offeredProfileKeys, sessionModelProfile, type ModelProfilesState } from '../lib/model-profiles';
 import { useClipboardImages } from '../features/conversation/useClipboardImages';
 import { CONVERSATION_DRAG_TYPE, formatAgentReference, readConversationDrag } from '../features/conversation/agent-reference';
 import { copyTextToClipboard } from '../lib/clipboard';
@@ -217,6 +217,13 @@ function upsertLiveBridgeDraft(
   liveBridgeDraftStore.set(conversationKey, next);
 }
 
+/** How each provider's structured session is driven, as the small badge and its tooltip say it. */
+const STRUCTURED_PROTOCOLS: Record<ProviderId, { label: string; title: string }> = {
+  codex: { label: 'app-server', title: 'Codex app-server protocol' },
+  claude: { label: 'headless', title: 'Claude headless protocol' },
+  grok: { label: 'ACP', title: 'Grok ACP protocol' },
+};
+
 function modelProfileLabel(profile: ModelProfileKey): string {
   return profile.charAt(0).toUpperCase() + profile.slice(1);
 }
@@ -333,7 +340,7 @@ function LiveSessionInputBridge({
   const [agentDragOver, setAgentDragOver] = useState(false);
   const profileLevels = modelProfiles.status === 'ready' ? modelProfiles.profiles.providers[provider].levels : undefined;
   const offeredProfiles = offeredProfileKeys(structured);
-  const providerLabel = provider === 'codex' ? 'Codex' : 'Claude';
+  const providerLabel = PROVIDER_NAMES[provider];
   const hasNumericMenuDraft = nativeSelectionActive && /^\d{1,8}$/.test(draftText.trim());
 
   async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
@@ -1619,8 +1626,9 @@ export function ConversationPane({
   const boundSession = timeline?.boundSession;
   const liveScreen = timeline?.liveScreen;
   const structuredSession = boundSession?.transport === 'structured';
-  // Claude runs headless; Codex runs through its app-server protocol. Neither has a terminal.
-  const structuredLabel = boundSession?.provider === 'claude' ? 'headless' : 'app-server';
+  // Claude runs headless, Codex through its app-server protocol and Grok through ACP. None of them has a terminal.
+  const structuredProtocol = boundSession ? STRUCTURED_PROTOCOLS[boundSession.provider] : undefined;
+  const structuredLabel = structuredProtocol?.label;
   const compactLiveLayout = workMode && liveMode;
   const hideTopPanel = isMobile ? !mobileDetailsOpen : mobileChromeHidden;
   const largeTranscriptDismissKey = conversationKey ? `ac:large-chat-warning-dismissed:${conversationKey}` : undefined;
@@ -1834,7 +1842,7 @@ export function ConversationPane({
         <div className="flex h-full items-center justify-center px-6 text-center">
           <div className="max-w-md">
             <div className="text-lg font-medium text-slate-100">Work mode</div>
-            <div className="mt-2 text-sm text-slate-400">{isMobile ? 'Open Chats to choose a conversation or start a new one.' : 'Select a bound session from the left pane or start a new Codex or Claude session there.'}</div>
+            <div className="mt-2 text-sm text-slate-400">{isMobile ? 'Open Chats to choose a conversation or start a new one.' : 'Select a bound session from the left pane or start a new chat there.'}</div>
           </div>
         </div>
       );
@@ -1954,8 +1962,8 @@ export function ConversationPane({
                   <span className={clsx('rounded-full border px-2.5 py-1', boundSession ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300' : 'border-slate-700 text-slate-400')}>
                     {conversationStatus}
                   </span>
-                  {structuredSession && (
-                    <span title={`Driven through the ${boundSession?.provider === 'claude' ? 'Claude headless protocol' : 'Codex app-server protocol'} rather than a terminal`} className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">{structuredLabel}</span>
+                  {structuredSession && structuredProtocol && (
+                    <span title={`Driven through the ${structuredProtocol.title} rather than a terminal`} className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 text-sky-300">{structuredProtocol.label}</span>
                   )}
                   {timeline.conversation.degraded && (
                     <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2.5 py-1 text-amber-300">Degraded parse</span>
@@ -2127,7 +2135,7 @@ export function ConversationPane({
           mobileChromeHidden={mobileChromeHidden}
           onToggleMobileChrome={onToggleMobileChrome}
           latestAssistantMessage={latestAssistantMessage}
-          activeModelProfile={boundSession.provider === 'codex' ? boundSession.codexProfile : boundSession.claudeProfile}
+          activeModelProfile={sessionModelProfile(boundSession)}
           autoRoute={boundSession.autoRoute}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}

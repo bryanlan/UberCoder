@@ -1,6 +1,7 @@
 import type { ProviderId } from '@agent-console/shared';
 import { ClaudeProvider } from './claude-provider.js';
 import { CodexProvider } from './codex-provider.js';
+import { GrokProvider } from './grok-provider.js';
 import type { ProviderAdapter, TranscriptParseCache } from './types.js';
 
 export class ProviderRegistry {
@@ -10,6 +11,7 @@ export class ProviderRegistry {
     this.providers = {
       codex: new CodexProvider(parseCache),
       claude: new ClaudeProvider(parseCache),
+      grok: new GrokProvider(parseCache),
     };
   }
 

@@ -27,6 +27,11 @@ const readyProfiles: ModelProfilesState = {
         medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
         low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
       } },
+      grok: { routerProvider: 'xai', levels: {
+        high: level('grok-build-high', 'Grok Build High', 'high'),
+        medium: level('grok-build-medium', 'Grok Build Medium', 'medium'),
+        low: level('grok-build-low', 'Grok Build Low', 'low'),
+      } },
     },
   },
 };
@@ -138,6 +143,7 @@ function project(): ProjectSummary {
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations: [] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
+      grok: { id: 'grok', label: 'Grok', conversations: [] },
     },
   };
 }
@@ -300,6 +306,25 @@ it('offers Claude H/M/L models and selects high without changing the draft', asy
   expect(textbox).toHaveValue('keep this Claude draft');
 });
 
+it('offers Grok A/H/M/L on a structured Grok session, reads grokProfile and selects with Alt H', async () => {
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
+  renderPane({
+    onSetModelProfile,
+    sessionOverrides: { provider: 'grok', transport: 'structured', tmuxSessionName: 'acs-session-1', grokProfile: 'medium' },
+    screenModel: 'grok-build-medium medium',
+  });
+  const group = screen.getByLabelText('Grok model profile');
+  expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'H', 'M', 'L']);
+  expect(screen.getByRole('button', { name: 'Use high Grok profile' })).toHaveAttribute('title', expect.stringContaining('grok-build-high / high'));
+  expect(screen.getByRole('button', { name: 'Use medium Grok profile' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('button', { name: 'Use low Grok profile' })).toHaveAttribute('aria-pressed', 'false');
+  const textbox = screen.getByRole('textbox');
+  fireEvent.change(textbox, { target: { value: 'keep this Grok draft' } });
+  fireEvent.keyDown(textbox, { key: 'h', altKey: true });
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'high'));
+  expect(textbox).toHaveValue('keep this Grok draft');
+});
+
 describe('Auto model profile (A)', () => {
   const structuredCodex = { transport: 'structured' as const, tmuxSessionName: 'acs-session-1' };
   const decision = {
@@ -339,6 +364,31 @@ describe('Auto model profile (A)', () => {
     expect(line).toHaveTextContent('A → Sonnet 5.5·low · implementer 91% · lighter · Claude on pace');
     expect(line).toHaveAttribute('title', decision.reason);
     expect(screen.getByRole('button', { name: 'Use auto Claude profile' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('marks a provisional choice, says the role is unclear, and drops the re-route hint', () => {
+    renderPane({
+      sessionOverrides: { ...structuredCodex, codexProfile: 'auto', autoRoute: { routePending: true, provisionalRoutes: 1, previousPrompt: 'hm', decision: {
+        source: 'router', decidedAt: baseTime, model: 'gpt-6-luna', label: 'GPT-6 Luna', effort: 'low', launchName: 'gpt-6-luna',
+        role: 'implementer', rolePercent: 41, difficulty: 'lighter', classifierStatus: 'cannot_tell', provisional: true,
+      } } },
+    });
+    const line = screen.getByTestId('auto-route-line');
+    expect(line).toHaveTextContent('A (provisional) → GPT-6 Luna·low · role unclear · lighter');
+    expect(line).not.toHaveTextContent('41%');
+    expect(line).not.toHaveTextContent('re-routes with your next message');
+  });
+
+  it('shows a Grok session\'s Auto choice with its own name and quota state', () => {
+    renderPane({
+      sessionOverrides: { ...structuredCodex, provider: 'grok', grokProfile: 'auto', autoRoute: { routePending: false, decision: {
+        source: 'router', decidedAt: baseTime, model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7',
+        role: 'implementer', rolePercent: 72, difficulty: 'lighter', quotaState: 'unknown',
+      } } },
+      screenModel: 'grok-4.7 high',
+    });
+    expect(screen.getByTestId('auto-route-line')).toHaveTextContent('A → Grok 4.7·high · implementer 72% · lighter · Grok quota unknown');
+    expect(screen.getByRole('button', { name: 'Use auto Grok profile' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('says the next message will be routed while A is pending, and shows a fallback warning', () => {
@@ -1314,6 +1364,14 @@ describe('ConversationPane app-server (structured) sessions', () => {
 
     expect(screen.getByText('headless')).toBeVisible();
     expect(screen.queryByText('app-server')).not.toBeInTheDocument();
+  });
+
+  it('labels a structured Grok session ACP and names the Grok ACP protocol in its tooltip', () => {
+    renderPane({ sessionOverrides: { ...structured, provider: 'grok', grokProfile: 'medium' } });
+
+    expect(screen.getByText('ACP')).toHaveAttribute('title', 'Driven through the Grok ACP protocol rather than a terminal');
+    expect(screen.queryByText('app-server')).not.toBeInTheDocument();
+    expect(screen.queryByText('headless')).not.toBeInTheDocument();
   });
 
   it('keeps Send, Esc and Stop, the model profile controls, copy, suspend and release', () => {

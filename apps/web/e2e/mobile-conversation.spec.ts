@@ -21,6 +21,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations: slug === 'demo' ? chats : [] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
+      grok: { id: 'grok', label: 'Grok', conversations: [] },
     },
   }));
   const messages: NormalizedMessage[] = Array.from({ length: 30 }, (_, i) => ({

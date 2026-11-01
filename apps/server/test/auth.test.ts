@@ -12,7 +12,7 @@ import { AuthService } from '../src/security/auth-service.js';
 function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig {
   return {
     coordination: { enabled: false, pilotPaths: [] },
-    modelRouting: { woPath: '/usr/local/bin/wo', profilesTimeoutMs: 10_000, routeTimeoutMs: 8_000 },
+    modelRouting: { woPath: '/usr/local/bin/wo', profilesTimeoutMs: 10_000, routeTimeoutMs: 8_000, startDefault: { provider: 'codex', profile: 'medium' } },
     workerSummaries: { enabled: false, runtimeCommand: ['agent-consult'] },
     conversationTitles: { enabled: false, runtimeCommand: ['agent-consult'] },
     server: {
@@ -33,6 +33,7 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       defaultTransport: 'tmux',
       codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
       claude: { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} },
+      grok: { enabled: false, command: ['grok'], idleUnloadMinutes: 60, env: {} },
     },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -63,6 +64,16 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
           newCommand: ['claude'],
           resumeCommand: ['claude', '--resume', '{{conversationId}}'],
           continueCommand: ['claude', '--continue'],
+          env: {},
+        },
+      },
+      grok: {
+        enabled: true,
+        discoveryRoot: '~/.grok',
+        commands: {
+          newCommand: ['grok'],
+          resumeCommand: ['grok', '--resume', '{{conversationId}}'],
+          continueCommand: ['grok', '--continue'],
           env: {},
         },
       },

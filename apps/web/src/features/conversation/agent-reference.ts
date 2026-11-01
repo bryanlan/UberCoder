@@ -1,5 +1,5 @@
 import type { DragEvent } from 'react';
-import type { AgentReference, ProviderId } from '@agent-console/shared';
+import { PROVIDERS, type AgentReference, type ProviderId } from '@agent-console/shared';
 
 export const CONVERSATION_DRAG_TYPE = 'application/x-agent-console-conversation';
 
@@ -20,7 +20,7 @@ export function readConversationDrag(data: DataTransfer): ConversationDragRefere
   try {
     const value = JSON.parse(data.getData(CONVERSATION_DRAG_TYPE));
     if (typeof value?.projectSlug === 'string' && value.projectSlug.length > 0 && value.projectSlug.length <= 200
-      && (value.provider === 'codex' || value.provider === 'claude')
+      && PROVIDERS.includes(value.provider)
       && typeof value.conversationRef === 'string' && value.conversationRef.length > 0 && value.conversationRef.length <= 200) return value;
   } catch { /* A malformed drag is rejected without changing the draft. */ }
   return undefined;

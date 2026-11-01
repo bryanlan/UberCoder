@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ModelProfileService,
   ModelProfilesUnavailableError,
+  ROUTE_REPLY_MAX_CHARS,
   ROUTE_TASK_MAX_CHARS,
+  composeRerouteTask,
   fallbackDecision,
   peekSessionModelTarget,
   sessionModelTarget,
@@ -19,6 +21,9 @@ const PROFILES_JSON = JSON.stringify({ profiles: {
   } },
   claude: { provider: 'anthropic', levels: {
     high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+  } },
+  grok: { provider: 'xai', levels: {
+    high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
   } },
 } });
 const ROUTE_JSON = {
@@ -209,5 +214,92 @@ describe('the stand-in wo command (real subprocess path)', () => {
     } finally {
       process.env.AGENT_CONSOLE_WO_PATH = saved;
     }
+  });
+});
+
+describe('Grok and the provider-neutral route', () => {
+  const grokAnswer = { ...ROUTE_JSON, provider: 'xai', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launch_name: 'grok-4.7', quota_state: 'unknown' };
+
+  it('serves Grok\'s High, Medium and Low profiles from `wo profiles`', async () => {
+    const service = new ModelProfileService({}, runner({ profiles: () => PROFILES_JSON }).run);
+    const profiles = await service.profiles();
+    expect(profiles.providers.grok.routerProvider).toBe('xai');
+    expect(profiles.providers.grok.levels.low).toEqual({ model: 'grok-4.6', label: 'Grok 4.6', effort: 'medium', launchName: 'grok-4.6' });
+    expect(await service.entry('grok', 'high')).toMatchObject({ launchName: 'grok-4.7', effort: 'xhigh' });
+  });
+
+  it('asks the router with no --provider when no provider is given, and says which Console provider won', async () => {
+    const { run, calls } = runner({ route: () => JSON.stringify(grokAnswer) });
+    const outcome = await new ModelProfileService({}, run).route(undefined, 'add a flag');
+    expect(calls[0]).toEqual(['route', '--task', 'add a flag', '--launcher', 'console', '--json']);
+    expect(outcome).toMatchObject({ ok: true, provider: 'grok', decision: { model: 'grok-4.7', launchName: 'grok-4.7', quotaState: 'unknown' } });
+    for (const [vendor, expected] of [['openai', 'codex'], ['anthropic', 'claude'], ['xai', 'grok']] as const) {
+      const routed = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: vendor }) }).run).route(undefined, 'x');
+      expect(routed).toMatchObject({ ok: true, provider: expected });
+    }
+  });
+
+  it('passes xai for a Grok session and refuses an answer from another vendor', async () => {
+    const { run, calls } = runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: 'openai' }) });
+    const outcome = await new ModelProfileService({}, run).route('grok', 'x');
+    expect(calls[0]!.slice(-3)).toEqual(['--provider', 'xai', '--json']);
+    expect(outcome).toEqual({ ok: false, reason: 'the router chose a model from openai for a grok session' });
+  });
+
+  it('refuses a vendor the Console has no provider for', async () => {
+    const outcome = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: 'mistral' }) }).run).route(undefined, 'x');
+    expect(outcome).toMatchObject({ ok: false, reason: expect.stringContaining('mistral') });
+  });
+
+  it('uses the router\'s best alternative on a provider that can take new chats when its first choice cannot', async () => {
+    const answer = { ...grokAnswer, alternatives: [
+      { provider: 'xai', model: 'grok-4.6', label: 'Grok 4.6', effort: 'low', launch_name: 'grok-4.6', quota_state: 'unknown' },
+      { provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launch_name: 'gpt-6.1-terra', quota_state: 'tight' },
+    ] };
+    const service = new ModelProfileService({}, runner({ route: () => JSON.stringify(answer) }).run);
+    const outcome = await service.route(undefined, 'x', { acceptProvider: provider => provider !== 'grok' });
+    expect(outcome).toMatchObject({ ok: true, provider: 'codex', decision: {
+      model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launchName: 'gpt-6.1-terra', quotaState: 'tight',
+      reason: expect.stringContaining('GPT-6.1 Terra was used because Grok is not available for new chats'),
+    } });
+    const none = await service.route(undefined, 'x', { acceptProvider: () => false });
+    expect(none).toEqual({ ok: false, reason: 'the router chose no model that a new chat can run on' });
+    // The first choice is used as it is when its provider can take the chat.
+    expect(await service.route(undefined, 'x', { acceptProvider: () => true })).toMatchObject({ ok: true, provider: 'grok' });
+  });
+});
+
+describe('Auto decision labels and the provisional flag', () => {
+  it('shows the role and difficulty the classifier read whatever its status says', async () => {
+    const answer = { ...ROUTE_JSON, provisional: true, classifier: { status: 'cannot_tell', role_choice: 'implementer',
+      role_probabilities: { implementer: 0.41, reviewer: 0.38 }, difficulty_choice: 'lighter' } };
+    const outcome = await new ModelProfileService({}, runner({ route: () => JSON.stringify(answer) }).run).route('claude', 'hm');
+    expect(outcome).toMatchObject({ ok: true, decision: { role: 'implementer', rolePercent: 41, difficulty: 'lighter', classifierStatus: 'cannot_tell', provisional: true } });
+  });
+
+  it('records provisional only when the router says so; an older router without the field means a clear result', async () => {
+    const clear = await new ModelProfileService({}, runner({ route: () => JSON.stringify(ROUTE_JSON) }).run).route('claude', 'x');
+    expect(clear.ok && 'provisional' in clear.decision).toBe(false);
+    const explicit = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provisional: false }) }).run).route('claude', 'x');
+    expect(explicit.ok && 'provisional' in explicit.decision).toBe(false);
+    const provisional = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provisional: true }) }).run).route('claude', 'x');
+    expect(provisional.ok && provisional.decision.provisional).toBe(true);
+  });
+});
+
+describe('composeRerouteTask', () => {
+  it('puts the new prompt first, then the start of the last reply, then the earlier prompt, within 2,000 characters', () => {
+    const task = composeRerouteTask({ prompt: 'new question', assistantReply: 'A'.repeat(900), previousPrompt: 'earlier ask' });
+    expect(task.startsWith('new question\n\n' + 'A'.repeat(ROUTE_REPLY_MAX_CHARS) + '\n\nearlier ask')).toBe(true);
+    expect(task).toHaveLength('new question\n\n'.length + ROUTE_REPLY_MAX_CHARS + '\n\nearlier ask'.length);
+    const long = composeRerouteTask({ prompt: 'p'.repeat(1_900), assistantReply: 'r'.repeat(400), previousPrompt: 'q'.repeat(400) });
+    expect(long).toHaveLength(ROUTE_TASK_MAX_CHARS);
+    expect(long.startsWith('p'.repeat(1_900))).toBe(true);
+  });
+
+  it('leaves out what is missing', () => {
+    expect(composeRerouteTask({ prompt: ' only this ' })).toBe('only this');
+    expect(composeRerouteTask({ prompt: 'now', previousPrompt: 'before' })).toBe('now\n\nbefore');
+    expect(composeRerouteTask({ prompt: 'now', assistantReply: '   ' })).toBe('now');
   });
 });

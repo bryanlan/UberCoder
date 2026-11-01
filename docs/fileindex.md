@@ -57,7 +57,8 @@
   including the opt-in eight-hour scan for recent unbound Codex conversations.
 - `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and durable Codex/Claude model-profile request/cancel routes, including
   first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
-- `apps/server/src/model-profiles/service.ts` - the Console's only source of model choices: runs `wo profiles --json` and `wo route --task ... --json`, caches and validates the answers, builds Auto decisions and the Medium fallback, and turns a session row into its model and effort. `apps/server/src/routes/model-profiles.ts` serves `GET /api/model-profiles`.
+- `apps/server/src/model-profiles/service.ts` - the Console's only source of model choices: runs `wo profiles --json` and `wo route --task ... --json`, caches and validates the answers, builds Auto decisions (with the `provisional` flag and the labels the classifier returned) and the Medium fallback, routes with or without a provider (`route(undefined, ...)` is the provider-neutral Start), composes the text of a provisional re-route (`composeRerouteTask`), and turns a session row into its model and effort. `apps/server/src/routes/model-profiles.ts` serves `GET /api/model-profiles`.
+- `apps/server/src/sessions/start-conversation.ts` - the provider-neutral Start (`POST /api/conversations/:projectSlug/start`): routes the first prompt with no provider named, creates the structured chat on the provider the router picked (or on `modelRouting.startDefault` with a warning when routing fails), and sends the prompt as the first turn. `apps/server/test/start-conversation.test.ts` covers it and Grok profile switching.
   `apps/server/test/model-profiles.test.ts`, `model-profile-routes.test.ts` and `auto-model-profile.test.ts` cover them; `apps/server/test/helpers/fake-wo.mjs` stands in for `wo`, and `apps/server/vitest.config.ts` points every server test at it.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
@@ -71,11 +72,12 @@
 - `apps/server/src/titles/service.ts` - first-message GPT-6 Luna titles for chats created in the Console,
   with their durable `titleGeneration` state on the pending record.
 - `apps/server/src/projects/project-service.ts` - explicit project config and project tree behavior.
-- `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, and `registry.ts` - vendor
-  transcript discovery and launch command adapters; Codex pending adoption prefilters decoded JSONL
+- `apps/server/src/providers/codex-provider.ts`, `claude-provider.ts`, `grok-provider.ts` and `registry.ts` - vendor
+  transcript discovery and launch command adapters (Grok has no launch command: it only runs structured); Codex pending adoption prefilters decoded JSONL
   user messages by their recorded text hash.
 - `apps/server/src/providers/transcripts/claude.ts` - Claude JSONL parsing and active-branch
   selection for parent-linked sibling resume histories.
+- `apps/server/src/providers/transcripts/grok.ts` - Grok session parsing: reads `summary.json` (directory, title, model) and joins the chunked `updates.jsonl` stream into messages. `apps/server/test/grok-provider.test.ts` covers listing and parsing.
 - `apps/server/src/providers/transcripts/claude-run-state.ts` - incremental Claude turn lifecycle reading for Work-mode readiness.
 - `apps/server/src/proxy/localhost-proxy.ts` - authenticated allowlisted localhost proxy.
 - `apps/server/src/lib/provider-conversation-cache.ts` - transcript parse cache; small changing
@@ -353,6 +355,14 @@ Run recovery ownership (requires explicit unattended permission):
   and re-encodes an image to what the API accepts before it becomes a base64 block), `event-channel.ts`, `index.ts`.
   `apps/server/src/images/prompt.ts` holds the matching prompt helpers (`withoutImageInstruction`, `imagePromptFiles`, which
   accepts only files directly in the image store).
+- `apps/server/src/providers/transport/grok/` — the Grok plugin (`grok agent --always-approve stdio` over ACP, one process per
+  conversation behind its own session host `grok-<conversationId>`): `grok-instance.ts` (argv, environment, per-session MCP list,
+  launch, attach-only reattach, the session roster check, `session/load`, `probe`), `grok-session.ts` (turns, model switch with
+  `session/set_config_option`, cancel, permission requests, background tasks, event mapping, detach), `protocol.ts` (small readers
+  over the ACP JSON and the failure classifier), `index.ts`. It reuses the JSON-RPC client in `codex/jsonrpc.ts` (with the
+  `"jsonrpc":"2.0"` field and `startRequest`/`onUnmatchedResponse` that ACP needs) and the event channel in `claude/`.
+  `apps/server/test/structured-grok-plugin.test.ts` runs it against `apps/server/test/helpers/fake-grok.mjs`, an ACP agent stand-in
+  (also behind a real session host for the restart cases).
 - `apps/server/src/sessions/structured/pending-requests.ts` — the meta key and projection of the questions a structured
   session is waiting on (`pendingRequests` on the row; the service owns the list).
 - `apps/web/src/components/PendingQuestionCard.tsx` — the question card in the conversation pane; its answer goes to

@@ -11,6 +11,9 @@ function boundSession(input: Partial<BoundSession> & { id: string; conversationR
   return {
     id: input.id,
     provider: input.provider ?? 'codex',
+    codexProfile: input.codexProfile,
+    claudeProfile: input.claudeProfile,
+    grokProfile: input.grokProfile,
     projectSlug: input.projectSlug ?? 'demo',
     conversationRef: input.conversationRef,
     resumeConversationRef: input.resumeConversationRef ?? input.conversationRef,
@@ -123,7 +126,7 @@ describe('AppDatabase', () => {
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
     before.boundSessions.upsert(boundSession({ id: 'auto-session', conversationRef: 'auto-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column auto_route_json; delete from schema_version where version = 20');
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; alter table bound_sessions drop column auto_route_json; delete from schema_version where version in (20, 21)');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 19 });
     before.close();
 
@@ -342,6 +345,45 @@ describe('AppDatabase', () => {
     db.boundSessions.upsert({ ...session, updatedAt: '2026-09-24T11:02:30.000Z' });
     expect(db.boundSessions.getById(session.id)).toMatchObject({ claudeProfile: 'high', codexProfile: undefined });
     db.close();
+  });
+
+  it('commits a Grok profile to the Grok column and preserves it against stale upserts', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-'));
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const session = boundSession({
+      id: 'grok-profile-session', provider: 'grok', grokProfile: 'medium', conversationRef: 'grok-conversation',
+      updatedAt: '2026-11-01T11:00:00.000Z',
+    });
+    db.boundSessions.upsert(session);
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ provider: 'grok', grokProfile: 'medium', codexProfile: undefined, claudeProfile: undefined });
+    const applying = {
+      requestId: 'grok-request', profile: 'high' as const, state: 'applying' as const,
+      requestedAt: '2026-11-01T11:01:00.000Z', startedAt: '2026-11-01T11:02:00.000Z',
+      resumeConversationRef: session.conversationRef,
+    };
+    db.boundSessions.replaceModelProfileRequest(session.id, applying, applying.startedAt);
+    const completed = db.boundSessions.completeModelProfileRequest({
+      id: session.id, requestId: applying.requestId, profile: 'high', updatedAt: '2026-11-01T11:03:00.000Z',
+    });
+    expect(completed).toMatchObject({ grokProfile: 'high', codexProfile: undefined, claudeProfile: undefined, modelProfileRequest: undefined });
+    db.boundSessions.upsert({ ...session, updatedAt: '2026-11-01T11:02:30.000Z' });
+    expect(db.boundSessions.getById(session.id)).toMatchObject({ grokProfile: 'high' });
+    db.close();
+  });
+
+  it('upgrades a version 20 database with a column for the Grok profile, and old rows read as having none', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v20-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const before = new AppDatabase(databasePath);
+    before.boundSessions.upsert(boundSession({ id: 'old-session', provider: 'claude', claudeProfile: 'low', conversationRef: 'old-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; delete from schema_version where version = 21');
+    expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 20 });
+    before.close();
+
+    const after = new AppDatabase(databasePath);
+    expect(after.sqlite.prepare('select name from schema_version where version = 21').get()).toEqual({ name: 'grok-cost-profile' });
+    expect(after.boundSessions.getById('old-session')).toMatchObject({ claudeProfile: 'low', grokProfile: undefined });
+    after.close();
   });
 
   it('deduplicates repeated conversation refs during index replacement', async () => {

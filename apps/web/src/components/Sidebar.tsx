@@ -1,6 +1,6 @@
-import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Plus, RefreshCcw, Search, Sparkles, X } from 'lucide-react';
+import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Play, Plus, RefreshCcw, Search, Sparkles, X, Zap } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import type { ConversationSearchResult, ProjectSummary, ProviderId, RunFailure, SessionTransport, TreeResponse } from '@agent-console/shared';
+import { PROVIDERS, PROVIDER_NAMES, type ConversationSearchResult, type ProjectSummary, type ProviderId, type RunFailure, type SessionTransport, type TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
@@ -11,17 +11,20 @@ import { conversationStatusClasses, getConversationStatusColor } from '../featur
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { TitleTooltip } from './TitleTooltip';
+import { StartComposer } from './StartComposer';
+import { PROVIDER_ICONS } from '../lib/provider-icons';
 import { startConversationDrag } from '../features/conversation/agent-reference';
 
 const enabledToggleClassName = 'border-emerald-500/45 bg-emerald-500/12 text-emerald-300 hover:border-emerald-400/50 hover:bg-emerald-500/16';
 
 /** The New Chat action for a provider's structured (non-terminal) lane. */
-const STRUCTURED_ACTION_LABELS: Record<ProviderId, string> = { codex: 'Codex (app-server)', claude: 'Claude (headless)' };
+const STRUCTURED_ACTION_LABELS: Record<ProviderId, string> = { codex: 'Codex (app-server)', claude: 'Claude (headless)', grok: 'Grok (ACP)' };
+
+/** The providers that can also run in a terminal. Grok runs on the structured transport only. */
+const TERMINAL_PROVIDERS: readonly ProviderId[] = ['codex', 'claude'];
 
 function providerMeta(provider: ProviderId) {
-  return provider === 'codex'
-    ? { label: 'Codex', icon: Sparkles }
-    : { label: 'Claude', icon: Bot };
+  return { label: PROVIDER_NAMES[provider], icon: PROVIDER_ICONS[provider] };
 }
 
 interface SidebarProps {
@@ -37,6 +40,8 @@ interface SidebarProps {
   onToggleRecentActivity: () => Promise<void>;
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId, options?: { transport?: SessionTransport }) => void;
+  /** Provider-neutral Start: resolves true when the chat was created. */
+  onStartConversation: (projectSlug: string, prompt: string) => Promise<boolean>;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
@@ -442,6 +447,7 @@ function ProjectSection({
   creatingAnyConversation,
   structuredProviders,
   onNewConversation,
+  onStartConversation,
   onRenameProject,
   renamingProject,
   onClose,
@@ -468,6 +474,7 @@ function ProjectSection({
   creatingAnyConversation: boolean;
   structuredProviders: readonly ProviderId[];
   onNewConversation: (projectSlug: string, provider: ProviderId, options?: { transport?: SessionTransport }) => void;
+  onStartConversation: (projectSlug: string, prompt: string) => Promise<boolean>;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
   onClose: () => void;
@@ -490,6 +497,7 @@ function ProjectSection({
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftName, setDraftName] = useState(project.displayName);
   const [showAllConversations, setShowAllConversations] = useState(false);
+  const [startOpen, setStartOpen] = useState(false);
 
   useEffect(() => {
     if (workMode) {
@@ -531,7 +539,7 @@ function ProjectSection({
     setMenuOpen(false);
   }
 
-  const collapsedConversations = (['codex', 'claude'] as const)
+  const collapsedConversations = PROVIDERS
     .flatMap((provider) => project.combinedConversations
       .filter((conversation) => conversation.provider === provider)
       .slice(0, 2));
@@ -545,7 +553,7 @@ function ProjectSection({
   return (
     <section
       className={clsx('mb-4 rounded-2xl transition', isDragTarget && 'bg-slate-900/40 ring-1 ring-sky-400/40')}
-      draggable={manualOrderingEnabled && !editingProject}
+      draggable={manualOrderingEnabled && !editingProject && !startOpen}
       onDragStart={() => onDragStartProject(project.slug)}
       onDragOver={(event) => onDragOverProject(event, project.slug)}
       onDrop={() => onDropProject(project.slug)}
@@ -656,6 +664,21 @@ function ProjectSection({
                     <Pencil className="h-3.5 w-3.5 text-slate-400" />
                     Rename project
                   </button>
+                  {structuredProviders.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setStartOpen(true);
+                      }}
+                      disabled={creatingAnyConversation}
+                      title="Type a first message and Console picks the agent"
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Play className="h-3.5 w-3.5 text-sky-300" />
+                      Start a chat (agent picked for you)
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -712,6 +735,21 @@ function ProjectSection({
                       {creatingConversationKey === `${project.slug}:claude:structured` ? `Starting ${STRUCTURED_ACTION_LABELS.claude}…` : STRUCTURED_ACTION_LABELS.claude}
                     </button>
                   )}
+                  {structuredProviders.includes('grok') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onClose();
+                        onNewConversation(project.slug, 'grok', { transport: 'structured' });
+                      }}
+                      disabled={creatingAnyConversation}
+                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Zap className="h-3.5 w-3.5 text-sky-300" />
+                      {creatingConversationKey === `${project.slug}:grok:structured` ? `Starting ${STRUCTURED_ACTION_LABELS.grok}…` : STRUCTURED_ACTION_LABELS.grok}
+                    </button>
+                  )}
                   {project.allowedLocalhostPorts.length > 0 && (
                     <div className="mt-1 border-t border-slate-800 pt-1">
                       {project.allowedLocalhostPorts.map((port) => (
@@ -748,6 +786,17 @@ function ProjectSection({
           </div>
         ) : null}
       </div>
+      {startOpen && (
+        <div className="ml-7 border-l border-slate-800 pl-3">
+          <StartComposer
+            projectName={project.displayName}
+            starting={creatingConversationKey === `${project.slug}:start`}
+            disabled={creatingAnyConversation}
+            onSend={(prompt) => onStartConversation(project.slug, prompt)}
+            onClose={() => setStartOpen(false)}
+          />
+        </div>
+      )}
       <div className="ml-7 mt-2 border-l border-slate-800 pl-3">
         {project.combinedConversations.length > 0 ? (
           <div className="space-y-1">
@@ -804,6 +853,57 @@ function ProjectSection({
   );
 }
 
+/** One project in the phone-sized New chat picker: a button per way to start, and the Start box when it is open. */
+function MobileNewChatCard({
+  project,
+  creatingConversationKey,
+  creatingAnyConversation,
+  structuredProviders,
+  onNewConversation,
+  onStartConversation,
+  onStarted,
+}: {
+  project: ProjectSummary;
+  creatingConversationKey?: string;
+  creatingAnyConversation: boolean;
+  structuredProviders: readonly ProviderId[];
+  onNewConversation: SidebarProps['onNewConversation'];
+  onStartConversation: SidebarProps['onStartConversation'];
+  onStarted: () => void;
+}) {
+  const [startOpen, setStartOpen] = useState(false);
+  const buttonClassName = 'min-h-11 min-w-[7rem] flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50';
+  return (
+    <section className="mb-3 rounded-xl border border-slate-800 p-3">
+      <div className="mb-2 font-medium">{project.displayName}</div>
+      <div className="flex flex-wrap gap-2">
+        {structuredProviders.length > 0 && (
+          <button type="button" aria-expanded={startOpen} disabled={creatingAnyConversation} onClick={() => setStartOpen(open => !open)} title="Type a first message and Console picks the agent" className={buttonClassName}>Start</button>
+        )}
+        {TERMINAL_PROVIDERS.map(provider => (
+          <button key={provider} type="button" disabled={creatingAnyConversation} onClick={() => onNewConversation(project.slug, provider)} className={buttonClassName}>{providerMeta(provider).label}</button>
+        ))}
+        {PROVIDERS.filter(provider => structuredProviders.includes(provider)).map(provider => (
+          <button key={`${provider}:structured`} type="button" disabled={creatingAnyConversation} onClick={() => onNewConversation(project.slug, provider, { transport: 'structured' })} className={buttonClassName}>{STRUCTURED_ACTION_LABELS[provider]}</button>
+        ))}
+      </div>
+      {startOpen && (
+        <StartComposer
+          projectName={project.displayName}
+          starting={creatingConversationKey === `${project.slug}:start`}
+          disabled={creatingAnyConversation}
+          onSend={async (prompt) => {
+            const started = await onStartConversation(project.slug, prompt);
+            if (started) onStarted();
+            return started;
+          }}
+          onClose={() => setStartOpen(false)}
+        />
+      )}
+    </section>
+  );
+}
+
 export function Sidebar({
   tree,
   open,
@@ -817,6 +917,7 @@ export function Sidebar({
   onToggleRecentActivity,
   onReorderProjects,
   onNewConversation,
+  onStartConversation,
   onRenameProject,
   onRebindConversation,
   onRenameConversation,
@@ -1044,14 +1145,16 @@ export function Sidebar({
           )}
           <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">
             {isMobile && newChatMode ? (tree?.projects ?? []).map(project => (
-              <section key={project.slug} className="mb-3 rounded-xl border border-slate-800 p-3">
-                <div className="mb-2 font-medium">{project.displayName}</div>
-                <div className="flex gap-2">{(['codex', 'claude'] as const).map(provider => (
-                  <button key={provider} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{providerMeta(provider).label}</button>
-                ))}{(['codex', 'claude'] as const).filter(provider => structuredProviders.includes(provider)).map(provider => (
-                  <button key={`${provider}:structured`} type="button" disabled={creatingAnyConversation} onClick={() => { setNewChatMode(false); onClose(); onNewConversation(project.slug, provider, { transport: 'structured' }); }} className="min-h-11 flex-1 rounded-xl border border-slate-700 text-sm text-sky-200 disabled:opacity-50">{STRUCTURED_ACTION_LABELS[provider]}</button>
-                ))}</div>
-              </section>
+              <MobileNewChatCard
+                key={project.slug}
+                project={project}
+                creatingConversationKey={creatingConversationKey}
+                creatingAnyConversation={creatingAnyConversation}
+                structuredProviders={structuredProviders}
+                onNewConversation={(projectSlug, provider, options) => { setNewChatMode(false); onClose(); onNewConversation(projectSlug, provider, options); }}
+                onStartConversation={onStartConversation}
+                onStarted={() => { setNewChatMode(false); onClose(); }}
+              />
             )) : showingSubmittedSearchResults ? (
               <SearchResultsPanel
                 query={trimmedSubmittedSearchQuery}
@@ -1072,6 +1175,7 @@ export function Sidebar({
                 creatingAnyConversation={creatingAnyConversation}
                 structuredProviders={structuredProviders}
                 onNewConversation={onNewConversation}
+                onStartConversation={onStartConversation}
                 onRenameProject={onRenameProject}
                 renamingProject={renamingProjectKey === project.slug}
                 onClose={onClose}

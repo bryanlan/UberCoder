@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { ConversationSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import { PROVIDERS, type ConversationSummary, type ProviderId, type TreeResponse } from '@agent-console/shared';
 import { z } from 'zod';
 import { nowIso } from '../lib/time.js';
 import { AuthService } from '../security/auth-service.js';
@@ -11,7 +11,7 @@ export const RECENT_AUTO_TRACK_WINDOW_MS = 8 * 60 * 60 * 1000;
 const refreshProjectsBodySchema = z.object({
   autoTrackRecent: z.boolean().optional(),
   projectSlug: z.string().min(1).optional(),
-  providerId: z.enum(['codex', 'claude']).optional(),
+  providerId: z.enum(PROVIDERS).optional(),
 }).refine(
   ({ projectSlug, providerId }) => Boolean(projectSlug) === Boolean(providerId),
   { message: 'projectSlug and providerId must be provided together.' },

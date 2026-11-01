@@ -39,12 +39,19 @@
       "command": ["claude"],
       "idleUnloadMinutes": 60,
       "env": {}
+    },
+    "grok": {
+      "enabled": false,
+      "command": ["grok"],
+      "idleUnloadMinutes": 60,
+      "env": {}
     }
   },
   "modelRouting": {
     "woPath": "/home/bryan/code/workflow_optimizer/.venv/bin/wo",
     "profilesTimeoutMs": 10000,
-    "routeTimeoutMs": 8000
+    "routeTimeoutMs": 8000,
+    "startDefault": { "provider": "codex", "profile": "medium" }
   },
   "security": {
     "passwordHash": "REPLACE_WITH_OUTPUT_FROM_NPM_RUN_AUTH_HASH",
@@ -74,6 +81,16 @@
         "newCommand": ["claude", "--effort", "medium"],
         "resumeCommand": ["claude", "--resume", "{{conversationId}}", "--effort", "medium"],
         "continueCommand": ["claude", "--continue", "--effort", "medium"],
+        "env": {}
+      }
+    },
+    "grok": {
+      "enabled": true,
+      "discoveryRoot": "~/.grok",
+      "commands": {
+        "newCommand": ["grok"],
+        "resumeCommand": ["grok", "--resume", "{{conversationId}}"],
+        "continueCommand": ["grok", "--continue"],
         "env": {}
       }
     }

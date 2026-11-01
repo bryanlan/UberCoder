@@ -11,6 +11,7 @@ async function openConsole(page: Page): Promise<void> {
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations: [conversation] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
+      grok: { id: 'grok', label: 'Grok', conversations: [] },
     },
   };
   await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
@@ -129,6 +130,7 @@ test('filters to active status chats beside Work mode and remembers the choice',
           ref: 'Yellow chat', provider: 'claude', projectSlug: 'demo', kind: 'history', title: 'Yellow chat',
           updatedAt: ago(0), isBound: true, degraded: false,
         }] },
+        grok: { id: 'grok', label: 'Grok', conversations: [] },
       },
     }],
     boundSessions: cases.flatMap(({ ref, session }) => session ? [{

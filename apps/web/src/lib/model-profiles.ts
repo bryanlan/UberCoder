@@ -2,6 +2,7 @@ import {
   FIXED_MODEL_PROFILE_KEYS,
   MODEL_PROFILE_KEYS,
   type AutoRoute,
+  type BoundSession,
   type FixedModelProfileKey,
   type ModelProfileKey,
   type ModelProfilesResponse,
@@ -14,6 +15,14 @@ export type ModelProfilesState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'ready'; profiles: ModelProfilesResponse };
+
+/** The session field that holds each provider's profile. */
+const SESSION_PROFILE_FIELDS = { codex: 'codexProfile', claude: 'claudeProfile', grok: 'grokProfile' } as const satisfies Record<ProviderId, keyof BoundSession>;
+
+/** The profile a session is on, read from the field of its own provider. */
+export function sessionModelProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile'>): ModelProfileKey | undefined {
+  return session[SESSION_PROFILE_FIELDS[session.provider]];
+}
 
 /** Auto routes each message on the structured transport only, so a terminal-backed session offers H, M and L. */
 export function offeredProfileKeys(structured: boolean): readonly ModelProfileKey[] {

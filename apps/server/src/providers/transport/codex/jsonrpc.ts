@@ -86,6 +86,16 @@ export interface JsonRpcClientOptions {
    * to decide; the client only counts.
    */
   onTimeoutRun?: (consecutive: number, method?: string) => void;
+  /**
+   * `'2.0'`: every outgoing frame carries `"jsonrpc":"2.0"`. The Codex app-server speaks the same protocol without the field, so
+   * it is left out by default; an ACP agent (Grok) is a strict JSON-RPC 2.0 peer.
+   */
+  jsonrpc?: '2.0';
+  /**
+   * A response arrived that no request of this client is waiting for: the answer to a request an earlier client wrote to the same
+   * process before a backend restart. Runs synchronously; an exception is logged.
+   */
+  onUnmatchedResponse?: (id: JsonRpcId, frame: Record<string, unknown>) => void;
 }
 
 /** The server answered a request with a JSON-RPC error. */
@@ -211,6 +221,8 @@ export class JsonRpcClient {
   private readonly defaultTimeoutMs: number;
   private readonly nextRequestId: () => number;
   private readonly onTimeoutRun: ((consecutive: number, method?: string) => void) | undefined;
+  private readonly versionField: { jsonrpc: '2.0' } | Record<string, never>;
+  private readonly onUnmatchedResponse: ((id: JsonRpcId, frame: Record<string, unknown>) => void) | undefined;
   private timeoutRun = 0;
   private activeServerRequests = 0;
   private closing = false;
@@ -225,6 +237,8 @@ export class JsonRpcClient {
     this.defaultTimeoutMs = options.defaultRequestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.nextRequestId = options.nextRequestId ?? requestIdCounter();
     this.onTimeoutRun = options.onTimeoutRun;
+    this.versionField = options.jsonrpc === '2.0' ? { jsonrpc: '2.0' } : {};
+    this.onUnmatchedResponse = options.onUnmatchedResponse;
     transport.onLine((line) => this.handleLine(line));
     transport.onExit((info) => this.finish(info));
   }
@@ -252,9 +266,28 @@ export class JsonRpcClient {
   }
 
   request<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
+    return this.startRequest<T>(method, params, options).result;
+  }
+
+  /**
+   * Like {@link request}, and also says when the frame has been written. `written` resolves once the transport took the line,
+   * and rejects with {@link JsonRpcExitError} (`sent: false`) when nothing was written because the channel had ended, or with the
+   * write error itself when the outcome is unknown (the request stays pending and the channel's exit fails it). A caller that
+   * must tell "never sent" from "sent, no answer yet" (a long turn) waits for `written` and not for `result`.
+   */
+  startRequest<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): { written: Promise<void>; result: Promise<T> } {
+    let markWritten!: () => void;
+    let failWrite!: (error: unknown) => void;
+    const written = new Promise<void>((resolveWritten, rejectWritten) => {
+      markWritten = resolveWritten;
+      failWrite = rejectWritten;
+    });
+    written.catch(() => undefined); // a caller that never looks at `written` must not see an unhandled rejection
+    const result = new Promise<T>((resolve, reject) => {
       if (this.finished) {
-        reject(this.exitError(false));
+        const notSent = this.exitError(false);
+        failWrite(notSent);
+        reject(notSent);
         return;
       }
       const id = this.nextRequestId();
@@ -275,15 +308,21 @@ export class JsonRpcClient {
         }, timeoutMs);
       }
       this.pending.set(id, entry);
-      this.writeFrame({ id, method, ...(params !== undefined ? { params } : {}) }).catch((error: unknown) => {
+      this.writeFrame({ id, method, ...(params !== undefined ? { params } : {}) }).then(markWritten, (error: unknown) => {
         // Only a channel that certainly wrote nothing makes the request "not sent". Any other write failure leaves the
         // outcome unknown: the request stays pending and the channel's exit fails it as sent.
-        if (!(error instanceof NotSentError) || this.pending.get(id) !== entry) return;
+        if (!(error instanceof NotSentError) || this.pending.get(id) !== entry) {
+          failWrite(error);
+          return;
+        }
         this.pending.delete(id);
         if (entry.timer) clearTimeout(entry.timer);
-        reject(this.exitError(false));
+        const notSent = this.exitError(false);
+        failWrite(notSent);
+        reject(notSent);
       });
     });
+    return { written, result };
   }
 
   /** Sends a notification. Rejects with {@link JsonRpcExitError} (`sent: false`) when the channel has ended. */
@@ -357,7 +396,7 @@ export class JsonRpcClient {
   }
 
   private writeFrame(frame: Record<string, unknown>): Promise<void> {
-    const line = JSON.stringify(frame);
+    const line = JSON.stringify({ ...this.versionField, ...frame });
     this.log.debug?.(this.describeFrame('out', frame, line.length + 1), 'codex protocol');
     return this.transport.write(line);
   }
@@ -452,6 +491,11 @@ export class JsonRpcClient {
     }
     if (!entry || typeof id !== 'number') {
       this.log.debug?.({ id }, 'codex app-server answered a request nobody waits for');
+      try {
+        this.onUnmatchedResponse?.(id, frame);
+      } catch (error) {
+        this.log.warn?.({ error: error instanceof Error ? error.message : String(error) }, 'unmatched response handler threw');
+      }
       return;
     }
     this.pending.delete(id);

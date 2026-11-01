@@ -1,6 +1,6 @@
 export * from './coordination.js';
 export * from './workers.js';
-export const PROVIDERS = ['codex', 'claude'] as const;
+export const PROVIDERS = ['codex', 'claude', 'grok'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /**
@@ -34,7 +34,7 @@ export interface ModelProfileEntry {
 
 export interface ProviderModelProfiles {
   /** The vendor behind the provider, as the router names it. */
-  routerProvider: 'openai' | 'anthropic';
+  routerProvider: 'openai' | 'anthropic' | 'xai';
   levels: Record<FixedModelProfileKey, ModelProfileEntry>;
 }
 
@@ -65,6 +65,11 @@ export interface AutoDecision {
   classifierStatus?: string;
   /** Weekly-quota pacing of the chosen subscription: surplus, on_pace, tight, stale or unknown. */
   quotaState?: string;
+  /**
+   * True when the classifier could not tell what kind of task this is, so the choice is a first guess. The next prompts re-route
+   * it (at most three provisional prompts in all). Absent or false: the choice is final.
+   */
+  provisional?: boolean;
   /** The router's full plain-English reason. */
   reason?: string;
   /** Shown to the person when Auto fell back, for example `Auto unavailable: timed out. Using Medium.` */
@@ -77,7 +82,14 @@ export interface AutoRoute {
   routePending: boolean;
   /** The latest decision. Its model is what the session runs on until the next routing. */
   decision?: AutoDecision;
+  /** How many routings in a row have come back provisional. Three end the re-routing and the last choice is kept as final. */
+  provisionalRoutes?: number;
+  /** The text the last provisional routing saw (at most 2,000 characters); the next routing starts from it. */
+  previousPrompt?: string;
 }
+
+/** A provisional Auto choice is re-routed on the next prompts, at most this many provisional routings in all. */
+export const MAX_PROVISIONAL_ROUTES = 3;
 
 const AUTO_QUOTA_WORDS: Record<string, string> = {
   surplus: 'surplus',
@@ -86,6 +98,9 @@ const AUTO_QUOTA_WORDS: Record<string, string> = {
   stale: 'quota stale',
   unknown: 'quota unknown',
 };
+
+/** The plain name of each provider, as the profile line and status text say it. */
+export const PROVIDER_NAMES: Record<ProviderId, string> = { codex: 'Codex', claude: 'Claude', grok: 'Grok' };
 
 /** A short model name for the one-line display: `Claude Sonnet 5.5` becomes `Sonnet 5.5`. */
 export function shortModelLabel(label: string): string {
@@ -97,18 +112,22 @@ export function shortModelLabel(label: string): string {
  * Example line: `A → Sonnet 5.5·low · implementer 91% · lighter · Claude on pace`.
  */
 export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undefined): { line: string; title?: string } {
-  const providerName = provider === 'codex' ? 'Codex' : 'Claude';
+  const providerName = PROVIDER_NAMES[provider];
   const decision = route?.decision;
   if (!decision) return { line: route?.routePending ? 'A → routes with your next message' : 'A' };
+  const provisional = decision.source === 'router' && decision.provisional === true;
   const parts: string[] = [];
   parts.push(decision.label && decision.effort ? `${shortModelLabel(decision.label)}·${decision.effort}` : 'no model chosen');
   if (decision.source === 'router') {
-    if (decision.role) parts.push(decision.rolePercent !== undefined ? `${decision.role} ${decision.rolePercent}%` : decision.role);
+    // A provisional choice is a first guess because the router could not tell the kind of task, so the role is not shown as fact.
+    if (provisional) parts.push('role unclear');
+    else if (decision.role) parts.push(decision.rolePercent !== undefined ? `${decision.role} ${decision.rolePercent}%` : decision.role);
     if (decision.difficulty) parts.push(decision.difficulty);
     if (decision.quotaState) parts.push(`${providerName} ${AUTO_QUOTA_WORDS[decision.quotaState] ?? decision.quotaState}`);
   }
-  const base = `A → ${parts.join(' · ')}`;
-  const line = route?.routePending ? `${base} · re-routes with your next message` : base;
+  const base = `${provisional ? 'A (provisional)' : 'A'} → ${parts.join(' · ')}`;
+  // A provisional choice re-routes by itself; the marker already says so.
+  const line = route?.routePending && !provisional ? `${base} · re-routes with your next message` : base;
   const title = decision.source === 'fallback' ? decision.warning : decision.reason;
   return { line, ...(title ? { title } : {}) };
 }
@@ -119,8 +138,10 @@ export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undef
  */
 export function visibleModelMatchesTarget(provider: ProviderId, target: ModelTarget, visibleModel: string | undefined): boolean | undefined {
   if (!visibleModel) return undefined;
-  if (provider === 'codex') {
-    const observed = visibleModel.trim().match(/^(gpt-[\w.-]+)(?:\s+(default|low|medium|high|xhigh|max|ultra))?$/i);
+  if (provider === 'codex' || provider === 'grok') {
+    const observed = visibleModel.trim().match(provider === 'codex'
+      ? /^(gpt-[\w.-]+)(?:\s+(default|low|medium|high|xhigh|max|ultra))?$/i
+      : /^(grok-[\w.-]+)(?:\s+(default|low|medium|high|xhigh|max))?$/i);
     if (!observed) return undefined;
     return observed[1]!.toLowerCase() === target.model
       && (!observed[2] || observed[2].toLowerCase() === target.effort);
@@ -171,6 +192,23 @@ export type ModelProfileRequest =
       failedAt: string;
       message: string;
     });
+
+/**
+ * The provider-neutral Start: the person gives a project and a first prompt and the server picks the provider. `prompt` is the
+ * whole first message; the router sees its first 2,000 characters.
+ */
+export interface StartConversationRequest {
+  prompt: string;
+}
+
+/** What Start returns: the new session on whichever provider took it. */
+export interface StartConversationResponse {
+  session: BoundSession;
+  conversationRef: string;
+  provider: ProviderId;
+  /** Set when routing failed and the configured default provider and profile took the chat. Shown to the person. */
+  warning?: string;
+}
 
 export interface SessionModelProfileResponse {
   session: BoundSession;
@@ -339,6 +377,7 @@ export interface BoundSession {
   provider: ProviderId;
   codexProfile?: ModelProfileKey;
   claudeProfile?: ModelProfileKey;
+  grokProfile?: ModelProfileKey;
   /** Present while the profile is `auto`. */
   autoRoute?: AutoRoute;
   modelProfileRequest?: ModelProfileRequest;

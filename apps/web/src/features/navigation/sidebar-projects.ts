@@ -1,4 +1,4 @@
-import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
+import { PROVIDERS, type ProjectSummary, type ProviderId, type TreeResponse } from '@agent-console/shared';
 import { getConversationStatusColor } from './work-status';
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
@@ -55,7 +55,7 @@ export function deriveSidebarProjects({
 
   return (tree?.projects ?? [])
     .map((project) => {
-      const combinedConversations = (['codex', 'claude'] as const)
+      const combinedConversations = PROVIDERS
         .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
           const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
           const activityTimestamp = getConversationRecencyTimestamp(conversation, session);
@@ -81,7 +81,7 @@ export function deriveSidebarProjects({
           const color = getConversationStatusColor(conversation.isBound, lastResponseAt, isWorking, nowMs, runFailure);
           return color === 'red' || color === 'green' || color === 'yellow';
         });
-      const providerEntries = (['codex', 'claude'] as const).map((provider) => [provider, {
+      const providerEntries = PROVIDERS.map((provider) => [provider, {
         ...project.providers[provider],
         conversations: combinedConversations.filter((item) => item.provider === provider).map((item) => item.conversation),
       }] as const);

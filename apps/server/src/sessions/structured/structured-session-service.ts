@@ -12,6 +12,7 @@ import { defaultStructuredProviderConfig, type StructuredProviderConfig } from '
 import { nowIso } from '../../lib/time.js';
 import type { TransportPluginRegistry } from '../../providers/transport/registry.js';
 import { hostIdFor as claudeHostId } from '../../providers/transport/claude/claude-instance.js';
+import { grokLaunchKey, grokTurnKey, hostIdFor as grokHostId } from '../../providers/transport/grok/grok-instance.js';
 import { hostPaths, terminateHost } from '../../providers/transport/line-transport.js';
 import {
   NotSentError,
@@ -158,6 +159,8 @@ const UNPROFILED_CLAUDE_EFFORT = 'medium';
  */
 const PER_SESSION_HOSTS: Partial<Record<ProviderId, { hostId(sessionId: string): string; launchKey(sessionId: string): string; turnsKey(sessionId: string): string; hostPrefix: string }>> = {
   claude: { hostId: claudeHostId, launchKey: sessionId => `claude-launch:${sessionId}`, turnsKey: sessionId => `claude-turns:${sessionId}`, hostPrefix: 'claude-' },
+  // Grok keeps its running-turn record where Claude keeps its record of completed turns: both go when the conversation ends.
+  grok: { hostId: grokHostId, launchKey: grokLaunchKey, turnsKey: grokTurnKey, hostPrefix: 'grok-' },
 };
 
 interface LoadedSession {
@@ -197,7 +200,7 @@ interface LoadedSession {
 }
 
 function providerLabel(provider: ProviderId): string {
-  return provider === 'codex' ? 'Codex (app-server)' : 'Claude (structured)';
+  return provider === 'codex' ? 'Codex (app-server)' : provider === 'grok' ? 'Grok (ACP)' : 'Claude (structured)';
 }
 
 function errorMessage(error: unknown): string {

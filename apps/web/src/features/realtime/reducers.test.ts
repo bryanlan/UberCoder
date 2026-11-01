@@ -24,6 +24,7 @@ function project(conversations: ProjectSummary['providers']['codex']['conversati
     providers: {
       codex: { id: 'codex', label: 'Codex', conversations },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
+      grok: { id: 'grok', label: 'Grok', conversations: [] },
     },
   };
 }

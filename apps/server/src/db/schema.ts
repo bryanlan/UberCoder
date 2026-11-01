@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 20;
+export const CURRENT_SCHEMA_VERSION = 21;
 
 interface Migration {
   version: number;
@@ -309,6 +309,10 @@ const MIGRATIONS: Migration[] = [
   { version: 20, name: 'auto-model-profile', up(sqlite) {
     // The Auto profile's state: whether the next message is routed, and the router's latest decision.
     if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'auto_route_json', 'auto_route_json text');
+  } },
+  { version: 21, name: 'grok-cost-profile', up(sqlite) {
+    // The model profile of a Grok session, beside codex_profile and claude_profile.
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'grok_profile', 'grok_profile text');
   } },
 ];
 
