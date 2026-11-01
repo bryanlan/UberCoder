@@ -334,7 +334,6 @@ export interface SessionKeystrokeRequest {
   text?: string;
   keys?: string[];
   submittedText?: string;
-  clientOptimisticMessageId?: string;
   imageIds?: string[];
 }
 

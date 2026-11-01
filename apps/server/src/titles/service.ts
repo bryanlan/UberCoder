@@ -50,8 +50,8 @@ export class ConversationTitleService {
 
   private async handle(event: UserInputEvent): Promise<void> {
     const message = event.text.trim();
-    // Slash commands and numbered picker choices are provider controls, not the chat's request.
-    if (this.stopped || !message || message.startsWith('/') || /^\d{1,8}$/.test(message) || isCoordinationWakePrompt(message)) return;
+    // A coordination wake is the Console's own notice, not the chat's request.
+    if (this.stopped || !message || isCoordinationWakePrompt(message)) return;
     const pending = event.conversationRef.startsWith('pending:')
       ? this.db.pendingConversations.get(event.conversationRef)
       : this.db.pendingConversations.getByAdoptedRef(event.projectSlug, event.provider, event.conversationRef);

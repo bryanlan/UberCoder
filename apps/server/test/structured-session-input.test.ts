@@ -459,6 +459,15 @@ describe('Structured input that has no meaning without a terminal', () => {
       expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual([text]);
     });
 
+    it('judges a caption without its image envelope: a bare slash command is refused, a sentence that starts with a slash is sent', async () => {
+      const f = imageFixture();
+      const { session } = await f.bindNew();
+      await rejected(send(f, session.id, `/compact${imagePromptSuffix([imageRow()], 'codex')}`));
+      expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
+      await send(f, session.id, `/tmp holds this file${imagePromptSuffix([imageRow()], 'codex')}`);
+      expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    });
+
     it('attaches them to a steer, and to the direct input path', async () => {
       const f = imageFixture();
       const { session } = await f.bindNew();

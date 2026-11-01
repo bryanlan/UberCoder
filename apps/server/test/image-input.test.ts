@@ -40,11 +40,7 @@ async function fixture(provider: ProviderId = 'codex', pending = false) {
     ...session, session,
     recordedUserInput: { id: 'recorded', timestamp: new Date().toISOString(), ...imagePromptDisplay(payload.submittedText ?? '') },
   }));
-  const restartPendingSessionWithInitialPrompt = vi.fn(async (input: { initialPrompt: string }) => ({
-    ...session, session,
-    recordedUserInput: { id: 'first', timestamp: session.startedAt, ...imagePromptDisplay(input.initialPrompt) },
-  }));
-  const sessions = { getSessionById: () => session, allowsLiteralSelectionKeystroke: async () => false, sendKeystrokes, restartPendingSessionWithInitialPrompt };
+  const sessions = { getSessionById: () => session, sendKeystrokes };
   registerImageRoutes(app, auth, sessions as never, store);
   await registerSessionRoutes(app, auth, db, {
     getProjectBySlug: async () => ({ slug: 'demo', path: directory }), getMergedProviderSettings: () => ({ enabled: true }),
@@ -57,7 +53,7 @@ async function fixture(provider: ProviderId = 'codex', pending = false) {
   async function upload(bytes = png, mediaType = 'image/png') {
     return await app.inject({ method: 'POST', url: '/api/sessions/session-1/images', headers: { ...headers, 'content-type': mediaType }, payload: bytes });
   }
-  return { app, db, directory, session, store, headers, png, upload, sendKeystrokes, restartPendingSessionWithInitialPrompt,
+  return { app, db, directory, session, store, headers, png, upload, sendKeystrokes,
     async close() { await app.close(); db.close(); await fs.rm(directory, { recursive: true, force: true }); },
   };
 }
@@ -91,7 +87,7 @@ describe('clipboard image backend', () => {
   });
 
   for (const provider of ['codex', 'claude'] as const) {
-    it(`${provider} submits captions and image-only messages without replacing existing bypass text`, async () => {
+    it(`${provider} submits captions and image-only messages with the image envelope after the caption`, async () => {
       const f = await fixture(provider);
       try {
         const image = (await f.upload()).json().image;
@@ -100,15 +96,12 @@ describe('clipboard image backend', () => {
         });
         expect(response.statusCode).toBe(200);
         const payload = f.sendKeystrokes.mock.calls[0]![1];
-        expect(payload).toMatchObject({ keys: ['Enter'], text: expect.stringContaining(path.join(f.directory, 'images', image.id)) });
-        expect((payload as { text: string }).text).not.toContain('What is shown?');
-        expect(payload.submittedText).toContain('What is shown?');
+        expect(payload).toMatchObject({ keys: ['Enter'], submittedText: expect.stringMatching(/^What is shown\?\n<agent-console-images>/) });
+        expect(payload.submittedText).toContain(path.join(f.directory, 'images', image.id));
         expect(payload.submittedText).toContain(provider === 'codex' ? 'view_image' : 'Read');
         expect(response.json().recordedUserInput).toMatchObject({ text: 'What is shown?', images: [image] });
         const imageOnly = await f.app.inject({ method: 'POST', url: '/api/sessions/session-1/keys', headers: f.headers, payload: { keys: ['Enter'], imageIds: [image.id] } });
         expect(imageOnly.json().recordedUserInput).toMatchObject({ text: '', images: [image] });
-        const slash = await f.app.inject({ method: 'POST', url: '/api/sessions/session-1/keys', headers: f.headers, payload: { text: '/model', keys: ['Enter'], imageIds: [image.id] } });
-        expect(slash.statusCode).toBe(400);
         const typing = await f.app.inject({ method: 'POST', url: '/api/sessions/session-1/keys', headers: f.headers, payload: { text: 'typing', imageIds: [image.id] } });
         expect(typing.statusCode).toBe(400);
         const foreign = await f.store.save(f.png, 'image/png', { ...f.session, projectSlug: 'other' });

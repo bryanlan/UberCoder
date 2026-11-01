@@ -2447,7 +2447,11 @@ export class SessionManager {
   }
 
   private structuredTextRejection(text: string, provider: ProviderId): string | undefined {
-    // Refuse at admission, before the message is queued, rather than leave it failed in the journal.
+    // Refuse at admission, before the message is queued, rather than leave it failed in the journal. A caption is judged
+    // without the image envelope after it.
+    if (STRUCTURED_SLASH_COMMAND.test(imagePromptDisplay(text).text.trim())) {
+      return 'Slash commands are terminal controls and are not available here. Send the request as a normal message. Nothing was sent.';
+    }
     const files = structuredImages(text, this.imageStoreDir);
     if (files && !this.structured.supportsImages(provider)) {
       return 'Image attachments are not available for this provider. Nothing was sent.';
@@ -2455,9 +2459,6 @@ export class SessionManager {
     // An envelope that names images the store does not hold would reach the model as text pointing at files it cannot open.
     if (!files && imagePromptDisplay(text).images?.length) {
       return 'The attached image is not in the image store. Paste it again. Nothing was sent.';
-    }
-    if (STRUCTURED_SLASH_COMMAND.test(text.trim())) {
-      return 'Slash commands are terminal controls and are not available here. Send the request as a normal message. Nothing was sent.';
     }
     return undefined;
   }

@@ -145,7 +145,6 @@ describe('session routes', () => {
       text: 'hello',
       timestamp: '2026-03-14T18:01:00.000Z',
     };
-    const allowsLiteralSelectionKeystroke = vi.fn(async () => false);
     const sendKeystrokes = vi.fn(async () => commandResult(session, recordedUserInput));
     const app = fastify();
     await registerSessionRoutes(
@@ -155,7 +154,6 @@ describe('session routes', () => {
       {} as never,
       {
         getSessionById: vi.fn(() => session),
-        allowsLiteralSelectionKeystroke,
         sendKeystrokes,
       } as never,
     );
@@ -378,7 +376,7 @@ describe('session routes', () => {
         expect(sendKeystrokes).toHaveBeenCalledOnce();
         const [, payload] = sendKeystrokes.mock.calls[0] as unknown as [string, { text: string; submittedText: string; imageIds?: string[] }];
         // The envelope names the stored file; SessionManager turns it into a native attachment.
-        expect(imagePromptFiles(payload.text, '/data/images')).toEqual([{ path: image.path, mimeType: 'image/png' }]);
+        expect(imagePromptFiles(payload.submittedText, '/data/images')).toEqual([{ path: image.path, mimeType: 'image/png' }]);
         expect(payload.submittedText).toBe(`look at this${imagePromptSuffix([image], 'codex')}`);
         expect(payload.imageIds).toBeUndefined();
       } finally {

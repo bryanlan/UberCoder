@@ -105,9 +105,12 @@ describe('generated conversation titles', () => {
 
   it('waits for a real request and ignores chats that were not created as new Console chats', async () => {
     const f = await fixture();
-    for (const control of ['/model', '2', PEER_WAKE_PROMPT, '   ']) await f.send(control);
+    for (const control of [PEER_WAKE_PROMPT, '   ']) await f.send(control);
     expect(f.runner.title).not.toHaveBeenCalled();
     expect(f.state()).toBe(TITLE_GENERATION_AWAITING_MESSAGE);
+    // A message that starts with a slash is the person's request: a bare command word never gets past admission.
+    await f.send('/tmp is full, clean it up');
+    expect(f.runner.title).toHaveBeenCalledWith('/tmp is full, clean it up', expect.any(String));
 
     const launched = await fixture({ newConsoleChat: false });
     await launched.send('fix the login redirect please');

@@ -40,7 +40,6 @@ const keystrokeBodySchema = z.object({
   text: z.string().min(1).optional(),
   keys: z.array(z.string()).optional(),
   submittedText: z.string().min(1).optional(),
-  clientOptimisticMessageId: z.string().min(1).optional(),
   imageIds: z.array(z.string().uuid()).min(1).max(MAX_PROMPT_IMAGES).optional(),
 }).strict().refine((value) => value.keys?.length === 1 && (value.keys[0] === 'Enter'
   ? Boolean((value.submittedText ?? value.text)?.trim()) || Boolean(value.imageIds)
@@ -276,12 +275,10 @@ export async function registerSessionRoutes(
     const inputRevision = new InputQueue(db.sqlite).revision(sessionId);
     if (parsed.data.imageIds) {
       if (!images) throw new Error('Image storage was not configured.');
+      // The message is the caption with the image envelope after it; the session manager reads `submittedText` first.
       const caption = (parsed.data.submittedText ?? parsed.data.text ?? '').trim();
-      if (caption.startsWith('/')) return reply.code(400).send({ error: 'Send images with a chat message, rather than a slash command.' });
       try {
-        const suffix = imagePromptSuffix(await images.resolve(parsed.data.imageIds, session), session.provider);
-        parsed.data.text = (parsed.data.text ?? '') + suffix;
-        parsed.data.submittedText = caption + suffix;
+        parsed.data.submittedText = caption + imagePromptSuffix(await images.resolve(parsed.data.imageIds, session), session.provider);
       } catch (error) {
         if (error instanceof ImageUploadError) return reply.code(error.statusCode).send({ error: error.message });
         throw error;

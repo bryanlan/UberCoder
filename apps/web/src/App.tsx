@@ -368,18 +368,9 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     return Boolean(body.keys?.includes('Enter'));
   }
 
+  /** The message a send shows at once, before the server records it; a Stop shows nothing. */
   function optimisticSubmittedTextForKeystrokes(body: SessionKeystrokeRequest): string | undefined {
-    if (!body.keys?.includes('Enter')) {
-      return undefined;
-    }
-    const text = (body.submittedText ?? body.text)?.trim();
-    if (!text || text.startsWith('/')) {
-      return undefined;
-    }
-    if (/^\d{1,8}$/.test(text)) {
-      return undefined;
-    }
-    return text;
+    return body.keys?.includes('Enter') ? (body.submittedText ?? body.text)?.trim() || undefined : undefined;
   }
 
   useEffect(() => () => {
@@ -708,8 +699,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
       });
     };
     try {
-      const completeChatSubmit = body.keys?.length === 1 && body.keys[0] === 'Enter'
-        && body.submittedText?.trim() && !body.submittedText.trim().startsWith('/');
+      const completeChatSubmit = body.keys?.length === 1 && body.keys[0] === 'Enter' && body.submittedText?.trim();
       const submissionKey = `${sessionId}:${body.submittedText ?? ''}`;
       const submissionId = completeChatSubmit
         ? body.submissionId ?? pendingSubmissionIds.current.get(submissionKey) ?? crypto.randomUUID() : undefined;
