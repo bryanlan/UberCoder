@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { chromium } from '@playwright/test';
 import { buildApp } from '../apps/server/dist/app.js';
+import { endStandaloneProof } from './structured-proof-kit.mjs';
 if (!process.argv.includes('--run')) throw Error('Use --run to opt into real disposable grant sessions. Build first.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-grants-proof-'));
 const project = path.join(root, 'projects/demo'); fs.mkdirSync(project, { recursive: true }); execFileSync('git', ['init', '-q', project]);
@@ -84,7 +85,10 @@ try {
   await context.close(); browser._connection.close();
   for (const id of sessions) if (db.prepare('select should_restore from bound_sessions where id=?').get(id)?.should_restore) await api('POST',`/api/sessions/${id}/release`,{}).catch(()=>{});
   await app.close(); db.close();
+  const cleanup = await endStandaloneProof(root, config.runtimeDir);
+  console.log(JSON.stringify({ cleanup }));
+  if (!cleanup.clean) process.exitCode = 1;
 }
 // End this client's remaining CDP transport after all proof cleanup. This
 // closes the client's socket without issuing Browser.close to shared Chrome.
-process.exit(0);
+process.exit(process.exitCode ?? 0);

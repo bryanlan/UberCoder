@@ -193,6 +193,25 @@ const endRecordedHosts = async ({ runtimeDir, lineTransport, named = [], note })
 };
 
 /**
+ * The cleanup tail of a proof that runs its own backend instead of this kit's harness (the grant proofs), after it released its
+ * sessions and closed the backend: the session hosts recorded under the runtime are ended (the shared Codex app-server outlives a
+ * release by design, and every host outlives the backend), then the final scan ends any lane process that still names the temp
+ * root. `clean` is false when a host could not be ended or the scan had to end something; the proof then fails. The temp root is
+ * kept: it holds the proof's evidence.
+ */
+export const endStandaloneProof = async (root, runtimeDir) => {
+  const lineTransport = await import(new URL('../apps/server/dist/providers/transport/line-transport.js', import.meta.url));
+  const hosts = [];
+  await endRecordedHosts({ runtimeDir, lineTransport, note: (name, ok, detail) => { hosts.push({ name, ok, ...(detail ? { detail } : {}) }); } });
+  const { found, remaining } = await endProofProcesses(root);
+  return {
+    hosts,
+    finalScan: found.length ? `had to end ${found.length} lane process(es): ${summarizeProcesses(found)}${remaining.length ? `; ${remaining.length} survived SIGKILL` : ''}` : 'no lane process of this proof left',
+    clean: hosts.every(host => host.ok) && found.length === 0 && remaining.length === 0,
+  };
+};
+
+/**
  * Builds the isolated environment. If anything fails while it is built, whatever it started is ended and the temp root removed
  * before the error is rethrown. The callers' own `finally` only exists once this has returned.
  */

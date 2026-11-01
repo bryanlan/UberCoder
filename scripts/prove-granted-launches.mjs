@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 import { chromium } from '@playwright/test';
 import { buildApp } from '../apps/server/dist/app.js';
+import { endStandaloneProof } from './structured-proof-kit.mjs';
 if (!process.argv.includes('--run')) throw Error('Use --run to opt into real disposable grant sessions. Build first.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-launch-proof-'));
 const project = path.join(root, 'projects/demo'); fs.mkdirSync(project, { recursive: true }); execFileSync('git', ['init', '-q', project]);
@@ -52,7 +53,10 @@ const record = entry => { evidence.push(entry); fs.writeFileSync(path.join(root,
 const browser=await chromium.connectOverCDP('http://127.0.0.1:9222'),context=await browser.newContext(),page=await context.newPage();
 console.log(JSON.stringify({evidence:root}));
 const nativeFor = id=>{const session=db.prepare('select * from bound_sessions where id=?').get(id);return db.prepare('select * from coordination_assignments where provider=? and native_session_id=?').get(session.provider,session.conversation_ref);};
-const send=(recipientId,text)=>rpc({...auth,action:'send',messageId:randomUUID(),recipientId,text});
+// A stage for an agent that has ended its turn goes as P1 with a wake reason: a P2 or P3 message (P3 is the default) never wakes an
+// idle agent, so it would wait for a turn that nothing starts. The capacity stage stays P3: the recovery turn delivers it, which
+// is what that stage proves.
+const send=(recipientId,text,wakeReason)=>rpc({...auth,action:'send',messageId:randomUUID(),recipientId,text,...(wakeReason?{priority:'P1',wakeReason}:{})});
 // Loaded, no turn running. An asleep conversation answers 404 and is not ready until something loads it.
 const ready=async id=>{const response=await app.inject({method:'GET',url:`/api/sessions/${id}/screen`,headers});if(response.statusCode!==200)return false;const body=response.json();return !body.session.isWorking&&/ idle$/.test(body.screen.status);};
 const epochOf=id=>db.prepare('select value from meta where key=?').get(`structured-epoch:${id}`)?.value;
@@ -81,19 +85,19 @@ try{
  record({step:3,action:'capacity_recovery',sessionId:laneId,noNewApproval:true});
  // A restart reloads the conversation in a new epoch; the shared Codex app-server keeps its pid.
  const oldEpoch=epochOf(laneId);
- await send(lead.id,`Restart stage within the standing grant: use agent_grants restart for sessionId ${laneId}. It is idle with unfinished authorized work. Wait for launch_status to report completion, then send GRANTED_RESTART_DONE to controller ${controller}. Do not make a new grant request.`);
+ await send(lead.id,`Restart stage within the standing grant: use agent_grants restart for sessionId ${laneId}. It is idle with unfinished authorized work. Wait for launch_status to report completion, then send GRANTED_RESTART_DONE to controller ${controller}. Do not make a new grant request.`,'The proof driver is blocked on the granted restart stage; the idle lead must request the restart now.');
  await wait('real lead requests granted restart',()=>db.prepare("select id from agent_session_requests where action='restart_session' and status='completed'").get());
  assert.notEqual(epochOf(laneId),oldEpoch);
  await wait('lane ready after granted restart',()=>ready(laneId));
  const turns=fs.readFileSync(transcript,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)).filter(row=>row.type==='turn_context');
  assert.equal(turns.at(-1).payload.model,CODEX_COST_PROFILES.low.model);assert.equal(turns.at(-1).payload.effort,'medium');
  record({step:3,action:'restart',sessionId:laneId,oldEpoch,newEpoch:epochOf(laneId),noNewApproval:true,modelAndEffortPreserved:true});
- await send(lane.id,`Delegate the budget-summary.md work to a Claude helper in demo, model ${CLAUDE_COST_PROFILES.low.model}, effort high, title "Inherited planner helper", with your own assignment as supervisor. Its concrete task is to calculate annual income and spending for monthly income 4000 dollars, write budget-summary.md and report the annual surplus. You will supply the monthly expense amount in a second message. Have it read its inherited grant, calculate annual income, send exactly INHERITED_HELPER_READY to you (its supervisor), then end its turn with the calculation unfinished until that one missing input arrives. Report the registered helper assignment to your supervisor.`);
+ await send(lane.id,`Delegate the budget-summary.md work to a Claude helper in demo, model ${CLAUDE_COST_PROFILES.low.model}, effort high, title "Inherited planner helper", with your own assignment as supervisor. Its concrete task is to calculate annual income and spending for monthly income 4000 dollars, write budget-summary.md and report the annual surplus. You will supply the monthly expense amount in a second message. Have it read its inherited grant, calculate annual income, send exactly INHERITED_HELPER_READY to you (its supervisor), then end its turn with the calculation unfinished until that one missing input arrives. Report the registered helper assignment to your supervisor.`,'The proof driver is blocked on the delegation stage; the idle lane must launch its helper now.');
  const grand=await wait('real worker delegates a Claude helper',()=>db.prepare("select * from agent_session_requests where assignment_id=? and action='launch_session' and status='completed'").get(lane.id));sessions.push(grand.session_id);
  await wait('inherited helper ready',()=>db.prepare('select id from coordination_messages where recipient_id=? and text=?').get(lane.id,'INHERITED_HELPER_READY'));
  const helper=nativeFor(grand.session_id);assert(helper);
  assert.deepEqual(JSON.parse(db.prepare('select launch_context_json from bound_sessions where id=?').get(grand.session_id).launch_context_json).grantIds,[grant.id]);
- await send(lane.id,`Relay the remaining budget requirement to your helper ${helper.id} under the shared grant: monthly spending is 3250 dollars. Ask it to write budget-summary.md with annual income, annual spending and annual surplus, send exactly SHARED_GRANT_SCOPE_HONORED to you, and finish the helper assignment. This completes the same budget example Bryan authorized.`);
+ await send(lane.id,`Relay the remaining budget requirement to your helper ${helper.id} under the shared grant: monthly spending is 3250 dollars. Ask it to write budget-summary.md with annual income, annual spending and annual surplus, send exactly SHARED_GRANT_SCOPE_HONORED to you, and finish the helper assignment. This completes the same budget example Bryan authorized.`,'The proof driver is blocked on the relay stage; the lane must pass the missing input to its helper now.');
  await wait('relayed scope honored under inherited grant',()=>db.prepare('select id from coordination_messages where sender_id=? and recipient_id=? and text=?').get(helper.id,lane.id,'SHARED_GRANT_SCOPE_HONORED'));
  const budget=fs.readFileSync(path.join(project,'budget-summary.md'),'utf8').replace(/,/g,'');
  assert.ok(budget.includes('48000')&&budget.includes('39000')&&budget.includes('9000'),budget);
@@ -101,14 +105,17 @@ try{
  for(const id of [laneId,grand.session_id]){const log=db.prepare('select event_log_path from bound_sessions where id=?').get(id).event_log_path;assert.equal(fs.readFileSync(log,'utf8').split('\n').filter(Boolean).map(x=>JSON.parse(x)).filter(x=>x.type==='user-input').length,0);}
  record({step:4,action:'inherited_launch_and_relay',sessionId:grand.session_id,assignmentId:helper.id,launcherAssignment:lane.id,grantId:grant.id,noHumanInputs:true,noNewRequests:true});
  fs.writeFileSync(path.join(root,'proof.json'),JSON.stringify(evidence,null,2));console.log(JSON.stringify(evidence));
- await send(lead.id,'ALL_PROOF_DONE. The grant launch, capacity, restart, inherited helper and shared scope checks passed. Finish the lead assignment.');
- await send(lane.id,'ALL_PROOF_DONE. Finish this lane assignment.');
+ await send(lead.id,'ALL_PROOF_DONE. The grant launch, capacity, restart, inherited helper and shared scope checks passed. Finish the lead assignment.','The proof driver waits for the lead to finish its assignment.');
+ await send(lane.id,'ALL_PROOF_DONE. Finish this lane assignment.','The proof driver ends after the lane finishes its assignment.');
  await wait('lead finished',()=>db.prepare('select status from coordination_assignments where id=?').get(lead.id)?.status==='finished');
 }finally{
  await context.close();browser._connection.close();
  for(const row of db.prepare('select id from bound_sessions where should_restore=1').all())await api('POST',`/api/sessions/${row.id}/release`,{}).catch(()=>{});
  await rpc({...auth,action:'finish',summary:'Disposable launch proof controller finished.'}).catch(()=>{});
  await app.close();db.close();
+ const cleanup=await endStandaloneProof(root,config.runtimeDir);
+ console.log(JSON.stringify({cleanup}));
+ if(!cleanup.clean)process.exitCode=1;
 }
 // End only this proof's CDP transport, after cleanup; keep shared Chrome alive.
-process.exit(0);
+process.exit(process.exitCode ?? 0);
