@@ -268,6 +268,17 @@ describe('Granted real-session launch pipeline', () => {
     f.grants.revoke(f.grant.id); await f.launches.drain(); expect(f.launches.status(f.actor, request.requests[0]!.id).requests[0]?.status).toBe('cancelled'); expect(f.starts()).toBe(0);
   });
 
+  it('checks a launch that names no model against the Medium model of the catalog', async () => {
+    const none = { model: undefined, effort: undefined };
+    // The stand-in catalog (test/helpers/fake-wo.mjs) makes gpt-6.1-sol the Codex Medium model.
+    const allowed = await fixture(2, ['gpt-6.1-sol']);
+    allowed.setMemory('MemAvailable: 100 kB');
+    expect(await allowed.launch(none)).not.toMatchObject({ requiresGrant: true });
+    const refused = await fixture(2, ['gpt-6-luna']);
+    expect(await refused.launch(none)).toMatchObject({ requiresGrant: true, model: 'gpt-6.1-sol' });
+    expect(refused.starts()).toBe(0);
+  });
+
   it('deduplicates a submitted launch ID and retains its reservation through controller restart', async () => {
     const f = await fixture(); f.setMemory('MemAvailable: 100 kB'); const requestId = randomUUID(); await f.launch({ requestId }); await f.launch({ requestId });
     expect(f.launches.status(f.actor).requests).toHaveLength(1); expect(f.grants.snapshot().uses).toHaveLength(1);
