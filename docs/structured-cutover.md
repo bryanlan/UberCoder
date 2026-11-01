@@ -587,7 +587,7 @@ behind its session host. Where this differs from the plan above, the record gove
 `screen-heuristics.ts`, `keystroke-transport.ts`, `output-watcher.ts`, `last-user-input.ts`, the Claude terminal
 normalizer (`live-output/filters.ts`), `structured/default-transport.ts`, `lib/shell.ts` and
 `lib/pending-conversation-match.ts`, and the tmux branches of `session-manager.ts` (5,980 lines before, about 3,070
-after). `pending-adoption.ts` stays, reduced to the three helpers the structured bind uses. The input queue lost its
+after). `pending-adoption.ts` stays, reduced to the helpers the structured bind uses (adoption and clearing a pending binding). The input queue lost its
 paste-confirmation states; `needs_review` became `failed`. The providers lost their launch commands and pending-adoption
 transcript matching. Routes: `GET /api/sessions/:id/raw-output`, `GET /api/sessions/structured-migration`, the literal
 keys and Text Bypass of `/keys`, and the terminal capture of `/screen` (it returns the synthesized status only and
@@ -635,8 +635,7 @@ instead of a fixed delay (a session host attach that lands before the host has s
 discarded-steers notice, the Codex idle sleep, the per-session profile switch). Three were left as they are: a second
 session host attach race of the same kind, and two tests that ran past 10 s (`engineering-summary`, `worktree-sweep`). The web suite (19 files, 211 tests) has 35 failures, all in `ConversationPane.test.tsx`: they test the terminal
 controls (Text Bypass, key and menu buttons, the live screen panel) that the web lane removes. No real provider was
-started; the real proofs, including the rewritten `prove-agent-grants.mjs` and `prove-granted-launches.mjs`, have not
-been run.
+started at that point; the review below ran the real proofs.
 
 **Web (2026-11-01, the web lane of the same branch).** The web no longer has a terminal surface. `ConversationPane.tsx`
 lost `LiveSessionInputBridge`, Text Bypass, the key and menu buttons, numeric menu choices, the live screen panel, the
@@ -651,6 +650,39 @@ specs now fail the provider close on the fake transport plugin (68 browser tests
 Both structured lanes now default to on in the schema, and the coordination text no longer promises that drafts defer peer
 wakes. Left for the backend: `SessionKeystrokeRequest.clientOptimisticMessageId` (the web no longer sends it), and the
 slash-command and picker-number checks of the title service and of `optimisticSubmittedTextForKeystrokes` in `App.tsx`.
+
+**Review (2026-11-01, an independent lane on the same branch).** Fixes, each its own commit:
+
+- The single-provider proofs (`prove-structured-claude`, `prove-structured-codex`) replaced `structuredSessions` with their
+  own lane only, so once both lanes defaulted to on the other lane came up enabled and step a failed before any turn. Each
+  now switches the other lane off by name.
+- `prove-granted-launches` timed out waiting for the granted restart. No restart request was ever made: the driver sent
+  the restart stage with the default priority, P3, which never wakes an idle agent (P3 became the default on 2026-10-22,
+  after the proof was written). The restart path was not at fault. Stages for an agent that has ended its turn now go as
+  P1 with a wake reason; the capacity stage stays P3 because the recovery turn delivers it.
+- Both rewritten grant proofs left the shared Codex app-server, its session host and coordination MCP helpers running. They
+  now end the recorded session hosts after the backend closes and run the proof kit's final scan
+  (`endStandaloneProof`); anything the scan has to end fails the run.
+- The web lane's three leftovers: `SessionKeystrokeRequest.clientOptimisticMessageId` is gone from the contract and the
+  `/keys` schema; the web and the title service no longer treat a message that starts with `/` or is a number as a
+  terminal control (only a bare command word is refused, at admission); `TreeResponse.structuredProviders` is required.
+- An image caption is judged by the same admission rule as any message: the `/keys` route lost its own 400 for a caption
+  that starts with `/`, the rule ignores the image envelope, and the route sets only `submittedText` (caption plus
+  envelope); the terminal-era copy of the envelope into `text` is gone.
+- `SessionScreen` is `status`, `capturedAt`, `model` and `contextPercent`; the terminal fields `content`, `contentAnsi`,
+  `inputText`, `inputActive` and `statusAnsi` were constants that nothing read.
+- `recordPendingUserInput` wrote pending-alias fields that only the removed transcript matching read; it is gone.
+- A refused message (a bare command word, an image the store does not hold) is now refused before it pauses automatic work,
+  cancels recovery or moves the input revision. Before, typing `/compact` into an unattended worker's message box left its
+  wakes paused and its continuation waiting for input (this was already so on `main`).
+
+Real proofs, one at a time on a fresh build: `prove-structured-claude` 14 of 14 and `prove-structured-codex` 16 of 16 (on
+the final build), `prove-granted-launches` (launch, capacity recovery, granted restart with a new epoch and the model and
+effort kept, inherited Claude helper, relayed scope) and `prove-agent-grants` (record and request flows, both browser
+verified) on the build before the last fix (the admission order), each with no lane process left. After the fixes: `npm run typecheck` and `npm run build` passed; the server suite passed 82
+files, 1903 tests (5 skipped) on its second run; the first run failed only the Codex replay test `queued_turn`, which also
+failed once in three runs alone (a race in the recorded fixture: the first turn can complete before the second send, and this
+branch did not touch the plugin or the test); the web suite passed 19 files, 182 tests.
 
 ## Verification
 

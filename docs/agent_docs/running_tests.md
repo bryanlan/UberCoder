@@ -79,16 +79,19 @@ memory queues, restart persistence, custom launch settings and notification acti
 
 After `npm run build`, run `node scripts/prove-agent-grants.mjs --run` and
 `node scripts/prove-granted-launches.mjs --run` sequentially.
-They require real Codex/Claude authentication and an existing visible Chrome CDP endpoint on port 9222, and run
-conversations on the structured transport (rewritten in Phase B and not yet run since; see `docs/structured-cutover.md`,
-"Phase B record"). Each proof uses a private project, database and runtime, plus its own browser context.
-The fixtures occupy port 14381 and close their own sessions and browser context afterwards.
+They require real Codex/Claude authentication and a Chrome CDP endpoint on port 9222 (a headless
+`google-chrome --headless=new --remote-debugging-port=9222 --user-data-dir=<throwaway dir>` is enough), and run
+conversations on the structured transport (both passed on 2026-11-01; see `docs/structured-cutover.md`, "Phase B record").
+Each proof uses a private project, database and runtime, plus its own browser context.
+The fixtures occupy port 14381 and close their own sessions and browser context afterwards. After the backend closes they
+end the session hosts recorded under their runtime (the shared Codex app-server outlives a release) and run the proof kit's
+final scan for lane processes that name their temp root; a process the scan has to end fails the run.
 They preserve the shared browser. Evidence remains under `/tmp/console-grants-proof-*`
 or `/tmp/console-launch-proof-*`.
 The launch proof injects a capacity failure envelope into its disposable provider transcript,
-then attempts to verify native recovery, granted restart, a Claude helper and relayed scope under one grant.
-Its peer requests omit priority and default to P3, whose bodies automatic polling excludes.
-It can therefore stall while awaiting requested actions and does not currently establish those checks.
+then verifies native recovery, granted restart (a new load epoch, model and effort kept), a Claude helper and relayed scope
+under one grant. The capacity stage message goes as P3, which only the recovery turn delivers; every other stage goes to an
+agent that has ended its turn, so it is sent as P1 with a wake reason (P2 and P3 never wake an idle agent).
 
 ## Assignment coordination
 

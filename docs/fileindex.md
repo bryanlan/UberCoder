@@ -394,7 +394,7 @@ Run recovery ownership (requires explicit unattended permission):
   `scripts/prove-agent-grants.mjs` and `scripts/prove-granted-launches.mjs`: standing grants recorded, requested, edited and
   revoked by real agents, and granted launch, restart and inherited helpers (rewritten for the structured transport in Phase B).
   `scripts/structured-proof-kit.mjs`: the Claude proof's harness, whose standalone helpers the Codex proof imports (isolated backend, evidence, process scan and cleanup, PNG
-  builders, event-log reader).
+  builders, event-log reader); the grant proofs end with its `endStandaloneProof` (recorded hosts, then the final process scan).
 - Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register and
   structured liveness,
   `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls
