@@ -104,6 +104,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
     [marker]: new Date(now).toISOString(),
   };
   const tree: TreeResponse = {
+    structuredProviders: [],
     boundSessions: [session],
     projects: [{
       slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',

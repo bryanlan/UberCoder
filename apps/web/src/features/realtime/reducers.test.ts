@@ -32,6 +32,7 @@ function tree(conversations: ProjectSummary['providers']['codex']['conversations
   return {
     projects: [project(conversations)],
     boundSessions,
+    structuredProviders: [],
   };
 }
 

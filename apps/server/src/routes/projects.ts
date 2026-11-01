@@ -18,7 +18,7 @@ const refreshProjectsBodySchema = z.object({
 );
 
 export function findRecentUnboundConversations(
-  tree: TreeResponse,
+  tree: Pick<TreeResponse, 'projects'>,
   nowMs = Date.now(),
 ): ConversationSummary[] {
   const cutoffMs = nowMs - RECENT_AUTO_TRACK_WINDOW_MS;
@@ -49,7 +49,7 @@ export async function registerProjectRoutes(
   let treeObservationTimer: NodeJS.Timeout | undefined;
 
   // The tree tells the web which providers can run conversations (their lane is enabled), so it offers New conversation only for those.
-  function withStructuredProviders(tree: TreeResponse): TreeResponse {
+  function withStructuredProviders(tree: Omit<TreeResponse, 'structuredProviders'>): TreeResponse {
     return { ...tree, structuredProviders: [...structuredProviders] };
   }
 

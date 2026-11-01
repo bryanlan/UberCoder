@@ -231,7 +231,8 @@ export class IndexingService {
     await this.syncWatchers();
   }
 
-  getTree(): TreeResponse {
+  /** The tree without the provider lanes, which the route adds from the session manager. */
+  getTree(): Omit<TreeResponse, 'structuredProviders'> {
     const activeSessions = this.db.boundSessions.listTreeVisible()
       .filter((session) => isTreeVisibleBoundSession(session) && isBoundSessionVisibleInDiscovery(session, {
         getPendingConversation: (ref) => this.db.pendingConversations.get(ref),

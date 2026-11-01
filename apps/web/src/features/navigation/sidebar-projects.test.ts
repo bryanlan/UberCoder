@@ -81,6 +81,7 @@ function boundSession({
 describe('deriveSidebarProjects', () => {
   it('sorts by recent activity using bound-session completion time when present', () => {
     const tree: TreeResponse = {
+      structuredProviders: [],
       projects: [
         project({
           slug: 'alpha',
@@ -128,6 +129,7 @@ describe('deriveSidebarProjects', () => {
 
   it('uses auto-tracked time for the indicator without moving genuine recent-activity order', () => {
     const tree: TreeResponse = {
+      structuredProviders: [],
       projects: [
         project({
           slug: 'auto-tracked',
@@ -176,6 +178,7 @@ describe('deriveSidebarProjects', () => {
 
   it('uses manual order and display-name fallback when recent sorting is disabled', () => {
     const tree: TreeResponse = {
+      structuredProviders: [],
       projects: [
         project({ slug: 'gamma', displayName: 'Gamma' }),
         project({ slug: 'alpha', displayName: 'Alpha' }),
@@ -196,6 +199,7 @@ describe('deriveSidebarProjects', () => {
 
   it.each([true, false])('moves projects without bound conversations below active projects until a chat binds (recent sorting: %s)', (recentActivitySortEnabled) => {
     const tree: TreeResponse = {
+      structuredProviders: [],
       projects: [
         project({
           slug: 'active',
@@ -283,7 +287,7 @@ describe('mobile active conversations', () => {
       ...boundSession({ projectSlug: 'alpha', provider: 'codex', conversationRef: ref }),
       ...(ref === 'manual' ? { manualSuspendedAt: stamp } : ref === 'pressure' ? { pressureSuspendedAt: stamp } : ref === 'idle' ? { idleSuspendedAt: stamp } : {}),
     }));
-    const tree: TreeResponse = { projects: [project({ slug: 'alpha', displayName: 'Alpha', codex: chats }), project({ slug: 'empty', displayName: 'Empty' })], boundSessions: sessions };
+    const tree: TreeResponse = { projects: [project({ slug: 'alpha', displayName: 'Alpha', codex: chats }), project({ slug: 'empty', displayName: 'Empty' })], boundSessions: sessions, structuredProviders: [] };
     const options = { tree, workMode: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
     const mobile = deriveSidebarProjects({ ...options, mobileActiveOnly: true });
     expect(mobile.map(item => item.slug)).toEqual(['alpha']);
@@ -320,6 +324,7 @@ describe('Active only', () => {
     ref, provider, projectSlug: 'alpha', updatedAt: ago(0), isBound: Boolean(session),
   }));
   const tree: TreeResponse = {
+    structuredProviders: [],
     projects: [project({
       slug: 'alpha', displayName: 'Alpha',
       codex: chats.filter(chat => chat.provider === 'codex'),

@@ -371,7 +371,7 @@ export interface TreeResponse {
   projects: ProjectSummary[];
   boundSessions: BoundSession[];
   /** Providers whose lane is enabled in config (`structuredSessions.<provider>.enabled`): only these can run conversations. */
-  structuredProviders?: ProviderId[];
+  structuredProviders: ProviderId[];
   lastIndexedAt?: string;
 }
 
