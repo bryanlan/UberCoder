@@ -412,9 +412,9 @@ describe('a Stop that drops queued steers', () => {
 
     const result = await session.interrupt(turnId);
     expect(result).toEqual({ cancelledSteerIds: ['queue-item-7', uuidShaped] });
-    const notice = log.of('notice').find((event) => /discarded 2 messages/.test(event.text));
-    expect(notice).toBeDefined();
-    expect(notice!.text).toContain('queue-item-7');
+    // The notice comes through the event stream, which the log reads on its own schedule: wait for it.
+    const notice = await log.waitFor((event) => event.type === 'notice' && /discarded 2 messages/.test(event.text));
+    expect(notice.type === 'notice' && notice.text).toContain('queue-item-7');
     expect((await log.waitForTerminal(turnId)).status).toBe('interrupted');
     expect(log.terminalsOf(turnId)).toHaveLength(1);
     // Nothing runs for them afterwards, and a Stop with nothing queued reports nothing.
