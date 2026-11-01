@@ -56,7 +56,6 @@ Drag a chat from the sidebar or chat search results into the message box. Consol
 inserts an editable agent reference at the selection, with the chat title, provider,
 project and `agent_coordination` recipient ID. The receiving agent can use that ID
 with `send`, including across projects. Dropping does not submit the message.
-Text Bypass types the reference into the native draft through its existing input path.
 
 The authenticated `GET /api/agent-reference` endpoint resolves the conversation's
 current restorable binding and native provider identity to its assignment ID.
@@ -73,7 +72,7 @@ finished agents still require an explicit resume before a new message.
 
 **Unattended means permission to continue the existing human-authorized assignment without another prompt.** It never grants a new task, external action, approval or deployment permission. Every new assignment defaults to `waiting_for_input`; neither its `active` label nor a peer message enables unattended work. `status` returns the current continuation permission, supervisor and recovery outcome. The repository activity panel defines both modes and shows a stalled warning after three automatic continuations.
 
-Set `continuation: "unattended"` through `update` when the assignment is authorized to continue. Set `continuation: "waiting_for_input"` **before asking Bryan for a decision**, even if work remains. Console Stop, new human input, manual suspension and release pause unattended permission immediately. The ordinary native end-of-turn Stop hook only sets lifecycle status `waiting`; it preserves unattended permission because a completed turn need not mean a completed assignment. Native Codex cancellation also pauses it. Visible native drafts and approvals defer input without modifying them.
+Set `continuation: "unattended"` through `update` when the assignment is authorized to continue. Set `continuation: "waiting_for_input"` **before asking Bryan for a decision**, even if work remains. Console Stop, new human input, manual suspension and release pause unattended permission immediately. The ordinary native end-of-turn Stop hook only sets lifecycle status `waiting`; it preserves unattended permission because a completed turn need not mean a completed assignment. Native Codex cancellation also pauses it. A running turn, including one waiting on an approval, defers input.
 
 After actual progress, an agent may explicitly renew `unattended` for the remaining authorized work. Renewal starts a new three-attempt continuation budget. Do not renew just to suppress a stall warning. Descriptions, status updates, new messages, worker facts, supervisor edits and backend restarts cannot reset the budget. Interrupted or unacknowledged submission requires conversation review before renewal. A stopped provider-failure retry needs a new manual provider turn; permission renewal alone does not replay that failure.
 
@@ -92,7 +91,7 @@ The alert does not end the worker's await or change permission. A full superviso
 inbox defers the alert until space opens. Await state and alert deduplication
 survive backend restarts. Console Stop, native cancellation, manual pause and
 human input clear the await and keep their existing automatic-input guards.
-Drafts, interactive prompts and memory limits still defer a result wake.
+A running turn (including one waiting on an approval or question) and memory limits still defer a result wake.
 
 Declare `supervisorId` on a separately registered worker. Store a coherent task with `update.task`: `deliverable`, `doneWhen`, `evidencePath`, `state` (working/blocked/done), and `actionNeeded` when blocked. Expected external job waits remain working with `awaiting`. Routine summaries, repeated blocked state and intermediate review readiness never notify the supervisor. A transition to DONE or action-needed BLOCKED creates one durable report, default P2 with one-week validity. Explicit P1/P3 and validity choices still apply. Unattended disconnect reports only unfinished work.
 
@@ -102,7 +101,7 @@ Non-P1 worker reports are batched into an existing-turn supervisor digest, at mo
 
 Reports include a bounded summary and task/evidence details; full summaries remain in `history`. Do not duplicate a task-state report with `send`. Changing ordinary summary wording does not create another notification. Links reject unknown, finished, self and cyclic supervisors. Reports cannot enable a waiting parent, change authority or replenish its recovery budget. Native provider failure and exhausted continuation remain bounded controller signals; genuine native child completion envelopes remain signals for their own parent.
 
-The backend checks every 15 seconds. A ready unattended assignment with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Native worker signals use that same first delay. Later continuations wait at least 45 and 120 seconds, with three attempts per permission generation. Informational P2/P3 arrivals cannot start an extra turn or bypass that budget. Explicit supervised dispatch is a separate, guarded task command. Foreground work, native drafts, approvals, Stop and resource limits retain their guards. Typed provider failures use the separate bounded recovery controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery).
+The backend checks every 15 seconds. A ready unattended assignment with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Native worker signals use that same first delay. Later continuations wait at least 45 and 120 seconds, with three attempts per permission generation. Informational P2/P3 arrivals cannot start an extra turn or bypass that budget. Explicit supervised dispatch is a separate, guarded task command. Foreground work, approvals, Stop and resource limits retain their guards. Typed provider failures use the separate bounded recovery controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery).
 
 ### Cooperative priority trial
 
@@ -184,7 +183,7 @@ deadline before its inbox request begins.
 
 Trial measurement uses the read-only audit CLI (`--hours`, optionally `--usage`). Its `priorityTrial` section counts accepted priorities/origins and expiry without exposing message bodies. Compare actual model wakes over comparable work windows and inspect P1 next-action impact and blocking latency; transport acknowledgements do not prove efficiency or token savings.
 
-SQLite metadata stores permission, revision, deduplicated signals and attempts. Each input attempt is recorded before transport. Missing native acknowledgement after 30 seconds, an interrupted submission or ambiguous input blocks automatic replay across restart. A human pause during readiness or text entry prevents automatic input; a work-permission revision also prevents unattended-work Enter. Incoming wake requests received while a drain runs request another pass; new signals arriving during input remain pending. The continuation notice asks the agent to read its inbox, reconcile work and results, preserve all constraints and continue the assignment.
+SQLite metadata stores permission, revision, deduplicated signals and attempts. Each input attempt is recorded before transport. Missing native acknowledgement after 30 seconds, an interrupted submission or ambiguous input blocks automatic replay across restart. A human pause before sending prevents automatic input; a work-permission revision also prevents an unattended-work send. Incoming wake requests received while a drain runs request another pass; new signals arriving during input remain pending. The continuation notice asks the agent to read its inbox, reconcile work and results, preserve all constraints and continue the assignment.
 
 Source integration does not activate a compiled backend. Deploy the reviewed backend and browser together using the installation contract below and verify real disposable Codex and Claude examples. The helper introduces continuation policy only when the running backend returns it; existing MCP connections need reconnecting to discover the added update fields. The hook also tells agents with a cached tool schema to invoke the same canonical `update` via `node scripts/agent-coord.mjs update` with JSON on stdin; that uses the existing authenticated RPC, without restarting the provider. An older backend rejects unsupported fields explicitly.
 
@@ -210,20 +209,15 @@ of one initial response and one delayed follow-up after a completed turn.
 Console Stop, native cancellation, manual suspension and release pause automatic
 input independently of `waiting_for_input`. The pause survives agent updates,
 registration and backend restart; only the next accepted human conversation turn
-clears the peer-wake pause. Draft typing also defers wake until that human turn
-is submitted. An ordinary native end-of-turn Stop hook does not pause wake.
-Active turns, drafts, approval prompts, queued model changes, insufficient memory
-and uncertain session ownership still defer input. Completing an assignment leaves its inbox available. A late P1 message can wake the
+clears the peer-wake pause. An ordinary native end-of-turn Stop hook does not pause wake.
+Active turns (including one waiting on an approval or a question), queued human messages,
+queued model changes and insufficient memory still defer input. Completing an assignment leaves its inbox available. A late P1 message can wake the
 original eligible conversation for inbox handling while the assignment stays
 finished and its work permission stays off. Registration and automatic prompt
 hooks preserve completion; a genuine human prompt or explicit active update can
 begin new work. Closed sessions retain messages until explicit resume and cannot
 wake without a current restorable binding. Finished supervisors also retain late
 result handoffs and overdue alerts.
-
-Claude control notices use literal text entry, as provider recovery does, so the
-final ownership check can match their actual contents before Enter. Bracketed
-paste can collapse even a single-line notice into an opaque native placeholder.
 
 ### Send receipts
 
@@ -237,29 +231,11 @@ coordination history. A work-permission update does not cancel an inbox response
 guards record their actual reason, including available memory and its threshold, instead of
 combining memory, permission and ownership changes into a generic pause error.
 
-A refusal before submission is `deferred`, rather than an uncertain transport failure. For
-Claude, a completely confirmed unsent Console notice retains its assignment, binding PID,
-binding start, notice kind and message IDs. The same owner may finish that submission when guards clear,
-including after backend restart, only if the composer still contains the exact notice.
-An empty composer also blocks staged recovery: native input may have submitted or cleared
-the notice outside Console, so the backend cannot safely infer that another paste is needed.
-The backend reads the composer again after its last asynchronous ownership check and
-rechecks local pause, binding and resource guards immediately before invoking Enter.
-An unsent unattended-work notice also retains its permission revision and original attempt
-count. It can deliver worker results that arrive later, since the notice reads the inbox;
-it cannot submit after that permission changes or spend another attempt to finish the paste.
-Human text, a different binding, manual Stop and a failed or interrupted Enter prevent this
-path. The backend writes the submitting phase before invoking Enter; uncertain submissions
-remain blocked from automatic replay. Deferrals do not spend a successful response attempt.
-
-A queued human message has priority over a staged automatic notice. When the original
-assignment, PID and binding still own the exact known single-line notice, the backend may
-remove that unsent notice without submitting it. It rechecks ownership and the live composer,
-journals a `retiring` phase, uses Claude's documented end-of-line and delete-to-start editing
-keys, then confirms an empty ready composer before entering the human message. See
-[Claude's editing shortcuts](https://code.claude.com/docs/en/interactive-mode#text-editing).
-Changed or mixed human text is preserved. An uncertain clear or interrupted retirement becomes
-a reviewable queued message across restart; neither clear nor Enter is automatically replayed.
+A refusal before submission is `deferred`, rather than an uncertain transport failure; the
+structured transport reports whether it sent the notice. The backend writes the submitting phase
+before sending, and an uncertain submission is never automatically replayed, including after a
+backend restart. Deferrals do not spend a successful response attempt. A queued human message
+has priority over an automatic notice: the notice waits until the person's queue is empty.
 
 Send returns id, queued, recipient, delivery and a plain-English note. A known
 recipient accepts a durable message independently of its process or completion
@@ -271,7 +247,7 @@ CLI failures are JSON on stderr; an unknown destination carries code
 The recipient reports working, idle or stopped, provider, last messaging contact, and resumableInConsole. Process identity is checked by PID and start time; an unambiguous current Console binding supplies working/suspension state. A recorded resumable binding is not a guarantee that a provider restart will succeed.
 
 - next_step: queued for the next supported native hook; long tools can delay it.
-- wake_pending: a peer-inbox response is requested for the original Console conversation, including while waiting for Bryan. Drafts, approvals, provider startup and insufficient memory defer it. A recorded refusal before submission includes its reason and remains eligible when guards clear.
+- wake_pending: a peer-inbox response is requested for the original Console conversation, including while waiting for Bryan. A running turn, approvals, provider startup and insufficient memory defer it. A recorded refusal before submission includes its reason and remains eligible when guards clear.
 - wake_started: a fixed coordination control notice was submitted; receipt still requires acknowledgement.
 - wake_blocked: submission or restore failed or was interrupted. The message remains queued and ambiguous input is never automatically replayed.
 - next_turn: the live recipient has no unique managed Console binding; it waits for its next native turn.
@@ -287,11 +263,11 @@ Receipt generation never polls or acknowledges messages. Only a new P1 requests 
 
 Ordinary idle sleep checks native work rather than the assignment's active label, which can remain active after a resume without a new turn. Running background terminals, shell/task counters and native child-agent rosters defer suspension. Failed wake input retains its per-message attempt record but clears its provisional working marker, allowing new messages and subsequent idle sleep.
 
-If Claude resumes into its exact native summary/full-session choice, peer wake selects **Resume full session as-is** after verifying the pane PID, binding ownership and complete active choice block. It preserves the full conversation and leaves the provider's future-question setting unchanged. A durable confirmation attempt is written immediately before the first control key and prevents replaying an ambiguous Enter after restart. Shutdown or a transient ownership read before that attempt only defers delivery, preserving the pending message for the next pass. An unanswered instance of this known resume menu can sleep at the ordinary idle deadline; other approvals and drafts remain protected. Live sessions kept awake by a guard still reattach their output monitoring after a backend restart. Reattachment opens an append-only pipe only when none exists; a live pipe stays connected without replacement.
+A wake that finds the conversation asleep restores it first, on the structured transport, before it sends the notice.
 
-The private Unix socket and authenticated `/api/assignment-activity` browser route serve activity and inbox data. The former `/api/coordination` endpoint is removed: older tabs receive an ordinary request failure and show their existing status message, rather than rendering an incompatible payload. Refreshing loads the new panel; no automatic reload interrupts draft input. Direct messages request an immediate backend wake check, with a 15-second retry pass for deferred recipients. A fixed control notice requests inbox handling and conditionally resumes the existing authorized work according to current continuation status. Codex uses its native `codex queue --thread` command with the configured resume executable, merged provider environment and project directory, preserving the composer. Claude waits for the complete exact notice in its ready composer, including partial repaints, before the guarded Enter; peer text remains in the authenticated inbox and arrives through lifecycle and post-tool hooks. Native transcript adapters classify the notice as coordination status, never a human message. Browser drafts are not modified. A native terminal draft, working turn, queued model change, uncertain tmux ownership or other interactive prompt prevents submission. Codex native drafts defer the queue request as well. Long tools delay delivery until a supported boundary.
+The private Unix socket and authenticated `/api/assignment-activity` browser route serve activity and inbox data. The former `/api/coordination` endpoint is removed: older tabs receive an ordinary request failure and show their existing status message, rather than rendering an incompatible payload. Refreshing loads the new panel; no automatic reload interrupts draft input. Direct messages request an immediate backend wake check, with a 15-second retry pass for deferred recipients. A fixed control notice requests inbox handling and conditionally resumes the existing authorized work according to current continuation status. The notice is sent as a turn on the conversation's structured transport, only while no turn runs; the transport reports whether it was sent, and only a refusal before sending is retried. Peer text remains in the authenticated inbox and arrives through lifecycle and post-tool hooks. Native transcript adapters classify the notice as coordination status, never a human message. Browser drafts are not modified. A running turn, a queued human message, a queued model change, a manual or memory-pressure sleep, or a changed binding prevents submission.
 
-Messages are queued, offered to the runtime, then explicitly acknowledged. Unacknowledged messages are offered again after 60 seconds. Each P1 message ID permits an initial automatic input attempt and at most one guarded follow-up. The follow-up requires a successfully submitted initial attempt in the same binding, a later completed turn, at least 90 seconds since submission, an expired offer cooldown and all ordinary readiness, draft, ownership and resource guards. A failed or unconfirmed native submission is never replayed. A durable, exact, confirmed unsent notice may finish its original submission as described above. Separate durable attempt records are written before input, so restarting the backend or retrying a send cannot create a third attempt. Offered messages are not proof of acknowledgement. A continuation reads the current inbox batches, acknowledges their IDs, replies only when useful and then resumes the existing authorized work. It does not close unfinished assignments or send acknowledgement-only replies. Their text is delivered in full, independently of activity summaries. The browser pending count covers all relevant unacknowledged messages, independently of its 50-message display limit.
+Messages are queued, offered to the runtime, then explicitly acknowledged. Unacknowledged messages are offered again after 60 seconds. Each P1 message ID permits an initial automatic input attempt and at most one guarded follow-up. The follow-up requires a successfully submitted initial attempt in the same binding, a later completed turn, at least 90 seconds since submission, an expired offer cooldown and all ordinary readiness, ownership and resource guards. A failed or unconfirmed submission is never replayed. Separate durable attempt records are written before input, so restarting the backend or retrying a send cannot create a third attempt. Offered messages are not proof of acknowledgement. A continuation reads the current inbox batches, acknowledges their IDs, replies only when useful and then resumes the existing authorized work. It does not close unfinished assignments or send acknowledgement-only replies. Their text is delivered in full, independently of activity summaries. The browser pending count covers all relevant unacknowledged messages, independently of its 50-message display limit.
 
 Routine activity is retained for `history`, `status` and the browser, and is not injected automatically. Hooks supply P1/P2 batches, current assignment/authority state and eligible P3 notices only.
 
@@ -328,11 +304,11 @@ text appended to an interrupted notice remains human conversation content.
 
 ## One-hour loaded idle window
 
-The default `sessions.eagerRestoreHours` and `sessions.restoreGraceHours` are both 1. New activity and completed replies reset the idle clock; restoration alone grants one hour of grace. Reconciliation checks every 30 seconds, so suspension occurs on the first eligible pass after the hour. Sleeping keeps the conversation, inbox, assignment and Work binding. A new direct message can restore that same conversation for an inbox response, independently of unattended work permission.
+The default `sessions.restoreGraceHours` is 1. New activity and completed replies reset the idle clock; restoration alone grants one hour of grace. Reconciliation checks every 30 seconds, so suspension occurs on the first eligible pass after the hour. Sleeping keeps the conversation, inbox, assignment and Work binding. A new direct message can restore that same conversation for an inbox response, independently of unattended work permission.
 
-Manual pauses, active provider turns, drafts, approvals, queued model changes and unverifiable tmux ownership prevent automatic actions. Memory-pressure sleep can wake for a pending message only after the configured available-memory threshold is met. A surviving registered provider outside its recorded tmux binding prevents a second writer. Finished assignments retain their inboxes. Conversations without a unique current managed binding cannot be automatically resumed; new work needs an explicit live owner.
+Manual pauses, active provider turns, queued human messages and queued model changes prevent automatic actions. Memory-pressure sleep can wake for a pending message only after the configured available-memory threshold is met. The loaded structured conversation is the only writer of its native conversation. Finished assignments retain their inboxes. Conversations without a unique current managed binding cannot be automatically resumed; new work needs an explicit live owner.
 
-Activation of an existing Console installation must also set its local runtime configuration's two idle-window values to 1; schema defaults do not replace explicit old values. Build and test the isolated checkout before activation. Preserve provider processes through the backend restart and verify a disposable real cross-provider request, acknowledgement and reply, not only health.
+Activation of an existing Console installation must also set its local runtime configuration's `sessions.restoreGraceHours` to 1; schema defaults do not replace explicit old values. The former `sessions.eagerRestoreHours` key now fails at startup and must be removed. Build and test the isolated checkout before activation. Preserve provider processes through the backend restart and verify a disposable real cross-provider request, acknowledgement and reply, not only health.
 
 ## Retired enforcement and maintenance
 

@@ -2,7 +2,7 @@
 
 Prepared: 2026-09-18. Repository: `/home/bryan/code/UberCoder/agent-console-mvp/agent-console`.
 
-Status: implemented and deployed to the local Agent Console service on 2026-09-24. This file preserves the original design and acceptance checklist; current behavior is described in `docs/architecture.md` and `docs/fileindex.md`. The live SQLite database migrated to schema 11. The original reported conversation was not used for testing. Live Codex `/model` picker behavior was verified in disposable sessions in both regular entry and Text Bypass; the full queued-switch navigate-away scenario in section 9 was covered by automated tests but was not repeated against the live service.
+Status: implemented and deployed to the local Agent Console service on 2026-09-24. This file preserves the original design and acceptance checklist; current behavior is described in `docs/architecture.md` and `docs/fileindex.md`. The live SQLite database migrated to schema 11. The original reported conversation was not used for testing. Live Codex `/model` picker behavior was verified in disposable sessions in both regular entry and Text Bypass; the full queued-switch navigate-away scenario in section 9 was covered by automated tests but was not repeated against the live service. The tmux transport this plan describes was removed in Phase B (2026-11-01); see `docs/structured-cutover.md`.
 
 Subsequent approved profile changes superseded the original mapping: Codex H/M/L now use GPT-6 Astra/Sol/Luna at `xhigh`, and Claude has its own H/M/L mapping. The instruction below to preserve profile definitions describes the queue implementation's original scope, not the later explicit changes.
 

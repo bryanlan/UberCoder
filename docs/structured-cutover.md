@@ -6,7 +6,10 @@ Status: Phase A is live. It was proven against the real Claude and Codex CLIs af
 "Verification evidence"), then on 2026-10-30 Bryan asked for the cutover: `main` was fast-forwarded to the branch, the live
 Console was rebuilt and restarted with both lanes on, a real structured chat per provider answered on the live Console, and
 `defaultTransport` was flipped to `structured`; the first reconcile passes moved every asleep tmux row. The record is in
-"Cutover record (2026-10-30)". Phase B (tmux retirement) has not started.
+"Cutover record (2026-10-30)". Phase B (tmux retirement) was done on 2026-11-01 on `feature/tmux-retirement`; see
+"Phase B record (2026-11-01)". Everything in this document before that record describes the tmux path and the
+two-transport period and is history: `defaultTransport`, the migration, `transport` on binds and the tmux proofs no
+longer exist.
 
 ## Goal
 
@@ -560,6 +563,8 @@ The migration then converts idle rows on the next reconcile pass (the first pass
 
 ## tmux retirement (Phase B)
 
+### Plan (history, 2026-10-26)
+
 Delete, with their tests and docs: `sessions/tmux-client.ts`, `tmux-health.ts`, `session-screen.ts`,
 `screen-heuristics.ts`, `keystroke-transport.ts`, `output-watcher.ts`, `last-user-input.ts`,
 `pending-adoption.ts`, the Claude terminal normalizer in `live-output/filters.ts`, the tmux branches of
@@ -572,6 +577,66 @@ terminal panel and screen polling, `providers.*.commands` config (replaced by `s
 structured path), `smoke-codex-adoption.mjs`, and the FakeTmux fixtures (28 test files rewritten against
 the fake plugin). `bound_sessions.tmux_session_name` becomes nullable in a later schema version. The
 `design/extension-agent-lane` branch is deleted.
+
+### Phase B record (2026-11-01)
+
+Branch `feature/tmux-retirement`, from `main` at `84157b8`. A conversation now runs one way: on the structured transport,
+behind its session host. Where this differs from the plan above, the record governs.
+
+**Removed.** The backend tmux path: `sessions/tmux-client.ts`, `tmux-health.ts`, `session-screen.ts`,
+`screen-heuristics.ts`, `keystroke-transport.ts`, `output-watcher.ts`, `last-user-input.ts`, the Claude terminal
+normalizer (`live-output/filters.ts`), `structured/default-transport.ts`, `lib/shell.ts` and
+`lib/pending-conversation-match.ts`, and the tmux branches of `session-manager.ts` (5,980 lines before, about 3,070
+after). `pending-adoption.ts` stays, reduced to the three helpers the structured bind uses. The input queue lost its
+paste-confirmation states; `needs_review` became `failed`. The providers lost their launch commands and pending-adoption
+transcript matching. Routes: `GET /api/sessions/:id/raw-output`, `GET /api/sessions/structured-migration`, the literal
+keys and Text Bypass of `/keys`, and the terminal capture of `/screen` (it returns the synthesized status only and
+ignores `?lines`). Shared contracts: `SESSION_TRANSPORTS`, `SessionTransport`, `BoundSession.transport`,
+`BoundSession.tmuxSessionName`, `BoundSession.rawLogPath`, `BindConversationRequest.transport`,
+`SessionKeystrokeRequest.deferScreenUpdate`, `AgentLaunchContext.flags`, the `session.raw-output` event, and the
+model-profile deferral reasons that only a terminal could give. Scripts: `prove-active-input.mjs`,
+`prove-session-recovery.mjs`, `prove-peer-message-wake.mjs`, `prove-session-close.mjs`, `prove-structured-migration.mjs`,
+`smoke-codex-adoption.mjs` and `verify-live-console.mjs` were deleted; `prove-agent-grants.mjs` and
+`prove-granted-launches.mjs` were rewritten against the structured transport (not yet run against real providers).
+Tests: the tmux-only suites and the `FakeTmux` fixture were deleted; the input queue, lifecycle, recency, model profile,
+routes, grants, peer wake, continuation and recovery suites run on the fake plugin.
+
+**Startup conversion.** It replaces the migration. Before the first reconcile pass, `SessionManager` finds every
+restorable row an earlier build left with `transport = 'tmux'`. For each it ends the tmux session (`tmux kill-session`,
+spawned directly, failures ignored), notes the conversation history for the structured resume, fails any message that
+was being typed into the terminal, and rewrites the row as structured with the `structured:<id>` placeholder name and no
+pid. A row that was not manually or pressure suspended becomes asleep (idle suspended), so the next message resumes the
+same native conversation. Each row is logged at info and gets a status line in its conversation. A row that is already
+released keeps its old values; nothing reads them.
+
+**Config keys that now fail at startup**, each naming the key: `providers.<provider>.commands`,
+`projects.<slug>.providers.<provider>.commands`, `structuredSessions.defaultTransport` and `sessions.eagerRestoreHours`.
+`structuredSessions.<provider>.enabled`, `command`, `idleUnloadMinutes` and `env` stay.
+
+**Launch flags.** `launchContext.flags` is gone end to end. A grant launch that sends a non-empty `flags` list is refused
+with a message that says sessions take no command-line flags; an absent or empty list is accepted.
+
+**Other contract changes.** Bind bodies are strict: any field, including `transport`, is refused with 400. `/keys` takes
+`keys: ['Enter']` with text (and optional `submittedText`, `submissionId`, `imageIds`) or `keys: ['Escape']` alone, and
+refuses everything else. The live output reader and live search show only the person's messages and status lines.
+
+**Kept.** The `bound_sessions.tmux_session_name` and `transport` columns (schema 19; new rows write the placeholder and
+`structured`), so no schema change was needed. The `design/extension-agent-lane` branch and worktree, contrary to the
+plan above. The removal of `TMUX` variables from a provider process's environment, so a backend started inside tmux does
+not leak it.
+
+**Rollback.** There is no configuration switch back to tmux. Rolling back means the previous build and a database
+backup; rows the startup conversion moved stay on the structured transport.
+
+**Verification (2026-11-01, on the branch).** `npm run typecheck` and `npm run build` passed. The server suite passed
+82 files, 1901 tests (5 skipped). Earlier full runs on the same code, on a host at load average 7 to 14, each failed one to
+five timing tests, mostly in suites this change did not touch; each passed alone. Four now wait for their condition
+instead of a fixed delay (a session host attach that lands before the host has seen its provider end, the Claude
+discarded-steers notice, the Codex idle sleep, the per-session profile switch). Three were left as they are: a second
+session host attach race of the same kind, and two tests that ran past 10 s (`engineering-summary`, `worktree-sweep`). The web suite (19 files, 211 tests) has 35 failures, all in `ConversationPane.test.tsx`: they test the terminal
+controls (Text Bypass, key and menu buttons, the live screen panel) that the web lane removes. No real provider was
+started; the real proofs, including the rewritten `prove-agent-grants.mjs` and `prove-granted-launches.mjs`, have not
+been run.
 
 ## Verification
 
@@ -680,8 +745,9 @@ the `main` checkout, with its configuration in `~/.config/agent-console/config.j
    live app-server. The Codex instance now ends the app-server and its host once no thread has been loaded on it for
    `idleUnloadMinutes`; the next open starts a fresh one (unit test on the fake app-server behind a real host).
 
-Rollback stays as documented in the flip procedure: `defaultTransport: tmux` and a restart return new conversations to
-tmux, moved rows keep working on the structured transport, and the backups above restore the previous build and database.
+Rollback stayed as documented in the flip procedure until Phase B: `defaultTransport: tmux` and a restart returned new
+conversations to tmux, moved rows kept working on the structured transport, and the backups above restored the previous
+build and database. Phase B removed that switch; see "Phase B record (2026-11-01)".
 
 ## Verification evidence
 

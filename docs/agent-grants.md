@@ -67,17 +67,18 @@ The localhost development app disables PWA workers, so notifications require the
 
 ## Launch and restart real sessions
 
-`agent_grants launch` accepts `projectSlug`, `provider`, `model`, `effort`, `flags`, `prompt`, `title` and `supervisorId`.
-Providers are `codex` and `claude`. The backend uses the same session manager and provider commands as the UI.
+`agent_grants launch` accepts `projectSlug`, `provider`, `model`, `effort`, `prompt`, `title` and `supervisorId`.
+Providers are `codex` and `claude`. The backend uses the same session manager and structured transport as the UI.
+Sessions take no command-line flags: a request that carries a non-empty `flags` list is refused.
 The session appears in the list as **Launched by** its launcher.
 Use `launch_status` with the returned request ID to obtain the native assignment after registration.
 
 `restart` takes either the original `sessionId` or `targetAssignmentId`, the lane's coordination assignment ID.
 It preserves the native conversation, assignment and inbox. The assignment ID resolves to the stored Console binding before queueing.
-It starts one new turn through the provider's resume command, even if the previous assignment finished or its continuation is `waiting_for_input`.
+It unloads the conversation, loads it again on the structured transport and starts one new turn, even if the previous assignment finished or its continuation is `waiting_for_input`.
 An optional `prompt` supplies that turn's task; without it, a fixed notice asks the agent to reconcile and continue existing authorized work or report its completed outcome.
 Restart does not enable unattended permission or resolve a pending human decision.
-Current work, drafts, queued human input and provider choices defer restart. Manual Stop, manual suspension, memory pressure and released bindings remain protected.
+A running turn, queued human input and a queued model change defer restart. Manual Stop, manual suspension, memory pressure and released bindings remain protected.
 The queue rechecks the current grant before restart and before starting the replacement process. This explicit action uses no automatic provider-failure retry.
 
 ```json

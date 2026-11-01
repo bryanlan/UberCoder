@@ -2,16 +2,15 @@
 
 Agent Console is a production-leaning MVP for Ubuntu/Linux that lets one user manage **local Codex CLI and Claude Code sessions** across multiple project folders from a desktop browser or phone.
 
-The backend runs on the Linux box and stays authoritative. The frontend is a thin React PWA that renders an abstracted live session surface instead of exposing tmux or Linux terminals to clients.
+The backend runs on the Linux box and stays authoritative. The frontend is a thin React PWA that renders an abstracted live session surface instead of exposing Linux terminals to clients.
 
 ## What it does
 
 - discovers active projects from one parent directory
 - indexes Codex and Claude local histories into a project/provider/conversation tree
-- binds a selected conversation to a hidden detached tmux session
+- binds a selected conversation to its provider's structured interface (Codex app-server, Claude headless stream-json), run by a session host process that outlives a backend restart
 - sends user input to the bound agent session without exposing terminal control directly
 - renders bound sessions as a backend-owned live `output + input + status` view
-- exposes a collapsible raw-output/debug drawer
 - securely reverse-proxies allowlisted project-local localhost apps, including websocket upgrades
 - supports secure single-user remote access with cookie auth and optional Tailscale identity bootstrap
 
@@ -22,7 +21,7 @@ The backend runs on the Linux box and stays authoritative. The frontend is a thi
 - Node.js + TypeScript
 - Fastify
 - SQLite (`better-sqlite3`)
-- tmux CLI integration
+- Codex app-server and Claude headless stream-json transports
 - chokidar
 - zod
 - SSE for live updates
@@ -40,7 +39,7 @@ The backend runs on the Linux box and stays authoritative. The frontend is a thi
 
 ```text
 apps/
-  server/   Fastify backend, providers, tmux session manager, proxy, tests
+  server/   Fastify backend, providers, session manager, proxy, tests
   web/      React PWA frontend
 packages/
   shared/   shared types between backend and frontend
@@ -58,7 +57,7 @@ scripts/
 
 ```bash
 sudo apt update
-sudo apt install -y tmux build-essential python3
+sudo apt install -y build-essential python3
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
@@ -123,34 +122,12 @@ npm run dev
 
 Frontend Vite dev server proxies `/api` and `/proxy` back to the backend.
 
-## Codex E2E smoke test
+## Real provider proofs
 
-The highest-value host-level E2E check is the **Codex adoption flow**:
-
-- Agent Console creates a **hidden detached tmux session** for a new Codex conversation
-- your prompt is sent into that bound session
-- Codex writes a real transcript under the configured local Codex sessions root
-- the backend reconciles the temporary `pending:*` node to the real saved Codex conversation ref
-- releasing the session tears down the tmux session cleanly
-
-Run it against a running backend:
-
-```bash
-npm run smoke:codex -- --project <project-slug> --password '<login-password>'
-```
-
-Useful options:
-
-```bash
-npm run smoke:codex -- \
-  --project demo-web \
-  --password 'your-password' \
-  --base-url http://127.0.0.1:4317 \
-  --config ~/.config/agent-console/config.json \
-  --timeout-ms 180000
-```
-
-This script proves the saved conversation lands under the expected Codex sessions root. It does **not** inspect GUI terminals, because the product model is a hidden tmux session on the Linux host rather than a visible local terminal window.
+The host-level checks that drive a real Codex or Claude conversation are the opt-in structured proofs
+(`scripts/prove-structured-codex.mjs --run` and `scripts/prove-structured-claude.mjs --run`). Each starts its own isolated
+backend, spends real provider quota and removes what it started. See `docs/agent_docs/running_tests.md` for what each step
+proves.
 
 ## Remote access model
 
@@ -185,7 +162,6 @@ Core tests cover:
 - config parsing and config merge behavior
 - explicit project configuration and tree refresh
 - provider history discovery
-- command construction
 - proxy allowlisting
 - session state transitions
 
@@ -201,7 +177,7 @@ npm run test
 
 - local state root is `$CODEX_HOME` or `~/.codex`
 - session transcripts are primarily under `~/.codex/sessions/`
-- resume commands are built from official `codex resume` patterns
+- a conversation runs through `codex app-server`, which resumes the saved thread by id
 - parsing is tolerant of JSONL layout differences and falls back to filename/title heuristics
 
 ### Claude assumptions
@@ -209,7 +185,7 @@ npm run test
 - local state root is `~/.claude`
 - project transcripts are best-effort discovered under `~/.claude/projects/<encoded-path>/`
 - `~/.claude/history.jsonl` is treated as a helpful but non-guaranteed index
-- resume commands are built from official `claude --resume` / `claude --continue` patterns
+- a conversation runs through headless `claude` (stream-json), which resumes the saved session with `--resume <id>`
 - encoded path matching is intentionally loose because the layout is not a stable public API
 
 ### Degraded mode
@@ -242,4 +218,4 @@ If a transcript schema changes and the parser cannot fully normalize it:
 
 ## Notes on validation in this environment
 
-The repo is structured to be runnable with the declared dependencies and tests, but the actual Codex CLI / Claude Code binaries, tmux presence, and vendor-local state layouts still need to exist on the target Ubuntu host for end-to-end verification.
+The repo is structured to be runnable with the declared dependencies and tests, but the actual Codex CLI / Claude Code binaries and vendor-local state layouts still need to exist on the target Ubuntu host for end-to-end verification.

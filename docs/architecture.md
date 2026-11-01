@@ -8,7 +8,7 @@ failures and unknown wiki provenance remain visible in its versioned JSON.
 Standing grants let agents launch and restart real Console sessions under Bryan's recorded authority.
 See [Agent grants](agent-grants.md) for creation, inheritance, the durable launch queue and native context.
 
-`agent-console` is a local, server-first Codex/Claude Agent Console. The backend owns project configuration, provider transcript discovery, hidden tmux session binding, auth, proxying, SQLite state, and event-log normalization. The React PWA is a thin client that renders backend-owned project/conversation/session state; it must not become a raw terminal controller.
+`agent-console` is a local, server-first Codex/Claude Agent Console. The backend owns project configuration, provider transcript discovery, session binding on the structured provider transport (Codex app-server, Claude headless stream-json, each behind a session host), auth, proxying, SQLite state, and the session event logs. The React PWA is a thin client that renders backend-owned project/conversation/session state; it must not become a raw terminal controller.
 
 First-class runtime surfaces:
 - Fastify startup: `apps/server/src/index.ts` calls `buildApp` in `apps/server/src/app.ts`; root `package.json` coordinates the server, web and shared packages.
@@ -20,10 +20,10 @@ First-class runtime surfaces:
   `apps/server/src/indexing/indexing-service.ts`, and the SQLite `conversation_search_fts` table in
   `apps/server/src/db/schema.ts`.
 - Fastify session input API: `apps/server/src/routes/sessions.ts`.
-- Session lifecycle and tmux boundary: `apps/server/src/sessions/session-manager.ts`, `session-runtime.ts`, `timeline-merge.ts`, `session-screen.ts`, `live-output/reader.ts`, `screen-heuristics.ts`, `working-state.ts`, `transcript-watcher.ts`, `tmux-health.ts`, and `tmux-client.ts`.
+- Session lifecycle: `apps/server/src/sessions/session-manager.ts`, `structured/structured-session-service.ts`, `session-runtime.ts`, `input-queue.ts`, `timeline-merge.ts`, `live-output/reader.ts`, `working-state.ts`, `transcript-watcher.ts`, `run-recovery.ts` and `tmux-row-conversion.ts` (the startup conversion of rows the removed tmux transport left).
 - Provider transcript adapters, especially `apps/server/src/providers/transcripts/codex.ts` for Codex JSONL display filtering and duplicate handling.
 - React app shell and conversation surface: `apps/web/src/App.tsx`, `apps/web/src/features/navigation/`, `apps/web/src/features/realtime/`, `apps/web/src/features/conversation/useConversationData.ts`, and `apps/web/src/components/ConversationPane.tsx`.
-- npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run smoke:codex`, `npm run test`, `npm run test:e2e`, `npm run typecheck`, `npm run verify:live-console`.
+- npm scripts: `npm run auth:hash`, `npm run build`, `npm run dev`, `npm run test`, `npm run test:e2e`, `npm run typecheck`.
 
 ## Mobile conversation layout
 
@@ -96,18 +96,15 @@ or mismatched image formats. Files and metadata live in `images/` beside the
 configured Console database, outside the session runtime cleanup tree.
 
 Enter submissions carry image IDs through the existing session keys route. The
-backend resolves those IDs within the selected project and provider, then appends
-local file references and an instruction to inspect them with Codex `view_image`
-or Claude `Read`. This uses the existing tmux writer and provider credentials;
-it does not use the host desktop clipboard or create another provider process.
-Text Bypass appends the image references to the already-typed caption rather than
-typing the caption twice. Pending Codex first-turn launches receive the complete
-caption and image references. Upload errors and rejected sends retain the draft.
-Screen parsing finds the active composer across the captured pane, including
-long wrapped image references, while retaining output and picker exclusion checks.
+backend resolves those IDs within the selected project and provider and appends
+the image envelope (local file references) to the message. The transport attaches
+the stored files natively (Codex `localImage` items, Claude base64 image blocks,
+see `docs/structured-cutover.md`, "Parity features") and drops the envelope's
+instruction line from the text it sends. It does not use the host desktop clipboard
+or create another provider process. Upload errors and rejected sends retain the draft.
 
 The generated image envelope remains in event logs and provider history for
-pending adoption, recovery and duplicate matching. At the public timeline,
+recovery and duplicate matching. At the public timeline,
 recorded-input and user-input event boundaries, it becomes caption text plus
 typed image metadata. The web renders authenticated thumbnails, and search
 indexes the caption rather than transport instructions or local image paths.
@@ -120,14 +117,15 @@ hashing user turns so a pasted prompt can be adopted and matched to live input.
 ## Main Components
 
 - `apps/server/` - Fastify backend, project/config/auth routes, provider adapters, SQLite state,
-  indexing, conversation search, tmux session management, live-output normalization, restart
-  handling, and localhost proxying.
+  indexing, conversation search, session management on the structured provider transport,
+  session event logs, restart handling, and localhost proxying.
 - `apps/web/` - React/Vite PWA for project navigation, conversation timelines, live session
   display, settings, and auth flows.
 - `packages/shared/` - shared TypeScript contracts for sessions, conversations, projects, and
   provider data.
 - `config/` - example runtime configuration for projects, providers, proxy allowlists, and auth.
-- `scripts/` - operator/development helpers such as auth hash generation and host smoke checks.
+- `scripts/` - operator/development helpers such as auth hash generation, the coordination helper, the
+  worktree sweep and the opt-in real-provider proofs.
 - `docs/` - repository navigation, architecture, and test guidance.
 - `test-results/` - Playwright failure artifacts; current contents can be stale and are regenerated by e2e runs.
 
@@ -167,63 +165,39 @@ decision, and yields between batches. Stopping a watcher invalidates its delayed
 including across suspension and resume.
 Output updates must not synchronously load or scan the whole event history.
 
-Live timeline reads cache per-session normalized events and use a set for assistant-line
-duplicate detection. Append reads verify the file identity and previous EOF bytes;
+Live timeline reads cache the rows of each session's event log. Append reads verify the file identity and previous EOF bytes;
 partial records, truncation and replacement trigger reconstruction. Tail boundaries and
 message offsets use UTF-8 byte positions. Parsing and reconstruction yield between
 bounded batches. Completed live-read entries have a combined 64 MiB estimated-text
 budget and a 64-entry limit, and concurrent reads of the same fingerprint share work.
 
-Raw tmux screen captures are parsed by `apps/server/src/sessions/session-screen.ts` for session
-state and exposed through `/api/sessions/:sessionId/screen`. Timeline responses from
-`apps/server/src/routes/conversations.ts` intentionally return messages and bound-session metadata,
-not raw screen content; `apps/web/src/features/conversation/useConversationData.ts` polls the
-screen route separately for the live terminal/status panel.
-That panel shows current output while the backend marks the bound session as working,
-and keeps interactive menus visible while idle only when the screen has no active composer.
-Quoted menu controls at a ready composer stay in the normal transcript.
-Idle terminal scrollback and permission
-footers do not count as active work; completed replies remain in the normal transcript.
-Codex's unboxed composer is bounded by its left-edge prompt, indented continuation rows and
-indented native model footer. Paragraph breaks, quoted prompts and bullets inside that region
-remain input. Earlier prompts followed by assistant output remain screen content. Recognizing the
-whole draft lets the normal submission path confirm a multiline paste and reuse an already-visible
-draft without pasting it again. Native Codex input retains its rendered row boundaries;
-the retained-draft comparison allows whitespace at those boundaries because wrapping can
-split a word. Characters and spaces within each row still have to match.
-The screen parser preserves the full Claude OAuth URL from terminal hyperlink metadata when the
-login screen wraps its visible label. This correction applies only to the interactive screen.
-User-visible incremental conversation output comes through `apps/server/src/sessions/live-output/reader.ts`
-and the event log attached to the bound session. Codex transcript parsing prefers response-backed display messages over
+`GET /api/sessions/:sessionId/screen` serves a status synthesized from the transport's state
+(`StructuredSessionService.screen`): the provider and whether it is working, idle or asleep, the
+model of the active cost profile and the share of context left. There is no terminal content. An
+asleep or suspended conversation answers 404; a bound one that is not loaded is loaded first.
+Timeline responses from `apps/server/src/routes/conversations.ts` return messages and bound-session
+metadata; `apps/web/src/features/conversation/useConversationData.ts` polls the screen route
+separately for the status panel.
+Live rows come through `apps/server/src/sessions/live-output/reader.ts` and the event log attached
+to the bound session: the person's messages (`user-input`, durable until the transcript carries
+them) and the Console's status lines. An automatic opening prompt (`agent-input`, a granted launch)
+and terminal output an earlier build logged (`raw-output`) are not shown; the transcript carries the
+conversation. Codex transcript parsing prefers response-backed display messages over
 near-duplicate event messages, removes internal memory-citation blocks before display comparison,
 and hides environment, `AGENTS.md`, and instruction wrapper records from the visible transcript
 while keeping the full parsed message set available for indexing. Codex commentary-phase assistant
 records are treated as pending progress, and only the latest pending commentary tail is displayed
-so an in-flight answer can show progress without flooding the durable transcript. Codex pending
-conversations attempt transcript linking during the active first turn. Linking atomically writes
-the native conversation summary and transcript path to the index alongside the binding and pending
-reference, so subsequent reads and transcript watchers share the same identity without waiting for
-full discovery. Until a matching transcript exists, the chat shows submitted input and session
-status. Polling continues while the latest message is pending, even if terminal activity reports
-completion within the usual timestamp grace window.
+so an in-flight answer can show progress without flooding the durable transcript. A new chat starts
+as a pending alias (`pending:<uuid>`); its bind learns the native id from the provider at once and the
+native conversation adopts the alias (`sessions/pending-adoption.ts`), writing the conversation
+summary and transcript path to the index in the same transaction, so reads of the alias and
+transcript watchers share one identity. Until the transcript exists, the chat shows submitted input
+and session status.
 
-Pending adoption matches the first/last user prompt hashes and timestamps from the
-provider-filtered visible messages. Injected instructions, midnight environment updates, and
-other hidden records remain available in the full parse but cannot displace the submitted
-prompts in matching metadata. Parser version changes invalidate persisted summaries so an
-existing pending URL can recover its completed transcript without relaunching the agent.
-
-The console intentionally keeps four text channels separate. `/screen` exposes parsed tmux screen
-state for interactive pickers and status, `/raw-output` exposes debug tails for inspection only,
-event-log readers preserve submitted user input and session status, and provider transcript adapters
-produce conversation history. Codex raw-output events never become assistant messages, including
-before its first transcript is linked; the remaining terminal-prose normalizer serves Claude.
-Claude's boxed bug-report notifications are removed before terminal chrome is stripped, keeping
-their header, body and review/send/dismiss controls out of conversation messages and output activity.
-The original notification remains available through the terminal screen and debug output.
-The web conversation pane may mirror local text-bypass typing
-optimistically, but server-derived terminal input or ordinary screen scrollback must not become a
-pending user transcript row.
+The console keeps three text channels separate. `/screen` exposes the synthesized session status,
+event-log readers preserve submitted user input and session status, and provider transcript
+adapters produce conversation history. The web conversation pane may show a sent message
+optimistically, but only a recorded user input or the transcript makes it a durable row.
 
 Claude `api-request-blob` records are saved copies of model context, not new conversation
 turns. The adapter excludes them from parsed messages, active-branch selection and opening
@@ -249,12 +223,10 @@ summary only in internal record metadata. These markers do not replace real user
 hashes, advance conversation activity, enter conversation search, or start a working turn.
 The ready indicator continues to use the last confirmed response and its age.
 
-When debugging duplicated bubbles, missing assistant text, terminal repaint noise, or stale live
-output, route the investigation by text source instead of by visual symptom. Durable history starts
+When debugging duplicated bubbles, missing assistant text or stale live rows, route the investigation by text source instead of by visual symptom. Durable history starts
 in the provider transcript parser (`apps/server/src/providers/transcripts/codex.ts` or the Claude
-adapter), live pending output starts in `apps/server/src/sessions/live-output/`, duplicate
-suppression belongs in `apps/server/src/sessions/timeline-merge.ts`, raw screen inspection belongs
-in `apps/server/src/sessions/session-screen.ts`, and presentation rules belong in
+adapter), live rows start in `apps/server/src/sessions/live-output/`, duplicate
+suppression belongs in `apps/server/src/sessions/timeline-merge.ts`, and presentation rules belong in
 `apps/web/src/features/conversation/transcript-turns.tsx` and
 `apps/web/src/components/ConversationPane.tsx`. Repeated bubble corruption is usually a boundary
 failure between these sources; do not fix it by teaching the renderer to guess which server text is
@@ -283,127 +255,60 @@ transcript load should not break the conversation tree.
 
 The top-left refresh action explicitly requests recent Codex auto-tracking. The server first
 re-indexes every configured active project, then may resume unbound Codex history with real
-provider activity during the preceding eight hours into hidden tmux sessions. Claude discovery is
+provider activity during the preceding eight hours into Console sessions. Claude discovery is
 intentionally different: an unbound Claude transcript remains outside Agent Console until the user
 explicitly confirms that its original terminal session has stopped. This prevents refresh from
 starting a second Claude process for the same provider conversation. Settings-driven tree refreshes
 do not request auto-tracking. `autoTrackedAt` is persisted as display provenance: it makes a newly
 discovered Codex binding green without changing genuine conversation activity or project-recency
-ordering. The provider launch path resumes the original conversation id; it does not fork a new
-provider id.
+ordering. The bind resumes the original conversation id; it does not fork a new provider id.
 
 The web conversation data hook keeps metadata and paged messages on separate query keys. Active
 bound sessions poll the message timeline; after a session completes, the message query keeps polling
 briefly when the latest durable message is still the user's prompt or when session output/completion
-timestamps are newer than the latest transcript message. This closes the gap where a hidden tmux
-session has finished but the provider transcript has not yet exposed the assistant's final answer.
+timestamps are newer than the latest transcript message. This closes the gap where a turn has
+finished but the provider transcript has not yet exposed the assistant's final answer.
 Binding a session to a provider-readable conversation does not require that conversation to already
 have a search-index row. The conversations route can load the provider transcript directly for a
 known conversation id, then the indexing service backfills search rows later without blocking the
 binding flow.
 
-Session text entry has two paths. Normal `/input` submissions send the text to the bound tmux
-session, but the first user prompt for a pending Codex conversation restarts the placeholder
-session with that prompt as the provider's initial command and records the input hash/preview on
-the pending conversation. `/keys` handles literal bridge input; when text plus Enter arrives for a
-first-turn pending Codex session, `sessions.ts` asks `SessionManager.allowsLiteralSelectionKeystroke`
-whether the current screen is an interactive selection UI. Selection tokens stay on the live tmux
-bridge, while non-selection prompt text restarts the pending Codex session instead of typing into a
-stuck composer.
+Session input has one path into the provider: the structured transport takes complete messages
+and Stop. `POST /api/sessions/:id/input` sends a message directly. `POST /api/sessions/:id/keys`
+takes `keys: ['Enter']` with `text`/`submittedText` (and optionally `submissionId` and `imageIds`)
+to send a message, or `keys: ['Escape']` alone to stop the running turn; any other key, text without
+Enter, or a field the route does not take is refused with 400 and nothing is sent. A message that is
+only a slash command word is refused at admission (terminal controls do not exist on the structured
+transport).
 
-Complete chat drafts carry a UUID `submissionId` on `/keys`. The backend journals
-each request in SQLite metadata and delivers messages in order under the existing
-session command lock. An active native composer accepts human messages even while
-the provider is working: normal text plus Enter lets Codex steer the running turn
-and Claude deliver the message after its running tool calls. Console does not wait
-for the whole turn to finish or interrupt it. Startup, approvals, menus and unrelated
-native drafts defer delivery. Automatic input still requires an idle provider.
-The browser shows the queued message separately from the
-transcript and clears the submitted local draft after the server accepts the request.
-Acceptance of a queued Text Bypass message returns the composer to local drafting,
-so later typing cannot append to the queued native text. Text Bypass stays disabled
-while a queued message owns the native input, including after a browser refresh.
-Refreshing or navigating does not discard it. Retrying an uncertain HTTP request
-uses the same submission ID within the open browser and returns the existing receipt.
+Complete chat drafts carry a UUID `submissionId` on `/keys`. The backend journals each request in
+SQLite metadata (`sessions/input-queue.ts`) as `queued`, `submitting` (the request was handed to the
+transport), then `submitted` with the turn it started or steered, and delivers messages in order
+under the session command lock. While a turn runs, a provider that can steer takes the message into
+the running turn; one that cannot keeps it queued until the turn ends. Automatic input still requires
+an idle provider. The browser shows the queued message separately from the transcript and clears
+the submitted local draft after the server accepts the request; refreshing or navigating does not
+discard it, and retrying an uncertain HTTP request with the same submission ID returns the existing
+receipt. A message the transport refused before writing anything waits and is retried (for at most
+ten minutes of refusals); one it can never accept, or whose delivery is uncertain, becomes `failed`
+with its reason and stays listed until the person dismisses it (`DELETE
+/api/sessions/:id/queued-inputs/:requestId`). A message the backend was submitting when it restarted
+becomes `failed` and is never replayed. Queue state is projected on the bound session and is excluded
+from transcript and search content until submission. Pending human messages defer automatic peer
+input, automatic session sleep and model switches.
 
-Before typing and before Enter, delivery verifies the current binding, tmux owner,
-pane PID and native composer. A fresh composer capture follows the final ownership
-reads, with synchronous input-revision and queue-state checks before Enter.
-It reuses matching text; after a paste, it waits for
-the full message or its newly rendered native paste placeholder without pasting
-again. A journal transition precedes each transport action. Collapsed Text Bypass
-drafts are recognized using their persisted text and pane PID. Codex displays large
-pastes as `[Pasted Content N chars]`, with a Unicode scalar count and an optional
-`#N` suffix. Claude uses `[Pasted text #N +N lines]`. One shared matcher checks the
-owned prefix and, for Codex, the expected pasted character count. Queue delivery,
-persisted Text Bypass drafts and idle cancellation cleanup use that same matcher.
-Cancellation remnants retain the input revision, so later human typing removes
-Console's permission to clear them. An unconfirmed paste becomes `needs_review`
-after 30 seconds on a ready composer if a fresh capture still cannot confirm it;
-a changed native PID also requires review. Confirmed text remains eligible after
-a restart or an approval wait. Neither case replays
-the paste or Enter. The browser shows the existing Check delivery action.
-Raw typing or controls invalidate the previous native input revision before entering
-the session command queue, so a later paste cannot acknowledge an older message.
-Restart may resume observation of typed text, but an interrupted or uncertain Enter requires reviewing
-the conversation and never causes automatic replay. Queue state is projected on
-the bound session and is excluded from transcript/search content until submission.
-Pending human messages defer automatic peer input and automatic session sleep.
-Stop and Escape interrupt without synchronizing a local draft or flushing buffered
-Text Bypass input. Escape also works when focus is outside the editor. The editor
-becomes editable immediately, retaining the interrupted draft while the old request
-is still pending. The browser gives the next send a fresh identity and ignores old
-responses, so they cannot overwrite the new draft or unlock a newer submission.
-The server cancels human sends still waiting to enter the session command queue.
-Queued chat submissions retain the input revision from before asynchronous image and native checks,
-including the pending first-message restart path. Stop invalidates that revision.
-After Escape, a bounded wait for readiness repaint and a fresh ownership and
-unchanged-composer check clear a remaining draft
-with one native clear-input key. That explicit human cancellation can clear a draft
-whose prefix differs from the queued message. It preserves the known text in debug
-history. Repeated Escape on an empty composer never sends the clear-input key.
-Claude can restore an interrupted prompt after first repainting an empty composer.
-When Stop interrupts its working turn with an empty input box, cleanup waits for
-that repaint and can clear the exact last accepted human prompt. It preserves
-different or edited text, waits for the native interrupt indicator to disappear,
-and checks the input revision captured before Escape plus current ownership.
-Cancelled submission identities remain cancelled, including uncertain submissions
-and late paste-timeout or transport results;
-they never replay or block a new explicit message. After Enter,
-the human-message journal confirms an empty native composer before recording
-delivery. If Enter leaves text in the composer, delivery requires review and is
-never retried automatically.
-A confirmed unsent Console notice may yield to a queued human message only with
-matching staged proof, binding, ownership and exact composer text. On an idle
-Claude prompt, its native clear-input control removes the entire notice; line
-editing may leave earlier wrapped rows behind. Delivery requires a verified empty
-composer afterward, and an uncertain clear stays reviewable without replay.
-Model switches defer while a queued message owns typed or unconfirmed native input.
-Stop, successful explicit suspension, release, or cancelling a queued send prevents further
-automatic submission. Cancellation also owns an unchanged Text Bypass draft when its saved
-text matches the cancelled message, its original prefix is empty, and its native PID matches.
-This cleanup ownership stays separate from the queued message's delivery fields. The idle
-cleanup clears it once, immediately or before the next queued message; it verifies the live
-pane owner, PID and input revision and preserves mixed or edited drafts.
-Rejected suspension leaves the queue intact. Once Enter starts, the message is
-shown as sending and cannot be cancelled; uncertain delivery remains reviewable.
-Native choices, slash commands and raw terminal typing retain their explicit control
-path. Pending Codex first prompts retain the initial-command launch path above.
-
-After Codex creates the durable provider transcript, pending adoption locates candidates by hashing
-decoded user-message text from JSONL records. Raw serialized prompt previews are not an identity
-boundary because JSON escaping can change quotes, newlines, and backslashes without changing the
-user's actual prompt.
+Stop interrupts the running turn and cancels queued messages; a direct send or Stop moves the input
+revision, so a queued send that a later Stop overtook before it reached the queue is cancelled and
+never sent. The steers the provider drops with a stopped turn are marked `failed` ("cancelled by
+Stop"). Explicit suspension and release cancel queued messages too. Once submission starts, a
+message cannot be cancelled.
 
 ## External Integrations
-- Codex CLI and Claude Code are launched/resumed locally through provider adapter commands and hidden detached tmux sessions.
-- Codex sessions expose High (GPT-6 Astra/xhigh), Medium (GPT-6.1 Sol/xhigh), and Low (GPT-6 Luna/xhigh). Claude sessions expose High (Fable 5.1/xhigh), Medium (Opus 5.5/xhigh), and Low (Sonnet 5/high). New sessions use Medium unless a project supplies explicit model flags. Model-profile selections are durable server-owned requests on the bound session: the authenticated route persists the latest target immediately, and the backend applies it after verifying the provider is idle and the terminal has no draft or interactive selection. A Codex profile chosen before the first turn is used by the established first-prompt restart; a Claude profile chosen before the first turn restarts the empty provider process immediately. Navigation, browser shutdown, and ordinary backend restart do not discard a queued selection. Explicit cancellation is request-ID guarded, and release/supersession clears obsolete requests.
-- A Claude command with only `--effort` still receives the canonical Medium model and effort on a
-  new session, and the session stores that Medium profile for later recovery. Only an explicit
-  `--model` command flag bypasses the new-session default; selected profiles override both flags.
-- Codex working state follows provider `task_started`, `task_complete`, and `turn_aborted` events, not the output-recency cooldown. Claude working state follows its provider transcript's submitted user prompts and assistant `end_turn` records; a completed record only marks the response ready after the raw terminal snapshot shows the real input prompt. The server verifies the current tmux writer's owner, PID and creation time. Lifecycle records older than that writer cannot keep a resumed conversation busy or establish a new response; a backend restart reads the same writer's original creation time. Readiness requires the parsed active composer, even when notifications displace the permissions footer; the footer alone and display-decorated status are not proof of readiness. The separate `lastResponseAt` clock updates on confirmed completion, while completion recency still waits for the output idle window. Completion/interruption schedules the server-owned model queue immediately. Model switching rereads provider lifecycle under the session command lock, verifies tmux ownership, and defers on drafts, provider-queued messages, or interactive terminal state. The confirmed active profile is updated only after verified startup. A durable applying marker prevents a backend restart from blindly repeating an ambiguous process restart. A previous completion cannot acknowledge newly submitted input, and older screen polls cannot override newer session updates in the browser.
+- Codex (`codex app-server`) and Claude (headless `claude` with stream-json input and output) run locally behind per-process session hosts, driven by transport plugins (`apps/server/src/providers/transport/`); see "Structured provider lane" below.
+- Codex sessions expose High (GPT-6 Astra/xhigh), Medium (GPT-6.1 Sol/xhigh), and Low (GPT-6 Luna/xhigh). Claude sessions expose High (Fable 5.1/xhigh), Medium (Opus 5.5/xhigh), and Low (Sonnet 5/high). New chats use Medium unless a granted launch names its own model or effort. Model-profile selections are durable server-owned requests on the bound session: the authenticated route persists the latest target immediately, and the backend applies it when no turn runs and no message waits in the input journal; the profile rides on the next turn, so no process restarts. Navigation, browser shutdown, and ordinary backend restart do not discard a queued selection. Explicit cancellation is request-ID guarded, selecting the active profile again cancels a queued change, and release clears it.
+- Working state follows the transport's own turn state (`turn.started` and the turn's terminal event); a conversation that is not loaded runs nothing. The separate `lastResponseAt` clock updates on a completed turn, while completion recency (`lastCompletedAt`) waits for the output idle window. Completion or interruption schedules the server-owned model queue immediately. A previous completion cannot acknowledge newly submitted input, and older status polls cannot override newer session updates in the browser.
 - Opening or binding an unindexed provider conversation registers its native transcript path and notifies session watchers. Pending adoption registers the same path atomically with the native binding; turn monitoring must not depend on a later project-wide discovery refresh.
-- tmux is the session execution boundary; the backend captures pane state and logs normalized events.
+- The transport plugin is the session execution boundary; the backend journals input and status lines in the session event log.
 - The main SQLite database via `better-sqlite3` stores config-derived indexes alongside durable bound session, authentication, pending-conversation, agent-coordination, and UI-preference records. The database as a whole must not be treated as a rebuildable cache.
 - Tailscale identity headers can bootstrap a cookie session when explicitly trusted and allowlisted.
 - Login sessions have a fixed configured lifetime. A background read can bootstrap a new
@@ -422,14 +327,14 @@ user's actual prompt.
 ## Key Decisions
 - Prefer current ownership modules over stale facade or compatibility paths when changing behavior.
 - Do not add compatibility layers, fallback mappings, or legacy response fields unless the caller contract explicitly requires them.
-- A provider conversation has one restorable database owner and one hidden tmux writer. Live screen
-  reads stay outside the mutating session queue, but a missing-session restore is serialized with
-  input and release operations, re-reads the current conversation owner before launch and commit,
-  and reports success only after the provider process survives startup. Tmux owner metadata guards
-  failed-launch cleanup from terminating a replacement writer.
-- Session recency is not a generic "screen changed" timestamp. Opening an old session, restoring a
-  tmux binding, viewing an old transcript, raw restore output, or the screen merely leaving
-  `Working` must not make a conversation look fresh.
+- A provider conversation has one restorable database owner and one provider writer. Status reads
+  stay outside the mutating session queue, but a restore is serialized with input and release
+  operations, re-reads the current conversation owner before loading and commit, and reports success
+  only after the transport loaded the conversation. A per-session plugin refuses a second open of a
+  conversation that is already loaded.
+- Session recency is not a generic "status changed" timestamp. Opening an old session, restoring it,
+  viewing an old transcript, or the status merely leaving working must not make a conversation look
+  fresh.
   Synthetic tree rows and live search use the newest valid activity, output, completion, or native
   transcript timestamp. Binding creation and normalized live-event dates are fallbacks when no
   activity/transcript timestamp is known; maintenance updates never advance conversation recency.
@@ -457,11 +362,11 @@ user's actual prompt.
   An unbound chat with this history is Closed and offers Resume directly, including Claude chats.
   Claude history without a recorded Console close still requires the existing handoff confirmation;
   that confirmation does not assert that a terminal process is currently running.
-- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 216 hours. This gives a completed response seven full days in purple. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 216 hours (nine days) without user or agent activity, removing them from Work mode. Finished assignments whose tmux session has exited retain their restorable inbox and bypass this release check. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. The one-hour tmux suspension remains separate from Work-mode release; queued model-profile changes are not automatically released.
-- Manual Suspend keeps an established conversation bound and visible in Work while stopping its tmux session. The server stores the suspension marker in SQLite, skips that session during reconciliation and automatic Work release, and resumes it only through the authenticated resume action when the conversation is selected. Peer-message wake preserves manual pauses. The suspend action verifies tmux ownership and a readable screen, and rejects running work, native drafts, provider-queued input and queued model changes. Untyped Console messages are cancelled only after tmux stops and the suspension is persisted; a rejected pause preserves them. An empty composer does not need a recognized model footer. A native completed turn can be paused while its restored screen is still repainting. A recognized native selection can be paused without answering it, including a turn whose working/assignment labels remain active while awaiting the selection. Outside that input wait, active coordination assignments still block manual suspension. The browser submits the request even when the cached working label is set; the server owns the decision. Assignment records remain available for resume. Suspension preserves the normal response-age dot color; the separate Suspended badge and tooltip identify sessions that need resuming. Release still ends the Work binding.
+- Bound Work-mode dots use the provider response clock: red while the agent is working, green for a ready response under one hour old, yellow under 12 hours, amber under 48 hours, and purple from 48 to 216 hours. This gives a completed response seven full days in purple. Sessions with no confirmed response have a gray dot. Reconciliation releases nonworking sessions after 216 hours (nine days) without user or agent activity, removing them from Work mode. Finished assignments whose provider process has ended retain their restorable inbox and bypass this release check. Automatic release of history requires an indexed, readable native transcript so Browse retains the chat before the Console runtime log is removed. History without that transcript stays in Work mode. Automatically releasing a pending session also removes its pending record and Console log. Idle sleep (after each provider's `idleUnloadMinutes`) remains separate from Work-mode release; queued model-profile changes are not automatically released.
+- Manual Suspend keeps an established conversation bound and visible in Work while ending its loaded provider session (a per-session process ends; a shared process unloads the thread). The server stores the suspension marker in SQLite, skips that session during reconciliation and automatic Work release, and resumes it only through the authenticated resume action when the conversation is selected. Peer-message wake preserves manual pauses. The suspend action rejects a running turn, background work the process reports, queued model changes and an active coordination assignment. Untyped Console messages are cancelled only after the session ended and the suspension is persisted; a rejected pause preserves them. Assignment records remain available for resume. Suspension preserves the normal response-age dot color; the separate Suspended badge and tooltip identify sessions that need resuming. Release still ends the Work binding.
 - Completed assignments retain their restorable inbox after the provider exits. Reconciliation and polling leave the provider asleep; a pending message can request a guarded inbox-only restore. Completion and expired grants stay unchanged. Explicit close makes a binding ended and non-restorable, retaining queued messages until explicit resume. The authenticated agent `close` action still requires current `close_session` authority and exact stored launcher ownership, rechecks both under the session command lock, and uses the normal release path.
-- Under low available memory, reconciliation can suspend one finished session idle for at least 60 minutes per pass, oldest first. The default trigger is less than 3072 MiB `MemAvailable` in two consecutive 30-second passes; both the threshold and idle window are configurable under `sessions`. A finished session whose tmux process is already gone is not relaunched after the first low reading; it is marked suspended after the second. Live-session pressure suspension requires an idle provider with a ready prompt, no draft, interactive selection, background work or queued input, verified tmux ownership and no active coordination assignment. It then rechecks available memory immediately before stopping tmux. Its separate SQLite marker keeps the session stopped when memory recovers or the backend restarts; selecting the conversation or a pending direct message restores it when sufficient memory is available. A restored session gets at least another pressure idle window because eligibility also checks its latest state update. Pressure-suspended sessions remain eligible for the nine-day Work release. The ordinary idle suspension and restore grace both default to one hour. If `/proc/meminfo` cannot be read, pressure suspension does nothing.
-- Ordinary hour-based sleep uses native readiness and run state rather than the coordination assignment's active label: SessionStart can leave that label active without starting a turn. All suspension paths protect visible native background terminals, running-shell/task counters, child-agent rosters and drafts. Automatic suspension also protects approval prompts; a manual request can pause a recognized selection without answering it. The exact native Claude summary/full-session resume menu is sleepable; a pending peer message selects the full original session using ownership/PID checks and a durable confirmation attempt. Pre-input shutdown/read failures only defer delivery. Retained live sessions still attach their output monitoring after restart; append-only pipe reattachment leaves an existing pipe connected and opens a new one only when needed. The hour sleep resumes once work indicators clear and the existing activity window has elapsed. A failed peer-wake transport restores the previous provisional submitted-turn marker while retaining its durable message-attempt record, so idle sleep remains available without replaying ambiguous input. Further automatic continuation remains blocked until the conversation is reviewed and unattended permission renewed.
+- Under low available memory, reconciliation can suspend one idle per-session conversation (its own process; a shared Codex app-server is left alone) idle for at least 60 minutes per pass, oldest first. The default trigger is less than 3072 MiB `MemAvailable` in two consecutive 30-second passes; both the threshold and idle window are configurable under `sessions`. Pressure suspension requires no running turn, no background work, no queued input or model change and no active coordination assignment, and rechecks available memory immediately before ending the process. Its separate SQLite marker keeps the session stopped when memory recovers or the backend restarts; selecting the conversation or a pending direct message restores it when sufficient memory is available. Pressure-suspended sessions remain eligible for the nine-day Work release. If `/proc/meminfo` cannot be read, pressure suspension does nothing.
+- Ordinary idle sleep uses the transport's turn state and the idle window (`structuredSessions.<provider>.idleUnloadMinutes`) rather than the coordination assignment's active label: SessionStart can leave that label active without starting a turn. All suspension paths protect background work the process reports (`TransportSession.hasBackgroundWork`) and queued input. A failed peer-wake delivery restores the previous provisional submitted-turn marker while retaining its durable message-attempt record, so idle sleep remains available without replaying ambiguous input. Further automatic continuation remains blocked until the conversation is reviewed and unattended permission renewed.
 - Claude transcripts can contain multiple parent-linked branches when the same provider session is
   resumed concurrently. The transcript adapter follows the last message leaf back through
   `parentUuid` and exposes that active branch instead of flattening sibling turns together.
@@ -494,13 +399,9 @@ user's actual prompt.
   sidebar so the expanded text is not clipped. Escape, scrolling, navigation, and pointer exit
   dismiss the tooltip. Parser-version invalidation regenerates older 72-character titles on
   discovery refresh; explicit title overrides remain authoritative.
-- First-turn pending Codex input must keep prompt submission separate from literal selection
-  keystrokes. Review `apps/server/src/routes/sessions.ts`,
-  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts`, and
-  `apps/server/test/session-pending-first-turn.test.ts`,
-  `apps/server/test/session-keystrokes-submit.test.ts`, and `apps/server/test/session-routes.test.ts`
-  before changing pending conversation restart,
-  selection detection, or text+Enter passthrough behavior.
+- `/keys` takes a complete message with Enter or Stop (Escape) alone. Review `apps/server/src/routes/sessions.ts`,
+  `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts` and
+  `apps/server/test/session-input-queue.test.ts` before changing what the route accepts or how a queued message is sent.
 - Completion recency moves after new trackable output has idled past the completion window. Review
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-recency.test.ts`, and
   `apps/server/test/session-lifecycle.test.ts`
@@ -515,12 +416,12 @@ user's actual prompt.
   `apps/web/src/features/conversation/useConversationData.ts`, `apps/web/src/features/realtime/`,
   and `apps/web/src/features/conversation/transcript-turns.tsx` before changing timeline
   merge, pagination, duplicate filtering, live-screen polling, or refresh behavior.
-- Raw screen rendering belongs to interactive/status display, not durable transcript construction.
+- The synthesized session status belongs to status display, not durable transcript construction.
   Review `apps/web/src/components/ConversationPane.tsx`,
   `apps/web/src/components/ConversationPane.test.tsx`,
   `apps/web/src/lib/api.ts`, `apps/web/src/features/realtime/apply-session-event.ts`,
-  `apps/server/src/routes/sessions.ts`, and the live-output tests before changing text-bypass
-  preview, screen panels, raw-output panels, or server-derived input display.
+  `apps/server/src/routes/sessions.ts`, and the live-output tests before changing status panels
+  or server-derived input display.
 - Pending Codex transcript progress is a server/parser plus web-rendering contract. Review
   `apps/server/src/providers/transcripts/codex.ts`,
   `apps/server/test/providers.test.ts`,
@@ -570,20 +471,25 @@ See [the audit contract](peer-wake-audit.md).
 
 ## Structured provider lane
 
-Behind `structuredSessions.<provider>.enabled` (default off), a conversation can be driven through a
-provider protocol instead of a hidden tmux session. Codex runs through `codex app-server` and Claude through its
-headless stream-json CLI. The plan, contracts and verification evidence are in
+Every conversation runs through a provider protocol: Codex through `codex app-server` and Claude through its headless
+stream-json CLI. A provider can run conversations only while its lane is on (`structuredSessions.<provider>.enabled`,
+default off); a bind for a provider whose lane is off answers 400. The tmux transport that came before was removed in Phase B
+(see [the cutover plan](structured-cutover.md), "Phase B record"). The plan, contracts and verification evidence are in
 [the lane plan](structured-providers.md) (Codex) and [the cutover plan](structured-cutover.md) (relay, Claude, questions,
-migration); this section is the summary.
+removal of tmux); this section is the summary.
 
-- Transport column: `bound_sessions.transport` (`tmux` by default, `structured`; schema 19) is chosen at
-  bind time and persisted on the row, so turning the flag off later leaves existing rows working.
-  Structured rows store the sentinel tmux name `structured:<sessionId>`, have no `raw_log_path`, and keep
-  the app-server process id in `pid`. tmux 3.4 does not reject the colon (it would create a session named
-  `structured_<id>`), so the tmux client refuses any name with the `structured:` prefix in every method
-  (`assertTmuxSessionName`). `SessionManager` stays the lifecycle owner and dispatches on `session.transport`
-  at each tmux-dependent entry point. A structured row never reaches a tmux call; tests enforce this by
-  counting calls on a fake client that applies the same guard.
+- Rows: `bound_sessions` keeps two columns from the tmux transport until a later schema version drops them:
+  `tmux_session_name` (not null) and `transport` (schema 19). New rows fill them with `structured:<sessionId>` and
+  `structured`; the domain type has neither. The row keeps the provider process id in `pid` (a per-session process, or the
+  shared app-server).
+- Startup conversion: when the backend starts, before anything reads the rows, `SessionManager` converts every restorable
+  row an earlier build left with `transport = 'tmux'`: it ends that row's hidden tmux session with a best-effort
+  `tmux -L <AGENT_CONSOLE_TMUX_SOCKET or agent-console> kill-session -t <name>` (`sessions/tmux-row-conversion.ts`; every
+  failure is ignored), tells the plugin that the conversation has history, fails a queued message whose delivery was
+  in progress, and flips the row to structured and asleep (`BoundSessionsRepo.convertTmuxRow`: the placeholder name, no raw
+  log, no pid, `idle_suspended_at` unless a manual or pressure marker already keeps it asleep). Identity, title and recency
+  do not change; the next message resumes the same native conversation. A converted row that never learned its native id
+  (`pending:`) ends on its next use. Each conversion is logged at info.
 - Service: `sessions/structured/structured-session-service.ts` owns the loaded transport sessions, the
   active turn, the steer-versus-new-turn rule (human text steers a running turn, otherwise starts one),
   exactly-once turn terminals, interrupts and the provider process environment. It reports through
@@ -623,7 +529,7 @@ migration); this section is the summary.
   unchanged. The one-writer rule (the CLI does not refuse two processes on one transcript) is enforced by the plugin
   through its table of open sessions, the host record and the CLI's live-process registry `~/.claude/sessions/<pid>.json`. Findings from the real-CLI proof
   are in `docs/structured-cutover.md`, "Verification evidence".
-- Approvals: threads start with approval policy `never` and a full-access sandbox, as the tmux path does.
+- Approvals: threads start with approval policy `never` and a full-access sandbox.
   A server request that still arrives (command, file or permission approval, MCP form) is declined and
   recorded as a status event. There is no approval UI.
 - Questions: a question the agent asks the person is kept instead of declined. The service stores it under the session's
@@ -646,10 +552,10 @@ migration); this section is the summary.
   coordination on, the Console gives the process `AGENT_COORD_RUNTIME` and `AGENT_CONSOLE_CONFIG`;
   `structuredSessions.<provider>.env` overrides them. The coordination MCP entry in
   `~/.codex/config.toml` names the live Console's runtime and helper, so with coordination on the plugin
-  appends the same `-c mcp_servers.agent_console_coordination.*` overrides the tmux launch uses (minus the
-  session id) to the app-server argv; an isolated Console needs no extra configuration
+  appends `-c mcp_servers.agent_console_coordination.*` overrides that point at this Console (with no session id) to
+  the app-server argv; an isolated Console needs no extra configuration
   (`scripts/prove-structured-codex.mjs` checks it).
-- Coordination liveness: a structured assignment is alive while a restorable bound structured row exists
+- Coordination liveness: an assignment is alive while a restorable bound row exists
   for its thread, not while the shared process runs. A backend restart or an app-server exit therefore does
   not disconnect the assignment or page its supervisor, because the thread loads on demand.
 - Granted restart: on a structured row it refuses while a turn runs ("Restart is waiting for the current
@@ -658,19 +564,8 @@ migration); this section is the summary.
 - Per-session plugins (Claude): `capabilities.processModel: 'per-session'` makes the service start one process per
   Console session. Idle sleep, manual suspend and memory pressure end that process and mark the row; the next message
   resumes the same native conversation. The conversation's process gets its own environment (`AGENT_CONSOLE_SESSION_ID`),
-  coordination MCP identity and, for a granted launch, the grant authority text. Rows on a shared process are still not
+  coordination MCP identity and, for a granted launch, the grant authority text. Rows on a shared process are not
   suspended under memory pressure.
-- Default transport and migration: `structuredSessions.defaultTransport` (`tmux` unless set) is the transport of a
-  bind that names none, including granted launches, for providers whose lane is on. While it is `structured`,
-  `reconcileSessions` also moves existing tmux conversations over, one row at a time under its command lock: a live
-  tmux session that idle sleep would stop (idle for the idle window and past its restore grace) passes the idle-sleep
-  guard, is killed and confirmed dead, then `BoundSessionsRepo.setTransport` flips the
-  row (`transport='structured'`, the `structured:<id>` name, `idle_suspended_at` set, identity, native conversation and
-  recency unchanged). The row resumes its native conversation on its next message; nothing is loaded at move time.
-  Live rows used within the idle window, working rows, rows with queued input and Claude rows without a transcript wait
-  and are retried.
-  `GET /api/sessions/structured-migration` is the dry run. `scripts/prove-structured-migration.mjs` runs the whole move
-  against real tmux Codex and Claude chats. See `docs/structured-cutover.md`.
 - Images: the existing attachment flow feeds both providers (Codex `localImage`, Claude base64 image blocks), and only files
   directly in the image store are accepted. Codex reads the file itself. For Claude, `claude/image-fit.ts` (sharp) sends an
   image that already fits unchanged and otherwise scales it to a 1568 px long edge and about 3.4 MB, because the API rejects an
@@ -679,12 +574,12 @@ migration); this section is the summary.
   image rows stay in the message.
 - Limits: pressure suspension skips rows on a shared process (it cannot be suspended per thread);
   the recovery and launch memory floors still apply. Streamed assistant text is not shipped: display is driven by
-  the provider transcript, as for tmux.
+  the provider transcript.
 - Restart behavior: with the relay (the production path) provider processes outlive a backend restart or crash. A plain stdio
   child (tests, or a plugin given no factory) ends with the backend. A new backend finds a surviving process again and does not
   declare its turn lost. At the first reconcile pass the manager adopts every awake per-session row and every shared-process
   (Codex) row still marked working through the plugin's `reattach`, which never starts a process. The same lookup runs before loss
-  handling on any path that loads a working row, so a screen poll that comes before the first pass cannot write the loss line.
+  handling on any path that loads a working row, so a status poll that comes before the first pass cannot write the loss line.
   Claude learns what the process is doing from the reply to a repeated `initialize` (`session_state`). Codex learns it from
   `thread/resume`, the thread's recent turns and the host's replay buffer, and a held question is answered by id over the same
   relayed stdin. An adopted turn keeps the row working without moving recency, Stop reaches it, and its terminal ends it once. A
@@ -714,64 +609,15 @@ error, and preserves the local draft and existing binding. The composer loads a 
 draft when it mounts and has a separate component identity per conversation, so
 navigating away and back does not overwrite the draft with initial empty state.
 Any restart requires an
-explicit user action. Rejected text entry leaves the before/after screen trace in
-the session's private `debug.log`; the server also logs session identity, input
-lengths, screen hashes, and wait duration without prompt or screen contents. These
-metadata remain in the server journal if the session is later explicitly released.
-
-The screen parser records whether it found an active composer, even when empty.
-All configured Agent Console project folders are trusted for Claude. When a bound
-Claude session displays its workspace-trust menu, Console queues acceptance under
-the existing session command lock. It verifies tmux ownership and the provider PID,
-selects `Yes, I trust this folder`, verifies the highlighted choice, and confirms it.
-The same preparation runs before chat submission if the menu appears late. Startup
-acceptance waits for a ready composer or the next interactive control, records a
-status receipt, and creates no user turn or activity timestamp. It also handles an
-existing trust prompt after backend restart. Unnumbered trust-menu choices are
-interactive controls; quoted controls inside a bounded composer remain draft text.
-Dimmed Claude prompt suggestions are empty-composer placeholders, including
-truncated startup previews and suggested follow-ups. Typed input with later dim
-annotations and collapsed-paste placeholders remains draft text.
-Quoted menu instructions above an open composer do not block ordinary chat. When
-an interactive approval or menu replaces the composer, a combined text-and-key
-send rejects nonnumeric chat text before typing or confirming anything and
-identifies the pending selection in the error. Explicit numeric choices and
-key-only controls remain available. Direct terminal typing, including Enter to
-submit a free-text answer to a provider question, remains the existing control
-surface. The
-existing rejection path retains the local draft and binding.
-
-When a native menu replaces the active composer, the live bridge's explicit
-key buttons keep a held chat draft separate and send only the selected key.
-An explicit numeric choice is sent before Enter and consumed on success.
-Text Bypass completes its buffered text delivery before control keys, clears
-consumed selection previews and restores them on rejected submission. Menu
-selections retain image attachments; the backend classifies selection tokens
-separately from conversation input.
-Controls remain visible when mobile controls are otherwise hidden. Enter in a
-chat draft retains the normal guarded submission behavior; quoted menu text
-above an active composer does not change how its buttons submit chat.
+explicit user action. A rejection names its reason (a running turn on a provider that cannot steer, a slash command, an image
+the transport cannot take, a session that cannot be loaded) and says that nothing was sent.
 
 The desktop input's saved height is capped at 60% of the window height. Its
 44-pixel touch resize handle and visible Smaller button let the user reduce it;
 Smaller resets the input to 96 pixels without changing its draft.
 
-Console-managed Codex launches set `check_for_update_on_startup=false` so new and
-restored conversations reach their composer without a host software-update menu.
-Codex updates remain a host maintenance action. Existing update menus with
-`enter continue · esc skip` are recognized as selection controls: combined chat
-sends reject before typing, while explicit choices and key-only controls remain
-available. Ordinary chat text never confirms an update.
-
-Input confirmation uses the provider's parsed composer, including Claude's horizontal
-input-box boundaries. Blank paragraphs, quoted prompts, and bullets inside that box
-belong to the draft. Claude's trailing agent roster is status metadata whether it
-appears before or after the permissions footer. Neither the roster nor a paragraph
-break proves that text was rejected. Submitted prompts followed by assistant output
-and interactive choices still remain outside the composer. A draft already visible
-in the input box is submitted without pasting it a second time.
-Text beginning with `?` uses bracketed paste for queued, combined and Text Bypass
-entry, so the native shortcut-help key cannot consume the message's first character.
+The Codex app-server is started with `check_for_update_on_startup=false`, so a host software-update menu never
+interrupts a conversation; Codex updates remain a host maintenance action.
 
 Codex `task_complete.error` records and Claude main-session assistant records marked
 `isApiErrorMessage` are authoritative failed-turn outcomes. The
@@ -790,11 +636,9 @@ and 529 server-error envelopes automatically continue the same
 unattended conversation: at most three consecutive attempts without useful provider output, delayed 15, 45 and 120 seconds. A Claude
 `server_error` label alone is insufficient because OAuth failures use it too. Permission,
 policy, authentication, quota and unknown failures stay stopped. Each attempt
-rechecks the latest provider turn, canonical binding, live tmux ownership, enabled
-project/provider, available memory and idle composer. Manual and memory-pressure
-pauses, a queued model change, drafts and interactive prompts stop recovery.
-Readiness requires a real input prompt; context-percentage metadata is not a
-readiness signal, and Claude does not require a Codex footer. It never launches a second writer. The
+rechecks the latest provider turn, canonical binding, enabled project/provider, available memory and that the
+conversation is loaded with no turn running (it reloads a conversation whose process ended). Manual and memory-pressure
+pauses, a queued model change and queued human input stop recovery. It never starts a second writer. The
 continuation tells the agent to reconcile existing work and external effects before
 continuing under the original authorization. It does not resend the original user
 command or grant additional authority.
@@ -817,12 +661,10 @@ useful output retain the budget; stale completion callbacks do not clear newer f
 Recovery state transitions and their stop reasons are also appended to the session event
 log, so clearing the active notice does not erase the decision evidence.
 
-Codex recovery uses its native queue, preserving the composer and avoiding lost
-text-plus-Enter submissions. Claude recovery verifies the exact entered composer
-before sending Enter. Automatic text entry checks cancellation and tmux ownership again before Enter.
-A Stop received while entering text leaves that text unsent and retains the
-cancellation reason. An Enter already handed to tmux cannot be recalled. These
-guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status, continuation permission and peer-message wake remain independent. Human Stop, cancellation and manual pause disable peer wake until an accepted human conversation turn; agent waiting updates do not. After handling its inbox, an unattended assignment continues authorized work in that same turn unless recovery is blocked or stalled. A waiting assignment returns to waiting. Inbox turns preserve pending human decisions and neither spend nor reset the continuation budget. Worker facts never grant permission or reset a spent continuation budget.
+Recovery and automatic notices go through the transport as a new turn, only on a loaded conversation with no turn
+running, after the cancellation and ownership checks. The transport reports whether anything was written: a refusal
+before writing defers the attempt, a refusal that would fail again stops it with its reason, and an uncertain outcome is
+never replayed. These guards also apply to assignment continuation. The backend owns explicit unattended permission, supervisor relationships and silence/result signals in SQLite metadata; see [the coordination contract](agent-coordination.md#explicit-unattended-work). Turn lifecycle status, continuation permission and peer-message wake remain independent. Human Stop, cancellation and manual pause disable peer wake until an accepted human conversation turn; agent waiting updates do not. After handling its inbox, an unattended assignment continues authorized work in that same turn unless recovery is blocked or stalled. A waiting assignment returns to waiting. Inbox turns preserve pending human decisions and neither spend nor reset the continuation budget. Worker facts never grant permission or reset a spent continuation budget.
 
 A granted restart is an explicit one-turn action, independent of automatic recovery.
 It resolves either a session ID or a target assignment ID to the original binding,
@@ -835,9 +677,9 @@ conversation. Released bindings and manual pauses remain protected.
 An unexpected provider exit with unattended work remaining uses this same durable
 backoff. Reconciliation and queued peer messages cannot bypass it. The backend
 resumes the original conversation, preserves its assignment and inbox, and submits
-the recovery notice after native readiness. Three failed relaunches stop recovery.
+the recovery notice once the conversation is loaded again. Three failed relaunches stop recovery.
 Intentional automatic idle sleep has a persisted marker and a cleared PID. Passive
-screen polling does not restore it; intentional user and peer wake paths remain available;
+status polling does not restore it; intentional user and peer wake paths remain available;
 manual suspension, finished assignments and resource limits stay respected.
 Failure transitions advance the session revision timestamp so browser polls and
 events accept the cleared status; they do not advance conversation recency.
@@ -846,25 +688,15 @@ events accept the cleared status; they do not advance conversation recency.
 
 Ordinary idle sleep persists `idleSuspendedAt` on the bound session, independently of manual
 and pressure suspension. All sleep reasons are visible in Work without changing the response-age
-dot. Screen polling and passive ensure calls leave an idle sleeper stopped, including calls from
+dot. Status polling and passive ensure calls leave an idle sleeper stopped, including calls from
 older browser builds. Selection, human input, queued messages, model changes and eligible peer
 messages may restore the same conversation. Successful restoration or release clears the idle
 marker. Ordinary idle sleepers remain eligible for the existing nine-day Work release.
-Finished assignments whose tmux session has exited retain their inbox and bypass that release.
+Finished assignments whose provider process has ended retain their inbox and bypass that release.
 
-Reconciliation resolves recorded pending conversations before applying idle rules. Exact registered
-identity is preferred for both human-created and agent-created sessions. An idle pending Codex session
-without a registration uses the existing bounded provider candidate search. Claude retains its
-normal transcript-discovery adoption path; reconciliation does not add full history scans.
-Human-created registrations are polled for adoption after recorded input exists. Forked Codex histories,
-ambiguous fingerprints and native identities already owned by another retained binding are refused.
-The pending guard stays in place until the resumable native identity is known. This does not change
-general transcript discovery cadence or permit stopping unresolved sessions.
-
-Automatic Claude notices record their binding and intended notice kind before paste (`pasting`),
-then confirmation (`staged`) and Enter invocation (`submitting`). An exact owned never-submitted
-notice may be discarded by successful sleep or retired by the existing guarded human-input path.
-Partial, clipped, mixed or unowned drafts, uncertain Enter and interrupted retirement remain
-protected. The ordinary ready-prompt, working-turn, background-task and ownership guards still apply.
+A bind learns the native identity of a new conversation from the provider at once, so a row is `pending:` only while its
+bind runs; a row left `pending:` by a crash (or by the startup conversion of a tmux row) has no native conversation to
+resume and ends on its next use. A coordination registration of a launched session still indexes its conversation and
+applies the launcher's title (`SessionManager.adoptRegisteredSession`).
 
 Wiki replacements are revisioned with `supersededBy` in wiki schema 3. Current matching pages rank ahead of superseded matches, and readers retain access to historical revisions and replacement links. New P1 messages and supervisor handoffs require an explicit sender-chosen `wakeReason`; validation adds no classifier or automatic urgency. Expired pending wake reasons are purged with message bodies.

@@ -9,8 +9,8 @@
   current failures.
 
 ## Key Directories
-- `apps/server/src/sessions/` - tmux session manager, screen parsing, and event-log live-output
-  normalization.
+- `apps/server/src/sessions/` - session manager on the structured provider transport, input journal, and the
+  session event-log live rows.
 - `apps/server/src/routes/` - Fastify API routes for auth, conversations, sessions, projects,
   settings, and live events.
 - `apps/server/src/providers/` - Codex/Claude adapters and transcript normalization.
@@ -55,8 +55,9 @@
 - `apps/server/src/routes/events.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/routes/projects.ts` - project tree reads and explicit refresh orchestration,
   including the opt-in eight-hour scan for recent unbound Codex conversations.
-- `apps/server/src/routes/sessions.ts` - session input/screen/raw-output and durable Codex/Claude model-profile request/cancel routes, including
-  first-turn pending Codex restart behavior and text+Enter selection-keystroke passthrough.
+- `apps/server/src/routes/sessions.ts` - session input (`/input`, `/keys`: a message with Enter or Stop with Escape),
+  synthesized status (`/screen`), question answers, queued-input cancellation and durable Codex/Claude model-profile
+  request/cancel routes.
 - `apps/server/src/routes/settings.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/src/app.ts` - Fastify app composition, route registration, static serving, indexing startup, and session observation.
 - `apps/server/src/config/schema.ts` and `service.ts` - config schema, merge behavior, runtime paths, provider/project settings, and security knobs.
@@ -94,8 +95,6 @@
   live session to provider-readable conversations even before search indexing has caught up.
 - `apps/server/src/providers/transcripts/base.ts` - shared transcript summaries; pending-match
   hashes and timestamps use provider-filtered visible user prompts, excluding injected context.
-- `apps/server/test/pending-codex-context.test.ts` - original-URL recovery of completed Codex
-  transcripts after midnight context injection, including invalidation of older cached summaries.
 - `apps/server/src/db/schema.ts` and `apps/server/src/db/repos/` - SQLite schema and persistence
   methods for `conversation_search_fts`, conversation index rows, bound sessions, and search result mapping.
 - `apps/server/src/providers/transcripts/codex.ts` - Codex JSONL parsing, visible transcript
@@ -103,27 +102,22 @@
   event/response duplicate preference.
 - `apps/server/src/sessions/session-manager.ts` - bound-session lifecycle, serialized restore, durable queued Codex/Claude model-profile execution,
   canonical conversation ownership, startup verification, recovery,
-  bounded recent-conversation auto-tracking, working state, confirmed response timestamps, nine-day Work-mode release, event-log observation, text entry,
-  literal selection-keystroke detection, and recency timestamps.
-- `apps/server/src/sessions/input-queue.ts` - durable human-message delivery journals,
-  Text Bypass draft provenance and request summaries projected on bound sessions.
+  bounded recent-conversation auto-tracking, working state, confirmed response timestamps, nine-day Work-mode release, event-log observation,
+  message input, coordination wakes, the startup conversion of rows the removed tmux transport left, and recency timestamps.
+- `apps/server/src/sessions/input-queue.ts` - durable human-message delivery journals (`queued`, `submitting`,
+  `submitted`, `failed`, `cancelled`) and the request summaries projected on bound sessions.
 - `apps/web/src/components/QueuedInputNotice.tsx` - queued-message display and cancellation;
   pending requests stay separate from submitted transcript turns.
-- `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - event-log
-  normalization for user-visible live output.
-- `apps/server/src/sessions/last-user-input.ts` - asynchronous prompt restoration and session-local
-  echo-detection cache, superseded by durable input appends.
+- `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - live rows from the session event log:
+  the person's messages and status lines.
 - `apps/server/src/sessions/timeline-merge.ts` - server-owned merge and duplicate-suppression
   rules between durable provider transcript messages and temporary live event-log messages.
 - `apps/server/src/sessions/transcript-watcher.ts` - transcript-file change detection that refreshes
   selected timelines when provider history catches up.
-- `apps/server/src/sessions/session-screen.ts` - raw tmux screen parsing for session status/content,
-  including complete Claude login URLs recovered from wrapped terminal hyperlinks.
-- `apps/server/src/sessions/screen-heuristics.ts` - native readiness, input-selection and background-work indicators used by lifecycle guards.
-- `apps/server/src/sessions/tmux-client.ts` - tmux command boundary, literal input/paste helpers,
-  default pane capture, interrupts, session kill, and readable/writable session ownership options.
+- `apps/server/src/sessions/tmux-row-conversion.ts` - the best-effort `tmux kill-session` the startup conversion runs for a
+  row an earlier build left on the removed tmux transport; nothing else calls tmux.
 - `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,
-  paged timeline-message query, separate session-screen polling, live refresh behavior, and
+  paged timeline-message query, separate session-status polling, live refresh behavior, and
   completed-tail polling while durable transcripts catch up after a bound session finishes.
 - `apps/web/src/features/conversation/markdown.tsx`, `transcript-turns.tsx`, and
   `ExplorerPane.tsx` - extracted conversation rendering helpers, including pending Codex
@@ -156,12 +150,9 @@
 - `apps/web/src/lib/query-client.ts` - authentication cache shared by the API client and React.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
-- `scripts/smoke-codex-adoption.mjs` - opt-in host smoke check for real Codex/tmux session adoption.
 - `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees and landed or expired snapshot branches across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
-- `scripts/verify-live-console.mjs` - opt-in visible-browser check for live Agent Console UX
-  against a running backend and Chrome CDP endpoint.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.
-- `apps/server/test/command-and-proxy.test.ts` - key tracked file or entrypoint for this repo.
+- `apps/server/test/proxy-allowlist.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/config.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/conversation-routes.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/conversations.test.ts` - key tracked file or entrypoint for this repo.
@@ -171,36 +162,33 @@
 - `apps/server/test/fixtures/claude/projects/-tmp-demo-project-/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.jsonl` - key tracked file or entrypoint for this repo.
 - `apps/server/test/fixtures/codex/sessions/2026/02/14/rollout-11111111-2222-4333-8444-555555555555.jsonl` - key tracked file or entrypoint for this repo.
 - `apps/server/test/indexing-service.test.ts` - key tracked file or entrypoint for this repo.
-- `apps/server/test/indexing.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/live-output.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/projects-routes.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/projects.test.ts` - key tracked file or entrypoint for this repo.
 
 Test and verification anchors:
 - `apps/server/test/auth.test.ts` - representative test or verification file.
-- `apps/server/test/command-and-proxy.test.ts` - representative test or verification file.
+- `apps/server/test/proxy-allowlist.test.ts` - representative test or verification file.
 - `apps/server/test/config.test.ts` - representative test or verification file.
 - `apps/server/test/conversation-routes.test.ts` - representative test or verification file.
 - `apps/server/test/conversations.test.ts` - representative test or verification file.
 - `apps/server/test/database.test.ts` - representative test or verification file.
 - `apps/server/test/indexing-service.test.ts` - representative test or verification file.
-- `apps/server/test/indexing.test.ts` - representative test or verification file.
 - `apps/server/test/live-output.test.ts` - representative test or verification file.
 - `apps/server/test/search.test.ts` - conversation search, live-session search, recency/ranking,
   hidden-conversation filtering, and cached-index backfill coverage.
 - `apps/server/test/projects-routes.test.ts` - representative test or verification file.
 - `apps/server/test/projects.test.ts` - representative test or verification file.
 - `apps/server/test/providers.test.ts` - representative test or verification file.
-- `apps/server/test/session-lifecycle.test.ts`, `session-recency.test.ts`,
-  `session-keystrokes.test.ts`, and `session-keystrokes-submit.test.ts` - split session-manager
-  behavior coverage.
+- `apps/server/test/session-lifecycle.test.ts`, `session-recency.test.ts`, `session-input-queue.test.ts` and
+  `session-model-profile.test.ts` - session-manager behavior that does not depend on the provider, on the fake transport
+  plugin; the `structured-session-*` files cover the transport side.
 - `apps/server/test/session-routes.test.ts` - representative test or verification file.
-- `apps/server/test/session-screen.test.ts` - representative test or verification file.
 - `apps/server/test/settings.test.ts` - representative test or verification file.
 
 ## Change Hotspots
 - Clipboard image input spans `apps/server/src/images/{store,prompt,routes}.ts`,
-  the session keys route, session screen parsing, public timeline and user-input
+  the session keys route, the transports' image attachment, public timeline and user-input
   event normalization, `apps/web/src/features/conversation/useClipboardImages.ts`,
   `ConversationPane.tsx`, transcript thumbnail rendering and shared image contracts.
   Coverage lives in `apps/server/test/image-input.test.ts`, the composer tests and
@@ -216,11 +204,9 @@ Test and verification anchors:
   `apps/server/src/sessions/session-manager.ts`, both provider transcript adapters,
   `apps/web/src/App.tsx`, `apps/web/src/features/navigation/sidebar-projects.ts`, and their focused
   route, lifecycle, provider, database, and sidebar tests together.
-- Pending Codex first-turn input or live keystroke changes should review
-  `apps/server/src/routes/sessions.ts`, `apps/server/src/sessions/session-manager.ts`,
-  `apps/server/test/session-routes.test.ts`, `apps/server/test/session-pending-first-turn.test.ts`,
-  and `apps/server/test/session-keystrokes-submit.test.ts`
-  together so prompt restarts and literal selection passthrough stay distinct.
+- Session input changes should review `apps/server/src/routes/sessions.ts`, `apps/server/src/sessions/session-manager.ts`,
+  `apps/server/src/sessions/input-queue.ts`, `apps/server/test/session-routes.test.ts`,
+  `apps/server/test/session-input-queue.test.ts` and `apps/server/test/structured-session-input.test.ts` together.
 - Live output, history pagination, duplicate filtering, or text latency changes should review
   `apps/server/src/routes/conversations.ts`, `apps/server/src/sessions/timeline-merge.ts`,
   `apps/server/src/sessions/live-output/`, `apps/server/src/sessions/transcript-watcher.ts`,
@@ -237,12 +223,11 @@ Test and verification anchors:
   provider transcript parser, live-output reader, server timeline merge, realtime cache reducer, then
   web transcript rendering. Avoid starting in `ConversationPane.tsx` unless the server timeline
   payload is already correct.
-- Raw terminal/screen rendering changes should review `apps/server/src/routes/sessions.ts`,
-  `apps/server/src/sessions/session-screen.ts`, `apps/server/src/sessions/live-output/reader.ts`,
-  `apps/web/src/components/ConversationPane.tsx`,
+- Session status display changes should review `apps/server/src/routes/sessions.ts`,
+  `apps/server/src/sessions/structured/structured-session-service.ts` (`screen`), `apps/web/src/components/ConversationPane.tsx`,
   `apps/web/src/features/realtime/apply-session-event.ts`, `apps/web/src/lib/api.ts`, and
-  `apps/web/src/components/ConversationPane.test.tsx`. Raw screen and debug tails are inspection
-  surfaces; event-log/provided transcript messages are the conversation surface.
+  `apps/web/src/components/ConversationPane.test.tsx`. The status is an inspection surface; the provider transcript is
+  the conversation surface.
 - Pending Codex progress and stale-bound-timeline polling changes should review
   `apps/server/src/providers/transcripts/codex.ts`, `apps/server/test/providers.test.ts`,
   `apps/web/src/features/conversation/useConversationData.ts`,
@@ -262,7 +247,7 @@ Test and verification anchors:
 
 ## Deferred or Unclear Areas
 - Playwright e2e artifacts under `test-results/` are generated evidence, not source architecture.
-- Host-level Codex smoke validation requires a running backend plus real Codex/tmux access and is intentionally opt-in.
+- The real-provider proofs (`scripts/prove-*.mjs --run`) start real Claude and Codex processes and are intentionally opt-in.
 
 ## Assignment coordination
 
@@ -354,17 +339,13 @@ Run recovery ownership (requires explicit unattended permission):
   session is waiting on (`pendingRequests` on the row; the service owns the list).
 - `apps/web/src/components/PendingQuestionCard.tsx` — the question card in the conversation pane; its answer goes to
   `POST /api/sessions/:id/requests/:requestId`.
-- `apps/server/src/sessions/tmux-client.ts`: also holds `assertTmuxSessionName`, which makes every
-  `ShellTmuxClient` method refuse a `structured:` session name.
 - `apps/server/src/sessions/structured/structured-session-service.ts` — loaded sessions, active turn,
   steer-versus-turn policy, exactly-once terminals, process environment, survivor adoption (`reattachSurvivors`), ending
   orphan hosts (`sweepOrphanHosts`, `endConversation`) and the question list; `structured-run-monitor.ts`
   — run state for RunRecovery from turn events plus the rollout monitor.
-- `apps/server/src/sessions/structured/default-transport.ts` — the pure rule for the transport of a bind that names
-  none (`structuredSessions.defaultTransport` for a provider whose lane is on); routes and `SessionManager` share it.
-- `apps/server/src/sessions/session-manager.ts` — owns the structured seams (`session.transport`
-  dispatch at bind, restore, input, wake, recovery, sleep, model profile, release) and the move of tmux
-  conversations to the structured transport (`migrateTmuxRowToStructured`, `structuredMigrationReport`).
+- `apps/server/src/sessions/session-manager.ts` — owns the lifecycle around the service (bind, restore, input, wake,
+  recovery, sleep, model profile, release) and the startup conversion of rows the removed tmux transport left
+  (`convertTmuxRows`, `BoundSessionsRepo.listTmuxRows` and `convertTmuxRow`).
 - `apps/server/test/structured-*.test.ts` — plugin (scripted fake and recorded wire transcripts), fake
   plugin contract, and session-manager seams (bind, input, lifecycle, recovery, wake, coordination,
   Codex end to end against a fake app-server, process environment). Helpers: `test/helpers/structured-fixtures.ts`,
@@ -401,22 +382,19 @@ Run recovery ownership (requires explicit unattended permission):
   `structured-session-orphans.test.ts`: ending a session host nobody adopted (release, sleep, the startup sweep).
 - `apps/server/test/structured-session-per-session.test.ts`: per-session processes (environment, coordination
   identity, authority text, own pid, idle sleep, manual suspend, pressure, release, unexpected exit).
-  `structured-session-migration.test.ts`: moving tmux conversations over and the dry run.
-  `structured-session-default-transport.test.ts` and `structured-session-launches.test.ts`: the default transport for
-  binds and granted launches.
-- `apps/server/test/tmux-client-structured-guard.test.ts`: the tmux client refuses the `structured:` name in
-  every method.
+  `structured-session-tmux-conversion.test.ts`: the startup conversion of rows the removed tmux transport left.
+  `structured-session-launches.test.ts`: granted launches and the refusal of launch flags.
 - `scripts/prove-structured-codex.mjs`: opt-in real-Codex proof of the whole lane through the HTTP API (16 steps, including
   a question, an image, a backend restart during a running turn and a large image); evidence JSON under
   `test-results/structured-codex-proof/`.
   `scripts/prove-structured-claude.mjs`: the same for a real structured Claude chat (14 steps: coordination hooks and MCP,
   steer, Stop, a question, an image, a live model switch, sleep and restore, backend restart while idle and during a running
   turn, a large image, release); evidence under `test-results/structured-claude-proof/`.
-  `scripts/prove-structured-migration.mjs`: real tmux Codex and Claude chats moved to the structured transport by the
-  reconcile pass (9 steps); evidence under `test-results/structured-migration-proof/`.
-  `scripts/structured-proof-kit.mjs`: their shared harness (isolated backend, evidence, process scan and cleanup, PNG
+  `scripts/prove-agent-grants.mjs` and `scripts/prove-granted-launches.mjs`: standing grants recorded, requested, edited and
+  revoked by real agents, and granted launch, restart and inherited helpers (rewritten for the structured transport in Phase B).
+  `scripts/structured-proof-kit.mjs`: the Claude proof's harness, whose standalone helpers the Codex proof imports (isolated backend, evidence, process scan and cleanup, PNG
   builders, event-log reader).
 - Change hotspot: transport, service, plugin, session-manager seams, `coordination/service.ts` register and
-  structured liveness, `sessions/tmux-client.ts`,
+  structured liveness,
   `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls
   move together; review them with `docs/structured-providers.md` and the structured tests.

@@ -7,11 +7,17 @@ implementation on 2026-10-26; where it still differs from the code, the code gov
 followed (relay, Claude plugin, questions, images, re-adoption across restarts, migration) is in
 `docs/structured-cutover.md`; this document keeps the slice 1 record and the plugin contract.
 
+Phase B (2026-11-01) removed the tmux transport. A conversation now has one path, the structured transport: there is
+no `transport` field, no default transport and no migration. "Data model and config" and "Routes and web" below
+describe the current contracts, and the plugin contract is current. The other sections, including every mention of
+the tmux path, the transport dispatch and lane C2's migration, are the slice 1 record and are history.
+`docs/architecture.md` describes current behaviour; `docs/structured-cutover.md` has the Phase B record.
+
 ## Decision
 
 Console keeps its coordination, wiki, grants, priorities, history and recency rules, and replaces the
-way it drives a provider. Today a conversation is one hidden tmux session: Console pastes text into a
-terminal, presses Enter, and infers everything from the screen. The structured lane drives a provider
+way it drives a provider. On 2026-10-26 a conversation was one hidden tmux session: Console pasted text into a
+terminal, pressed Enter, and inferred everything from the screen. The structured lane drives a provider
 through a protocol with explicit requests and events. Codex comes first, through `codex app-server`
 (JSON-RPC). Claude (Agent SDK) and ACP agents (Mistral Vibe, Grok if it speaks ACP) come later through
 the same plugin contract.
@@ -34,6 +40,9 @@ used here as reference and, where marked, as copied code with its license notice
 `/home/bryan/code/UberCoder/t3code-ref` (v0.1.2).
 
 ## Architecture
+
+The diagram and rules are the slice 1 design (history), when SessionManager dispatched between the two transports.
+Since Phase B only the structured branch exists, and SessionManager calls `StructuredSessionService` directly.
 
 ```
                  +---------------------------+
@@ -86,15 +95,12 @@ Rules:
 
 ### Schema version 19
 
-- `bound_sessions.transport TEXT NOT NULL DEFAULT 'tmux'`.
-- `tmux_session_name` stays NOT NULL. Structured rows store the sentinel `structured:<sessionId>`. tmux 3.4
-  does not reject the colon (it rewrites it to `_` and creates a session), so tmux gives no protection. The
-  tmux client does. `assertTmuxSessionName` in `sessions/tmux-client.ts` throws a `TmuxError` for any name
-  that starts with `structured:`, before a tmux command runs, in every `ShellTmuxClient` method. The test
-  fake (`FakeTmux`) applies the same check. The dispatch rule still holds: a structured row never reaches a
-  tmux call, and the structured session tests check it by counting calls on the fake client. The guard turns
-  a stray call into an error instead of a second provider process on the thread.
-- `raw_log_path` is NULL for structured rows; `event_log_path` is set (the event log is shared).
+- Schema 19 added `bound_sessions.transport TEXT NOT NULL DEFAULT 'tmux'` and kept `tmux_session_name` NOT NULL.
+  Both columns stay, so Phase B needs no schema change, but no code chooses a path by them. Every row the backend
+  writes stores `transport = 'structured'` and the placeholder `structured:<sessionId>` in `tmux_session_name`.
+  The startup conversion (`docs/structured-cutover.md`, Phase B record) moves the restorable rows an earlier build
+  left with `transport = 'tmux'`; it is the only reader of the old values.
+- `raw_log_path` is NULL for every new row; `event_log_path` is set.
 - `pid` holds the app-server process id for structured rows (readers that use `pid` as "a live
   helper exists" keep working: worker roster, grant concurrency).
 - `scripts/worktree-sweep.mjs` `SUPPORTED_SCHEMA_VERSIONS` gains 19 in the same change.
@@ -112,18 +118,17 @@ Rules:
 ### Shared contracts (`packages/shared/src/index.ts`)
 
 ```ts
-export const SESSION_TRANSPORTS = ['tmux', 'structured'] as const;
-export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
-// BoundSession gains:  transport: SessionTransport;
-// TreeResponse gains:  structuredProviders?: ProviderId[];   // providers whose structured flag is on
-// POST /new/bind body: { transport?: SessionTransport }       // omitted: structuredSessions.defaultTransport (default 'tmux')
+// TreeResponse:        structuredProviders?: ProviderId[];   // providers whose structuredSessions lane is enabled
+// POST /new/bind body: {}                                     // strict: any field, including `transport`, is refused
 ```
+
+Phase B removed `SESSION_TRANSPORTS`, `SessionTransport`, `BoundSession.transport`, `BoundSession.tmuxSessionName`,
+`BoundSession.rawLogPath` and `AgentLaunchContext.flags`.
 
 ### Config (`apps/server/src/config/schema.ts`)
 
 ```json
 "structuredSessions": {
-  "defaultTransport": "tmux",
   "codex": {
     "enabled": false,
     "command": ["codex", "app-server"],
@@ -139,26 +144,21 @@ export type SessionTransport = (typeof SESSION_TRANSPORTS)[number];
 }
 ```
 
-`defaultTransport` (`tmux` or `structured`, default `tmux`) is the transport of a bind that names none and the switch for
-moving existing tmux conversations over; it only takes effect for a provider whose lane is enabled. The Claude block has
-the same shape as the Codex one; `command` is the `claude` executable and any leading arguments. See
-`docs/structured-cutover.md`, "Per-session host support, default transport and migration (lane C2)".
+The Claude block has the same shape as the Codex one; `command` is the `claude` executable and any leading arguments.
+Phase B removed `structuredSessions.defaultTransport`, `providers.<provider>.commands` (global and per project) and
+`sessions.eagerRestoreHours`: a config that still carries one of them fails at startup and names the key.
 
 `env` is extra environment for the provider process. The Console first sets `AGENT_COORD_RUNTIME` (its
-runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordination is enabled, mirroring what
-the tmux path gets from `providers.codex.commands.env`; `env` overrides them. Hooks inside a thread read
+runtime directory) and `AGENT_CONSOLE_CONFIG` (its config path) when coordination is enabled; `env` overrides them. Hooks inside a thread read
 `AGENT_COORD_RUNTIME` to find the Console. The coordination MCP entry in `~/.codex/config.toml` pins its own
 `AGENT_COORD_RUNTIME` and helper path (the live Console's), so the plugin overrides the entry in the app-server
 argv whenever coordination is enabled (see "Codex app-server plugin"); no configuration is needed, and an
 isolated Console (the proof script) gets its own runtime this way.
 
-- Absent block or `enabled: false` means the lane is off: no New Chat option, `/new/bind` with
-  `transport: 'structured'` returns 400, and no app-server process is ever started.
-- Zod strips unknown keys on settings save, so the key must not be written into the live
-  `config.json` until the server that understands it is the one that stays. The example config carries
-  it with `enabled: false`.
-- The transport is chosen at bind time and persisted on the row. Turning the flag off later does not
-  change existing structured rows; they keep working until released.
+- Absent block or `enabled: false` means the lane is off: the provider has no New Chat option, a bind returns 400,
+  and no provider process is started for a new conversation. The schema default is off; the example config turns
+  both lanes on.
+- Turning a lane off later does not change bound rows; they keep working until released.
 
 ## Plugin contract (`apps/server/src/providers/transport/types.ts`)
 
@@ -779,7 +779,10 @@ MCP server it ran is this Console's (pinned by the app-server argv, see "Coordin
 
 ## SessionManager seams (slice 1)
 
-Each is an early `if (session.transport === 'structured')` that delegates to
+History: since Phase B these are no longer seams. The tmux branch is gone and each entry point runs the structured
+behaviour below directly; the lane C2 migration row was replaced by the startup conversion.
+
+In slice 1 each was an early `if (session.transport === 'structured')` that delegated to
 `StructuredSessionService` (`apps/server/src/sessions/structured/structured-session-service.ts`).
 Line numbers are from `main` at `af009e3`.
 
@@ -900,48 +903,44 @@ the repeat status line and push), `onRequestsChanged`, `onSessionState` (error: 
 ## Coordination, grants and other readers
 
 - `CoordinationService.register`: when `consoleSessionId` is absent or does not match, resolve it from
-  `bound_sessions` where `transport='structured' and provider=? and (conversation_ref=? or
+  `bound_sessions` where `provider=? and (conversation_ref=? or
   resume_conversation_ref=?) and should_restore=1`. This restores `bindAssignment` for structured
   threads (assignment project, automatic `unattended` for granted helpers, grant session naming).
 - `sendReceipt` and `reconcileProcesses`: for an assignment with a structured binding, liveness is "a
-  restorable bound structured row exists" (`transport='structured'`, `should_restore=1`, status `starting`
-  or `bound`, and one row for the thread). `CoordinationService` reads this from `bound_sessions` itself and
+  restorable bound row exists" (`should_restore=1`, status `starting` or `bound`, and one row for the thread). `CoordinationService` reads this from `bound_sessions` itself and
   needs no callback into `SessionManager`. It is not the shared process id and not the pid of the last hook,
   because the thread loads on demand (wake, recovery, selection). So `reconcileProcesses` does not
   disconnect such an assignment and does not page its supervisor after a backend restart or an app-server
   exit. A receipt for a thread with a restorable row reports `stopped` only while the row is manually or
-  pressure suspended. A thread whose only row is released is `stopped`. A thread with no structured row
-  falls back to the hook pid, as for tmux.
-- `coordination/wake.ts` `queueCodexNotice` is not used for structured rows; `deliverAutomatic` sends
-  the same fixed notice text through `sendTurn`. `PeerWakeAttempt` records keep their format so audit,
+  pressure suspended. A thread whose only row is released is `stopped`. A thread with no bound row
+  falls back to the hook pid.
+- `deliverAutomatic` sends the fixed notice text of `coordination/wake.ts` through `sendTurn` (Phase B removed the
+  tmux path's `queueCodexNotice`). `PeerWakeAttempt` records keep their format so audit,
   delivery warnings and grant push keep working.
 - `grants/session-launches.ts`: restart goes through `restartGrantedSession`, which handles structured rows.
-  In slice 1 a granted launch always created a tmux session; since lane C2 a bind that names no transport takes
-  `structuredSessions.defaultTransport`, except a launch that carries command-line flags, which stays on tmux (see
-  `docs/structured-cutover.md`). The memory gate stays as is. Concurrency counting keeps using `pid` (the app-server pid is set on structured rows).
+  A granted launch binds on the structured transport; since Phase B a launch that carries command-line flags is
+  refused (history: slice 1 launches created tmux sessions, and lane C2 kept flagged launches on tmux). The memory gate stays as is. Concurrency counting keeps using `pid` (the app-server pid is set on structured rows).
 - `scripts/worktree-sweep.mjs`: unchanged; a structured row's checkout looks "process running" while the
   shared process lives, which is the conservative outcome.
 
 ## Routes and web
 
-- `POST /api/conversations/:projectSlug/:provider/new/bind` accepts `{ transport?: 'tmux' |
-  'structured' }`. Omitted, it takes `structuredSessions.defaultTransport` for a provider whose lane is on, else
-  tmux. An explicit structured request is refused with 400 unless `structuredSessions.<provider>.enabled`.
-- `POST .../:conversationRef/bind` (history resume) accepts the same field; an explicit structured resume of a
-  conversation that another live binding owns is refused like today (one restorable owner). A request that names no
-  transport and finds a tmux binding returns that binding.
-- `GET /api/sessions/structured-migration` is the read-only dry run of moving tmux conversations to the structured
-  transport (authenticated).
-- `GET /api/projects` tree response gains `structuredProviders`.
-- `GET /api/sessions/:id/screen` returns the synthesized screen for structured rows.
-  `GET /api/sessions/:id/raw-output` returns 404 for structured rows.
-- Web: New Chat shows a second action per advertised provider, "Codex (app-server)" and "Claude (headless)".
-  `ConversationPane.tsx` for `boundSession.transport === 'structured'`: hide Text Bypass, the
-  arrow/Backspace/Tab keys, the native-selection affordances and the terminal panel; keep Send, Esc/Stop,
-  model profile controls, `QueuedInputNotice`, `RunFailureNotice`, suspend and close. A small
-  "app-server" badge next to the status. A row with pending questions shows a `PendingQuestionCard` (options, a typed
-  answer) that posts to `POST /api/sessions/:id/requests/:requestId`. `useConversationData.ts` keeps polling `/screen` (cheap
-  synthesized response) so older code paths stay valid.
+Current since Phase B:
+
+- `POST /api/conversations/:projectSlug/:provider/new/bind` and `POST .../:conversationRef/bind` (history resume) take
+  an empty body; any field, including the removed `transport`, is refused with 400. A provider whose lane is off is
+  refused with 400. A history resume of a conversation that another live binding owns returns that binding (one
+  restorable owner).
+- `GET /api/projects` tree response carries `structuredProviders`.
+- `GET /api/sessions/:id/screen` returns the synthesized screen (status line only; there is no terminal).
+- `POST /api/sessions/:id/keys` takes a complete message (`keys: ['Enter']` with text) or Stop (`keys: ['Escape']`
+  alone); anything else is refused with 400.
+- Phase B removed `GET /api/sessions/structured-migration` and `GET /api/sessions/:id/raw-output`.
+
+History (slice 1 and lane C2): the bind body took `{ transport?: 'tmux' | 'structured' }`, New Chat showed a second
+action per advertised provider ("Codex (app-server)", "Claude (headless)"), and `ConversationPane.tsx` hid Text Bypass,
+the terminal keys, the native-selection affordances and the terminal panel for structured rows. Pending questions show
+a `PendingQuestionCard` that posts to `POST /api/sessions/:id/requests/:requestId`; that part is current.
 
 ## Not in slice 1
 
@@ -958,6 +957,9 @@ the repeat status line and push), `onRequestsChanged`, `onSessionState` (error: 
 - Per-thread MCP environment injection.
 
 ## Verification
+
+History: the slice 1 record. The tmux tests, the fake tmux client and the tmux guard named here were deleted in
+Phase B; current commands are in `docs/agent_docs/running_tests.md`.
 
 - Unit tests (Vitest, `apps/server/test/structured-*.test.ts`): plugin contract with the fake plugin;
   Codex JSON-RPC client against a scripted fake app-server (`test/helpers/fake-app-server.mjs`) over
@@ -1156,6 +1158,8 @@ W1, W2 and W3 run in parallel after W0. File ownership is exclusive per lane; sh
 after W4, then a fix loop, then the full test run and the proof script again.
 
 ## Future slices
+
+History: item 5 (retire the tmux path) was done in Phase B on 2026-11-01.
 
 1. Streaming deltas: `assistant-output` event-log record, reader mapping to `role: 'assistant',
    lifecycle: 'pending'`, merge rule keyed by item id.
