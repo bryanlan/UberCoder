@@ -4,7 +4,7 @@ import { AppDatabase } from '../db/database.js';
 import { ProjectService } from '../projects/project-service.js';
 import { AuthService } from '../security/auth-service.js';
 import { SessionInputRejectedError, SessionManager, StructuredRequestNotFoundError, type SessionCommandResult } from '../sessions/session-manager.js';
-import { MAX_PROMPT_IMAGES, type SessionInputResponse } from '@agent-console/shared';
+import { MAX_PROMPT_IMAGES, MODEL_PROFILE_KEYS, type SessionInputResponse } from '@agent-console/shared';
 import { ImageStore, ImageUploadError } from '../images/store.js';
 import { imagePromptSuffix } from '../images/prompt.js';
 import { InputQueue } from '../sessions/input-queue.js';
@@ -51,7 +51,7 @@ const keystrokeBodySchema = z.object({
   message: 'Images require unique image IDs.',
 });
 const modelProfileBodySchema = z.object({
-  profile: z.enum(['high', 'medium', 'low']),
+  profile: z.enum(MODEL_PROFILE_KEYS),
 });
 
 function sessionInputResponse(result: SessionCommandResult): SessionInputResponse {

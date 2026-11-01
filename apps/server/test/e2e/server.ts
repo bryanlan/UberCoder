@@ -1,7 +1,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildApp } from '../../src/app.js';
+
+// The isolated backend reads its model list from a stand-in `wo`, never the real catalog or router.
+process.env.AGENT_CONSOLE_WO_PATH ??= fileURLToPath(new URL('../helpers/fake-wo.mjs', import.meta.url));
 
 function encodeClaudeProjectPath(projectPath: string): string {
   return projectPath.replace(/[^A-Za-z0-9]/g, '-');

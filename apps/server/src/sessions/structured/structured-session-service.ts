@@ -1,11 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import {
-  CLAUDE_COST_PROFILES,
-  CODEX_COST_PROFILES,
   type AgentLaunchContext,
   type BoundSession,
-  type ModelProfileKey,
+  type ModelTarget,
   type PendingRequestSummary,
   type ProviderId,
   type SessionScreen,
@@ -74,8 +72,17 @@ export interface SurvivorCandidate {
   cwd: string;
 }
 
+/** Turns a row's profile into the model and effort its provider process is started and switched with. */
+export interface ModelTargetSource {
+  /** `undefined`: the row names no profile, or is Auto and has not been routed yet. Rejects when the profile cannot be looked up. */
+  resolve(session: BoundSession): Promise<ModelTarget | undefined>;
+  /** The same from what is already loaded, for the synthesized screen. */
+  peek(session: BoundSession): ModelTarget | undefined;
+}
+
 export interface StructuredSessionServiceOptions {
   registry: TransportPluginRegistry;
+  targets: ModelTargetSource;
   config: StructuredSessionsConfig;
   createContext: (pluginId: string) => PluginContext;
   meta: PluginContext['meta'];
@@ -175,7 +182,8 @@ interface LoadedSession {
    */
   initialBurst: boolean;
   pendingInterrupt?: { turnId: string; at: string };
-  profile?: ModelProfileKey;
+  /** What the next turns run on; set when a profile is applied and read by every turn. */
+  target?: ModelTarget;
   fallbackModel?: { model?: string; effort?: string };
   /** Every request the transport has opened and not closed, answered at once or not. */
   pendingRequests: Set<string>;
@@ -186,14 +194,6 @@ interface LoadedSession {
   terminalSeen: string[];
   transcriptPath?: string;
   usage?: { used?: number; max?: number };
-}
-
-function profileTable(provider: ProviderId) {
-  return provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
-}
-
-function sessionProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile'>): ModelProfileKey | undefined {
-  return session.provider === 'codex' ? session.codexProfile : session.claudeProfile;
 }
 
 function providerLabel(provider: ProviderId): string {
@@ -244,6 +244,7 @@ export class StructuredSessionService {
   private readonly authorityContext?: (context: AgentLaunchContext) => string | undefined;
   private readonly logger?: { warn(bindings: object, message: string): void };
   private readonly hosts?: StructuredSessionServiceOptions['hosts'];
+  private readonly targets: ModelTargetSource;
   private readonly instances = new Map<string, TransportInstance>();
   /** The context each instance was created with: a per-session conversation reads the coordination identity from it. */
   private readonly contexts = new Map<string, PluginContext>();
@@ -265,6 +266,7 @@ export class StructuredSessionService {
     this.authorityContext = options.authorityContext;
     this.logger = options.logger;
     this.hosts = options.hosts;
+    this.targets = options.targets;
   }
 
   /** Whether new structured sessions may be bound for this provider. Existing rows do not depend on it. */
@@ -305,12 +307,12 @@ export class StructuredSessionService {
     sessionId: string;
     provider: ProviderId;
     cwd: string;
-    profile?: ModelProfileKey;
+    target?: ModelTarget;
     model?: string;
     effort?: string;
     launchContext?: AgentLaunchContext;
   }): Promise<{ nativeSessionId: string; transcriptPath?: string; pid?: number }> {
-    const state = await this.open(input.sessionId, input.provider, input.cwd, undefined, input.profile, { model: input.model, effort: input.effort }, input.launchContext);
+    const state = await this.open(input.sessionId, input.provider, input.cwd, undefined, input.target, { model: input.model, effort: input.effort }, input.launchContext);
     return { nativeSessionId: state.transport.nativeSessionId, transcriptPath: this.transcriptPath(input.sessionId), pid: state.pid };
   }
 
@@ -320,7 +322,7 @@ export class StructuredSessionService {
     if (existing?.loaded) return { transcriptPath: this.transcriptPath(session.id), pid: existing.pid };
     const nativeSessionId = session.resumeConversationRef ?? session.conversationRef;
     if (nativeSessionId.startsWith('pending:')) throw new StructuredUnavailableError('The conversation has no provider session id yet.');
-    const state = await this.open(session.id, session.provider, cwd, nativeSessionId, sessionProfile(session),
+    const state = await this.open(session.id, session.provider, cwd, nativeSessionId, await this.targets.resolve(session),
       { model: session.launchContext?.model, effort: session.launchContext?.effort }, session.launchContext);
     return { transcriptPath: this.transcriptPath(session.id), pid: state.pid };
   }
@@ -376,12 +378,17 @@ export class StructuredSessionService {
     if (nativeSessionId.startsWith('pending:')) return false;
     const instance = this.reattachingInstance(session.provider);
     if (!instance?.reattach) return false;
-    const profile = sessionProfile(session);
-    const fallback = this.fallbackModel(session.provider, instance, profile, { model: session.launchContext?.model, effort: session.launchContext?.effort });
-    const options = this.openOptions(session.id, session.provider, instance, cwd, true, profile, fallback, session.launchContext);
+    // Adopting a process that is already running does not depend on the model catalog: if the profile cannot be looked up, the
+    // process keeps the model it has and the next turn names none.
+    const target = await this.targets.resolve(session).catch((error: unknown) => {
+      this.logger?.warn({ err: error, sessionId: session.id }, 'The model profile could not be resolved while reattaching.');
+      return undefined;
+    });
+    const fallback = this.fallbackModel(session.provider, instance, target, { model: session.launchContext?.model, effort: session.launchContext?.effort });
+    const options = this.openOptions(session.id, session.provider, instance, cwd, true, target, fallback, session.launchContext);
     const transport = await instance.reattach(nativeSessionId, options);
     if (!transport) return false;
-    const state = await this.register(session.id, session.provider, instance, transport, profile, fallback, true);
+    const state = await this.register(session.id, session.provider, instance, transport, target, fallback, true);
     this.safely(() => this.callbacks.appendStatus(session.id, 'Reconnected to the running agent process'), state);
     return true;
   }
@@ -721,11 +728,14 @@ export class StructuredSessionService {
     return {};
   }
 
-  /** Switch the profile used by the next turn. A running turn keeps its model, so the switch is deferred. */
-  async setProfile(session: BoundSession, profile: ModelProfileKey): Promise<'applied' | 'deferred'> {
+  /**
+   * Switch the model and effort the next turn runs on. A running turn keeps its model, so the switch is deferred. `undefined`
+   * leaves the current model alone (a switch to Auto before any message has been routed).
+   */
+  async setTarget(session: BoundSession, target: ModelTarget | undefined): Promise<'applied' | 'deferred'> {
     const state = this.sessions.get(session.id);
     if (state?.activeTurnId) return 'deferred';
-    if (state) state.profile = profile;
+    if (state && target) state.target = target;
     return 'applied';
   }
 
@@ -734,9 +744,8 @@ export class StructuredSessionService {
   /** The status the web polls on /screen: there is no terminal, so it is synthesized from the session's state. */
   screen(session: BoundSession): SessionScreen {
     const state = this.sessions.get(session.id);
-    const profile = state?.profile ?? sessionProfile(session);
-    const selected = profile ? profileTable(session.provider)[profile] : undefined;
-    const model = selected ? `${selected.model} ${selected.reasoningEffort}` : session.launchContext?.model;
+    const selected = state?.target ?? this.targets.peek(session);
+    const model = selected ? `${selected.model} ${selected.effort}` : session.launchContext?.model;
     // `asleep`: the row is not loaded in the provider (manual or idle sleep, or not restored yet). Loading it again reads `idle`.
     const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId || state.transport.turnUnidentified ? 'working' : 'idle'}`;
     const used = state?.usage?.used, max = state?.usage?.max;
@@ -757,11 +766,7 @@ export class StructuredSessionService {
   }
 
   private modelFor(state: LoadedSession): { model?: string; effort?: string } {
-    const profile = state.profile;
-    if (profile) {
-      const selected = profileTable(state.provider)[profile];
-      return { model: selected.model, effort: selected.reasoningEffort };
-    }
+    if (state.target) return { model: state.target.model, effort: state.target.effort };
     const fallback = state.fallbackModel;
     return { ...(fallback?.model ? { model: fallback.model } : {}), ...(fallback?.effort ? { effort: fallback.effort } : {}) };
   }
@@ -791,13 +796,13 @@ export class StructuredSessionService {
     provider: ProviderId,
     cwd: string,
     nativeSessionId: string | undefined,
-    profile: ModelProfileKey | undefined,
+    target: ModelTarget | undefined,
     fallbackModel: { model?: string; effort?: string },
     launchContext: AgentLaunchContext | undefined,
   ): Promise<LoadedSession> {
     const instance = this.instanceFor(provider);
-    fallbackModel = this.fallbackModel(provider, instance, profile, fallbackModel);
-    const options = this.openOptions(sessionId, provider, instance, cwd, nativeSessionId !== undefined, profile, fallbackModel, launchContext);
+    fallbackModel = this.fallbackModel(provider, instance, target, fallbackModel);
+    const options = this.openOptions(sessionId, provider, instance, cwd, nativeSessionId !== undefined, target, fallbackModel, launchContext);
     // One process per conversation: a second open while the first is loaded would put two writers on one transcript.
     if (instance.capabilities.processModel === 'per-session' && this.sessions.get(sessionId)?.loaded) {
       throw new StructuredUnavailableError('This conversation already has a running provider process.');
@@ -809,7 +814,7 @@ export class StructuredSessionService {
       await this.dropInstanceIfDisconnected(provider, instance);
       throw error;
     }
-    return await this.register(sessionId, provider, instance, transport, profile, fallbackModel, nativeSessionId !== undefined);
+    return await this.register(sessionId, provider, instance, transport, target, fallbackModel, nativeSessionId !== undefined);
   }
 
   private openOptions(
@@ -818,16 +823,15 @@ export class StructuredSessionService {
     instance: TransportInstance,
     cwd: string,
     resuming: boolean,
-    profile: ModelProfileKey | undefined,
+    target: ModelTarget | undefined,
     fallbackModel: { model?: string; effort?: string },
     launchContext: AgentLaunchContext | undefined,
   ): OpenOptions {
-    const selected = profile ? profileTable(provider)[profile] : undefined;
     return {
       conversationId: sessionId,
       cwd,
-      model: selected?.model ?? fallbackModel.model,
-      effort: selected?.reasoningEffort ?? fallbackModel.effort,
+      model: target?.model ?? fallbackModel.model,
+      effort: target?.effort ?? fallbackModel.effort,
       policy: { approvals: 'never', sandbox: 'full-access' },
       ...this.identityOptions(provider, instance, sessionId, resuming, launchContext),
     };
@@ -842,10 +846,10 @@ export class StructuredSessionService {
   private fallbackModel(
     provider: ProviderId,
     instance: TransportInstance,
-    profile: ModelProfileKey | undefined,
+    target: ModelTarget | undefined,
     fallbackModel: { model?: string; effort?: string },
   ): { model?: string; effort?: string } {
-    if (profile || provider !== 'claude' || instance.capabilities.processModel !== 'per-session' || fallbackModel.model || fallbackModel.effort) return fallbackModel;
+    if (target || provider !== 'claude' || instance.capabilities.processModel !== 'per-session' || fallbackModel.model || fallbackModel.effort) return fallbackModel;
     return { effort: UNPROFILED_CLAUDE_EFFORT };
   }
 
@@ -865,7 +869,7 @@ export class StructuredSessionService {
     provider: ProviderId,
     instance: TransportInstance,
     transport: TransportSession,
-    profile: ModelProfileKey | undefined,
+    target: ModelTarget | undefined,
     fallbackModel: { model?: string; effort?: string },
     attaching = false,
   ): Promise<LoadedSession> {
@@ -883,7 +887,7 @@ export class StructuredSessionService {
       closing: false,
       lostReported: false,
       lastEventAt: Date.now(),
-      profile,
+      target,
       fallbackModel,
       adoptedTurns: new Set(),
       initialBurst: attaching,

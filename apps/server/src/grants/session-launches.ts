@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, type AgentGrant, type AgentGrantAction, type AgentLaunchContext, type BoundSession, type ConversationSummary, type ProviderId } from '@agent-console/shared';
+import type { AgentGrant, AgentGrantAction, AgentLaunchContext, BoundSession, ConversationSummary, ProviderId } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
@@ -8,21 +8,8 @@ import type { RealtimeEventBus } from '../realtime/event-bus.js';
 import { SessionInputRejectedError, type SessionManager } from '../sessions/session-manager.js';
 import type { GrantService } from './service.js';
 import { AGENT_LAUNCH_PREFIX } from './authority.js';
+import { rowProfile, sessionModelTarget } from '../model-profiles/service.js';
 const SESSION_MEMORY_BYTES = 250 * 1024 * 1024;
-
-/**
- * The model a launch or restart runs on, the way the session manager chooses it: a restart keeps the session's cost profile, or
- * the model its launch named; a new launch runs the model it names, or the default Medium profile when it names neither model
- * nor effort. Undefined when the provider picks the model itself. Grants that limit models compare against this.
- */
-function launchModel(provider: ProviderId, target: BoundSession | undefined, input: { model?: string; effort?: string }): string | undefined {
-  const profiles = provider === 'codex' ? CODEX_COST_PROFILES : CLAUDE_COST_PROFILES;
-  if (target) {
-    const profile = provider === 'codex' ? target.codexProfile : target.claudeProfile;
-    return profile ? profiles[profile].model : target.launchContext?.model;
-  }
-  return input.model ?? (input.effort ? undefined : profiles.medium.model);
-}
 
 interface LaunchInput {
   projectSlug?: string; provider?: ProviderId; model?: string; effort?: string;
@@ -141,13 +128,27 @@ export class AgentSessionLaunches {
     if (!project) throw new Error('Choose a configured active project.');
     const settings = this.projects.getMergedProviderSettings(project, input.provider);
     if (!settings.enabled) throw new Error('This provider is disabled for the project.');
-    const model = launchModel(input.provider, target, input);
+    const model = await this.plannedModel(input.provider, target, input);
     const grant = this.grants.grantsFor(assignmentId).find(candidate => (!input.grantId || input.grantId === candidate.id)
       && candidate.actions.includes(action) && (!candidate.projectSlugs.length || candidate.projectSlugs.includes(project.slug))
       && (!candidate.limits.models.length || (model && candidate.limits.models.includes(model))));
     if (!grant) return { requiresGrant: true, action, projectSlug: project.slug, model,
       reason: 'No active grant covers this action, project and model. Request one broad grant with the required actions and scope.' };
     return this.enqueue(assignmentId, action, input, grant, target?.id ?? randomUUID(), id);
+  }
+
+  /**
+   * The model a launch or restart runs on, the way the session manager chooses it: a restart keeps the model its row's profile
+   * means (an Auto row keeps the model its last routing chose, none before the first), or the model its launch named; a new launch
+   * runs the model it names, or the Medium profile when it names neither model nor effort (Auto is chosen per message, after the
+   * launch). Undefined when the provider picks the model itself. Grants that limit models compare against this.
+   */
+  private async plannedModel(provider: ProviderId, target: BoundSession | undefined, input: LaunchInput): Promise<string | undefined> {
+    if (target) {
+      return rowProfile(target) ? (await sessionModelTarget(this.sessions.modelProfiles, target))?.model : target.launchContext?.model;
+    }
+    if (input.model) return input.model;
+    return input.effort ? undefined : (await this.sessions.modelProfiles.entry(provider, 'medium')).launchName;
   }
 
   private enqueue(assignmentId: string, action: AgentGrantAction, input: LaunchInput, grant: AgentGrant, sessionId: string, id: string) {
@@ -229,7 +230,7 @@ export class AgentSessionLaunches {
     }
     if (grant.limits.models.length) {
       const target = row.action === 'restart_session' ? this.db.boundSessions.getById(row.session_id) : undefined;
-      const model = launchModel(input.provider!, target, input);
+      const model = await this.plannedModel(input.provider!, target, input);
       if (!model || !grant.limits.models.includes(model)) { this.update(row, 'cancelled', 'The current model is outside the grant.'); return; }
     }
     let available: number | undefined;

@@ -2,12 +2,34 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import type { BoundSession, ConversationTimeline, NormalizedMessage, PendingRequestSummary, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
+import type { BoundSession, ModelProfileKey, ConversationTimeline, NormalizedMessage, PendingRequestSummary, ProjectSummary, SessionInputResponse, SessionKeystrokeRequest } from '@agent-console/shared';
 import { ConversationPane, type MobileInputPanel } from './ConversationPane';
+import type { ModelProfilesState } from '../lib/model-profiles';
 import { api, ApiError } from '../lib/api';
 import { CONVERSATION_DRAG_TYPE } from '../features/conversation/agent-reference';
 
 const baseTime = '2026-07-02T12:00:00.000Z';
+
+// What the server's model list returns in these tests (the web app has no list of its own).
+const level = (model: string, label: string, effort: string) => ({ model, label, effort, launchName: model });
+const readyProfiles: ModelProfilesState = {
+  status: 'ready',
+  profiles: {
+    loadedAt: baseTime,
+    providers: {
+      codex: { routerProvider: 'openai', levels: {
+        high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'),
+        medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'),
+        low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
+      } },
+      claude: { routerProvider: 'anthropic', levels: {
+        high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'),
+        medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
+        low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+      } },
+    },
+  },
+};
 
 const pastedImage = {
   id: '48f85f7c-5448-4d96-94b4-177a2f8e300e', mediaType: 'image/png' as const,
@@ -166,7 +188,8 @@ function renderPane(input: {
   screenStatus?: string;
   screenModel?: string;
   onSendKeystrokes?: (sessionId: string, payload: SessionKeystrokeRequest) => Promise<SessionInputResponse | undefined>;
-  onSetModelProfile?: (sessionId: string, profile: 'high' | 'medium' | 'low') => Promise<boolean>;
+  modelProfiles?: ModelProfilesState;
+  onSetModelProfile?: (sessionId: string, profile: ModelProfileKey) => Promise<boolean>;
   onCancelModelProfileRequest?: (sessionId: string, requestId: string) => Promise<boolean>;
   onSuspend?: (sessionId: string) => Promise<void>;
   sessionOverrides?: Partial<BoundSession>;
@@ -199,6 +222,7 @@ function renderPane(input: {
         onRelease={vi.fn()}
         onSuspend={input.onSuspend ?? vi.fn()}
         onSendKeystrokes={onSendKeystrokes}
+        modelProfiles={input.modelProfiles ?? readyProfiles}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={onCancelModelProfileRequest}
         binding={false}
@@ -233,7 +257,7 @@ it('offers Claude H/M/L models and selects high without changing the draft', asy
   renderPane({ onSetModelProfile, sessionOverrides: { provider: 'claude', claudeProfile: 'medium' } });
   expect(screen.getByRole('button', { name: 'Use high Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-fable-5-1 / xhigh'));
   expect(screen.getByRole('button', { name: 'Use medium Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-opus-5-5 / xhigh'));
-  expect(screen.getByRole('button', { name: 'Use low Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-sonnet-5 / high'));
+  expect(screen.getByRole('button', { name: 'Use low Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-sonnet-5-5 / high'));
   const textbox = screen.getByRole('textbox');
   fireEvent.change(textbox, { target: { value: 'keep this Claude draft' } });
   fireEvent.keyDown(textbox, { key: 'h', altKey: true });
@@ -241,9 +265,77 @@ it('offers Claude H/M/L models and selects high without changing the draft', asy
   expect(textbox).toHaveValue('keep this Claude draft');
 });
 
+describe('Auto model profile (A)', () => {
+  const decision = {
+    source: 'router' as const, decidedAt: baseTime, model: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', effort: 'low',
+    launchName: 'claude-sonnet-5-5', role: 'implementer', rolePercent: 91, difficulty: 'lighter', classifierStatus: 'ok',
+    quotaState: 'on_pace', reason: 'Best implementer fit is Claude Sonnet 5.5 at low effort; it is on pace for its weekly quota.',
+  };
+
+  it('offers A to the left of H, M and L and Alt A selects it', async () => {
+    const onSetModelProfile = vi.fn().mockResolvedValue(true);
+    renderPane({ onSetModelProfile, sessionOverrides: { codexProfile: 'medium' } });
+    const group = screen.getByLabelText('Codex model profile');
+    expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'H', 'M', 'L']);
+    const textbox = screen.getByRole('textbox');
+    fireEvent.change(textbox, { target: { value: 'keep this draft' } });
+    fireEvent.keyDown(textbox, { key: 'a', altKey: true });
+    await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'auto'));
+    expect(textbox).toHaveValue('keep this draft');
+    fireEvent.click(screen.getByRole('button', { name: 'Use auto Codex profile' }));
+    await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows the compact route line from typed fields and the router reason on hover', () => {
+    renderPane({
+      sessionOverrides: { provider: 'claude', claudeProfile: 'auto', autoRoute: { routePending: false, decision } },
+      screenModel: 'claude-sonnet-5-5 low',
+    });
+    const line = screen.getByTestId('auto-route-line');
+    expect(line).toHaveTextContent('A → Sonnet 5.5·low · implementer 91% · lighter · Claude on pace');
+    expect(line).toHaveAttribute('title', decision.reason);
+    expect(screen.getByRole('button', { name: 'Use auto Claude profile' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('says the next message will be routed while A is pending, and shows a fallback warning', () => {
+    const pending = renderPane({ sessionOverrides: { codexProfile: 'auto', autoRoute: { routePending: true } } });
+    expect(screen.getByTestId('auto-route-line')).toHaveTextContent('A → routes with your next message');
+    pending.unmount();
+    renderPane({
+      sessionOverrides: { codexProfile: 'auto', autoRoute: { routePending: false, decision: {
+        source: 'fallback', decidedAt: baseTime, model: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effort: 'xhigh', launchName: 'gpt-6.1-sol',
+        warning: 'Auto unavailable: timed out after 8 s. Using Medium.',
+      } } },
+    });
+    expect(screen.getByTestId('auto-route-warning')).toHaveTextContent('Auto unavailable: timed out after 8 s. Using Medium.');
+    expect(screen.getByTestId('auto-route-line')).toHaveTextContent('A → GPT-6.1 Sol·xhigh');
+  });
+});
+
+describe('model profile list from the server', () => {
+  it('shows a clear error and disables every profile button when the list cannot be loaded', () => {
+    renderPane({
+      modelProfiles: { status: 'error', message: 'Model profiles unavailable: wo was not found at /x/wo' },
+      sessionOverrides: { codexProfile: 'medium' },
+    });
+    expect(screen.getByTestId('model-profiles-error')).toHaveTextContent('Model profiles unavailable: wo was not found at /x/wo');
+    for (const name of ['auto', 'high', 'medium', 'low']) {
+      expect(screen.getByRole('button', { name: `Use ${name} Codex profile` })).toBeDisabled();
+    }
+  });
+
+  it('does not act on Alt H while the list is missing', () => {
+    const onSetModelProfile = vi.fn().mockResolvedValue(true);
+    renderPane({ onSetModelProfile, modelProfiles: { status: 'loading' } });
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'h', altKey: true });
+    expect(onSetModelProfile).not.toHaveBeenCalled();
+    expect(screen.getByText('Loading model profiles…')).toBeInTheDocument();
+  });
+});
+
 it('does not present a saved profile as current when the live model is older', () => {
   renderPane({ sessionOverrides: { codexProfile: 'medium' }, screenModel: 'gpt-5.6-sol xhigh' });
-  expect(screen.getByText('Running: gpt-5.6-sol xhigh · select H, M, or L')).toBeInTheDocument();
+  expect(screen.getByText('Running: gpt-5.6-sol xhigh · select A, H, M, or L')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Use medium Codex profile' })).toHaveAttribute('aria-pressed', 'false');
 });
 
@@ -279,6 +371,7 @@ it('submits a busy-session profile immediately and does not carry its server que
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
+        modelProfiles={readyProfiles}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         binding={false}
@@ -331,6 +424,7 @@ it('does not use browser idleness to apply a server-owned queued profile', async
         onRelease={vi.fn()}
         onSuspend={vi.fn()}
         onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
+        modelProfiles={readyProfiles}
         onSetModelProfile={onSetModelProfile}
         onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
         binding={false}
@@ -686,6 +780,7 @@ describe('ConversationPane external Claude handoff', () => {
               onRelease={vi.fn()}
               onSuspend={vi.fn()}
               onSendKeystrokes={vi.fn().mockResolvedValue({ session: boundSession() })}
+              modelProfiles={readyProfiles}
               onSetModelProfile={vi.fn().mockResolvedValue(true)}
               onCancelModelProfileRequest={vi.fn().mockResolvedValue(true)}
               binding={false}

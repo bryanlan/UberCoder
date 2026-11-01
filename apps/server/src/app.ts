@@ -23,6 +23,8 @@ import { registerEventRoutes } from './routes/events.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerSearchRoutes } from './routes/search.js';
 import { registerSessionRoutes } from './routes/sessions.js';
+import { registerModelProfileRoutes } from './routes/model-profiles.js';
+import { ModelProfileService } from './model-profiles/service.js';
 import { ImageStore } from './images/store.js';
 import { registerImageRoutes } from './images/routes.js';
 import { registerSettingsRoutes } from './routes/settings.js';
@@ -86,6 +88,9 @@ export async function buildApp(options: AppOptions = {}) {
     hostProgramPath: fileURLToPath(new URL('./providers/transport/session-host.js', import.meta.url)),
   });
   const imageStoreDir = path.join(path.dirname(config.databasePath), 'images');
+  const modelProfiles = new ModelProfileService(config.modelRouting, undefined, app.log);
+  // Read the catalog now so a wrong `wo` path shows in the log at startup, not at the first session.
+  void modelProfiles.profiles().catch((error: unknown) => app.log.warn({ err: error }, 'The model profiles could not be loaded.'));
   const sessions = new SessionManager(db, config.runtimeDir, eventBus, {
     projectService,
     providerRegistry,
@@ -95,6 +100,7 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendAvailableBytes: config.sessions.pressureSuspendAvailableMiB * 1024 * 1024,
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
+    modelProfiles,
     structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude },
     lineTransport,
     // A message attaches only the pasted images the image store holds, found directly in this directory.
@@ -179,6 +185,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerSearchRoutes(app, authService, search);
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders);
   await registerSessionRoutes(app, authService, db, projectService, sessions, images);
+  await registerModelProfileRoutes(app, authService, modelProfiles);
   registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);
   await registerSettingsRoutes(app, authService, configService, db, indexing, projectService, restartService);

@@ -7,6 +7,7 @@ import { terminateHost } from '../src/providers/transport/line-transport.js';
 import { TransportPluginRegistry } from '../src/providers/transport/registry.js';
 import { LineTransportNotRunningError, type LineTransportFactory, type ProviderFailure, type TransportInstance } from '../src/providers/transport/types.js';
 import { StructuredSessionService } from '../src/sessions/structured/structured-session-service.js';
+import { noModelTargets } from './helpers/structured-fixtures.js';
 import {
   OPEN_OPTIONS, baseHandlers, hostTransportFactory, makeContext, readLog, receivedRequests, setupFake, threadResult, waitUntil,
   type FakeSetup, type TestContext,
@@ -67,6 +68,7 @@ function backend(
   registry.register({ id: plugin.id, create: (config, pluginContext) => { const instance = plugin.create(config as CodexStructuredConfig, pluginContext); created.push(instance); return instance; } });
   const states: Array<{ sessionId: string; state: string; failure?: ProviderFailure }> = [];
   const service = new StructuredSessionService({
+      targets: noModelTargets,
     registry,
     config: { codex: { enabled: true, command: fake.command, idleUnloadMinutes: 60, env: {} } },
     createContext: () => context,

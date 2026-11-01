@@ -4,8 +4,9 @@ import { imagePromptDisplay, imagePromptFiles } from '../images/prompt.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { CLAUDE_COST_PROFILES, CODEX_COST_PROFILES, PROVIDERS, visibleModelMatchesProfile, type AgentLaunchContext, type BoundSession, type ClaudeCostProfileKey, type CodexCostProfileKey, type ConversationSummary, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen } from '@agent-console/shared';
+import { PROVIDERS, visibleModelMatchesTarget, type AgentLaunchContext, type AutoRoute, type BoundSession, type ConversationSummary, type ModelTarget, type ModelProfileDeferredReason, type ModelProfileKey, type ModelProfileRequest, type PendingRequestSummary, type ProviderId, type RecordedUserInput, type SessionEvent, type SessionInputResponse, type SessionModelProfileResponse, type SessionRequestResponse, type SessionScreen } from '@agent-console/shared';
 import { nowIso } from '../lib/time.js';
+import { ModelProfileService, ModelProfilesUnavailableError, fallbackDecision, peekSessionModelTarget, rowProfile, sessionModelTarget } from '../model-profiles/service.js';
 import { AppDatabase } from '../db/database.js';
 import type { ActiveProject } from '../projects/project-service.js';
 import type { ProviderAdapter } from '../providers/types.js';
@@ -52,12 +53,21 @@ const SURVIVOR_BUSY_REPORT_AFTER = 3;
 /** A session host that keeps not answering for this long is taken as lost: its row settles the way a dead connection settles it. */
 const SURVIVOR_BUSY_LIMIT_MS = 10 * 60_000;
 
-function selectedModelProfile(provider: ProviderId, profile: ModelProfileKey) {
-  return provider === 'codex' ? CODEX_COST_PROFILES[profile] : CLAUDE_COST_PROFILES[profile];
+function activeModelProfile(session: BoundSession): ModelProfileKey | undefined {
+  return rowProfile(session);
 }
 
-function activeModelProfile(session: BoundSession): ModelProfileKey | undefined {
-  return session.provider === 'codex' ? session.codexProfile : session.claudeProfile;
+/** The target a profile switch applies, in the words the status lines use. */
+interface AppliedModel extends ModelTarget {
+  label?: string;
+}
+
+function profilePatch(provider: ProviderId, profile: ModelProfileKey | undefined) {
+  return provider === 'codex' ? { codexProfile: profile } : { claudeProfile: profile };
+}
+
+function describeAppliedModel(applied: AppliedModel | undefined): string {
+  return applied ? `${applied.label ?? applied.model}, ${applied.effort}` : 'no model change yet';
 }
 const SESSION_RECONCILIATION_INTERVAL_MS = 30_000;
 const SESSION_RECONCILIATION_INITIAL_DELAY_MS = 5_000;
@@ -77,6 +87,8 @@ interface SessionRecoveryDependencies {
 }
 
 interface SessionManagerOptions {
+  /** Reads the High/Medium/Low profiles and asks the Auto router. Omitted: a service on the configured `wo` path. */
+  modelProfiles?: ModelProfileService;
   coordinationEnabled?: boolean;
   restoreGraceMs?: number;
   pressureSuspendAvailableBytes?: number;
@@ -280,6 +292,7 @@ export class SessionManager {
   private readonly conversationBindRuns = new Map<string, Promise<BoundSession>>();
   private readonly scheduledModelProfileDrains = new Set<string>();
   private readonly requestedModelProfileRedrains = new Set<string>();
+  private readonly autoRoutings = new Map<string, Promise<void>>();
   private readonly autoTrackLaunchQueue: Array<() => void> = [];
   private readonly restoreGraceMs: number;
   private readonly pressureSuspendAvailableBytes?: number;
@@ -293,6 +306,8 @@ export class SessionManager {
   private readonly coordinationEnabled: boolean;
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private readonly notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
+  /** The model list shared with the web routes and granted launches: profiles come from here, never from a table in this repo. */
+  readonly modelProfiles: ModelProfileService;
   private readonly imageStoreDir?: string;
   private stopped = false;
   /** Set once the startup pass has looked for provider processes that outlived the previous backend. */
@@ -312,6 +327,7 @@ export class SessionManager {
     if (this.coordinationEnabled) migrateMessagePolicies(db);
     this.hasActiveLaunchAuthority = options.hasActiveLaunchAuthority;
     this.notifyStructuredQuestion = options.notifyStructuredQuestion;
+    this.modelProfiles = options.modelProfiles ?? new ModelProfileService({}, undefined, logger);
     this.imageStoreDir = options.imageStoreDir;
     this.restoreGraceMs = options.restoreGraceMs ?? DEFAULT_SESSION_IDLE_RESTORE_GRACE_MS;
     this.pressureSuspendAvailableBytes = options.pressureSuspendAvailableBytes;
@@ -340,6 +356,10 @@ export class SessionManager {
     };
     this.structured = new StructuredSessionService({
       registry: options.transportPlugins ?? new TransportPluginRegistry(),
+      targets: {
+        resolve: (session) => sessionModelTarget(this.modelProfiles, session),
+        peek: (session) => peekSessionModelTarget(this.modelProfiles, session),
+      },
       config: options.structuredSessions ?? {},
       hostEnv: options.structuredEnv,
       authorityContext: options.launchAuthorityContext,
@@ -1324,8 +1344,9 @@ export class SessionManager {
     initialPromptIsHuman?: boolean;
     launchContext?: AgentLaunchContext;
     sessionId?: string;
-    codexProfile?: CodexCostProfileKey;
-    claudeProfile?: ClaudeCostProfileKey;
+    /** The profile to start on. Omitted: Medium for a new conversation that names no model. */
+    codexProfile?: ModelProfileKey;
+    claudeProfile?: ModelProfileKey;
     autoTrackedAt?: string;
   }): Promise<BoundSession> {
     const bindKey = `${input.project.slug}:${input.provider.id}:${input.conversationRef}`;
@@ -1583,12 +1604,13 @@ export class SessionManager {
     fs.writeFileSync(eventLogPath, '', { flag: 'a' });
     const initialPrompt = input.initialPrompt?.trim();
     const defaultProfile = input.kind === 'pending' && !input.launchContext?.model && !input.launchContext?.effort;
+    const requestedProfile = providerId === 'codex' ? input.codexProfile : input.claudeProfile;
+    const startProfile = requestedProfile ?? (defaultProfile ? 'medium' : undefined);
     const session: BoundSession = {
       launchContext: input.launchContext,
       id: sessionId,
       provider: providerId,
-      codexProfile: providerId === 'codex' ? input.codexProfile ?? (defaultProfile ? 'medium' : undefined) : undefined,
-      claudeProfile: providerId === 'claude' ? input.claudeProfile ?? (defaultProfile ? 'medium' : undefined) : undefined,
+      ...profilePatch(providerId, startProfile),
       projectSlug: input.project.slug,
       conversationRef: input.conversationRef,
       resumeConversationRef: input.kind === 'history' ? input.conversationRef : undefined,
@@ -1604,6 +1626,8 @@ export class SessionManager {
     };
     this.db.boundSessions.upsert(session);
     if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
+    // A session that starts on Auto has no model yet: its first message is routed.
+    if (startProfile === 'auto') this.db.boundSessions.setAutoRoute(sessionId, { routePending: true }, now);
 
     try {
       let nativeRef = input.conversationRef;
@@ -1613,7 +1637,7 @@ export class SessionManager {
           sessionId,
           provider: providerId,
           cwd: input.project.path,
-          profile: providerId === 'codex' ? session.codexProfile : session.claudeProfile,
+          target: await sessionModelTarget(this.modelProfiles, session),
           model: input.launchContext?.model,
           effort: input.launchContext?.effort,
           launchContext: input.launchContext,
@@ -1654,6 +1678,7 @@ export class SessionManager {
       }
       let recordedInitialUserInput: RecordedUserInput | undefined;
       if (initialPrompt) {
+        if (input.initialPromptIsHuman !== false) await this.routeAutoBeforeTurn(current, initialPrompt);
         await this.structured.submitHuman(current, { requestId: randomUUID(), text: initialPrompt });
         recordedInitialUserInput = recordedUserInputFromEvent(this.appendEvent(current, {
           type: input.initialPromptIsHuman === false ? 'agent-input' : 'user-input',
@@ -1847,6 +1872,14 @@ export class SessionManager {
     await this.drainStructuredQueuedInput(session, record, attemptRevision, defer);
   }
 
+  /** The model a profile switch applies: the target an Auto decision carries, or the catalog's entry for High, Medium and Low. */
+  private async requestTarget(provider: ProviderId, request: Pick<ModelProfileRequest, 'profile' | 'target' | 'autoRoute'>): Promise<AppliedModel | undefined> {
+    if (request.target) return { ...request.target, label: request.autoRoute?.decision?.label };
+    if (request.profile === 'auto') return undefined;
+    const entry = await this.modelProfiles.entry(provider, request.profile);
+    return { model: entry.launchName, effort: entry.effort, label: entry.label };
+  }
+
   async requestModelProfile(sessionId: string, profile: ModelProfileKey): Promise<SessionModelProfileResponse> {
     const response = await this.runtimes.run(sessionId, 'requestModelProfile', async () => {
       const session = this.mustGetSession(sessionId);
@@ -1865,11 +1898,29 @@ export class SessionManager {
       if (!dependencies.projectService.getMergedProviderSettings(project, session.provider).enabled) {
         throw new SessionInputRejectedError(`${session.provider === 'codex' ? 'Codex' : 'Claude'} is disabled for this project.`);
       }
-      const visibleModel = activeModelProfile(session) === profile
+      let target: AppliedModel | undefined;
+      try {
+        target = await this.requestTarget(session.provider, { profile });
+      } catch (error) {
+        if (error instanceof ModelProfilesUnavailableError) throw new SessionInputRejectedError(error.message);
+        throw error;
+      }
+      if (profile === 'auto' && activeModelProfile(session) === 'auto') {
+        // Pressing A again keeps the model the session runs on and routes its next message afresh.
+        const updatedAt = nowIso();
+        if (session.modelProfileRequest) this.db.boundSessions.replaceModelProfileRequest(session.id, undefined, updatedAt);
+        const route: AutoRoute = { routePending: true, ...(session.autoRoute?.decision ? { decision: session.autoRoute.decision } : {}) };
+        const updated = this.db.boundSessions.setAutoRoute(session.id, route, updatedAt);
+        if (!updated) throw new SessionInputRejectedError('Session not found.');
+        this.appendEvent(updated, { type: 'status', text: 'Auto will route your next message.', timestamp: updatedAt });
+        this.eventBus.emit({ type: 'session.updated', session: updated });
+        return { session: updated };
+      }
+      const visibleModel = profile !== 'auto' && activeModelProfile(session) === profile
         ? this.structured.screen(session).model
         : undefined;
-      if (activeModelProfile(session) === profile
-        && visibleModelMatchesProfile(session.provider, profile, visibleModel) !== false) {
+      if (profile !== 'auto' && activeModelProfile(session) === profile
+        && target && visibleModelMatchesTarget(session.provider, target, visibleModel) !== false) {
         const updatedAt = nowIso();
         const unchanged = session.modelProfileRequest
           ? this.db.boundSessions.replaceModelProfileRequest(session.id, undefined, updatedAt)
@@ -1888,13 +1939,15 @@ export class SessionManager {
         requestedAt,
         state: 'queued',
         deferredReason: session.isWorking ? 'turn_running' : undefined,
+        ...(profile === 'auto' ? { autoRoute: { routePending: true } } : {}),
       };
       const updated = this.db.boundSessions.replaceModelProfileRequest(session.id, request, requestedAt);
       if (!updated) throw new SessionInputRejectedError('Session not found.');
-      const target = selectedModelProfile(session.provider, profile);
       this.appendEvent(updated, {
         type: 'status',
-        text: `Queued ${profile} ${session.provider} profile (${target.model}, ${target.reasoningEffort}).`,
+        text: profile === 'auto'
+          ? `Queued the Auto ${session.provider} profile (the router picks a model when you send your next message).`
+          : `Queued ${profile} ${session.provider} profile (${describeAppliedModel(target)}).`,
         timestamp: requestedAt,
       });
       this.eventBus.emit({ type: 'session.updated', session: updated });
@@ -2490,6 +2543,7 @@ export class SessionManager {
   }
 
   private async submitStructuredText(session: BoundSession, text: string): Promise<SessionCommandResult> {
+    await this.routeAutoBeforeTurn(session, text);
     try {
       await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text, this.imageStoreDir));
     } catch (error) {
@@ -2585,6 +2639,7 @@ export class SessionManager {
     const sending: QueuedInputRecord = { ...record, state: 'submitting', reason: 'Sending the message.' };
     this.saveQueuedInput(sessionId, sending);
     try {
+      await this.routeAutoBeforeTurn(session, record.text);
       const sent = await this.structured.submitHuman(session, record, structuredImages(record.text, this.imageStoreDir));
       const inputAt = nowIso();
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
@@ -2774,13 +2829,29 @@ export class SessionManager {
 
   /** No restart: the profile rides on the next turn, so a switch completes as soon as no turn is running. */
   private async completeStructuredModelProfile(session: BoundSession, request: Extract<ModelProfileRequest, { state: 'applying' }>): Promise<void> {
-    if (await this.structured.setProfile(session, request.profile) === 'deferred') {
+    let selected: AppliedModel | undefined;
+    try {
+      selected = await this.requestTarget(session.provider, request);
+    } catch (error) {
+      if (!(error instanceof ModelProfilesUnavailableError)) throw error;
+      this.failModelProfileRequest(session, request, error.message);
+      return;
+    }
+    if (await this.structured.setTarget(session, selected && { model: selected.model, effort: selected.effort }) === 'deferred') {
       // A turn started after the check; the next terminal re-runs this switch.
       this.db.boundSessions.compareAndSetModelProfileRequest({
         id: session.id,
         requestId: request.requestId,
         expectedState: 'applying',
-        next: { requestId: request.requestId, profile: request.profile, requestedAt: request.requestedAt, state: 'queued', deferredReason: 'turn_running' },
+        next: {
+          requestId: request.requestId,
+          profile: request.profile,
+          requestedAt: request.requestedAt,
+          state: 'queued',
+          deferredReason: 'turn_running',
+          ...(request.autoRoute ? { autoRoute: request.autoRoute } : {}),
+          ...(request.target ? { target: request.target } : {}),
+        },
         updatedAt: nowIso(),
       });
       return;
@@ -2789,10 +2860,70 @@ export class SessionManager {
       id: session.id, requestId: request.requestId, profile: request.profile, updatedAt: nowIso(),
     });
     if (!completed) return;
-    const selected = selectedModelProfile(session.provider, request.profile);
-    this.appendEvent(completed, { type: 'status', text: `${session.provider} session now uses ${request.profile} (${selected.model}, ${selected.reasoningEffort}).`, timestamp: completed.updatedAt });
+    const decision = request.autoRoute?.decision;
+    const text = request.profile === 'auto'
+      ? decision?.source === 'fallback' ? (decision.warning ?? 'Auto fell back to Medium.')
+        : decision ? `Auto chose ${describeAppliedModel(selected)}${decision.reason ? `: ${decision.reason}` : '.'}`
+        : 'Auto selected. The router picks a model when you send your next message.'
+      : `${session.provider} session now uses ${request.profile} (${describeAppliedModel(selected)}).`;
+    this.appendEvent(completed, { type: 'status', text, timestamp: completed.updatedAt });
     this.eventBus.emit({ type: 'session.updated', session: completed });
     this.publishStructuredScreen(completed.id);
+  }
+
+  /**
+   * Auto: before a person's message starts a turn, ask the router for a model once per selection of A and apply it through the
+   * same switch the H, M and L buttons use. The session then stays on that model, so later messages keep their prompt cache.
+   * A failed or slow router applies Medium and says so; the message is never held back for longer than the router's timeout.
+   * Runs under the session's command lock, so two messages cannot route twice.
+   */
+  private async routeAutoBeforeTurn(staleSession: BoundSession, text: string): Promise<void> {
+    // The caller's copy of the row may be older than a switch made while the message waited.
+    const session = this.db.boundSessions.getById(staleSession.id) ?? staleSession;
+    if (activeModelProfile(session) !== 'auto' || !session.autoRoute?.routePending) return;
+    // A switch the person asked for wins over a routing (a failed one does not), and a running turn keeps its model: the
+    // message waits for the next turn.
+    if (this.hasLiveModelProfileRequest(session) || this.structured.turnRunning(session)) return;
+    // One routing per selection of A, even when two messages arrive together.
+    const running = this.autoRoutings.get(session.id);
+    if (running) return await running;
+    const run = this.routeAutoNow(session, text).finally(() => { this.autoRoutings.delete(session.id); });
+    this.autoRoutings.set(session.id, run);
+    return await run;
+  }
+
+  private hasLiveModelProfileRequest(session: BoundSession): boolean {
+    return !!session.modelProfileRequest && session.modelProfileRequest.state !== 'failed';
+  }
+
+  private async routeAutoNow(session: BoundSession, text: string): Promise<void> {
+    try {
+      const outcome = await this.modelProfiles.route(session.provider, text);
+      const medium = outcome.ok ? undefined : await this.modelProfiles.entry(session.provider, 'medium').catch(() => undefined);
+      const decision = outcome.ok ? outcome.decision : fallbackDecision(outcome.reason, medium);
+      const latest = this.db.boundSessions.getById(session.id);
+      // The row may have changed while the router ran (released, or a different profile chosen).
+      if (!latest || activeModelProfile(latest) !== 'auto' || !latest.autoRoute?.routePending || this.hasLiveModelProfileRequest(latest)) return;
+      const target = decision.launchName && decision.effort ? { model: decision.launchName, effort: decision.effort } : undefined;
+      const startedAt = nowIso();
+      const applying: Extract<ModelProfileRequest, { state: 'applying' }> = {
+        requestId: randomUUID(),
+        profile: 'auto',
+        requestedAt: startedAt,
+        state: 'applying',
+        startedAt,
+        previousProfile: 'auto',
+        resumeConversationRef: latest.resumeConversationRef ?? latest.conversationRef,
+        autoRoute: { routePending: false, decision },
+        ...(target ? { target } : {}),
+      };
+      const stored = this.db.boundSessions.replaceModelProfileRequest(latest.id, applying, startedAt);
+      if (!stored) return;
+      await this.completeStructuredModelProfile(stored, applying);
+    } catch (error) {
+      // Never block the message: it runs on the model the session already has.
+      this.logger?.warn({ err: error, sessionId: session.id }, 'Auto routing failed; the message runs on the current model.');
+    }
   }
 
   private handleStructuredTurnStarted(sessionId: string, turnId: string, origin: 'user' | 'provider', replay = false, adopted = false): void {

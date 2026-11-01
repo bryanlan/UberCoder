@@ -684,6 +684,19 @@ files, 1903 tests (5 skipped) on its second run; the first run failed only the C
 failed once in three runs alone (a race in the recorded fixture: the first turn can complete before the second send, and this
 branch did not touch the plugin or the test); the web suite passed 19 files, 182 tests.
 
+**Merge of `main` (2026-11-01, the Auto profile).** `main` gained `9c806ed` (Auto model profile, model list read from
+workflow_optimizer, schema 20) while this branch removed the terminal path, so the merge keeps the Auto feature and drops
+every tmux branch that commit touched: the provider launch commands (`getLaunchCommand`, `ProviderLaunchOptions`) stay
+removed, so the profile target travels only through the structured service (`target` on start and `setTarget`); the
+tmux-only model-switch restart, its `Auto works on structured sessions only` refusals, `SessionTransport` and the `A` button's
+transport condition are gone because every session is structured; a new chat started from the UI starts on Auto for both
+providers. The grant model limit (`plannedModel` in `grants/session-launches.ts`) now reads the model from the catalog
+(restart: the row's profile or Auto decision, else the model its launch named; new launch: the model it names, else Medium)
+instead of from a launch command. The two tmux-launch test files `main` edited (`command-and-proxy.test.ts`,
+`model-profile-lifecycle.test.ts`) stay deleted, the one Auto test about a terminal-backed session is removed, and the
+`agent-reference` browser spec serves `/api/model-profiles` like its other fixture routes. Schema is now 20 (the `transport`
+and `tmux_session_name` columns stay, as recorded above).
+
 ## Verification
 
 - Unit: the Claude plugin against a scripted fake `claude` (`structured-claude-plugin`, and `structured-claude-reattach`

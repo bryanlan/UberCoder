@@ -18,6 +18,7 @@ import type {
   UpdateUiPreferencesRequest,
 } from '@agent-console/shared';
 import { api, ApiError } from './lib/api';
+import type { ModelProfilesState } from './lib/model-profiles';
 import { Sidebar } from './components/Sidebar';
 import { ConversationPane } from './components/ConversationPane';
 import { CoordinationPanel } from './components/CoordinationPanel';
@@ -136,6 +137,21 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     queryFn: api.uiPreferences,
     enabled: authQuery.data?.authenticated,
   });
+  // The High/Medium/Low (and Auto) models come from the server, which reads them from the shared model catalog. When that read
+  // fails the profile control says so; it retries every 15 seconds.
+  const modelProfilesQuery = useQuery({
+    queryKey: ['model-profiles'],
+    queryFn: api.modelProfiles,
+    enabled: authQuery.data?.authenticated,
+    retry: false,
+    staleTime: 60_000,
+    refetchInterval: (query) => (query.state.status === 'error' ? 15_000 : false),
+  });
+  const modelProfiles: ModelProfilesState = modelProfilesQuery.data
+    ? { status: 'ready', profiles: modelProfilesQuery.data }
+    : modelProfilesQuery.error
+      ? { status: 'error', message: describeError(modelProfilesQuery.error, 'Model profiles unavailable.') }
+      : { status: 'loading' };
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.settings, enabled: authQuery.data?.authenticated && routeSelection.inSettings });
 
   const selectedProjectSlug = routeSelection.selectedProjectSlug;
@@ -1084,6 +1100,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
               onRelease={handleRelease}
               onSuspend={handleSuspend}
               onSendKeystrokes={handleSendKeystrokes}
+              modelProfiles={modelProfiles}
               onSetModelProfile={handleSetModelProfile}
               onCancelModelProfileRequest={handleCancelModelProfileRequest}
               binding={bindExistingMutation.isPending}

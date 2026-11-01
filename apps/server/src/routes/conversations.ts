@@ -383,6 +383,8 @@ export async function registerConversationRoutes(
         conversationRef: pendingRef,
         title: pendingConversation.title,
         kind: 'pending',
+        // A new chat started from the UI picks its model per message (Auto).
+        ...(providerId === 'codex' ? { codexProfile: 'auto' as const } : { claudeProfile: 'auto' as const }),
       });
       // An adopted alias already points at the native conversation; do not overwrite that record.
       if (typeof db.pendingConversations.get(pendingRef)?.rawMetadata?.adoptedConversationRef !== 'string') {

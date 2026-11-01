@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { INVALID_CSRF_TOKEN_CODE, type AuthState, type SessionKeystrokeRequest } from '@agent-console/shared';
-import { api } from './api';
+import { api, ApiError } from './api';
 import { queryClient } from './query-client';
 
 function response(status: number, body: unknown) {
@@ -252,6 +252,25 @@ describe('api.bindNewConversation', () => {
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/conversations/demo/codex/new/bind');
     expect(requestBody(fetchMock)).toEqual({});
+  });
+});
+
+describe('model profile list', () => {
+  it('reads the server-owned list from /api/model-profiles', async () => {
+    const list = { loadedAt: 'now', providers: { codex: { routerProvider: 'openai', levels: {} }, claude: { routerProvider: 'anthropic', levels: {} } } };
+    const fetchMock = vi.fn(async (_url: string) => response(200, list));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.modelProfiles()).resolves.toEqual(list);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/model-profiles');
+  });
+
+  it('carries the server reason when the list cannot be loaded', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response(503, { error: 'Model profiles unavailable: wo was not found at /x/wo' })));
+
+    const failure = await api.modelProfiles().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({ status: 503, message: 'Model profiles unavailable: wo was not found at /x/wo' });
   });
 });
 
