@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Opt-in real-Codex proof of the structured provider lane (docs/structured-providers.md, "Verification").
 //
-// Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux
-// socket) with `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
+// Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project) with
+// `structuredSessions.codex.enabled`, then drives ONE structured Codex conversation through the HTTP
 // API the web client uses: bind, send, coordination hook and MCP, steer, Stop, a question answered through the card
 // route (h2), an image turn (h3), model profile, manual sleep and restore, a graceful backend restart while idle (k: the
 // app-server, held by its session host, survives it and serves the next turn) and during a running turn (k2: the turn is
@@ -62,10 +62,9 @@ const TURN_TIMEOUT_MS = 180_000;
 
 // ---- isolated environment ----------------------------------------------------------------------------------
 const startedAt = new Date();
-const tmuxSocket = `console-structured-proof-${randomUUID().slice(0, 8)}`;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-structured-proof-'));
 // Covers a failure before the `try` below (and an uncaught one): the temp root is removed and anything started is ended.
-installExitBackstop(root, () => tmuxSocket);
+installExitBackstop(root);
 const project = path.join(root, 'projects', 'demo');
 fs.mkdirSync(project, { recursive: true });
 execFileSync('git', ['init', '-q', project]);
@@ -107,10 +106,9 @@ Object.assign(config.security, {
   sessionSecret: randomBytes(40).toString('hex'), trustTailscaleHeaders: false,
 });
 config.sessions.pressureSuspendAvailableMiB = 512;
-config.providers.codex = structuredClone(installed.providers.codex);
+// Discovery reads the same Codex home the live Console does.
+config.providers.codex = { enabled: true, discoveryRoot: installed.providers.codex?.discoveryRoot ?? '~/.codex' };
 fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
-// A structured session must never reach tmux; if it did, the call would land on this private, empty socket.
-process.env.AGENT_CONSOLE_TMUX_SOCKET = tmuxSocket;
 
 // ---- evidence ------------------------------------------------------------------------------------------------
 const evidenceDir = path.join(repoRoot, 'test-results/structured-codex-proof');
@@ -405,25 +403,21 @@ try {
     values.structuredProviders = tree.structuredProviders.join(',');
   }, { fatal: true });
 
-  await step('b', 'structured bind: thread id, no tmux session, app-server pid and environment', async values => {
-    const bound = await api('POST', '/api/conversations/demo/codex/new/bind', { transport: 'structured' });
+  await step('b', 'structured bind: thread id, app-server pid and environment', async values => {
+    const bound = await api('POST', '/api/conversations/demo/codex/new/bind', {});
     sessionId = bound.session.id;
     evidence.sessionId = sessionId;
-    assert.equal(bound.session.transport, 'structured');
     assert.match(bound.conversationRef, /^pending:/, 'The response keeps the pending alias ref.');
     const stored = row();
     assert.match(stored.conversation_ref, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'conversation_ref must be the thread UUID.');
     assert.equal(stored.resume_conversation_ref, stored.conversation_ref);
-    assert.ok(stored.tmux_session_name.startsWith('structured:'), 'The tmux name must be the sentinel.');
+    assert.ok(stored.tmux_session_name.startsWith('structured:'), 'The kept tmux_session_name column must hold the placeholder.');
     assert.equal(stored.transport, 'structured');
     assert.equal(stored.raw_log_path, null);
     assert.ok(stored.pid > 0, 'pid must hold the app-server process id.');
     threadId = stored.conversation_ref;
     evidence.threadId = threadId;
     evidence.pids.appServerFirst = stored.pid;
-    const tmux = spawnSync('tmux', ['-L', tmuxSocket, 'ls'], { encoding: 'utf8' });
-    assert.notEqual(tmux.status, 0, 'The private tmux socket must have no server.');
-    assert.ok(!/structured/.test(tmux.stdout ?? ''), 'No tmux session may exist for the structured conversation.');
     const environ = fs.readFileSync(`/proc/${stored.pid}/environ`, 'utf8').split('\0');
     const env = name => environ.find(entry => entry.startsWith(`${name}=`))?.slice(name.length + 1);
     assert.equal(env('AGENT_COORD_RUNTIME'), runtimeDir, 'The app-server must point hooks at this Console runtime.');
@@ -451,7 +445,7 @@ try {
     assert.ok(members.includes(stored.pid), 'The app-server must lead its process group.');
     evidence.pids.appServerGroup = members;
     evidence.pids.sessionHost = record.host.pid;
-    Object.assign(values, { sessionId, threadId, pid: stored.pid, hostPid: record.host.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok', mcpPinned: 'ok', processGroup: record.child.processGroup, groupMembers: members.length });
+    Object.assign(values, { sessionId, threadId, pid: stored.pid, hostPid: record.host.pid, coordEnv: 'ok', mcpPinned: 'ok', processGroup: record.child.processGroup, groupMembers: members.length });
   }, { fatal: true });
 
   // The default (medium) profile's model is rate limited on this host at times: Codex then waits out a long 429
@@ -644,7 +638,7 @@ try {
     const epochBefore = epoch();
     assert.ok(epochBefore, 'The loaded thread must have an epoch.');
     // An interrupted turn runs no Stop hook, so the assignment stays `active`, and Console refuses a manual sleep
-    // while an assignment is active (the same rule as for tmux sessions). A completed turn marks it `waiting`.
+    // while an assignment is active. A completed turn marks it `waiting`.
     values.assignmentBefore = assignment()?.status ?? 'none';
     if (values.assignmentBefore === 'active') {
       const refused = await call('POST', `/api/sessions/${sessionId}/suspend`);
@@ -931,8 +925,6 @@ try {
     assert.equal(stored.status, 'ended');
     assert.equal(stored.should_restore, 0);
     values.status = stored.status;
-    assert.notEqual(spawnSync('tmux', ['-L', tmuxSocket, 'ls'], { encoding: 'utf8' }).status, 0, 'No tmux server may have been started during the whole run.');
-    values.tmuxServer = 'none';
     // The shared app-server stays up after its last thread is released; the check below must still see its MCP server.
     values.processesAfterRelease = listProcesses().length;
     values.coordMcpAfterRelease = coordMcpProcesses().length;
@@ -974,7 +966,6 @@ try {
     // After a run whose steps all passed, release had already ended everything: a process found here is a defect, not tidying up after a failure.
     note('leftover processes', listProcesses().length === 0 && (leftover.length === 0 || evidence.steps.some(entry => !entry.pass)), `${leftover.length} found, ${stubborn.length} needed SIGKILL`);
   } catch (error) { note('leftover processes', false, String(error.message)); }
-  try { spawnSync('tmux', ['-L', tmuxSocket, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server */ }
   try {
     const { found, remaining } = await endProofProcesses(root);
     note('final process scan', found.length === 0 && remaining.length === 0, found.length ? `had to end ${found.length} lane process(es) still running: ${summarizeProcesses(found)}${remaining.length ? `; ${remaining.length} survived SIGKILL` : ''}` : 'no lane process of this proof left');

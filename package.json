@@ -12,9 +12,7 @@
     "test": "npm run build -w @agent-console/shared && npm run test -w @agent-console/server",
     "test:e2e": "npm run build -w @agent-console/shared && playwright test",
     "typecheck": "npm run build -w @agent-console/shared && npm run typecheck -w @agent-console/server && npm run typecheck -w @agent-console/web",
-    "auth:hash": "node ./scripts/generate-password-hash.mjs",
-    "smoke:codex": "node ./scripts/smoke-codex-adoption.mjs",
-    "verify:live-console": "node ./scripts/verify-live-console.mjs"
+    "auth:hash": "node ./scripts/generate-password-hash.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Opt-in standing-grant proof, using real agents and an isolated Console/browser context.
+// Opt-in standing-grant proof (record, request, edit and approve, revoke), using real agents on the structured transport and an
+// isolated Console/browser context.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,7 @@ if (!process.argv.includes('--run')) throw Error('Use --run to opt into real dis
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-grants-proof-'));
 const project = path.join(root, 'projects/demo'); fs.mkdirSync(project, { recursive: true }); execFileSync('git', ['init', '-q', project]);
 fs.writeFileSync(path.join(project, 'AGENTS.md'), 'Disposable Console grant demo. Work only on its test messages. Do not edit files or contact anyone outside its private Console runtime.\n');
-const configPath = path.join(root, 'config.json'), socket = `console-grants-${randomUUID().slice(0, 8)}`;
+const configPath = path.join(root, 'config.json');
 const config = JSON.parse(fs.readFileSync(new URL('../config/agent-console.example.json', import.meta.url)));
 const installed = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config/agent-console/config.json')));
 const password = randomBytes(20).toString('hex'), salt = randomBytes(16).toString('hex');
@@ -22,14 +23,15 @@ Object.assign(config, { projectsRoot: path.join(root, 'projects'), runtimeDir: p
 Object.assign(config.server, { host: '127.0.0.1', port: 14381, publicBaseUrl: 'http://127.0.0.1:14381', webDistPath: path.resolve('apps/web/dist') });
 Object.assign(config.security, { passwordHash: `scrypt:${salt}:${scryptSync(password, salt, 64).toString('hex')}`, sessionSecret: randomBytes(40).toString('hex'), trustTailscaleHeaders: false });
 config.sessions.pressureSuspendAvailableMiB = 512;
-for (const provider of ['codex','claude']) {
-  config.providers[provider] = structuredClone(installed.providers[provider]);
-  config.providers[provider].commands.env = { ...config.providers[provider].commands.env, AGENT_CONSOLE_CONFIG: configPath, AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_TMUX_SOCKET: socket };
-}
-for (const key of ['newCommand','resumeCommand','continueCommand']) config.providers.codex.commands[key].push('--dangerously-bypass-hook-trust', '-c',
-  `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(config.runtimeDir)}`, '-c',
-  `mcp_servers.agent_console_coordination.args=${JSON.stringify([path.resolve('scripts/agent-coord.mjs'), 'mcp'])}`);
-fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 }); process.env.AGENT_CONSOLE_TMUX_SOCKET = socket;
+// Conversations run on the structured transport with the host's logins and installed hooks. The product points each provider
+// process at this proof's runtime and config (AGENT_COORD_RUNTIME, AGENT_CONSOLE_CONFIG) and pins its coordination MCP server
+// to this checkout's helper. Discovery reads the live provider homes.
+config.structuredSessions = {
+  codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
+  claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} },
+};
+for (const provider of ['codex','claude']) config.providers[provider] = { enabled: true, discoveryRoot: installed.providers[provider]?.discoveryRoot ?? `~/.${provider}` };
+fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
 const { app } = await buildApp({ configPath }); await app.listen({ host: '127.0.0.1', port: 14381 });
 const db = new Database(config.databasePath, { readonly: true });
 const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } });
@@ -38,16 +40,11 @@ const api = async (method, url, payload) => { const response = await app.inject(
 const wait = async (label, predicate, timeout = 150_000) => { const deadline = Date.now() + timeout; while (Date.now() < deadline) { const result = await predicate(); if (result) return result; await new Promise(resolve => setTimeout(resolve, 500)); } throw Error(`Timed out ${label}; evidence ${root}`); };
 const sessions = [], evidence = [];
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222'), context = await browser.newContext(), page = await context.newPage();
-console.log(JSON.stringify({ evidence: root, socket }));
+console.log(JSON.stringify({ evidence: root }));
 try {
   await page.goto('http://127.0.0.1:14381/login'); await page.getByLabel('Password', { exact: true }).fill(password); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   for (const flow of (process.env.PROOF_GRANT_FLOWS ?? 'record,request').split(',')) {
     const bound = await api('POST', '/api/conversations/demo/codex/new/bind', {}); sessions.push(bound.session.id);
-    await wait('native folder startup', () => {
-      const screen = execFileSync('tmux', ['-L', socket, 'capture-pane', '-p', '-S', '-60', '-t', bound.session.tmuxSessionName], { encoding: 'utf8' });
-      if (screen.includes('Folder access') && screen.includes(project) && screen.includes('1. Trust and continue') && screen.includes('2. Quit')) { execFileSync('tmux', ['-L', socket, 'send-keys', '-t', bound.session.tmuxSessionName, 'Enter']); return true; }
-      return /gpt-\d/i.test(screen);
-    }, 30_000);
     await api('POST', `/api/sessions/${bound.session.id}/model-profile`, { profile: 'low' });
     const prompt = flow === 'record'
       ? 'I authorize you to do whatever is needed for this disposable planner demo, including launching and restarting real Console helpers. Do not edit files. Record this broad standing grant immediately with agent_grants record, referencing this Console human message ID from agent_grants list. Set its grantee to your own assignment, actions launch_session and restart_session, maximum concurrent sessions 2, unrestricted models, and expiry until revoked. Preserve my whole scope. For this phase, report GRANT_RECORDED after the grant is active, then finish the fixture assignment. Do not launch a helper in this phase.'
@@ -86,7 +83,7 @@ try {
 } finally {
   await context.close(); browser._connection.close();
   for (const id of sessions) if (db.prepare('select should_restore from bound_sessions where id=?').get(id)?.should_restore) await api('POST',`/api/sessions/${id}/release`,{}).catch(()=>{});
-  await app.close(); db.close(); try {execFileSync('tmux',['-L',socket,'kill-server'],{stdio:'ignore'});} catch {}
+  await app.close(); db.close();
 }
 // End this client's remaining CDP transport after all proof cleanup. This
 // closes the client's socket without issuing Browser.close to shared Chrome.

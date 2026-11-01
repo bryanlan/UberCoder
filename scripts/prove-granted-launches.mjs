@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Opt-in standing-grant proof, using real agents and an isolated Console/browser context.
+// Opt-in granted-launch proof (launch, capacity recovery, restart, inherited helper), using real agents on the structured
+// transport and an isolated Console/browser context.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,7 @@ if (!process.argv.includes('--run')) throw Error('Use --run to opt into real dis
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-launch-proof-'));
 const project = path.join(root, 'projects/demo'); fs.mkdirSync(project, { recursive: true }); execFileSync('git', ['init', '-q', project]);
 fs.writeFileSync(path.join(project, 'AGENTS.md'), 'Private budget-planning example. Work in this project only. The Console supplies standing grants and supervising assignments. Keep peer communication inside this private runtime.\n');
-const configPath = path.join(root, 'config.json'), socket = `console-launch-${randomUUID().slice(0, 8)}`;
+const configPath = path.join(root, 'config.json');
 const config = JSON.parse(fs.readFileSync(new URL('../config/agent-console.example.json', import.meta.url)));
 const installed = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.config/agent-console/config.json')));
 const password = randomBytes(20).toString('hex'), salt = randomBytes(16).toString('hex');
@@ -22,19 +23,15 @@ Object.assign(config, { projectsRoot: path.join(root, 'projects'), runtimeDir: p
 Object.assign(config.server, { host: '127.0.0.1', port: 14381, publicBaseUrl: 'http://127.0.0.1:14381', webDistPath: path.resolve('apps/web/dist') });
 Object.assign(config.security, { passwordHash: `scrypt:${salt}:${scryptSync(password, salt, 64).toString('hex')}`, sessionSecret: randomBytes(40).toString('hex'), trustTailscaleHeaders: false });
 config.sessions.pressureSuspendAvailableMiB = 512;
-for (const provider of ['codex','claude']) {
-  config.providers[provider] = structuredClone(installed.providers[provider]);
-  config.providers[provider].commands.env = { ...config.providers[provider].commands.env, AGENT_CONSOLE_CONFIG: configPath, AGENT_COORD_RUNTIME: config.runtimeDir, AGENT_CONSOLE_TMUX_SOCKET: socket };
-}
-for (const key of ['newCommand','resumeCommand','continueCommand']) config.providers.codex.commands[key].push('--dangerously-bypass-hook-trust', '-c',
-  `mcp_servers.agent_console_coordination.env.AGENT_COORD_RUNTIME=${JSON.stringify(config.runtimeDir)}`, '-c',
-  `mcp_servers.agent_console_coordination.args=${JSON.stringify([path.resolve('scripts/agent-coord.mjs'), 'mcp'])}`);
-// The operational checkout still runs the preceding release while this proof
-// tests the new helper. Supply that helper to the disposable native hooks too.
-const hooks = Object.fromEntries(['SessionStart','UserPromptSubmit','PostToolUse','PostToolUseFailure','Stop','SessionEnd'].map(event =>
-  [event, [{ hooks: [{ type: 'command', command: `node '${path.resolve('scripts/agent-coord.mjs')}' hook claude`, timeout: 5 }] }]]));
-for (const key of ['newCommand','resumeCommand','continueCommand']) config.providers.claude.commands[key].push('--settings', JSON.stringify({ hooks }));
-fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 }); process.env.AGENT_CONSOLE_TMUX_SOCKET = socket;
+// Conversations run on the structured transport with the host's logins and installed hooks. The product points each provider
+// process at this proof's runtime and config (AGENT_COORD_RUNTIME, AGENT_CONSOLE_CONFIG) and pins its coordination MCP server
+// to this checkout's helper. Discovery reads the live provider homes.
+config.structuredSessions = {
+  codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
+  claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} },
+};
+for (const provider of ['codex','claude']) config.providers[provider] = { enabled: true, discoveryRoot: installed.providers[provider]?.discoveryRoot ?? `~/.${provider}` };
+fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });
 const { app } = await buildApp({ configPath }); await app.listen({ host: '127.0.0.1', port: 14381 });
 const db = new Database(config.databasePath, { readonly: true });
 const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { password } });
@@ -53,16 +50,17 @@ const auth={assignmentId:controller,token};
 const sessions=[],evidence=[];
 const record = entry => { evidence.push(entry); fs.writeFileSync(path.join(root,'proof.json'),JSON.stringify(evidence,null,2)); console.log(JSON.stringify(entry)); };
 const browser=await chromium.connectOverCDP('http://127.0.0.1:9222'),context=await browser.newContext(),page=await context.newPage();
-console.log(JSON.stringify({evidence:root,socket}));
+console.log(JSON.stringify({evidence:root}));
 const nativeFor = id=>{const session=db.prepare('select * from bound_sessions where id=?').get(id);return db.prepare('select * from coordination_assignments where provider=? and native_session_id=?').get(session.provider,session.conversation_ref);};
 const send=(recipientId,text)=>rpc({...auth,action:'send',messageId:randomUUID(),recipientId,text});
-const ready=async id=>{const response=await api('GET',`/api/sessions/${id}/screen?lines=120`);return response.screen?.inputActive&&!response.session.isWorking&&!response.screen.inputText.trim();};
+// Loaded, no turn running. An asleep conversation answers 404 and is not ready until something loads it.
+const ready=async id=>{const response=await app.inject({method:'GET',url:`/api/sessions/${id}/screen`,headers});if(response.statusCode!==200)return false;const body=response.json();return !body.session.isWorking&&/ idle$/.test(body.screen.status);};
+const epochOf=id=>db.prepare('select value from meta where key=?').get(`structured-epoch:${id}`)?.value;
 try{
  await page.goto('http://127.0.0.1:14381/login');await page.getByLabel('Password',{exact:true}).fill(password);await page.getByRole('button',{name:'Sign in',exact:true}).click();
  const bound=await api('POST','/api/conversations/demo/codex/new/bind',{});sessions.push(bound.session.id);
- await wait('native parent startup',()=>{const screen=execFileSync('tmux',['-L',socket,'capture-pane','-p','-S','-60','-t',bound.session.tmuxSessionName],{encoding:'utf8'});if(screen.includes('Folder access')&&screen.includes(project)&&screen.includes('1. Trust and continue')){execFileSync('tmux',['-L',socket,'send-keys','-t',bound.session.tmuxSessionName,'Enter']);return true;}return /gpt-\d/i.test(screen);},30000);
  await api('POST',`/api/sessions/${bound.session.id}/model-profile`,{profile:'low'});
- const prompt=`I authorize all agents in this private project to do whatever is needed to implement a budget-planning example, including launching and restarting real Console sessions, delegating helpers, and handling budget requirements relayed within this scope by the test driver ${controller}. Work and files must stay in this private checkout and peer communication must stay in this private runtime. First declare coordination description "Grant proof lead" and continuation unattended. Record my first two sentences as the broad grant scope, with this human message as provenance: grantee project demo, both actions, maximum concurrent sessions 4, unrestricted models, until revoked. Launch a Codex lane in demo with model ${CODEX_COST_PROFILES.low.model}, effort medium, flags ["--add-dir",${JSON.stringify(project)}], title "Granted planner lane", and your assignment as supervisor. Its concrete job is to implement budget-summary.md for an example with monthly income 4000 dollars; the expense amount will arrive after a capacity/restart check. First read active grants, declare description "Granted planner lane" and unattended, send LANE_READY to its supervisor, then end its turn with this budget work still unfinished. Do not poll inside the turn; Console wakes it for the remaining budget input. After launching, end your own turn with the assignment unfinished. Carry out the driver stages within this budget scope, and finish after ALL_PROOF_DONE.`;
+ const prompt=`I authorize all agents in this private project to do whatever is needed to implement a budget-planning example, including launching and restarting real Console sessions, delegating helpers, and handling budget requirements relayed within this scope by the test driver ${controller}. Work and files must stay in this private checkout and peer communication must stay in this private runtime. First declare coordination description "Grant proof lead" and continuation unattended. Record my first two sentences as the broad grant scope, with this human message as provenance: grantee project demo, both actions, maximum concurrent sessions 4, unrestricted models, until revoked. Launch a Codex lane in demo with model ${CODEX_COST_PROFILES.low.model}, effort medium, title "Granted planner lane", and your assignment as supervisor. Its concrete job is to implement budget-summary.md for an example with monthly income 4000 dollars; the expense amount will arrive after a capacity/restart check. First read active grants, declare description "Granted planner lane" and unattended, send LANE_READY to its supervisor, then end its turn with this budget work still unfinished. Do not poll inside the turn; Console wakes it for the remaining budget input. After launching, end your own turn with the assignment unfinished. Carry out the driver stages within this budget scope, and finish after ALL_PROOF_DONE.`;
  const submitted=await api('POST',`/api/sessions/${bound.session.id}/input`,{text:prompt}),leadId=submitted.session.id;sessions.push(leadId);
  let grant;
  await wait('real lead grant and lane launch',async()=>{await api('GET',`/api/conversations/demo/codex/${encodeURIComponent(bound.conversationRef)}/messages?limit=0`);grant=(await api('GET','/api/grants')).grants.find(g=>g.status==='active');return grant&&db.prepare("select session_id from agent_session_requests where action='launch_session' and status='completed'").get();});
@@ -81,14 +79,15 @@ try{
  await wait('granted lane automatically recovers',()=>db.prepare('select id from coordination_messages where sender_id=? and recipient_id=? and text=?').get(lane.id,controller,'GRANTED_CAPACITY_RECOVERED'));
  await wait('lane ready after capacity',()=>ready(laneId));
  record({step:3,action:'capacity_recovery',sessionId:laneId,noNewApproval:true});
- const oldPid=db.prepare('select pid from bound_sessions where id=?').get(laneId).pid;
+ // A restart reloads the conversation in a new epoch; the shared Codex app-server keeps its pid.
+ const oldEpoch=epochOf(laneId);
  await send(lead.id,`Restart stage within the standing grant: use agent_grants restart for sessionId ${laneId}. It is idle with unfinished authorized work. Wait for launch_status to report completion, then send GRANTED_RESTART_DONE to controller ${controller}. Do not make a new grant request.`);
  await wait('real lead requests granted restart',()=>db.prepare("select id from agent_session_requests where action='restart_session' and status='completed'").get());
- assert.notEqual(db.prepare('select pid from bound_sessions where id=?').get(laneId).pid,oldPid);
+ assert.notEqual(epochOf(laneId),oldEpoch);
  await wait('lane ready after granted restart',()=>ready(laneId));
  const turns=fs.readFileSync(transcript,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)).filter(row=>row.type==='turn_context');
  assert.equal(turns.at(-1).payload.model,CODEX_COST_PROFILES.low.model);assert.equal(turns.at(-1).payload.effort,'medium');
- record({step:3,action:'restart',sessionId:laneId,oldPid,newPid:db.prepare('select pid from bound_sessions where id=?').get(laneId).pid,noNewApproval:true,modelAndEffortPreserved:true});
+ record({step:3,action:'restart',sessionId:laneId,oldEpoch,newEpoch:epochOf(laneId),noNewApproval:true,modelAndEffortPreserved:true});
  await send(lane.id,`Delegate the budget-summary.md work to a Claude helper in demo, model ${CLAUDE_COST_PROFILES.low.model}, effort high, title "Inherited planner helper", with your own assignment as supervisor. Its concrete task is to calculate annual income and spending for monthly income 4000 dollars, write budget-summary.md and report the annual surplus. You will supply the monthly expense amount in a second message. Have it read its inherited grant, calculate annual income, send exactly INHERITED_HELPER_READY to you (its supervisor), then end its turn with the calculation unfinished until that one missing input arrives. Report the registered helper assignment to your supervisor.`);
  const grand=await wait('real worker delegates a Claude helper',()=>db.prepare("select * from agent_session_requests where assignment_id=? and action='launch_session' and status='completed'").get(lane.id));sessions.push(grand.session_id);
  await wait('inherited helper ready',()=>db.prepare('select id from coordination_messages where recipient_id=? and text=?').get(lane.id,'INHERITED_HELPER_READY'));
@@ -109,7 +108,7 @@ try{
  await context.close();browser._connection.close();
  for(const row of db.prepare('select id from bound_sessions where should_restore=1').all())await api('POST',`/api/sessions/${row.id}/release`,{}).catch(()=>{});
  await rpc({...auth,action:'finish',summary:'Disposable launch proof controller finished.'}).catch(()=>{});
- await app.close();db.close();try{execFileSync('tmux',['-L',socket,'kill-server'],{stdio:'ignore'});}catch{}
+ await app.close();db.close();
 }
 // End only this proof's CDP transport, after cleanup; keep shared Chrome alive.
 process.exit(0);

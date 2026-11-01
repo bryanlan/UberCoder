@@ -1,14 +1,13 @@
-// Shared harness for the opt-in real-provider proofs of the structured lane (`prove-structured-claude.mjs`,
-// `prove-structured-migration.mjs`). The Codex proof predates it: it keeps its own copy of the harness and imports only the
-// standalone helpers exported here (the PNG builders, the event-log reader, the control-text list and the leftover-process scan).
+// Harness for the opt-in real-provider proof of the structured Claude lane (`prove-structured-claude.mjs`). The Codex proof
+// predates it: it keeps its own copy of the harness and imports only the standalone helpers exported here (the PNG builders,
+// the event-log reader, the control-text list and the leftover-process scan).
 //
-// It builds one isolated Console: temp root, generated config, temp database and runtime, scratch git project, a private
-// tmux socket and a free port. The backend is `buildApp` from the compiled server, driven with `app.inject` (it never
-// listens). Nothing here reads or writes the live Console's runtime, database or config, or Bryan's provider settings:
-// the live `~/.config/agent-console/config.json` is only read for its tmux provider commands. `finish` always runs the
-// cleanup (release, backend shutdown, session hosts, leftover processes of this proof, private tmux server, a final scan for
-// lane processes, temp root). A failure while the kit is being built, or after it was returned but before the caller's own
-// `finally`, still ends everything the proof started and removes the temp root (`createProofKit` and the `exit` backstop).
+// It builds one isolated Console: temp root, generated config, temp database and runtime, scratch git project and a free port.
+// The backend is `buildApp` from the compiled server, driven with `app.inject` (it never listens). Nothing here reads or writes
+// the live Console's runtime, database or config, or Bryan's provider settings. `finish` always runs the cleanup (release,
+// backend shutdown, session hosts, leftover processes of this proof, a final scan for lane processes, temp root). A failure
+// while the kit is being built, or after it was returned but before the caller's own `finally`, still ends everything the proof
+// started and removes the temp root (`createProofKit` and the `exit` backstop).
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -156,17 +155,16 @@ export const scanProofProcesses = root => {
 const signalAll = (found, signal) => { for (const { pid } of found) { try { process.kill(pid, signal); } catch { /* gone */ } } };
 /**
  * Last resort for a failure the proof's own `finally` never sees (an error before its `try`, or an uncaught one): the process is
- * ending, so only synchronous work is possible. Lane processes of this proof are ended, its private tmux server stopped and its
- * temp root removed. After a normal cleanup there is nothing left and this does nothing. `tmuxSocket` is read when the process exits.
+ * ending, so only synchronous work is possible. Lane processes of this proof are ended and its temp root removed. After a normal
+ * cleanup there is nothing left and this does nothing.
  */
-export const installExitBackstop = (root, tmuxSocket) => process.once('exit', () => {
+export const installExitBackstop = root => process.once('exit', () => {
   try { signalAll(scanProofProcesses(root), 'SIGKILL'); } catch { /* best effort */ }
-  try { const socket = tmuxSocket(); if (socket) spawnSync('tmux', ['-L', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server */ }
   try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 /**
- * The last look before a proof reports: wait briefly for lane processes of this proof to leave on their own (a killed tmux server hands
- * them SIGHUP), then end whatever is still there, SIGTERM first. Returns what it had to end, and what even SIGKILL left.
+ * The last look before a proof reports: wait briefly for lane processes of this proof to leave on their own, then end whatever is
+ * still there, SIGTERM first. Returns what it had to end, and what even SIGKILL left.
  */
 export const endProofProcesses = async root => {
   for (let waited = 0; waited < 3000 && scanProofProcesses(root).length > 0; waited += 250) await sleep(250);
@@ -199,7 +197,7 @@ const endRecordedHosts = async ({ runtimeDir, lineTransport, named = [], note })
  * before the error is rethrown. The callers' own `finally` only exists once this has returned.
  */
 export async function createProofKit(options) {
-  const claim = { root: undefined, runtimeDir: undefined, tmuxSocket: undefined, state: undefined, lineTransport: undefined };
+  const claim = { root: undefined, runtimeDir: undefined, state: undefined, lineTransport: undefined };
   try {
     return await buildProofKit(options, claim);
   } catch (error) {
@@ -207,7 +205,6 @@ export async function createProofKit(options) {
     try { await claim.state?.app?.close(); } catch { /* not started or already closed */ }
     try { if (claim.lineTransport && claim.runtimeDir) await endRecordedHosts({ runtimeDir: claim.runtimeDir, lineTransport: claim.lineTransport, note: () => undefined }); } catch { /* best effort */ }
     try { if (claim.root) await endProofProcesses(claim.root); } catch { /* best effort */ }
-    try { if (claim.tmuxSocket) spawnSync('tmux', ['-L', claim.tmuxSocket, 'kill-server'], { stdio: 'ignore' }); } catch { /* no server */ }
     try { if (claim.root) fs.rmSync(claim.root, { recursive: true, force: true }); } catch { /* best effort */ }
     throw error;
   }
@@ -224,7 +221,7 @@ async function buildProofKit({ script, rootPrefix, evidenceSubdir, expectedSteps
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `${rootPrefix}-`));
   claim.root = root;
   // Covers an error between this call's return and the caller's own `try`, and an uncaught one.
-  installExitBackstop(root, () => claim.tmuxSocket);
+  installExitBackstop(root);
   const project = path.join(root, 'projects', 'demo');
   fs.mkdirSync(project, { recursive: true });
   execFileSync('git', ['init', '-q', project]);
@@ -233,10 +230,6 @@ async function buildProofKit({ script, rootPrefix, evidenceSubdir, expectedSteps
   const runtimeDir = path.join(root, 'runtime');
   claim.runtimeDir = runtimeDir;
   const databasePath = path.join(root, 'fixture.sqlite');
-  const tmuxSocket = `${rootPrefix}-${randomUUID().slice(0, 8)}`;
-  claim.tmuxSocket = tmuxSocket;
-  // A structured session must never reach tmux; if it did, the call would land on this private, empty socket.
-  process.env.AGENT_CONSOLE_TMUX_SOCKET = tmuxSocket;
 
   const freePort = async () => {
     for (let candidate = portFrom; candidate <= portTo; candidate += 1) {
@@ -377,7 +370,6 @@ async function buildProofKit({ script, rootPrefix, evidenceSubdir, expectedSteps
   const listProcesses = () => [...new Set([...pgrep(root), ...processesWithRuntime(), ...scanProofProcesses(root).map(entry => entry.pid)])].filter(pid => alive(pid));
   const hostRecordPath = hostId => path.join(runtimeDir, 'structured', 'hosts', `${hostId}.json`);
   const hostRecord = hostId => JSON.parse(fs.readFileSync(hostRecordPath(hostId), 'utf8'));
-  const tmux = (...args) => spawnSync('tmux', ['-L', tmuxSocket, ...args], { encoding: 'utf8' });
 
   // ---- step runner -----------------------------------------------------------------------------------------
   let aborted = false;
@@ -430,7 +422,6 @@ async function buildProofKit({ script, rootPrefix, evidenceSubdir, expectedSteps
       // After a run whose steps all passed, release had already ended everything: a process found here is a defect, not tidying up after a failure.
       note('leftover processes', listProcesses().length === 0 && (leftover.length === 0 || evidence.steps.some(entry => !entry.pass)), `${leftover.length} found, ${stubborn.length} needed SIGKILL`);
     } catch (error) { note('leftover processes', false, String(error.message)); }
-    try { tmux('kill-server'); note('private tmux server', tmux('ls').status !== 0); } catch (error) { note('private tmux server', false, String(error.message)); }
     try { await afterCleanup?.(note); } catch (error) { note('provider-side files', false, String(error.message)); }
     try {
       const { found, remaining } = await endProofProcesses(root);
@@ -450,9 +441,9 @@ async function buildProofKit({ script, rootPrefix, evidenceSubdir, expectedSteps
   };
 
   return {
-    repoRoot, root, project, configPath, runtimeDir, databasePath, tmuxSocket, port, evidence, evidencePath, writeConfig, flush, say, finding,
+    repoRoot, root, project, configPath, runtimeDir, databasePath, port, evidence, evidencePath, writeConfig, flush, say, finding,
     state, boot, shutdown, call, api, wait, sleep, alive, pgrep, procEntries, environOf, envValue, cmdlineOf, startTicksOf, parentOf, childrenOf,
-    descendantsOf, withEnv, processesWithRuntime, coordMcpProcesses, listProcesses, hostRecordPath, hostRecord, tmux, step, hooks, finish,
+    descendantsOf, withEnv, processesWithRuntime, coordMcpProcesses, listProcesses, hostRecordPath, hostRecord, step, hooks, finish,
     get app() { return state.app; }, get db() { return state.db; }, get headers() { return state.headers; },
   };
 }

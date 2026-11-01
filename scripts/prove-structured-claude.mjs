@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 // Opt-in real-Claude proof of the structured Claude lane (docs/structured-cutover.md, "Verification").
 //
-// Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, private tmux socket,
-// coordination enabled for the scratch project) with `structuredSessions.claude.enabled` and `defaultTransport: 'tmux'`
-// (the proof names `transport: 'structured'` on the bind), then drives ONE structured Claude conversation through the HTTP
+// Starts an isolated Console backend (temp root, temp database, temp runtime, scratch git project, coordination enabled for
+// the scratch project) with `structuredSessions.claude.enabled`, then drives ONE structured Claude conversation through the HTTP
 // API the web client uses: bind, send, transcript and index, coordination hook and MCP, steer, Stop, an AskUserQuestion
 // answered through the card route, an image turn, a live model/effort switch, manual sleep and restore, a graceful backend
 // restart while idle (k1) and during a running turn (k2: the `claude` process, held by its session host, survives it; the
@@ -66,8 +65,8 @@ const { evidence, say, finding, call, api, wait, alive, pgrep, step } = kit;
 say(claudeVersion);
 
 kit.writeConfig(config => {
-  // The lane under test is Claude's; the tmux provider block stays as the example template has it (it is never launched).
-  config.structuredSessions = { defaultTransport: 'tmux', claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
+  // The lane under test is Claude's; the Codex lane stays off.
+  config.structuredSessions = { claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
 });
 
 // ---- where Claude keeps the transcript ---------------------------------------------------------------------
@@ -262,22 +261,20 @@ try {
   }, { fatal: true });
 
   await step('b', 'structured bind: UUID native id, sentinel name, host record, process environment', async values => {
-    const bound = await api('POST', '/api/conversations/demo/claude/new/bind', { transport: 'structured' });
+    const bound = await api('POST', '/api/conversations/demo/claude/new/bind', {});
     sessionId = bound.session.id;
     evidence.sessionId = sessionId;
-    assert.equal(bound.session.transport, 'structured');
     assert.match(bound.conversationRef, /^pending:/, 'The response keeps the pending alias ref.');
     const stored = row();
     assert.match(stored.conversation_ref, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'conversation_ref must be the Claude session UUID.');
     assert.equal(stored.resume_conversation_ref, stored.conversation_ref);
-    assert.ok(stored.tmux_session_name.startsWith('structured:'), 'The tmux name must be the sentinel.');
+    assert.ok(stored.tmux_session_name.startsWith('structured:'), 'The kept tmux_session_name column must hold the placeholder.');
     assert.equal(stored.transport, 'structured');
     assert.equal(stored.raw_log_path, null);
     assert.ok(stored.pid > 0, 'pid must hold the claude process id.');
     nativeId = stored.conversation_ref;
     evidence.nativeSessionId = nativeId;
     evidence.pids.claudeFirst = stored.pid;
-    assert.notEqual(kit.tmux('ls').status, 0, 'The private tmux socket must have no server.');
     // The per-session host record names the process, its group and start times, and the process is the host's child.
     const record = kit.hostRecord(hostId());
     assert.equal(record.child.pid, stored.pid, 'The host record must name the pid that the row holds.');
@@ -291,7 +288,7 @@ try {
     assert.equal(kit.envValue(stored.pid, 'AGENT_COORD_RUNTIME'), kit.runtimeDir, 'The process must point hooks at this Console runtime.');
     assert.equal(kit.envValue(stored.pid, 'AGENT_CONSOLE_CONFIG'), kit.configPath, 'The process must name this Console config.');
     assert.equal(kit.envValue(stored.pid, 'AGENT_CONSOLE_SESSION_ID'), sessionId, 'The process must carry its own Console session id.');
-    assert.equal(kit.envValue(stored.pid, 'TMUX'), undefined, 'No tmux identity may reach the process.');
+    assert.equal(kit.envValue(stored.pid, 'TMUX'), undefined, 'No terminal multiplexer identity of the backend may reach the process.');
     assert.equal(kit.envValue(stored.pid, 'CLAUDE_CODE_SDK_READS_SESSION_STATE'), '1');
     const argv = kit.cmdlineOf(stored.pid);
     assert.ok(argv.includes('--session-id') && argv[argv.indexOf('--session-id') + 1] === nativeId, 'The argv must launch --session-id <native id>.');
@@ -306,7 +303,7 @@ try {
     mcpIsolated = mcp.length > 0 && runtimes.every(runtime => runtime === kit.runtimeDir);
     if (mcp.length && mcpIsolated) finding('mcp-precedence', `~/.claude.json defines a user-scope agent_console_coordination server that names the live runtime; the plugin's --mcp-config entry of the same name won: ${mcp.length} coordination MCP server(s) started, all with the isolated runtime.`);
     if (mcp.length && !mcpIsolated) finding('mcp-precedence', `The CLI started a coordination MCP server with runtime ${runtimes.map(runtime => tilde(String(runtime))).join(', ')} instead of the isolated one: the user-scope MCP entry won over --mcp-config.`);
-    Object.assign(values, { sessionId, nativeId, pid: stored.pid, hostPid: record.host.pid, tmuxName: stored.tmux_session_name, tmuxServer: 'none', coordEnv: 'ok', consoleSessionIdEnv: 'ok', mcpServers: mcp.length, mcpIsolated: String(mcpIsolated) });
+    Object.assign(values, { sessionId, nativeId, pid: stored.pid, hostPid: record.host.pid, coordEnv: 'ok', consoleSessionIdEnv: 'ok', mcpServers: mcp.length, mcpIsolated: String(mcpIsolated) });
   }, { fatal: true });
 
   await step('c', 'first message completes; transcript, human turn origin and index', async values => {
@@ -493,7 +490,7 @@ try {
     assert.equal(imageBlocks.length, 1, 'The user row must carry the image as a content block.');
     const reads = toolUsesSince(skip, 'Read').length;
     Object.assign(values, { imageId: image.id, mediaType: image.mediaType, imageBlocks: imageBlocks.length, sourceType: imageBlocks[0].source?.type ?? 'unknown', width: image.width, readToolCalls: reads });
-    if (reads > 0) finding('image-envelope-read', 'The image reached the model as a native image block, and the model also opened the stored file with the Read tool because the prompt text still carries the tmux "inspect the attached files" envelope; the answer is the same, one extra tool call.');
+    if (reads > 0) finding('image-envelope-read', 'The image reached the model as a native image block, and the model also opened the stored file with the Read tool because the prompt text also carries the image envelope that names the stored file; the answer is the same, one extra tool call.');
   });
 
   await step('i', 'model and effort: the profile reaches the running process on the next turn, with no restart', async values => {
@@ -769,8 +766,6 @@ try {
     await wait('the claude process to exit', () => !alive(pid), 15_000, 100);
     await wait('the session host to exit', () => !alive(record.host.pid) && !fs.existsSync(kit.hostRecordPath(hostId())), 20_000, 100);
     await kit.wait('every process of this proof to exit', () => kit.listProcesses().length === 0, 20_000, 250);
-    assert.notEqual(kit.tmux('ls').status, 0, 'No tmux server may have been started during the whole run.');
-    values.tmuxServer = 'none';
     values.processesAfterRelease = 0;
     values.coordMcpAfterRelease = kit.coordMcpProcesses().length;
     values.claudeProcessesAfterRelease = pgrep('claude --output-format').filter(candidate => kit.environOf(candidate).includes(`AGENT_COORD_RUNTIME=${kit.runtimeDir}`)).length;
