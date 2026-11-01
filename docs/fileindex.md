@@ -153,6 +153,7 @@
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
   and display shell surfaces. `ConversationPane.tsx` also renders the dismissible warning when a
   conversation transcript is large enough that active-turn updates may lag behind provider writes.
+- `apps/web/src/components/StartComposer.tsx` - the small box behind the Start entry (project name, a first message, Ctrl+Enter to send); `App.tsx` `handleStartConversation` posts it to `POST /api/conversations/:projectSlug/start`, opens the chat the server created and shows the server's `warning` when routing failed. `apps/web/src/lib/provider-icons.ts` holds the per-provider icons; `apps/web/e2e/start-conversation.spec.ts` covers Start in the browser (not run in CI here).
 - `packages/shared/src/index.ts` - shared API contracts, including
   `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES`, which must stay aligned between the server cache,
   conversation route response, and web warning.
