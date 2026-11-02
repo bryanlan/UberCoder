@@ -280,4 +280,37 @@ describe('realtime reducers', () => {
     expect(removed?.messages).toEqual([]);
     expect(removed?.messagePage?.total).toBe(0);
   });
+
+  it('keeps the agent launch label after the session ends', () => {
+    const indexed = tree([{
+      ref: 'native',
+      kind: 'history',
+      projectSlug: 'demo',
+      provider: 'codex',
+      title: 'Helper',
+      updatedAt: baseTime,
+      isBound: true,
+      degraded: false,
+    }]);
+    const launched = session({
+      conversationRef: 'native',
+      launchContext: {
+        launchedBy: 'assignment-1',
+        launcherName: 'Planner lead',
+        grantIds: ['grant-1'],
+        requestId: 'req',
+        supervisorId: 'assignment-1',
+      },
+    });
+
+    const live = applySessionUpdateToTree(indexed, launched);
+    const ended = applySessionUpdateToTree(live, { ...launched, status: 'ended', shouldRestore: false });
+
+    expect(live?.projects[0]?.providers.codex.conversations[0]?.agentControlled).toEqual({ launcherName: 'Planner lead' });
+    expect(ended?.boundSessions).toEqual([]);
+    expect(ended?.projects[0]?.providers.codex.conversations[0]).toMatchObject({
+      isBound: false,
+      agentControlled: { launcherName: 'Planner lead' },
+    });
+  });
 });

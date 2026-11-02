@@ -266,6 +266,12 @@ export interface ConversationSummary {
   boundSessionId?: string;
   /** Most recent ended Console binding, derived from retained session records. */
   lastClosedAt?: string;
+  /**
+   * Set when an agent launched this conversation under a standing grant.
+   * The chat list hides these until the person turns the Agent controlled filter on.
+   * The mark is a label for that filter. It does not load or unload the session.
+   */
+  agentControlled?: { launcherName: string };
   degraded: boolean;
   model?: string;
   statusKind?: 'run-failure';

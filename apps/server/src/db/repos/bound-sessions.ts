@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
-import type { AutoRoute, BoundSession, ModelProfileKey, ModelProfileRequest } from '@agent-console/shared';
+import { PROVIDERS, type AutoRoute, type BoundSession, type ModelProfileKey, type ModelProfileRequest, type ProviderId } from '@agent-console/shared';
+import type { AgentLaunchMark } from '../../lib/agent-controlled.js';
 import { boolAsInt, numberOrUndefined, optionalString, type SqliteRow } from '../utils.js';
 import { InputQueue } from '../../sessions/input-queue.js';
 import { parsePendingRequests, structuredRequestsKey } from '../../sessions/structured/pending-requests.js';
@@ -302,6 +303,37 @@ export class BoundSessionsRepo {
   list(): BoundSession[] {
     const rows = this.sqlite.prepare(`select * from bound_sessions order by updated_at desc`).all() as SqliteRow[];
     return rows.map(row => this.mapRow(row));
+  }
+
+  /** Every retained agent launch, including sessions that have ended and left the chat tree. */
+  listAgentLaunchMarks(): AgentLaunchMark[] {
+    const rows = this.sqlite.prepare(`
+      select project_slug, provider, conversation_ref, resume_conversation_ref, launch_context_json, updated_at
+      from bound_sessions
+      where launch_context_json is not null and length(launch_context_json) > 0
+    `).all() as SqliteRow[];
+    const marks: AgentLaunchMark[] = [];
+    for (const row of rows) {
+      const provider = String(row.provider);
+      if (!(PROVIDERS as readonly string[]).includes(provider)) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(row.launch_context_json));
+      } catch {
+        continue;
+      }
+      if (!parsed || typeof parsed !== 'object') continue;
+      const launcherName = 'launcherName' in parsed && typeof parsed.launcherName === 'string' ? parsed.launcherName : '';
+      marks.push({
+        projectSlug: String(row.project_slug),
+        provider: provider as ProviderId,
+        conversationRef: String(row.conversation_ref),
+        resumeConversationRef: optionalString(row.resume_conversation_ref),
+        launcherName,
+        updatedAt: String(row.updated_at),
+      });
+    }
+    return marks;
   }
 
   listTreeVisible(): BoundSession[] {

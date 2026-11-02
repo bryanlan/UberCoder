@@ -102,6 +102,45 @@ describe('IndexingService', () => {
     db.close();
   });
 
+  it('labels an agent-launched chat after its session has ended', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-agent-controlled-'));
+    const projectPath = path.join(tempDir, 'project');
+    const providerRoot = path.join(tempDir, 'provider-home');
+    await fs.mkdir(projectPath, { recursive: true });
+    await fs.mkdir(providerRoot, { recursive: true });
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const conversation = (ref: string, title: string): ConversationSummary => ({
+      ref, kind: 'history', projectSlug: 'demo', provider: 'codex', title, updatedAt: '2026-03-07T00:00:00.000Z', isBound: false, degraded: false,
+    });
+    db.conversationIndex.replace('demo', 'codex', [conversation('helper-chat', 'Helper chat'), conversation('my-chat', 'My chat')]);
+    db.boundSessions.upsert({
+      id: 'launched', provider: 'codex', projectSlug: 'demo', conversationRef: 'pending:req', resumeConversationRef: 'helper-chat',
+      status: 'ended', shouldRestore: false, title: 'Helper chat', startedAt: '2026-03-07T00:00:00.000Z', updatedAt: '2026-03-07T00:00:00.000Z',
+    });
+    db.boundSessions.setLaunchContext('launched', {
+      launchedBy: 'assignment-1', launcherName: 'Planner lead', grantIds: ['grant-1'], requestId: 'req', supervisorId: 'assignment-1',
+    });
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [{ ...project, path: projectPath, matchPaths: [projectPath] }],
+        getMergedProviderSettings: () => ({ ...providerSettings, discoveryRoot: providerRoot }),
+      } as never,
+      { get: () => ({ listConversations: async () => [] as ConversationSummary[] }) } as never,
+      db,
+      new RealtimeEventBus(),
+    );
+
+    await indexing.start();
+    const conversations = indexing.getTree().projects[0]?.providers.codex.conversations ?? [];
+
+    expect(conversations.find((item) => item.ref === 'helper-chat')?.agentControlled).toEqual({ launcherName: 'Planner lead' });
+    expect(conversations.find((item) => item.ref === 'my-chat')?.agentControlled).toBeUndefined();
+    expect(indexing.getTree().boundSessions).toEqual([]);
+    await indexing.stop();
+    db.close();
+  });
+
   it('keeps generic provider-root events metadata-only', async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-refresh-'));
     const projectPath = path.join(tempDir, 'project');

@@ -286,6 +286,65 @@ describe('New Chat options', () => {
   });
 });
 
+it('hides an agent-launched chat until Agent controlled is turned on', async () => {
+  const tree: TreeResponse = {
+    structuredProviders: ['codex'],
+    boundSessions: [{
+      id: 'helper-session', provider: 'codex', projectSlug: 'demo', conversationRef: 'helper',
+      status: 'bound', shouldRestore: true,
+      startedAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+      launchContext: {
+        launchedBy: 'assignment-1', launcherName: 'Planner lead', grantIds: ['grant-1'],
+        requestId: 'req', supervisorId: 'assignment-1',
+      },
+    }],
+    projects: [{
+      slug: 'demo', directoryName: 'demo', displayName: 'Demo', path: '/tmp/demo',
+      tags: [], allowedLocalhostPorts: [],
+      providers: {
+        codex: { id: 'codex', label: 'Codex', conversations: [
+          { ref: 'mine', projectSlug: 'demo', provider: 'codex', kind: 'history', title: 'My chat', updatedAt: '2026-07-01T09:00:00.000Z', isBound: true, degraded: false },
+          { ref: 'helper', projectSlug: 'demo', provider: 'codex', kind: 'history', title: 'Helper chat', updatedAt: '2026-07-01T10:00:00.000Z', isBound: true, degraded: false },
+        ] },
+        claude: { id: 'claude', label: 'Claude', conversations: [] },
+        grok: { id: 'grok', label: 'Grok', conversations: [] },
+      },
+    }],
+  };
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['network-info'], {});
+  const onToggleAgentControlled = vi.fn();
+  const element = (showAgentControlled: boolean) => (
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <Sidebar
+          tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}}
+          showAgentControlled={showAgentControlled} onToggleAgentControlled={onToggleAgentControlled}
+          recentActivitySortEnabled={false} manualProjectOrder={[]}
+          onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={() => {}} onStartConversation={async () => true}
+          onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
+          onRenameProject={async () => true} onRebindConversation={async () => true}
+          onRenameConversation={async () => true} updatingUiPreferences={false}
+          onCloseConversation={async () => true}
+          onRefresh={() => {}} refreshing={false}
+        />
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+  const view = render(element(false));
+  expect(screen.getByRole('link', { name: /My chat/ })).toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: /Helper chat/ })).not.toBeInTheDocument();
+  const toggle = screen.getByRole('button', { name: 'Agent controlled' });
+  expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await userEvent.setup().click(toggle);
+  expect(onToggleAgentControlled).toHaveBeenCalledOnce();
+
+  view.rerender(element(true));
+  expect(screen.getByRole('link', { name: /Helper chat/ })).toBeInTheDocument();
+  expect(screen.getByText('Launched by Planner lead')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Agent controlled' })).toHaveAttribute('aria-pressed', 'true');
+});
+
 describe('Start (provider-neutral new chat)', () => {
   const startLabel = 'Start a chat (agent picked for you)';
 

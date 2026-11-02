@@ -353,6 +353,14 @@ message cannot be cancelled.
   using the same status rules as the dots. All suspension reasons are excluded even when the dot
   is green or yellow. The filter updates with response age, works with Work mode on or off, and
   retains configured projects and their new-conversation actions. Mobile filters are independent.
+- Chats an agent launched under a standing grant are ordinary conversations. The chat list and
+  chat search hide them until the Agent controlled filter is on. The filter is remembered in the
+  browser, is off by default, and is available on desktop and mobile. It does not stop the agent,
+  unload its transcript, or free the provider process. That memory belongs to the running session,
+  not to the list row. Opening a chat by its address still works, and the worker panel still lists
+  workers. The tree marks these chats with `agentControlled`, including saved history after the
+  session ends. A live session is also recognized from its launch record. A project whose visible
+  chats are all hidden this way says that agent-launched chats are hidden.
 - Each project chat menu offers Close for a bound session. Close uses the authenticated release
   action to stop the provider process, clear runtime state and end the restorable binding. The chat
   disappears from Work mode and its saved history remains visible when Work mode is off. Closing

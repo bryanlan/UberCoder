@@ -21,6 +21,7 @@ export interface SidebarConversation {
 export type SidebarProject = ProjectSummary & {
   combinedConversations: SidebarConversation[];
   latestActivityAt: string;
+  hiddenAgentControlledCount: number;
 };
 
 function getConversationRecencyTimestamp(
@@ -40,6 +41,7 @@ export function deriveSidebarProjects({
   manualProjectOrder,
   mobileActiveOnly = false,
   activeOnly = false,
+  showAgentControlled = false,
   nowMs = Date.now(),
 }: {
   tree?: TreeResponse;
@@ -48,6 +50,8 @@ export function deriveSidebarProjects({
   manualProjectOrder: string[];
   mobileActiveOnly?: boolean;
   activeOnly?: boolean;
+  /** When false, chats an agent launched stay out of the list. */
+  showAgentControlled?: boolean;
   nowMs?: number;
 }): SidebarProject[] {
   const boundSessionMap = new Map((tree?.boundSessions ?? []).map((session) => [`${session.projectSlug}:${session.provider}:${session.conversationRef}`, session]));
@@ -55,7 +59,7 @@ export function deriveSidebarProjects({
 
   return (tree?.projects ?? [])
     .map((project) => {
-      const combinedConversations = PROVIDERS
+      const listedConversations = PROVIDERS
         .flatMap((provider) => project.providers[provider].conversations.map((conversation) => {
           const session = boundSessionMap.get(`${project.slug}:${provider}:${conversation.ref}`);
           const activityTimestamp = getConversationRecencyTimestamp(conversation, session);
@@ -72,15 +76,19 @@ export function deriveSidebarProjects({
             runFailure: session?.runFailure,
             launchContext: session?.launchContext,
           };
-        }))
-        .filter(({ conversation, manualSuspendedAt, pressureSuspendedAt, idleSuspendedAt, lastResponseAt, isWorking, runFailure }) => {
-          if (workMode && !conversation.isBound) return false;
-          if ((activeOnly || mobileActiveOnly)
-            && (!conversation.isBound || manualSuspendedAt || pressureSuspendedAt || idleSuspendedAt)) return false;
-          if (!activeOnly) return true;
-          const color = getConversationStatusColor(conversation.isBound, lastResponseAt, isWorking, nowMs, runFailure);
-          return color === 'red' || color === 'green' || color === 'yellow';
-        });
+        }));
+      const passesListFilters = (item: SidebarConversation, includeAgentControlled: boolean): boolean => {
+        if (!includeAgentControlled && (item.launchContext || item.conversation.agentControlled)) return false;
+        if (workMode && !item.conversation.isBound) return false;
+        if ((activeOnly || mobileActiveOnly)
+          && (!item.conversation.isBound || item.manualSuspendedAt || item.pressureSuspendedAt || item.idleSuspendedAt)) return false;
+        if (!activeOnly) return true;
+        const color = getConversationStatusColor(item.conversation.isBound, item.lastResponseAt, item.isWorking, nowMs, item.runFailure);
+        return color === 'red' || color === 'green' || color === 'yellow';
+      };
+      const combinedConversations = listedConversations.filter((item) => passesListFilters(item, showAgentControlled));
+      const hiddenAgentControlledCount = showAgentControlled ? 0 : listedConversations
+        .filter((item) => (item.launchContext || item.conversation.agentControlled) && passesListFilters(item, true)).length;
       const providerEntries = PROVIDERS.map((provider) => [provider, {
         ...project.providers[provider],
         conversations: combinedConversations.filter((item) => item.provider === provider).map((item) => item.conversation),
@@ -94,6 +102,7 @@ export function deriveSidebarProjects({
         providers: Object.fromEntries(providerEntries) as ProjectSummary['providers'],
         combinedConversations,
         latestActivityAt,
+        hiddenAgentControlledCount,
       };
     })
     .filter((project) => !mobileActiveOnly || project.combinedConversations.length > 0)
@@ -115,4 +124,33 @@ export function deriveSidebarProjects({
       }
       return a.displayName.localeCompare(b.displayName);
     });
+}
+
+export function agentControlledConversationKey(projectSlug: string, provider: string, conversationRef: string): string {
+  return `${projectSlug}:${provider}:${conversationRef}`;
+}
+
+/** Conversations the chat list treats as agent-launched, from the tree label or a live launch record. */
+export function agentControlledConversationKeys(tree: TreeResponse | undefined): Set<string> {
+  const keys = new Set<string>();
+  for (const project of tree?.projects ?? []) {
+    for (const provider of PROVIDERS) {
+      for (const conversation of project.providers[provider].conversations) {
+        if (conversation.agentControlled) keys.add(agentControlledConversationKey(project.slug, provider, conversation.ref));
+      }
+    }
+  }
+  for (const session of tree?.boundSessions ?? []) {
+    if (session.launchContext) keys.add(agentControlledConversationKey(session.projectSlug, session.provider, session.conversationRef));
+  }
+  return keys;
+}
+
+export function withoutAgentControlledSearchResults<T extends { projectSlug: string; provider: string; conversationRef: string }>(
+  results: readonly T[],
+  keys: ReadonlySet<string>,
+  showAgentControlled: boolean,
+): T[] {
+  if (showAgentControlled) return [...results];
+  return results.filter((result) => !keys.has(agentControlledConversationKey(result.projectSlug, result.provider, result.conversationRef)));
 }

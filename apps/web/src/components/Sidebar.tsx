@@ -6,7 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
-import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
+import { agentControlledConversationKeys, deriveSidebarProjects, withoutAgentControlledSearchResults, type SidebarProject } from '../features/navigation/sidebar-projects';
 import { conversationStatusClasses, getConversationStatusColor } from '../features/navigation/work-status';
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -29,6 +29,9 @@ interface SidebarProps {
   onToggleWorkMode: () => void;
   activeOnly: boolean;
   onToggleActiveOnly: () => void;
+  /** Off by default. On shows chats an agent launched. Hiding them does not stop those agents. */
+  showAgentControlled?: boolean;
+  onToggleAgentControlled?: () => void;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
   onToggleRecentActivity: () => Promise<void>;
@@ -230,6 +233,7 @@ function ConversationLink({
   runFailure,
   autoTrackedAt,
   launchContext,
+  agentControlled,
 }: {
   nowMs: number;
   project: ProjectSummary;
@@ -257,8 +261,10 @@ function ConversationLink({
   runFailure?: RunFailure;
   autoTrackedAt?: string;
   launchContext?: import('@agent-console/shared').AgentLaunchContext;
+  agentControlled?: { launcherName: string };
 }) {
   const location = useLocation();
+  const launcherName = launchContext?.launcherName ?? agentControlled?.launcherName;
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -363,7 +369,7 @@ function ConversationLink({
           <TitleTooltip text={title} className="line-clamp-1 min-w-0" />
           <div className="mobile-chat-preview mt-0.5 hidden truncate text-xs text-slate-500">{excerpt || (suspended ? 'Select to resume' : !isBound ? 'History' : runFailure ? 'Check session status' : isWorking ? 'Working' : 'Ready')}</div>
         </div>
-        {launchContext && <span className="hidden shrink-0 text-[10px] text-sky-300 md:inline" title={`Launched by ${launchContext.launcherName} under Bryan's standing grants`}>Launched by {launchContext.launcherName.slice(0, 24)}</span>}
+        {launcherName && <span className="hidden shrink-0 text-[10px] text-sky-300 md:inline" title={`Launched by ${launcherName} under Bryan's standing grants`}>Launched by {launcherName.slice(0, 24)}</span>}
         {suspended && <span className="shrink-0 rounded bg-slate-700/70 px-1.5 text-xs text-slate-200">Suspended</span>}
         {runFailure && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-xs text-amber-200" title={runFailure.message}>
           {runFailure.status === 'scheduled' ? 'Retry scheduled' : runFailure.status === 'retrying' ? 'Retrying' : 'Stopped'}
@@ -798,6 +804,7 @@ function ProjectSection({
                 runFailure={runFailure}
                 autoTrackedAt={autoTrackedAt}
                 launchContext={launchContext}
+                agentControlled={conversation.agentControlled}
               />
             ))}
             {hasHiddenConversations ? (
@@ -814,7 +821,9 @@ function ProjectSection({
           </div>
         ) : (
           <div className="px-3 py-2 text-sm text-slate-500">
-            {workMode || activeOnly ? 'No active conversations.' : 'No conversations indexed yet.'}
+            {project.hiddenAgentControlledCount > 0
+              ? 'Agent-launched chats are hidden.'
+              : workMode || activeOnly ? 'No active conversations.' : 'No conversations indexed yet.'}
           </div>
         )}
       </div>
@@ -878,6 +887,8 @@ export function Sidebar({
   onToggleWorkMode,
   activeOnly,
   onToggleActiveOnly,
+  showAgentControlled = false,
+  onToggleAgentControlled,
   recentActivitySortEnabled,
   manualProjectOrder,
   onToggleRecentActivity,
@@ -934,7 +945,11 @@ export function Sidebar({
     queryFn: ({ signal }) => api.searchConversations(trimmedSubmittedSearchQuery, { limit: 24, signal }),
     enabled: Boolean(trimmedSubmittedSearchQuery),
   });
-  const searchResults = showingSubmittedSearchResults ? searchQueryResult.data?.results ?? [] : [];
+  const searchResults = withoutAgentControlledSearchResults(
+    showingSubmittedSearchResults ? searchQueryResult.data?.results ?? [] : [],
+    agentControlledConversationKeys(tree),
+    showAgentControlled,
+  );
   const searchLoading = showingSubmittedSearchResults && searchQueryResult.isFetching;
   const searchError = showingSubmittedSearchResults && searchQueryResult.error instanceof Error
     ? searchQueryResult.error.message
@@ -957,6 +972,7 @@ export function Sidebar({
       manualProjectOrder,
       mobileActiveOnly: isMobile && !mobileShowAll,
       activeOnly: !isMobile && activeOnly,
+      showAgentControlled,
       nowMs,
     });
     if (!isMobile || !mobileShowAll) return projects;
@@ -968,7 +984,7 @@ export function Sidebar({
           .sort((a, b) => b.activityTimestamp.localeCompare(a.activityTimestamp))
           .slice(0, mobileChatsPerProject),
       }));
-  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, nowMs]);
+  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, showAgentControlled, nowMs]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -1037,6 +1053,20 @@ export function Sidebar({
             >
               Active only
             </button>}
+            <button
+              type="button"
+              onClick={() => onToggleAgentControlled?.()}
+              aria-pressed={showAgentControlled}
+              title="Show chats an agent launched. They stay hidden, including in search, until this is on. Hiding them does not stop those agents."
+              className={clsx(
+                'rounded-full border px-3 py-1.5 text-xs font-medium transition',
+                showAgentControlled
+                  ? enabledToggleClassName
+                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
+              )}
+            >
+              Agent controlled
+            </button>
             {!isMobile && <button
               type="button"
               onClick={() => void onToggleRecentActivity()}

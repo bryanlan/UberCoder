@@ -17,6 +17,7 @@ import { RealtimeEventBus } from '../realtime/event-bus.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
 import { TRANSCRIPT_PARSER_VERSION, type ProviderAdapter } from '../providers/types.js';
 import { buildConversationSearchChunks } from '../search/conversation-search.js';
+import { stampAgentControlledConversations } from '../lib/agent-controlled.js';
 import { isBoundSessionVisibleInDiscovery, isConversationVisibleInDiscovery } from '../lib/conversation-visibility.js';
 import type { CoordinationTelemetryRecord } from '../coordination/telemetry.js';
 
@@ -309,6 +310,8 @@ export class IndexingService {
         },
       }))
       .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    stampAgentControlledConversations(projects, this.db.boundSessions.listAgentLaunchMarks());
 
     return {
       projects,

@@ -29,6 +29,7 @@ function buildSyntheticConversationFromSession(session: BoundSession): ProjectSu
     isBound: true,
     boundSessionId: session.id,
     degraded: false,
+    ...(session.launchContext ? { agentControlled: { launcherName: session.launchContext.launcherName } } : {}),
     rawMetadata: {
       syntheticSessionPlaceholder: true,
     },
@@ -81,6 +82,7 @@ export function applySessionUpdateToTree(current: TreeResponse | undefined, sess
                     updatedAt: session.lastCompletedAt ?? conversation.updatedAt,
                     isBound: active,
                     boundSessionId: active ? session.id : undefined,
+                    ...(session.launchContext ? { agentControlled: { launcherName: session.launchContext.launcherName } } : {}),
                   }];
                 }
                 if (conversation.boundSessionId === session.id) {
