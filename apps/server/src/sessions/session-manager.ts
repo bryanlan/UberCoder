@@ -2687,9 +2687,21 @@ export class SessionManager {
     } catch (error) {
       if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
       if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError) {
-        // A turn is running: the message waits for it, however long it takes.
+        // Keep the message durable before interrupting a Grok turn that cannot take a native steer.
         this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined, reason: error instanceof StructuredBusyError
-          ? 'Waiting for the running turn to finish.' : 'Waiting for the session to accept the message.' });
+          ? session.provider === 'grok' ? 'Stopping the current turn to deliver your reply.' : 'Waiting for the running turn to finish.'
+          : 'Waiting for the session to accept the message.' });
+        if (error instanceof StructuredBusyError && session.provider === 'grok') {
+          try {
+            await this.structured.interruptForQueuedReply(session);
+          } catch (interruptError) {
+            // The reply was not sent and remains queued. An interrupt failure must not return a false send failure to
+            // the browser, which could restore and resubmit the same draft while this durable copy is still pending.
+            this.logger?.warn({ err: interruptError, sessionId }, 'Grok interruption for a queued reply will be retried.');
+            this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined,
+              reason: 'Could not stop the current turn yet. Your reply is saved and will be retried.' });
+          }
+        }
         return;
       }
       if (error instanceof NotSentError || error instanceof StructuredUnavailableError) {

@@ -846,8 +846,10 @@ window), `turn.terminal` exactly once per turn (whichever of the prompt answer a
 UI and declines it, which the plugin answers as `cancelled`. `hasBackgroundWork()` follows `task_backgrounded`, `task_completed`
 and `background_tasks`.
 
-**Capabilities.** `processModel: 'per-session'`, `nativeIds: 'server-allocated'`, `steer: 'none'` (a second prompt sent mid-turn
-would queue inside Grok behind the running one, so the Console keeps it in its own queue and sends it when the turn ends),
+**Capabilities.** `processModel: 'per-session'`, `nativeIds: 'server-allocated'`, `steer: 'none'` (Grok cannot fold a second prompt
+into the running turn). When a person replies mid-turn, the Console cancels the running Grok turn and keeps the reply in its
+durable input queue until the interrupted turn ends, then sends it as a new turn in the same conversation. It sends one cancel
+per turn, keeps all queued replies, and does not use the person's Stop action, which cancels queued messages.
 `interrupt: 'terminal-follows'`, `images: true`, `modelSwitch: 'next-turn'`.
 
 **After a backend restart.** The process keeps running behind its session host, so the new backend does not start another:

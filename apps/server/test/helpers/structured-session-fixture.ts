@@ -18,7 +18,7 @@ export const structuredSessionsConfig = {
 };
 
 export interface StructuredSessionFixtureOptions {
-  /** The main plugin; its `id` ('codex' by default, or 'claude') decides which provider the bind helpers use. */
+  /** The main plugin; its `id` ('codex' by default, 'claude' or 'grok') decides which provider the bind helpers use. */
   plugin?: FakeTransportPluginOptions;
   /** More plugins registered beside the main one (for example a Claude plugin beside the Codex one). */
   extraPlugins?: FakeTransportPluginOptions[];
@@ -38,9 +38,9 @@ export function structuredSessionFixture(options: StructuredSessionFixtureOption
   const registry = new TransportPluginRegistry();
   registry.register(plugin);
   for (const extra of extraPlugins) registry.register(extra);
-  const providerId: 'codex' | 'claude' = plugin.id === 'claude' ? 'claude' : 'codex';
+  const providerId = plugin.id === 'grok' ? 'grok' : plugin.id === 'claude' ? 'claude' : 'codex';
   const adapter = options.provider ?? (providerId === 'claude' ? claudeProvider : provider);
-  const providerName = providerId === 'claude' ? 'Claude' : 'Codex';
+  const providerName = providerId === 'grok' ? 'Grok' : providerId === 'claude' ? 'Claude' : 'Codex';
   const bus = new RealtimeEventBus();
   const events: SessionEvent[] = [];
   bus.subscribe((event) => { events.push(event); });

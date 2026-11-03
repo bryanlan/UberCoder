@@ -646,6 +646,14 @@ export class StructuredSessionService {
     return { turnId: await this.startTurn(state, input), mode: 'turn' };
   }
 
+  /** A durably queued Grok correction stops the old turn once; its reply waits for the terminal before starting a new one. */
+  async interruptForQueuedReply(session: Pick<BoundSession, 'id'>): Promise<void> {
+    const state = this.sessions.get(session.id);
+    if (state?.provider !== 'grok' || !state.activeTurnId || state.pendingInterrupt?.turnId === state.activeTurnId) return;
+    // This is not the person's Stop action: it must preserve the input queue and its revision.
+    await this.interrupt(session);
+  }
+
   /**
    * Stop. `cancelledSteerIds` are the steers that were queued behind the turn and that the provider dropped with it (the
    * `requestId` of the message that was sent as a steer): they were never delivered, and the owner marks them so.

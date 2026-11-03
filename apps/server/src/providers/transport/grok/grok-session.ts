@@ -51,8 +51,8 @@ export const GROK_CAPABILITIES: TransportCapabilities = {
   processModel: 'per-session',
   nativeIds: 'server-allocated',
   resume: 'reattach',
-  // A second prompt sent mid-turn would queue inside Grok behind the running one, not fold into it, so the Console queues it
-  // itself and sends it when the turn ends.
+  // A second prompt cannot fold into a running Grok turn. The Console queues human replies durably, interrupts the turn,
+  // and sends the reply in the same conversation after the interrupted terminal arrives.
   steer: 'none',
   interrupt: 'terminal-follows',
   images: true,

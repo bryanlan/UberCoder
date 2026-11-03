@@ -7,8 +7,8 @@ import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt
 import { CoordinationService } from '../src/coordination/service.js';
 import { peerWakeAttemptKey, peerWakePaused, type PeerWakeAttempt } from '../src/coordination/wake.js';
 import { NotSentError, SendRejectedError, TurnNotActiveError } from '../src/providers/transport/types.js';
-import { enableUnattendedRecovery } from './helpers/session-fixtures.js';
-import { eventLogLines, settle, structuredSessionFixture, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
+import { enableUnattendedRecovery, provider } from './helpers/session-fixtures.js';
+import { eventLogLines, settle, structuredSessionFixture, structuredSessionsConfig, type StructuredSessionFixture } from './helpers/structured-session-fixture.js';
 
 const open: StructuredSessionFixture[] = [];
 function fixture(options: Parameters<typeof structuredSessionFixture>[0] = {}) {
@@ -23,6 +23,15 @@ function send(f: StructuredSessionFixture, sessionId: string, text: string, requ
 }
 function record(f: StructuredSessionFixture, sessionId: string, requestId: string): QueuedInputRecord {
   return JSON.parse(f.db.meta.get(`session-input:${sessionId}:${requestId}`)!) as QueuedInputRecord;
+}
+
+function grokFixture() {
+  return fixture({
+    plugin: { id: 'grok', capabilities: { steer: 'none' } },
+    provider: { ...provider, id: 'grok' },
+    manager: { structuredSessions: { ...structuredSessionsConfig,
+      grok: { enabled: true, command: ['fake-grok'], idleUnloadMinutes: 60, env: {} } } },
+  });
 }
 
 describe('Structured human input', () => {
@@ -285,6 +294,97 @@ describe('Structured human input', () => {
     f.thread(session.conversationRef).completeTurn();
     await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 100 }).toBe('submitted');
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
+  });
+
+  it('interrupts Grok once and keeps a reply queued until the old turn ends, then submits it exactly once', async () => {
+    const f = grokFixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'the planner chat is missing', requestId);
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'queued', reason: 'Stopping the current turn to deliver your reply.' });
+    expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(1);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    // Repeated submissions and the background drain must not send repeated cancels or start a turn before its terminal.
+    await send(f, session.id, 'the planner chat is missing', requestId);
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(1);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    expect(record(f, session.id, requestId).state).toBe('queued');
+    f.thread(session.conversationRef).completeTurn('interrupted');
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 50 }).toBe('submitted');
+    await send(f, session.id, 'the planner chat is missing', requestId);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
+    expect(record(f, session.id, requestId)).toMatchObject({ turnId: 'turn-2', deliveryMode: 'turn' });
+    expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text))
+      .toEqual(['investigate', 'the planner chat is missing']);
+  });
+
+  it('preserves consecutive Grok replies in FIFO order across the interrupted turns', async () => {
+    const f = grokFixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    const first = randomUUID();
+    const second = randomUUID();
+    await send(f, session.id, 'first correction', first);
+    await send(f, session.id, 'second correction', second);
+    expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(1);
+    f.thread(session.conversationRef).completeTurn('interrupted');
+    await expect.poll(() => record(f, session.id, first).state, { timeout: 5000, interval: 50 }).toBe('submitted');
+    await expect.poll(() => f.calls(session.conversationRef, 'interrupt').length, { timeout: 5000, interval: 50 }).toBe(2);
+    expect(record(f, session.id, second).state).toBe('queued');
+    f.thread(session.conversationRef).completeTurn('interrupted');
+    await expect.poll(() => record(f, session.id, second).state, { timeout: 5000, interval: 50 }).toBe('submitted');
+    expect(f.calls(session.conversationRef, 'sendTurn').map(call => (call.args[0] as { text: string }).text))
+      .toEqual(['investigate', 'first correction', 'second correction']);
+  });
+
+  it('keeps a Grok reply queued when interruption fails and retries without reporting an uncertain submission', async () => {
+    const f = grokFixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    const thread = f.thread(session.conversationRef);
+    const interrupt = thread.interrupt.bind(thread);
+    let attempts = 0;
+    thread.interrupt = async turnId => {
+      if (++attempts === 1) throw new Error('cancel connection temporarily unavailable');
+      return interrupt(turnId);
+    };
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'correction', requestId);
+    expect(result.queuedInput).toMatchObject({ state: 'queued', reason: expect.stringContaining('Your reply is saved') });
+    await expect.poll(() => attempts, { timeout: 5000, interval: 50 }).toBe(2);
+    thread.completeTurn('interrupted');
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 50 }).toBe('submitted');
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
+  });
+
+  it('does not interrupt Grok for a direct send that has no durable queue record', async () => {
+    const f = grokFixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    await expect(f.manager.sendInput(session.id, 'not queued')).rejects.toThrow();
+    expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(0);
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+  });
+
+  it('still cancels the saved Grok reply when the person explicitly presses Stop', async () => {
+    const f = grokFixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    const requestId = randomUUID();
+    await send(f, session.id, 'correction', requestId);
+    await f.manager.sendKeystrokes(session.id, { keys: ['Escape'] });
+    expect(record(f, session.id, requestId).state).toBe('cancelled');
+    f.thread(session.conversationRef).completeTurn('interrupted');
+    await settle();
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(1);
+    expect(f.row(session.id).queuedInputs).toBeUndefined();
   });
 
   it('delivers an old queued message to a sleeping session by waking it', async () => {
