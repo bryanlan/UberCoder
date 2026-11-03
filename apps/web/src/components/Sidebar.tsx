@@ -1,6 +1,6 @@
 import { Bot, Check, FolderTree, GripVertical, Link as LinkIcon, LoaderCircle, Menu, Pencil, Play, Plus, RefreshCcw, Search, Sparkles, X, Zap } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
-import { PROVIDERS, PROVIDER_NAMES, type ConversationSearchResult, type ProjectSummary, type ProviderId, type RunFailure, type TreeResponse } from '@agent-console/shared';
+import { PROVIDERS, PROVIDER_NAMES, type ConversationSearchResult, type FixedModelProfileKey, type ProjectSummary, type ProviderId, type RunFailure, type TreeResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
@@ -38,7 +38,7 @@ interface SidebarProps {
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   /** Provider-neutral Start: resolves true when the chat was created. */
-  onStartConversation: (projectSlug: string, prompt: string) => Promise<boolean>;
+  onStartConversation: (projectSlug: string, prompt: string, level?: FixedModelProfileKey) => Promise<boolean>;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   onRebindConversation: (projectSlug: string, provider: ProviderId, conversationRef: string) => Promise<boolean>;
   onRenameConversation: (projectSlug: string, provider: ProviderId, conversationRef: string, title: string) => Promise<boolean>;
@@ -475,7 +475,7 @@ function ProjectSection({
   /** Providers whose lane is on; a provider outside this list has no New conversation action. */
   enabledProviders: readonly ProviderId[];
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
-  onStartConversation: (projectSlug: string, prompt: string) => Promise<boolean>;
+  onStartConversation: (projectSlug: string, prompt: string, level?: FixedModelProfileKey) => Promise<boolean>;
   onRenameProject: (project: ProjectSummary, displayName?: string) => Promise<boolean>;
   renamingProject: boolean;
   onClose: () => void;
@@ -767,7 +767,7 @@ function ProjectSection({
             projectName={project.displayName}
             starting={creatingConversationKey === `${project.slug}:start`}
             disabled={creatingAnyConversation}
-            onSend={(prompt) => onStartConversation(project.slug, prompt)}
+            onSend={(prompt, level) => onStartConversation(project.slug, prompt, level)}
             onClose={() => setStartOpen(false)}
           />
         </div>
@@ -867,8 +867,8 @@ function MobileNewChatCard({
           projectName={project.displayName}
           starting={creatingConversationKey === `${project.slug}:start`}
           disabled={creatingAnyConversation}
-          onSend={async (prompt) => {
-            const started = await onStartConversation(project.slug, prompt);
+          onSend={async (prompt, level) => {
+            const started = await onStartConversation(project.slug, prompt, level);
             if (started) onStarted();
             return started;
           }}

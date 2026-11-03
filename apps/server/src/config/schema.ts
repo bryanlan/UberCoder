@@ -6,7 +6,7 @@ import type { FixedModelProfileKey, ProviderId } from '@agent-console/shared';
 // arrives undefined. These tuples mirror the provider ids and the fixed profile keys the Start default names,
 // and are type-checked against the shared types.
 const PROVIDER_VALUES = ['codex', 'claude', 'grok'] as const satisfies readonly ProviderId[];
-const FIXED_PROFILE_VALUES = ['high', 'medium', 'low'] as const satisfies readonly FixedModelProfileKey[];
+const FIXED_PROFILE_VALUES = ['ultra', 'high', 'medium', 'low'] as const satisfies readonly FixedModelProfileKey[];
 
 const portSchema = z.number().int().min(1).max(65535);
 
@@ -130,7 +130,7 @@ export const appConfigSchema = z.object({
     enabled: z.boolean().default(true),
     runtimeCommand: z.array(z.string().min(1)).min(1).default(['~/.local/bin/agent-consult']),
   }).default({ enabled: true, runtimeCommand: ['~/.local/bin/agent-consult'] }),
-  // The model list lives in workflow_optimizer: the Console reads the High/Medium/Low profiles and asks the Auto router through
+  // The model list lives in workflow_optimizer: the Console reads the Ultra/High/Medium/Low profiles and asks the Auto router through
   // its `wo` command. `AGENT_CONSOLE_WO_PATH` overrides `woPath` for one process (tests, a trial checkout).
   // `startDefault` is the provider and profile a provider-neutral Start uses when the router cannot answer.
   modelRouting: z.object({

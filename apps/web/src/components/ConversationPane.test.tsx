@@ -18,17 +18,19 @@ const readyProfiles: ModelProfilesState = {
     loadedAt: baseTime,
     providers: {
       codex: { routerProvider: 'openai', levels: {
-        high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'),
-        medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'),
+        ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'),
+        high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'),
+        medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'),
         low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
       } },
       claude: { routerProvider: 'anthropic', levels: {
-        high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'),
-        medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
-        low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+        ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'),
+        high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
+        medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+        low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high'),
       } },
+      // Grok has no Ultra or High model.
       grok: { routerProvider: 'xai', levels: {
-        high: level('grok-build-high', 'Grok Build High', 'high'),
         medium: level('grok-build-medium', 'Grok Build Medium', 'medium'),
         low: level('grok-build-low', 'Grok Build Low', 'low'),
       } },
@@ -258,12 +260,20 @@ it('Alt H selects the high Codex profile without changing the draft', async () =
   expect(textbox).toHaveValue('keep this draft');
 });
 
-it('offers Claude H/M/L models and selects high without changing the draft', async () => {
+it('Alt U selects the ultra Codex profile', async () => {
+  const onSetModelProfile = vi.fn().mockResolvedValue(true);
+  renderPane({ onSetModelProfile });
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'u', altKey: true });
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'ultra'));
+});
+
+it('offers Claude U/H/M/L models and selects high without changing the draft', async () => {
   const onSetModelProfile = vi.fn().mockResolvedValue(true);
   renderPane({ onSetModelProfile, sessionOverrides: { provider: 'claude', claudeProfile: 'medium' } });
-  expect(screen.getByRole('button', { name: 'Use high Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-fable-5-1 / xhigh'));
-  expect(screen.getByRole('button', { name: 'Use medium Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-opus-5-5 / xhigh'));
-  expect(screen.getByRole('button', { name: 'Use low Claude profile' })).toHaveAttribute('title', expect.stringContaining('claude-sonnet-5-5 / high'));
+  expect(screen.getByRole('button', { name: 'Use ultra Claude profile' })).toHaveAttribute('title', 'Ultra: Claude Fable 5.1, xhigh (Alt U)');
+  expect(screen.getByRole('button', { name: 'Use high Claude profile' })).toHaveAttribute('title', 'High: Claude Opus 5.5, xhigh (Alt H)');
+  expect(screen.getByRole('button', { name: 'Use medium Claude profile' })).toHaveAttribute('title', 'Medium: Claude Sonnet 5.5, high (Alt M)');
+  expect(screen.getByRole('button', { name: 'Use low Claude profile' })).toHaveAttribute('title', 'Low: Claude Haiku 5.5, high (Alt L)');
   const textbox = screen.getByRole('textbox');
   fireEvent.change(textbox, { target: { value: 'keep this Claude draft' } });
   fireEvent.keyDown(textbox, { key: 'h', altKey: true });
@@ -271,7 +281,7 @@ it('offers Claude H/M/L models and selects high without changing the draft', asy
   expect(textbox).toHaveValue('keep this Claude draft');
 });
 
-it('offers Grok A/H/M/L on a Grok session, reads grokProfile and selects with Alt H', async () => {
+it('greys out U and H on a Grok session, which has no Ultra or High model, reads grokProfile and selects with Alt L', async () => {
   const onSetModelProfile = vi.fn().mockResolvedValue(true);
   renderPane({
     onSetModelProfile,
@@ -279,14 +289,20 @@ it('offers Grok A/H/M/L on a Grok session, reads grokProfile and selects with Al
     screenModel: 'grok-build-medium medium',
   });
   const group = screen.getByLabelText('Grok model profile');
-  expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'H', 'M', 'L']);
-  expect(screen.getByRole('button', { name: 'Use high Grok profile' })).toHaveAttribute('title', expect.stringContaining('grok-build-high / high'));
+  expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'U', 'H', 'M', 'L']);
+  expect(screen.getByRole('button', { name: 'Use ultra Grok profile' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Use ultra Grok profile' })).toHaveAttribute('title', 'Ultra: Grok has no Ultra model');
+  expect(screen.getByRole('button', { name: 'Use high Grok profile' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Use medium Grok profile' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByRole('button', { name: 'Use low Grok profile' })).toHaveAttribute('aria-pressed', 'false');
   const textbox = screen.getByRole('textbox');
   fireEvent.change(textbox, { target: { value: 'keep this Grok draft' } });
+  // Alt U and Alt H do nothing on Grok.
+  fireEvent.keyDown(textbox, { key: 'u', altKey: true });
   fireEvent.keyDown(textbox, { key: 'h', altKey: true });
-  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'high'));
+  fireEvent.keyDown(textbox, { key: 'l', altKey: true });
+  await waitFor(() => expect(onSetModelProfile).toHaveBeenCalledWith('session-1', 'low'));
+  expect(onSetModelProfile).toHaveBeenCalledTimes(1);
   expect(textbox).toHaveValue('keep this Grok draft');
 });
 
@@ -297,11 +313,11 @@ describe('Auto model profile (A)', () => {
     quotaState: 'on_pace', reason: 'Best implementer fit is Claude Sonnet 5.5 at low effort; it is on pace for its weekly quota.',
   };
 
-  it('offers A to the left of H, M and L and Alt A selects it', async () => {
+  it('offers A to the left of U, H, M and L and Alt A selects it', async () => {
     const onSetModelProfile = vi.fn().mockResolvedValue(true);
     renderPane({ onSetModelProfile, sessionOverrides: { codexProfile: 'medium' } });
     const group = screen.getByLabelText('Codex model profile');
-    expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'H', 'M', 'L']);
+    expect(Array.from(group.querySelectorAll('button')).map((button) => button.textContent)).toEqual(['A', 'U', 'H', 'M', 'L']);
     const textbox = screen.getByRole('textbox');
     fireEvent.change(textbox, { target: { value: 'keep this draft' } });
     fireEvent.keyDown(textbox, { key: 'a', altKey: true });
@@ -381,7 +397,7 @@ describe('model profile list from the server', () => {
       sessionOverrides: { codexProfile: 'medium' },
     });
     expect(screen.getByTestId('model-profiles-error')).toHaveTextContent('Model profiles unavailable: wo was not found at /x/wo');
-    for (const name of ['auto', 'high', 'medium', 'low']) {
+    for (const name of ['auto', 'ultra', 'high', 'medium', 'low']) {
       expect(screen.getByRole('button', { name: `Use ${name} Codex profile` })).toBeDisabled();
     }
   });
@@ -397,7 +413,7 @@ describe('model profile list from the server', () => {
 
 it('does not present a saved profile as current when the live model is older', () => {
   renderPane({ sessionOverrides: { codexProfile: 'medium' }, screenModel: 'gpt-5.6-sol xhigh' });
-  expect(screen.getByText('Running: gpt-5.6-sol xhigh · select A, H, M, or L')).toBeInTheDocument();
+  expect(screen.getByText('Running: gpt-5.6-sol xhigh · select A, U, H, M, or L')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Use medium Codex profile' })).toHaveAttribute('aria-pressed', 'false');
 });
 

@@ -45,8 +45,8 @@ describe('Structured session bind', () => {
     const options = f.plugin.instance!.sessions[0]!.options;
     expect(options).toMatchObject({
       cwd: project.path,
-      model: 'gpt-6.1-sol',
-      effort: 'xhigh',
+      model: 'gpt-6.1-terra',
+      effort: 'high',
       policy: { approvals: 'never', sandbox: 'full-access' },
     });
   });
@@ -101,7 +101,7 @@ describe('Structured session bind', () => {
     const { session } = await f.bindNew({ initialPrompt: 'Plan the migration' });
     const thread = f.plugin.instance!.sessions[0]!;
     expect(thread.calls.filter(call => call.method === 'sendTurn')).toHaveLength(1);
-    expect(thread.calls[0]!.args[0]).toMatchObject({ text: 'Plan the migration', model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect(thread.calls[0]!.args[0]).toMatchObject({ text: 'Plan the migration', model: 'gpt-6.1-terra', effort: 'high' });
     expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual(['Plan the migration']);
     await settle();
     expect(f.row(session.id).isWorking).toBe(true);
@@ -139,7 +139,7 @@ describe('Structured session screen', () => {
     const f = await fixture();
     const { session } = await f.bindNew({ initialPrompt: undefined });
     const idle = await f.manager.getSessionScreen(session.id);
-    expect(idle!.screen).toEqual({ status: 'Codex (app-server) idle', capturedAt: expect.any(String), model: 'gpt-6.1-sol xhigh' });
+    expect(idle!.screen).toEqual({ status: 'Codex (app-server) idle', capturedAt: expect.any(String), model: 'gpt-6.1-terra high' });
     await f.manager.sendInput(session.id, 'work');
     await settle();
     expect((await f.manager.getSessionScreen(session.id))!.screen.status).toBe('Codex (app-server) working');
@@ -441,8 +441,8 @@ describe('Structured model profile', () => {
     expect(f.plugin.instances.flatMap(instance => instance.calls).filter(call => call.method === 'start')).toHaveLength(1);
 
     await f.manager.sendInput(session.id, 'after the switch');
-    expect(f.calls(session.conversationRef, 'sendTurn').at(-1)?.args[0]).toMatchObject({ model: 'gpt-6-astra', effort: 'xhigh' });
-    expect((await f.manager.getSessionScreen(session.id))!.screen.model).toBe('gpt-6-astra xhigh');
+    expect(f.calls(session.conversationRef, 'sendTurn').at(-1)?.args[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect((await f.manager.getSessionScreen(session.id))!.screen.model).toBe('gpt-6.1-sol xhigh');
   });
 
   it('defers a switch while a turn runs and completes it at the next terminal', async () => {

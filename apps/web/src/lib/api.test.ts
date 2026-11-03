@@ -256,28 +256,31 @@ describe('api.bindNewConversation', () => {
 });
 
 describe('api.startConversation', () => {
-  it('posts only the prompt to the project start route with the CSRF token and encodes the project', async () => {
+  it('posts the body to the project start route with the CSRF token and encodes the project', async () => {
     const fetchMock = installSuccessfulFetch();
 
-    await api.startConversation('demo project', 'Fix the login bug', 'csrf-token');
+    await api.startConversation('demo project', { prompt: 'Fix the login bug' }, 'csrf-token');
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/conversations/demo%20project/start');
     expect(requestInit(fetchMock, 0).method).toBe('POST');
     expect(new Headers(requestInit(fetchMock, 0).headers).get('x-csrf-token')).toBe('csrf-token');
     expect(requestBody(fetchMock)).toEqual({ prompt: 'Fix the login bug' });
+
+    await api.startConversation('demo', { prompt: 'Plan it', level: 'ultra' }, 'csrf-token');
+    expect(JSON.parse(String(requestInit(fetchMock, 1).body))).toEqual({ prompt: 'Plan it', level: 'ultra' });
   });
 
   it('returns the server answer including a routing warning', async () => {
     const answer = { session: { id: 'session-9' }, conversationRef: 'ref-9', provider: 'codex', warning: 'Routing failed.' };
     vi.stubGlobal('fetch', vi.fn(async () => response(200, answer)));
 
-    await expect(api.startConversation('demo', 'hello')).resolves.toEqual(answer);
+    await expect(api.startConversation('demo', { prompt: 'hello' })).resolves.toEqual(answer);
   });
 
   it('raises the server error message', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response(409, { error: 'No structured provider is enabled.' })));
 
-    await expect(api.startConversation('demo', 'hello')).rejects.toMatchObject({ message: 'No structured provider is enabled.', status: 409 });
+    await expect(api.startConversation('demo', { prompt: 'hello' })).rejects.toMatchObject({ message: 'No structured provider is enabled.', status: 409 });
   });
 });
 

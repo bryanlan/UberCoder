@@ -2,7 +2,7 @@ import { RunFailureNotice } from './RunFailureNotice';
 import { QueuedInputNotice } from './QueuedInputNotice';
 import { PendingQuestionCard } from './PendingQuestionCard';
 import { Check, ChevronDown, Copy, Link as LinkIcon, Pause, PlugZap, Send, Unplug, X } from 'lucide-react';
-import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_KEYS, MODEL_PROFILE_SHORTCUTS, PROVIDER_NAMES, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
+import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, MODEL_PROFILE_KEYS, MODEL_PROFILE_NAMES, MODEL_PROFILE_SHORTCUTS, PROVIDER_NAMES, describeAutoRoute, isBoundSessionSuspended, visibleModelMatchesTarget, type AutoRoute, type FixedModelProfileKey, type ModelProfileKey, type ConversationTimeline, type ModelProfileRequest, type ProjectSummary, type ProviderId, type SessionKeystrokeRequest, type SessionInputResponse } from '@agent-console/shared';
 import clsx from 'clsx';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
@@ -115,7 +115,7 @@ function storeComposerDraft(conversationKey: string, text: string): void {
 }
 
 function modelProfileLabel(profile: ModelProfileKey): string {
-  return profile.charAt(0).toUpperCase() + profile.slice(1);
+  return MODEL_PROFILE_NAMES[profile];
 }
 
 function modelProfileRequestStatus(request: ModelProfileRequest): string {
@@ -205,6 +205,8 @@ function SessionComposer({
   const [agentDragOver, setAgentDragOver] = useState(false);
   const profileLevels = modelProfiles.status === 'ready' ? modelProfiles.profiles.providers[provider].levels : undefined;
   const providerLabel = PROVIDER_NAMES[provider];
+  /** A level this session's provider has no model for (Grok has no Ultra or High model). Unknown until the list has loaded. */
+  const levelMissing = (profile: ModelProfileKey) => profile !== 'auto' && profileLevels !== undefined && !profileLevels[profile];
   const canSend = draftText.trim().length > 0 || clipboardImages.items.length > 0;
 
   async function applyModelProfile(profile: ModelProfileKey): Promise<void> {
@@ -248,10 +250,10 @@ function SessionComposer({
   useEffect(() => {
     const onProfileShortcut = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
-      const profile = ({ a: 'auto', h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'a' | 'h' | 'm' | 'l'];
+      const profile = ({ a: 'auto', u: 'ultra', h: 'high', m: 'medium', l: 'low' } as const)[event.key.toLowerCase() as 'a' | 'u' | 'h' | 'm' | 'l'];
       if (!profile) return;
-      // The control stays disabled while the model list is missing; the keys follow it.
-      if (modelProfiles.status !== 'ready') return;
+      // The control stays disabled while the model list is missing, and a level the provider lacks stays disabled; the keys follow it.
+      if (modelProfiles.status !== 'ready' || levelMissing(profile)) return;
       event.preventDefault();
       event.stopPropagation();
       requestModelProfile(profile);
@@ -557,7 +559,7 @@ function SessionComposer({
   const currentProfileMatchesVisibleModel = activeModelProfile
     ? (activeTarget ? visibleModelMatchesTarget(provider, activeTarget, visibleModel) : undefined) !== false
     : false;
-  const profileLetters = MODEL_PROFILE_KEYS.map((profile) => MODEL_PROFILE_SHORTCUTS[profile]);
+  const profileLetters = MODEL_PROFILE_KEYS.filter((profile) => !levelMissing(profile)).map((profile) => MODEL_PROFILE_SHORTCUTS[profile]);
   const profileChoice = `${profileLetters.slice(0, -1).join(', ')}, or ${profileLetters.at(-1)}`;
   const autoLine = activeModelProfile === 'auto' ? describeAutoRoute(provider, autoRoute) : undefined;
   const displayedProfileStatus = profileError
@@ -632,18 +634,22 @@ function SessionComposer({
                 {MODEL_PROFILE_KEYS.map((profile) => {
                   const level = profile === 'auto' ? undefined : profileLevels?.[profile as FixedModelProfileKey];
                   const shortcut = MODEL_PROFILE_SHORTCUTS[profile];
+                  const name = MODEL_PROFILE_NAMES[profile];
+                  const missing = levelMissing(profile);
                   return (
                     <button
                       key={profile}
                       type="button"
-                      disabled={!profilesReady || profileBusy || profileApplying}
+                      disabled={!profilesReady || profileBusy || profileApplying || missing}
                       aria-label={`Use ${profile} ${providerLabel} profile`}
                       aria-pressed={activeModelProfile === profile && currentProfileMatchesVisibleModel}
                       title={profile === 'auto'
-                        ? `auto: the router picks a model when you send your next message (Alt ${shortcut})`
-                        : level
-                          ? `${profile}: ${level.launchName} / ${level.effort} (Alt ${shortcut})`
-                          : `${profile} (Alt ${shortcut})`}
+                        ? `Auto: the router picks a model when you send your next message (Alt ${shortcut})`
+                        : missing
+                          ? `${name}: ${providerLabel} has no ${name} model`
+                          : level
+                            ? `${name}: ${level.label}, ${level.effort} (Alt ${shortcut})`
+                            : `${name} (Alt ${shortcut})`}
                       onClick={() => requestModelProfile(profile)}
                       className={clsx(
                         '-ml-px border border-slate-700 px-3 py-1.5 text-xs first:ml-0 first:rounded-l-lg last:rounded-r-lg disabled:opacity-50',

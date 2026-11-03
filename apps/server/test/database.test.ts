@@ -123,7 +123,7 @@ describe('AppDatabase', () => {
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
     before.boundSessions.upsert(boundSession({ id: 'auto-session', conversationRef: 'auto-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column grok_profile; alter table bound_sessions drop column auto_route_json; delete from schema_version where version in (20, 21, 22)');
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; alter table bound_sessions drop column auto_route_json; delete from schema_version where version >= 20');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 19 });
     before.close();
 
@@ -382,14 +382,51 @@ describe('AppDatabase', () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v20-'));
     const databasePath = path.join(tempDir, 'agent-console.sqlite');
     const before = new AppDatabase(databasePath);
-    before.boundSessions.upsert(boundSession({ id: 'old-session', provider: 'claude', claudeProfile: 'low', conversationRef: 'old-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
-    before.sqlite.exec('alter table bound_sessions drop column grok_profile; delete from schema_version where version in (21, 22)');
+    before.boundSessions.upsert(boundSession({ id: 'old-session', provider: 'claude', claudeProfile: 'auto', conversationRef: 'old-ref', updatedAt: '2026-10-01T00:00:00.000Z' }));
+    before.sqlite.exec('alter table bound_sessions drop column grok_profile; delete from schema_version where version >= 21');
     expect(before.sqlite.prepare('select max(version) as version from schema_version').get()).toEqual({ version: 20 });
     before.close();
 
     const after = new AppDatabase(databasePath);
     expect(after.sqlite.prepare('select name from schema_version where version = 21').get()).toEqual({ name: 'grok-cost-profile' });
-    expect(after.boundSessions.getById('old-session')).toMatchObject({ claudeProfile: 'low', grokProfile: undefined });
+    expect(after.boundSessions.getById('old-session')).toMatchObject({ claudeProfile: 'auto', grokProfile: undefined });
+    after.close();
+  });
+
+  it('upgrades a version 22 database by renaming each stored profile to the level that now holds its model', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-db-v22-'));
+    const databasePath = path.join(tempDir, 'agent-console.sqlite');
+    const before = new AppDatabase(databasePath);
+    const rows: Array<[string, BoundSession['provider'], string]> = [
+      ['codex-high', 'codex', 'high'], ['codex-medium', 'codex', 'medium'], ['codex-low', 'codex', 'low'], ['codex-auto', 'codex', 'auto'],
+      ['claude-high', 'claude', 'high'], ['claude-medium', 'claude', 'medium'], ['claude-low', 'claude', 'low'],
+      ['grok-high', 'grok', 'high'], ['grok-medium', 'grok', 'medium'], ['grok-low', 'grok', 'low'],
+    ];
+    const column = { codex: 'codex_profile', claude: 'claude_profile', grok: 'grok_profile' } as const;
+    for (const [id, provider] of rows) {
+      before.boundSessions.upsert(boundSession({ id, provider, conversationRef: `${id}-ref`, updatedAt: '2026-11-01T00:00:00.000Z' }));
+    }
+    // The old names are no longer profile keys, so they are written the way the old build stored them.
+    for (const [id, provider, profile] of rows) before.sqlite.prepare(`update bound_sessions set ${column[provider]} = ? where id = ?`).run(profile, id);
+    before.sqlite.prepare('update bound_sessions set model_profile_request_json = ? where id = ?').run(JSON.stringify({
+      requestId: 'r1', profile: 'medium', requestedAt: '2026-11-01T00:00:00.000Z', state: 'applying', startedAt: '2026-11-01T00:00:00.000Z',
+      previousProfile: 'high', resumeConversationRef: 'claude-low-ref',
+    }), 'claude-low');
+    before.sqlite.exec('delete from schema_version where version = 23');
+    before.close();
+
+    const after = new AppDatabase(databasePath);
+    expect(after.sqlite.prepare('select name from schema_version where version = 23').get()).toEqual({ name: 'model-levels' });
+    const stored = Object.fromEntries(rows.map(([id, provider]) => [id, (after.sqlite.prepare(`select ${column[provider]} as profile from bound_sessions where id = ?`).get(id) as { profile: string }).profile]));
+    expect(stored).toEqual({
+      // Astra and Sol became Ultra and High; Luna stays Low.
+      'codex-high': 'ultra', 'codex-medium': 'high', 'codex-low': 'low', 'codex-auto': 'auto',
+      // Fable, Opus and Sonnet became Ultra, High and Medium, each renamed once.
+      'claude-high': 'ultra', 'claude-medium': 'high', 'claude-low': 'medium',
+      // Grok 4.7 at xhigh has no level of its own and is closest to Medium (Grok 4.7 at high).
+      'grok-high': 'medium', 'grok-medium': 'medium', 'grok-low': 'low',
+    });
+    expect(after.boundSessions.getById('claude-low')?.modelProfileRequest).toMatchObject({ profile: 'high', previousProfile: 'ultra' });
     after.close();
   });
 

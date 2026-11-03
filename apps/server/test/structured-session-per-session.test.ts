@@ -336,7 +336,7 @@ describe('Per-session processes: a row with no cost profile', () => {
   it('leaves a row that has a profile on it, and a granted launch on the model it named', async () => {
     const f = fixture({ plugin: PER_SESSION });
     const low = await f.bindNew({ claudeProfile: 'low' });
-    expect(startOptions(f, 0)).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
+    expect(startOptions(f, 0)).toMatchObject({ model: 'claude-haiku-5-5', effort: 'high' });
     expect(f.row(low.session.id).claudeProfile).toBe('low');
 
     const granted = await f.bindNew({ launchContext: { ...launchContext, model: 'claude-custom', effort: 'low' } });
@@ -357,7 +357,7 @@ describe('Per-session processes: a row with no cost profile', () => {
     await expect.poll(() => f.row(session.id).claudeProfile, { timeout: 5000, interval: 20 }).toBe('low');
     await f.manager.sendInput(session.id, 'hello');
     expect(f.row(session.id).claudeProfile).toBe('low');
-    expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high' });
+    expect(f.calls('native-history-2', 'sendTurn').map(call => call.args[0] as TurnInput)[0]).toMatchObject({ model: 'claude-haiku-5-5', effort: 'high' });
   });
 
   it('gives a shared Codex thread no default: its process keeps the model it was configured with', async () => {

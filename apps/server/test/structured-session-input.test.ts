@@ -36,7 +36,7 @@ describe('Structured human input', () => {
     expect(result.recordedUserInput).toMatchObject({ text: 'Refactor the parser' });
     const turn = f.calls(session.conversationRef, 'sendTurn');
     expect(turn).toHaveLength(1);
-    expect(turn[0]!.args[0]).toMatchObject({ text: 'Refactor the parser', model: 'gpt-6.1-sol', effort: 'xhigh', clientMessageId: requestId });
+    expect(turn[0]!.args[0]).toMatchObject({ text: 'Refactor the parser', model: 'gpt-6.1-terra', effort: 'high', clientMessageId: requestId });
     expect(record(f, session.id, requestId)).toMatchObject({ state: 'submitted', turnId: 'turn-1', deliveryMode: 'turn' });
     expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text)).toEqual(['Refactor the parser']);
     expect(f.row(session.id).lastActivityAt).toBeTruthy();

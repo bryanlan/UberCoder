@@ -21,8 +21,8 @@ async function openConversation(page: Page, provider: ProviderId, unavailable = 
   // The profile control reads the server's model list; this fixture has no server behind it, so it serves the list too.
   const level = (model: string, label: string, effort: string) => ({ model, label, effort, launchName: model });
   await page.route('**/api/model-profiles', route => route.fulfill({ json: { loadedAt: stamp, providers: {
-    codex: { routerProvider: 'openai', levels: { high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh') } },
-    claude: { routerProvider: 'anthropic', levels: { high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high') } },
+    codex: { routerProvider: 'openai', levels: { ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh') } },
+    claude: { routerProvider: 'anthropic', levels: { ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high') } },
   } } }));
   await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects: [project('demo', current), project('peer-project', peer)], boundSessions: [session] } }));
   await page.route(`**/api/conversations/demo/${provider}/current/messages**`, route => route.fulfill({ json: {

@@ -60,10 +60,10 @@ describe('Structured sessions on the Codex plugin', () => {
     expect(f.session.pid).toBeGreaterThan(0);
     // The plugin records its shared process for the coordination liveness check.
     expect(JSON.parse(f.db.meta.get('structured-instance:codex')!)).toMatchObject({ pid: f.session.pid });
-    expect(receivedRequests(f.logFile, 'thread/start')[0]!.params).toMatchObject({ cwd: project.path, approvalPolicy: 'never', model: 'gpt-6.1-sol' });
+    expect(receivedRequests(f.logFile, 'thread/start')[0]!.params).toMatchObject({ cwd: project.path, approvalPolicy: 'never', model: 'gpt-6.1-terra' });
 
     await f.manager.sendKeystrokes(f.session.id, { submissionId: randomUUID(), text: 'Do the thing', submittedText: 'Do the thing', keys: ['Enter'] });
-    expect(receivedRequests(f.logFile, 'turn/start')[0]!.params).toMatchObject({ threadId: THREAD, model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect(receivedRequests(f.logFile, 'turn/start')[0]!.params).toMatchObject({ threadId: THREAD, model: 'gpt-6.1-terra', effort: 'high' });
     await waitUntil(() => f.db.boundSessions.getById(f.session.id)?.lastResponseAt, 5_000, 'the turn to complete');
     expect(f.db.boundSessions.getById(f.session.id)).toMatchObject({ isWorking: false });
     expect(f.db.boundSessions.getById(f.session.id)?.lastOutputAt).toBeTruthy();

@@ -224,7 +224,7 @@ Opt-in real Codex proof: after `npm run build`, run
 `env -u NODE_ENV node scripts/prove-structured-codex.mjs --run > /tmp/proof-backend.log`.
 It starts an isolated backend (temp database, runtime and scratch git project, free port in 14390-14399) with `structuredSessions.codex.enabled`, and drives one real structured Codex conversation
 through the HTTP API in 16 steps. It needs the host Codex login, runs about fourteen short real turns (about 150 seconds when the
-provider is not rate limited), and removes its temp root and any app-server it started. The proofs hold no model names: they read what the High, Medium and Low profiles mean from the isolated Console's `GET /api/model-profiles` (the real `wo` catalog on this host) and compare it with what the provider received. A new chat starts on Auto, so each proof switches to the low profile before its first turn. Each step id and what it proves:
+provider is not rate limited), and removes its temp root and any app-server it started. The proofs hold no model names: they read what the Ultra, High, Medium and Low profiles mean from the isolated Console's `GET /api/model-profiles` (the real `wo` catalog on this host) and compare it with what the provider received. A new chat starts on Auto, so each proof switches to the low profile before its first turn. Each step id and what it proves:
 
 - a. The project tree advertises `codex` as the structured provider.
 - b. The bind returns a thread UUID, and the stored row holds the `structured:` placeholder name. The app-server's environment names the proof's runtime and config (and no session id), its argv pins the coordination MCP server to this Console, it leads its own process group, and it is a child of its session host, whose record matches `/proc`.

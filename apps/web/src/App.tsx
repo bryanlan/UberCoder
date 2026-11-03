@@ -4,6 +4,7 @@ import { AlertTriangle, ChevronDown, LogOut, Menu, MessageSquare, MoreHorizontal
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import type {
   BoundSession,
+  FixedModelProfileKey,
   ModelProfileKey,
   ConversationTimeline,
   NormalizedMessage,
@@ -141,7 +142,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     queryFn: api.uiPreferences,
     enabled: authQuery.data?.authenticated,
   });
-  // The High/Medium/Low (and Auto) models come from the server, which reads them from the shared model catalog. When that read
+  // The Ultra/High/Medium/Low (and Auto) models come from the server, which reads them from the shared model catalog. When that read
   // fails the profile control says so; it retries every 15 seconds.
   const modelProfilesQuery = useQuery({
     queryKey: ['model-profiles'],
@@ -501,8 +502,8 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   });
 
   const startMutation = useMutation({
-    mutationFn: ({ projectSlug, prompt }: { projectSlug: string; prompt: string }) =>
-      api.startConversation(projectSlug, prompt, authQuery.data?.csrfToken),
+    mutationFn: ({ projectSlug, prompt, level }: { projectSlug: string; prompt: string; level?: FixedModelProfileKey }) =>
+      api.startConversation(projectSlug, { prompt, ...(level ? { level } : {}) }, authQuery.data?.csrfToken),
     onSuccess: ({ provider, conversationRef, warning }, variables) => {
       setStartWarning(warning);
       openCreatedConversation(variables.projectSlug, provider, conversationRef);
@@ -667,13 +668,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     );
   }
 
-  async function handleStartConversation(projectSlug: string, prompt: string): Promise<boolean> {
+  async function handleStartConversation(projectSlug: string, prompt: string, level?: FixedModelProfileKey): Promise<boolean> {
     if (startMutation.isPending || creatingConversationKey) return false;
     setActionError(undefined);
     setStartWarning(undefined);
     setCreatingConversationKey(`${projectSlug}:start`);
     try {
-      await startMutation.mutateAsync({ projectSlug, prompt });
+      await startMutation.mutateAsync({ projectSlug, prompt, level });
       return true;
     } catch (error) {
       setActionError(describeError(error, 'Unable to start a new conversation.'));

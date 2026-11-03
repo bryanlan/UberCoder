@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 22;
+export const CURRENT_SCHEMA_VERSION = 23;
 
 interface Migration {
   version: number;
@@ -325,7 +325,48 @@ const MIGRATIONS: Migration[] = [
       create index if not exists coordination_messages_created on coordination_messages(created_at);
       create index if not exists coordination_messages_sender on coordination_messages(sender_id, created_at);`);
   } },
+  { version: 23, name: 'model-levels', up: renameProfilesToLevels },
 ];
+
+/**
+ * The model profiles became four levels, Ultra, High, Medium and Low (2026-11-02), and the models moved between the names. Each
+ * stored profile is renamed to the level that now holds the model it ran, so no session changes model:
+ * Codex High (GPT-6 Astra) and Medium (GPT-6.1 Sol) became Ultra and High; Claude High (Fable), Medium (Opus) and Low (Sonnet)
+ * became Ultra, High and Medium; Grok High (Grok 4.7 at xhigh) has no level of its own and becomes Medium (Grok 4.7 at high).
+ * Unchanged names (Codex Low, Grok Medium and Low, Auto) stay. A queued or applying switch is renamed the same way.
+ */
+const LEVEL_RENAMES: Record<'codex' | 'claude' | 'grok', Record<string, string>> = {
+  codex: { high: 'ultra', medium: 'high' },
+  claude: { high: 'ultra', medium: 'high', low: 'medium' },
+  grok: { high: 'medium' },
+};
+
+function renameProfilesToLevels(sqlite: Database.Database): void {
+  if (!tableExists(sqlite, 'bound_sessions')) return;
+  const columns = tableColumns(sqlite, 'bound_sessions');
+  for (const [provider, renames] of Object.entries(LEVEL_RENAMES)) {
+    const column = `${provider}_profile`;
+    if (!columns.has(column)) continue;
+    // One CASE per column, so a renamed value is never renamed again (Claude Medium to High must not then become Ultra).
+    const cases = Object.entries(renames).map(([from, to]) => `when '${from}' then '${to}'`).join(' ');
+    sqlite.exec(`update bound_sessions set ${column} = case ${column} ${cases} else ${column} end where ${column} in (${Object.keys(renames).map(from => `'${from}'`).join(', ')})`);
+  }
+  if (!columns.has('model_profile_request_json') || !columns.has('provider')) return;
+  const rows = sqlite.prepare('select id, provider, model_profile_request_json as json from bound_sessions where model_profile_request_json is not null')
+    .all() as Array<{ id: string; provider: string; json: string }>;
+  const update = sqlite.prepare('update bound_sessions set model_profile_request_json = ? where id = ?');
+  for (const row of rows) {
+    const renames = LEVEL_RENAMES[row.provider as keyof typeof LEVEL_RENAMES];
+    if (!renames) continue;
+    const request = JSON.parse(row.json) as { profile?: string; previousProfile?: string };
+    const renamed = {
+      ...request,
+      ...(request.profile && renames[request.profile] ? { profile: renames[request.profile] } : {}),
+      ...(request.previousProfile && renames[request.previousProfile] ? { previousProfile: renames[request.previousProfile] } : {}),
+    };
+    update.run(JSON.stringify(renamed), row.id);
+  }
+}
 
 export function migrateDatabase(sqlite: Database.Database): void {
   sqlite.exec(`

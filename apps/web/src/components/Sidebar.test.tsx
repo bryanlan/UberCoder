@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import type { BoundSession, TreeResponse } from '@agent-console/shared';
+import type { BoundSession, FixedModelProfileKey, ModelProfilesResponse, TreeResponse } from '@agent-console/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Sidebar } from './Sidebar';
 
@@ -364,9 +364,13 @@ describe('Start (provider-neutral new chat)', () => {
     };
   }
 
-  function sidebarElement(tree: TreeResponse, props: { onStartConversation?: (projectSlug: string, prompt: string) => Promise<boolean>; creatingConversationKey?: string; onClose?: () => void } = {}) {
+  function sidebarElement(tree: TreeResponse, props: {
+    onStartConversation?: (projectSlug: string, prompt: string, level?: FixedModelProfileKey) => Promise<boolean>; creatingConversationKey?: string; onClose?: () => void;
+    modelProfiles?: ModelProfilesResponse;
+  } = {}) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(['network-info'], {});
+    if (props.modelProfiles) client.setQueryData(['model-profiles'], props.modelProfiles);
     return (
       <QueryClientProvider client={client}>
         <MemoryRouter>
@@ -420,8 +424,35 @@ describe('Start (provider-neutral new chat)', () => {
     await user.type(textbox, 'Fix the login bug');
     await user.click(send);
 
-    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Fix the login bug');
+    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Fix the login bug', undefined);
     await waitFor(() => expect(screen.queryByTestId('start-composer')).not.toBeInTheDocument());
+  });
+
+  it('starts on the level picked, and names the models the server lists at that level', async () => {
+    const onStartConversation = vi.fn().mockResolvedValue(true);
+    const entry = (label: string) => ({ model: label, label, effort: 'xhigh', launchName: label });
+    const modelProfiles: ModelProfilesResponse = { loadedAt: 'now', providers: {
+      codex: { routerProvider: 'openai', levels: { ultra: entry('GPT-6 Astra'), medium: entry('GPT-6.1 Terra') } },
+      claude: { routerProvider: 'anthropic', levels: { ultra: entry('Claude Fable 5.1'), medium: entry('Claude Sonnet 5.5') } },
+      grok: { routerProvider: 'xai', levels: { medium: entry('Grok 4.7') } },
+    } };
+    render(sidebarElement(treeWith(['codex', 'claude']), { onStartConversation, modelProfiles }));
+    const user = userEvent.setup();
+
+    const textbox = await openStartBox(user);
+    const levels = screen.getByRole('radiogroup', { name: 'Model level' });
+    expect(Array.from(levels.querySelectorAll('[role="radio"]')).map((button) => button.textContent)).toEqual(['A', 'U', 'H', 'M', 'L']);
+    expect(screen.getByRole('radio', { name: 'Auto' })).toHaveAttribute('aria-checked', 'true');
+    await user.click(screen.getByRole('radio', { name: 'Ultra' }));
+    expect(screen.getByRole('radio', { name: 'Ultra' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('start-level-hint')).toHaveTextContent('Ultra: GPT-6 Astra, Claude Fable 5.1. Console picks the one with the most quota room.');
+    await user.click(screen.getByRole('radio', { name: 'High' }));
+    // No model at a level in the list: the hint says what the choice does without naming one.
+    expect(screen.getByTestId('start-level-hint')).toHaveTextContent('High: Console picks the High model with the most quota room.');
+    await user.click(screen.getByRole('radio', { name: 'Ultra' }));
+    await user.type(textbox, 'Design the rewrite');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Design the rewrite', 'ultra');
   });
 
   it('sends with Ctrl+Enter and cancels with Escape without sending', async () => {
@@ -439,7 +470,7 @@ describe('Start (provider-neutral new chat)', () => {
     await user.type(textbox, 'Send this one');
     await user.keyboard('{Control>}{Enter}{/Control}');
     expect(onStartConversation).toHaveBeenCalledTimes(1);
-    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Send this one');
+    expect(onStartConversation).toHaveBeenCalledWith('demo', 'Send this one', undefined);
   });
 
   it('keeps the box and the typed prompt when the chat could not be created', async () => {
@@ -487,7 +518,7 @@ describe('Start (provider-neutral new chat)', () => {
       await user.type(screen.getByRole('textbox', { name: 'First message for Demo' }), 'Plan the release');
       await user.click(screen.getByRole('button', { name: 'Send' }));
 
-      expect(onStartConversation).toHaveBeenCalledWith('demo', 'Plan the release');
+      expect(onStartConversation).toHaveBeenCalledWith('demo', 'Plan the release', undefined);
       await waitFor(() => expect(onClose).toHaveBeenCalled());
       expect(screen.getByRole('button', { name: 'New chat' })).toBeInTheDocument();
     } finally {

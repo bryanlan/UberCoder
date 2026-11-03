@@ -3,7 +3,8 @@ import { AuthService } from '../security/auth-service.js';
 import { ModelProfilesUnavailableError, type ModelProfileService } from '../model-profiles/service.js';
 
 /**
- * `GET /api/model-profiles`: the High, Medium and Low models of each provider, read from the workflow_optimizer catalog.
+ * `GET /api/model-profiles`: the Ultra, High, Medium and Low models of each provider (Grok has only Medium and Low), read from
+ * the workflow_optimizer catalog.
  * When the catalog cannot be read the answer is 503 with the reason, so the web can say so instead of guessing.
  */
 export async function registerModelProfileRoutes(app: FastifyInstance, authService: AuthService, modelProfiles: ModelProfileService): Promise<void> {

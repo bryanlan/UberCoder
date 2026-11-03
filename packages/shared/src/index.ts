@@ -4,16 +4,19 @@ export const PROVIDERS = ['codex', 'claude', 'grok'] as const;
 export type ProviderId = (typeof PROVIDERS)[number];
 
 /**
- * Model profiles. The High, Medium and Low models live in one place outside this repository (the workflow_optimizer model
- * catalog, read through `wo profiles --json`), so nothing here names a model. `auto` is not a model: it asks the router
- * for one when the next message is sent.
+ * Model profiles. The four levels (Ultra, High, Medium and Low) and the model each provider runs at each level live in one
+ * place outside this repository (the workflow_optimizer model catalog, read through `wo profiles --json`), so nothing here names
+ * a model. A provider may lack a level (Grok has no Ultra or High model). `auto` is not a model: it asks the router for one when
+ * the next message is sent.
  */
-export const FIXED_MODEL_PROFILE_KEYS = ['high', 'medium', 'low'] as const;
+export const FIXED_MODEL_PROFILE_KEYS = ['ultra', 'high', 'medium', 'low'] as const;
 export type FixedModelProfileKey = (typeof FIXED_MODEL_PROFILE_KEYS)[number];
 export const MODEL_PROFILE_KEYS = ['auto', ...FIXED_MODEL_PROFILE_KEYS] as const;
 export type ModelProfileKey = (typeof MODEL_PROFILE_KEYS)[number];
 /** The keyboard shortcut letter (Alt plus the letter) and button label of each profile. */
-export const MODEL_PROFILE_SHORTCUTS: Record<ModelProfileKey, string> = { auto: 'A', high: 'H', medium: 'M', low: 'L' };
+export const MODEL_PROFILE_SHORTCUTS: Record<ModelProfileKey, string> = { auto: 'A', ultra: 'U', high: 'H', medium: 'M', low: 'L' };
+/** The plain name of each level, as buttons' hover text and status lines say it. */
+export const MODEL_PROFILE_NAMES: Record<ModelProfileKey, string> = { auto: 'Auto', ultra: 'Ultra', high: 'High', medium: 'Medium', low: 'Low' };
 
 /** The model and reasoning effort a provider is started with or switched to. `model` is the provider's launch name. */
 export interface ModelTarget {
@@ -35,7 +38,8 @@ export interface ModelProfileEntry {
 export interface ProviderModelProfiles {
   /** The vendor behind the provider, as the router names it. */
   routerProvider: 'openai' | 'anthropic' | 'xai';
-  levels: Record<FixedModelProfileKey, ModelProfileEntry>;
+  /** The levels this provider has a model for. A missing level cannot be chosen for it. */
+  levels: Partial<Record<FixedModelProfileKey, ModelProfileEntry>>;
 }
 
 /** What `GET /api/model-profiles` returns. */
@@ -55,7 +59,7 @@ export interface AutoDecision {
   effort?: string;
   /** The name the Console launches the model with. */
   launchName?: string;
-  /** The role the router routed for (`implementer`), from the classifier or its default. */
+  /** The role the router routed for (`implementer`), from the classifier or its default. Absent when it routed by level. */
   role?: string;
   /** Classifier confidence in that role, 0 to 100, when the classifier answered. */
   rolePercent?: number;
@@ -67,11 +71,18 @@ export interface AutoDecision {
   quotaState?: string;
   /**
    * True when the classifier could not tell what kind of task this is, so the choice is a first guess. The next prompts re-route
-   * it (at most three provisional prompts in all). Absent or false: the choice is final.
+   * it (at most three provisional prompts in all). Absent or false: the choice is final. A choice the person asked for (a level
+   * or a thinking level) is always final.
    */
   provisional?: boolean;
   /** The router's full plain-English reason. */
   reason?: string;
+  /** The level the router picked from, when it routed by level instead of by kind of task. */
+  level?: FixedModelProfileKey;
+  /** `classifier`: the person's latest message asked for that level. `caller`: it was picked on Start. */
+  levelSource?: 'caller' | 'classifier';
+  /** The thinking level the person's latest message asked for (`low` to `xhigh`). */
+  requestedEffort?: string;
   /** Shown to the person when Auto fell back, for example `Auto unavailable: timed out. Using Medium.` */
   warning?: string;
 }
@@ -124,7 +135,11 @@ export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undef
   parts.push(decision.label && decision.effort ? `${shortModelLabel(decision.label)}·${decision.effort}` : 'no model chosen');
   if (decision.source === 'router') {
     // A provisional choice is a first guess because the router could not tell the kind of task, so the role is not shown as fact.
-    if (provisional) parts.push('role unclear');
+    // A choice the person asked for shows what was asked instead of the role.
+    if (decision.level || decision.requestedEffort) {
+      const request = [decision.level, decision.requestedEffort ? `${decision.requestedEffort} thinking` : undefined].filter(Boolean).join(', ');
+      parts.push(`${request} asked`);
+    } else if (provisional) parts.push('role unclear');
     else if (decision.role) parts.push(decision.rolePercent !== undefined ? `${decision.role} ${decision.rolePercent}%` : decision.role);
     if (decision.difficulty) parts.push(decision.difficulty);
     if (decision.quotaState) parts.push(`${providerName} ${AUTO_QUOTA_WORDS[decision.quotaState] ?? decision.quotaState}`);
@@ -132,7 +147,8 @@ export function describeAutoRoute(provider: ProviderId, route: AutoRoute | undef
   const base = `${provisional ? 'A (provisional)' : 'A'} → ${parts.join(' · ')}`;
   // A provisional choice re-routes by itself and its marker already says so. After the first prompt the second is always checked
   // once more; A pressed again routes the next message afresh.
-  const pendingNote = provisional ? undefined : route?.routedPrompts === 1 ? 're-checks at your next prompt' : 're-routes with your next message';
+  const asked = decision.level !== undefined || decision.requestedEffort !== undefined;
+  const pendingNote = provisional ? undefined : route?.routedPrompts === 1 && !asked ? 're-checks at your next prompt' : 're-routes with your next message';
   const line = route?.routePending && pendingNote ? `${base} · ${pendingNote}` : base;
   const title = decision.source === 'fallback' ? decision.warning : decision.reason;
   return { line, ...(title ? { title } : {}) };
@@ -170,7 +186,7 @@ interface ModelProfileRequestBase {
   requestedAt: string;
   /**
    * For a switch to `auto`: the Auto state the switch commits (a decision from the router, or just routePending). Absent for
-   * High, Medium and Low, which clear any Auto state when they complete.
+   * the fixed levels, which clear any Auto state when they complete.
    */
   autoRoute?: AutoRoute;
   /** For an Auto decision: the model and effort to apply, so a restart between the steps still applies the same choice. */
@@ -196,10 +212,12 @@ export type ModelProfileRequest =
 
 /**
  * The provider-neutral Start: the person gives a project and a first prompt and the server picks the provider. `prompt` is the
- * whole first message; the router sees its first 2,000 characters.
+ * whole first message; the router sees its first 2,000 characters. With `level`, the router picks the model with the most quota
+ * room at that level and the session starts on that level; without it, the session starts on Auto.
  */
 export interface StartConversationRequest {
   prompt: string;
+  level?: FixedModelProfileKey;
 }
 
 /** What Start returns: the new session on whichever provider took it. */

@@ -2805,6 +2805,32 @@ describe('conversation routes', () => {
         });
       });
 
+      it('starts on the level in the body through the router\'s level route, and refuses a value that is not a level', async () => {
+        await withDb(async (db, tempDir) => {
+          const bindConversation = vi.fn(async (input: { provider: { id: string } }) => ({ id: 'session-3', provider: input.provider.id }));
+          const route = vi.fn();
+          const routeLevel = vi.fn(async () => ({ ok: true, provider: 'codex', decision: {
+            source: 'router', decidedAt: 'now', model: 'gpt-6-astra', label: 'GPT-6 Astra', effort: 'xhigh', launchName: 'gpt-6-astra', reason: 'Best ultra-level fit is GPT-6 Astra.',
+          } }));
+          const app = await buildBindApp({ db, tempDir, sessions: sessionsFor(bindConversation), structuredProviders: ['codex', 'grok'],
+            start: { modelProfiles: { route, routeLevel } as never, startDefault: { provider: 'codex', profile: 'medium' } } });
+          try {
+            const response = await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: 'plan it', level: 'ultra' } });
+            expect(response.statusCode).toBe(200);
+            expect(response.json()).toMatchObject({ provider: 'codex' });
+            expect(routeLevel).toHaveBeenCalledWith('ultra', undefined, expect.any(Object));
+            expect(route).not.toHaveBeenCalled();
+            expect(bindConversation).toHaveBeenCalledWith(expect.objectContaining({ codexProfile: 'ultra', startNotice: 'Ultra: Best ultra-level fit is GPT-6 Astra.' }));
+            for (const level of ['auto', 'max']) {
+              expect((await app.inject({ method: 'POST', url: '/api/conversations/demo/start', payload: { prompt: 'x', level } })).statusCode).toBe(400);
+            }
+            expect(bindConversation).toHaveBeenCalledTimes(1);
+          } finally {
+            await app.close();
+          }
+        });
+      });
+
       it('rejects an empty prompt, an unknown project and a Console with no lane', async () => {
         await withDb(async (db, tempDir) => {
           const bindConversation = vi.fn();

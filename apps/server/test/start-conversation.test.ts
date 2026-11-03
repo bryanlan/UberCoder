@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ProviderId } from '@agent-console/shared';
+import type { FixedModelProfileKey, ProviderId } from '@agent-console/shared';
 import { ModelProfileService, type WoRunner } from '../src/model-profiles/service.js';
 import { StartUnavailableError, startConversation, type StartDefault } from '../src/sessions/start-conversation.js';
 import { project, provider, providerSettings } from './helpers/session-fixtures.js';
@@ -7,14 +7,21 @@ import { eventLogLines, structuredSessionFixture, structuredSessionsConfig, type
 
 const level = (model: string, label: string, effort: string) => ({ model, label, effort, launch_name: model });
 const PROFILES = JSON.stringify({ profiles: {
-  codex: { provider: 'openai', levels: { high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh') } },
-  claude: { provider: 'anthropic', levels: { high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high') } },
-  grok: { provider: 'xai', levels: { high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
+  codex: { provider: 'openai', levels: { ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh') } },
+  claude: { provider: 'anthropic', levels: { ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high') } },
+  // Grok has no Ultra or High model.
+  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
 } });
 const routed = (vendor: string, model: string, label: string, effort: string, extra: Record<string, unknown> = {}) => JSON.stringify({
   status: 'route', role: 'implementer', provider: vendor, model, label, effort, launch_name: model, quota_state: 'tight',
   reason: `Best implementer fit is ${label}.`,
   classifier: { status: 'ok', role_choice: 'implementer', role_probabilities: { implementer: 0.72 }, difficulty_choice: 'lighter' }, ...extra,
+});
+
+/** The router's answer to `route --level`: no role, the level and who asked for it. */
+const levelRouted = (vendor: string, model: string, label: string, effort: string, level: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+  status: 'route', role: null, level, level_source: 'caller', provider: vendor, model, label, effort, launch_name: model, quota_state: 'on_pace',
+  reason: `Best ${level}-level fit is ${label} at ${effort} effort; it is on pace for its weekly quota.`, classifier: null, ...extra,
 });
 
 function stubWo(options: { profilesFail?: boolean } = {}) {
@@ -59,7 +66,11 @@ function startFixture(options: { grok?: boolean; profilesFail?: boolean; startDe
     startDefault: options.startDefault ?? { provider: 'codex', profile: 'medium' },
   };
   const turns = (id: ProviderId) => (plugins[id].instance?.sessions ?? []).flatMap(session => session.calls.filter(call => call.method === 'sendTurn').map(call => call.args[0] as { text: string; model?: string; effort?: string }));
-  return { f, wo, deps, plugins, turns, start: (prompt: string) => startConversation(deps, { project, prompt }) };
+  return {
+    f, wo, deps, plugins, turns,
+    start: (prompt: string) => startConversation(deps, { project, prompt }),
+    startAt: (level: FixedModelProfileKey, prompt: string) => startConversation(deps, { project, prompt, level }),
+  };
 }
 
 describe('Provider-neutral Start', () => {
@@ -68,7 +79,7 @@ describe('Provider-neutral Start', () => {
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'high'));
     const started = await start('review the quota pacing code');
 
-    expect(wo.routeCalls).toEqual([['route', '--task', 'review the quota pacing code', '--launcher', 'console', '--json']]);
+    expect(wo.routeCalls).toEqual([['route', '--task', 'review the quota pacing code', '--latest-message', 'review the quota pacing code', '--launcher', 'console', '--json']]);
     expect(started).toMatchObject({ provider: 'grok', conversationRef: expect.stringMatching(/^pending:/) });
     expect(started.warning).toBeUndefined();
     expect(started.session).toMatchObject({ provider: 'grok' });
@@ -117,7 +128,7 @@ describe('Provider-neutral Start', () => {
     expect(started.warning).toBe('Auto could not pick a provider (timed out after 8 s). Started on Codex Medium.');
     expect(f.row(started.session.id)).toMatchObject({ provider: 'codex', codexProfile: 'medium' });
     expect(f.row(started.session.id).autoRoute).toBeUndefined();
-    expect(turns('codex')).toEqual([expect.objectContaining({ text: 'do the thing', model: 'gpt-6.1-sol', effort: 'xhigh' })]);
+    expect(turns('codex')).toEqual([expect.objectContaining({ text: 'do the thing', model: 'gpt-6.1-terra', effort: 'high' })]);
     expect(eventLogLines(f.row(started.session.id)).some(line => line.type === 'status' && line.text === started.warning)).toBe(true);
   });
 
@@ -126,7 +137,7 @@ describe('Provider-neutral Start', () => {
     claudeDefault.wo.answers.push(new Error('no route'));
     const low = await claudeDefault.start('x');
     expect(low).toMatchObject({ provider: 'claude', warning: expect.stringContaining('Started on Claude Low') });
-    expect(claudeDefault.turns('claude')).toEqual([expect.objectContaining({ model: 'claude-sonnet-5-5', effort: 'high' })]);
+    expect(claudeDefault.turns('claude')).toEqual([expect.objectContaining({ model: 'claude-haiku-5-5', effort: 'high' })]);
 
     const noGrok = startFixture({ grok: false, startDefault: { provider: 'grok', profile: 'high' } });
     noGrok.wo.answers.push(new Error('no route'));
@@ -172,7 +183,7 @@ describe('Provider-neutral Start', () => {
 
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'high'));
     await f.manager.sendInput(id, 'it must stream rows');
-    expect(wo.routeCalls[1]).toEqual(['route', '--task', 'it must stream rows\n\nhi, a question about the exporter', '--launcher', 'console', '--provider', 'xai', '--json']);
+    expect(wo.routeCalls[1]).toEqual(['route', '--task', 'it must stream rows\n\nhi, a question about the exporter', '--latest-message', 'it must stream rows', '--launcher', 'console', '--provider', 'xai', '--json']);
     expect(turns('grok').at(-1)).toMatchObject({ text: 'it must stream rows', model: 'grok-4.7', effort: 'high' });
     expect(f.row(id).autoRoute).toMatchObject({ routePending: false, decision: { launchName: 'grok-4.7' } });
     f.extraPlugins[1]!.instance!.sessions[0]!.completeTurn();
@@ -193,14 +204,79 @@ describe('Provider-neutral Start', () => {
     await expect.poll(() => f.row(started.session.id).isWorking).toBe(false);
     wo.answers.push(routed('xai', 'grok-4.6', 'Grok 4.6', 'high'));
     await f.manager.sendInput(started.session.id, 'refactor the exporter');
-    expect(wo.routeCalls[1]).toEqual(['route', '--task', 'refactor the exporter\n\nlook at this', '--launcher', 'console', '--provider', 'xai', '--json']);
+    expect(wo.routeCalls[1]).toEqual(['route', '--task', 'refactor the exporter\n\nlook at this', '--latest-message', 'refactor the exporter', '--launcher', 'console', '--provider', 'xai', '--json']);
     expect(turns('grok').at(-1)).toMatchObject({ text: 'refactor the exporter', model: 'grok-4.6', effort: 'high' });
     expect(f.row(started.session.id).autoRoute).toMatchObject({ routePending: false, decision: { launchName: 'grok-4.6' } });
   });
 });
 
+describe('Start on a level the person picked', () => {
+  it('asks the router for that level with no provider, and starts on the level\'s profile with the router\'s reason', async () => {
+    const { f, wo, startAt, turns } = startFixture();
+    wo.answers.push(levelRouted('anthropic', 'claude-fable-5-1', 'Claude Fable 5.1', 'xhigh', 'ultra'));
+    const started = await startAt('ultra', 'design the quota pacing rewrite');
+
+    expect(wo.routeCalls).toEqual([['route', '--level', 'ultra', '--launcher', 'console', '--json']]);
+    expect(started).toMatchObject({ provider: 'claude' });
+    expect(started.warning).toBeUndefined();
+    // The chat holds the level, not Auto: its next messages are not routed again.
+    expect(f.row(started.session.id)).toMatchObject({ provider: 'claude', claudeProfile: 'ultra' });
+    expect(f.row(started.session.id).autoRoute).toBeUndefined();
+    expect(turns('claude')).toEqual([expect.objectContaining({ text: 'design the quota pacing rewrite', model: 'claude-fable-5-1', effort: 'xhigh' })]);
+    expect(eventLogLines(f.row(started.session.id)).some(line => line.type === 'status' && line.text.startsWith('Ultra: Best ultra-level fit is Claude Fable 5.1'))).toBe(true);
+    await f.manager.sendInput(started.session.id, 'and the tests');
+    expect(wo.routeCalls).toHaveLength(1);
+  });
+
+  it('starts on the router\'s best alternative when the provider it prefers has no lane', async () => {
+    const { f, wo, startAt } = startFixture({ grok: false });
+    wo.answers.push(levelRouted('xai', 'grok-4.7', 'Grok 4.7', 'high', 'medium', { alternatives: [
+      { provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launch_name: 'gpt-6.1-terra', quota_state: 'on_pace' },
+    ] }));
+    const started = await startAt('medium', 'x');
+    expect(started.provider).toBe('codex');
+    expect(f.row(started.session.id)).toMatchObject({ codexProfile: 'medium' });
+  });
+
+  it('starts at the level on the configured default provider, with a warning, when the router cannot answer', async () => {
+    const { f, wo, startAt, turns } = startFixture({ startDefault: { provider: 'claude', profile: 'low' } });
+    wo.answers.push(new Error('no route'));
+    const started = await startAt('high', 'review the exporter');
+    expect(started).toMatchObject({ provider: 'claude', warning: 'The router could not pick a provider for High (no route). Started on Claude High.' });
+    expect(f.row(started.session.id)).toMatchObject({ claudeProfile: 'high' });
+    expect(turns('claude')).toEqual([expect.objectContaining({ model: 'claude-opus-5-5', effort: 'xhigh' })]);
+  });
+
+  it('skips a default provider that has no model at the level', async () => {
+    const { wo, startAt } = startFixture({ startDefault: { provider: 'grok', profile: 'medium' } });
+    wo.answers.push(new Error('no route'));
+    expect(await startAt('ultra', 'x')).toMatchObject({ provider: 'codex', warning: expect.stringContaining('Started on Codex Ultra') });
+  });
+
+  it('refuses, rather than start on another level, when no startable provider has a model at the level', async () => {
+    const f = structuredSessionFixture({ plugin: { id: 'grok' } });
+    open.push(f);
+    const wo = stubWo();
+    wo.answers.push(new Error('no route'));
+    const start = startConversation({
+      db: f.db, projectService: { getMergedProviderSettings: (_project: unknown, id: ProviderId) => ({ ...providerSettings, enabled: id === 'grok' }) } as never,
+      providerRegistry: { get: (id: ProviderId) => ({ ...provider, id }) } as never,
+      sessions: { enabledStructuredProviders: () => ['grok'] } as never, modelProfiles: wo.service, startDefault: { provider: 'codex', profile: 'medium' },
+    }, { project, prompt: 'x', level: 'ultra' });
+    await expect(start).rejects.toThrow('No provider that can start a chat in this project offers the Ultra level (no route).');
+    await expect(start).rejects.toBeInstanceOf(StartUnavailableError);
+    expect(f.db.pendingConversations.list()).toEqual([]);
+  });
+
+  it('refuses when neither the router nor the model list can answer', async () => {
+    const { wo, startAt } = startFixture({ profilesFail: true });
+    wo.answers.push(new Error('no route'));
+    await expect(startAt('low', 'x')).rejects.toBeInstanceOf(StartUnavailableError);
+  });
+});
+
 describe('Grok sessions in the Console', () => {
-  it('applies High, Medium, Low and Auto to the next turn of a Grok session, without restarting its process', async () => {
+  it('applies Medium, Low and Auto to the next turn of a Grok session, without restarting its process, and refuses Ultra and High', async () => {
     const { f, wo, start, turns } = startFixture();
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'low'));
     const started = await start('first');
@@ -208,7 +284,11 @@ describe('Grok sessions in the Console', () => {
     const finish = async () => { f.extraPlugins[1]!.instance!.sessions[0]!.completeTurn(); await expect.poll(() => f.row(id).isWorking).toBe(false); };
     await finish();
 
-    for (const [profile, model, effort] of [['high', 'grok-4.7', 'xhigh'], ['medium', 'grok-4.7', 'high'], ['low', 'grok-4.6', 'medium']] as const) {
+    for (const profile of ['ultra', 'high'] as const) {
+      await expect(f.manager.requestModelProfile(id, profile)).rejects.toThrow(`Grok has no ${profile === 'ultra' ? 'Ultra' : 'High'} model.`);
+      expect(f.row(id)).toMatchObject({ grokProfile: 'auto', modelProfileRequest: undefined });
+    }
+    for (const [profile, model, effort] of [['medium', 'grok-4.7', 'high'], ['low', 'grok-4.6', 'medium']] as const) {
       await f.manager.requestModelProfile(id, profile);
       await expect.poll(() => f.row(id).grokProfile).toBe(profile);
       expect(f.row(id)).toMatchObject({ modelProfileRequest: undefined, autoRoute: undefined });

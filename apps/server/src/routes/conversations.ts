@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { imageMessageDisplay } from '../images/prompt.js';
 import { z } from 'zod';
 import {
+  FIXED_MODEL_PROFILE_KEYS,
   PROVIDER_NAMES,
   PROVIDERS,
   type BoundSession,
@@ -45,6 +46,8 @@ const bindConversationBodySchema = z.object({
 }).strict();
 const startConversationBodySchema = z.object({
   prompt: z.string().trim().min(1).max(100_000),
+  // Optional: start on this level, on whichever provider the router picks for it.
+  level: z.enum(FIXED_MODEL_PROFILE_KEYS).optional(),
 });
 const renameConversationBodySchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -342,7 +345,7 @@ export async function registerConversationRoutes(
         return;
       }
       try {
-        return await startConversation({ db, projectService, providerRegistry, sessions, modelProfiles: start.modelProfiles, startDefault: start.startDefault }, { project, prompt: parsedBody.data.prompt });
+        return await startConversation({ db, projectService, providerRegistry, sessions, modelProfiles: start.modelProfiles, startDefault: start.startDefault }, { project, prompt: parsedBody.data.prompt, level: parsedBody.data.level });
       } catch (error) {
         if (error instanceof StartUnavailableError || error instanceof StructuredSessionDisabledError) {
           reply.code(400).send({ error: error.message });

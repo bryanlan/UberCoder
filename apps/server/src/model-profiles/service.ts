@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { z } from 'zod';
 import {
   FIXED_MODEL_PROFILE_KEYS,
+  MODEL_PROFILE_NAMES,
   type AutoDecision,
   type BoundSession,
   type ModelProfileKey,
@@ -78,9 +79,11 @@ const levelSchema = z.object({
   effort: z.string().min(1),
   launch_name: z.string().min(1),
 });
+// A provider may lack a level (Grok has no Ultra or High model). Every provider has a Medium model: it is the level the Console
+// falls back to when Auto cannot route and the default for a launch that names no model.
 const providerSchema = z.object({
   provider: z.enum(ROUTER_VENDORS),
-  levels: z.object({ high: levelSchema, medium: levelSchema, low: levelSchema }),
+  levels: z.object({ ultra: levelSchema.optional(), high: levelSchema.optional(), medium: levelSchema, low: levelSchema.optional() }),
 });
 const profilesSchema = z.object({ profiles: z.object({ codex: providerSchema, claude: providerSchema, grok: providerSchema }) });
 
@@ -100,7 +103,8 @@ const optionSchema = z.object({
 }).passthrough();
 const routeSchema = z.object({
   status: z.string(),
-  role: z.string().optional(),
+  // Null when the router routed by level instead of by kind of task.
+  role: z.string().nullable().optional(),
   provider: z.string().nullable().optional(),
   model: z.string().nullable().optional(),
   label: z.string().nullable().optional(),
@@ -112,6 +116,11 @@ const routeSchema = z.object({
   provisional: z.boolean().optional(),
   classifier: classifierSchema.nullable().optional(),
   alternatives: z.array(optionSchema).optional(),
+  // Set when the router routed by level: picked on Start (`caller`) or asked for in the latest message (`classifier`).
+  level: z.enum(FIXED_MODEL_PROFILE_KEYS).nullable().optional(),
+  level_source: z.enum(['caller', 'classifier']).nullable().optional(),
+  // The thinking level the latest message asked for.
+  requested_effort: z.string().nullable().optional(),
 }).passthrough();
 
 /** A short, single-line reason for a failed `wo` call, safe to show to the person. */
@@ -132,10 +141,28 @@ export type AutoRouteOutcome =
 export interface RouteOptions {
   /** For a provider-neutral route: the providers a session can be created on now. The first router option on one of them is used. */
   acceptProvider?: (provider: ProviderId) => boolean;
+  /**
+   * The person's newest message (at most 2,000 characters are sent). The router reads it for an explicit level ("use high") or
+   * thinking level ("xhigh thinking") and, when it finds one, routes by it.
+   */
+  latestMessage?: string;
 }
 
 /**
- * The Console's one source of model choices: the High/Medium/Low profiles and the Auto router both come from the
+ * A provider has no model at the level asked for (Grok has no Ultra or High model). It is a kind of unavailable profile, so every
+ * place that turns an unavailable profile into a message for the person handles it too.
+ */
+export class ModelLevelUnavailableError extends ModelProfilesUnavailableError {
+  constructor(readonly provider: ProviderId, readonly level: FixedModelProfileKey) {
+    super(`${PROVIDER_NAMES[provider]} has no ${MODEL_PROFILE_NAMES[level]} model`);
+    // The profiles did load; only this level is missing, so the message drops the "Model profiles unavailable" prefix.
+    this.message = `${PROVIDER_NAMES[provider]} has no ${MODEL_PROFILE_NAMES[level]} model.`;
+    this.name = 'ModelLevelUnavailableError';
+  }
+}
+
+/**
+ * The Console's one source of model choices: the level profiles and the Auto router both come from the
  * workflow_optimizer catalog, through the `wo` command. Nothing here knows a model name. A successful profile read is cached;
  * when a later read fails the last good answer keeps being served (it came from the same catalog), and the failure is logged.
  * With no good answer at all, every lookup throws `ModelProfilesUnavailableError` and the web shows the reason.
@@ -181,8 +208,11 @@ export class ModelProfileService {
     return this.cached?.profiles.providers[provider].levels[key];
   }
 
+  /** The model a provider runs at a level. Throws `ModelLevelUnavailableError` when it has none at that level. */
   async entry(provider: ProviderId, key: FixedModelProfileKey): Promise<ModelProfileEntry> {
-    return (await this.profiles()).providers[provider].levels[key];
+    const entry = (await this.profiles()).providers[provider].levels[key];
+    if (!entry) throw new ModelLevelUnavailableError(provider, key);
+    return entry;
   }
 
   private async load(): Promise<ModelProfilesResponse> {
@@ -204,10 +234,10 @@ export class ModelProfileService {
       if (entry.provider !== ROUTER_PROVIDER[id]) {
         throw new ModelProfilesUnavailableError(`wo profiles lists ${entry.provider} models for ${id}`);
       }
-      const levels = {} as Record<FixedModelProfileKey, ModelProfileEntry>;
+      const levels: Partial<Record<FixedModelProfileKey, ModelProfileEntry>> = {};
       for (const key of FIXED_MODEL_PROFILE_KEYS) {
         const level = entry.levels[key];
-        levels[key] = { model: level.model, label: level.label, effort: level.effort, launchName: level.launch_name };
+        if (level) levels[key] = { model: level.model, label: level.label, effort: level.effort, launchName: level.launch_name };
       }
       providers[id] = { routerProvider: entry.provider, levels };
     }
@@ -217,19 +247,32 @@ export class ModelProfileService {
   }
 
   /**
-   * Asks the router for the model of a session's next turns. The router sees the first 2,000 characters of the prompt. With a
-   * `provider` it sees only models of that vendor (a session cannot change vendor); with none, any vendor can win and
-   * `options.acceptProvider` says which of them a new session can be created on. Never throws: a failure is returned so the
-   * caller can fall back to Medium.
+   * Asks the router for the model of a session's next turns. The router sees the first 2,000 characters of the prompt, and of
+   * `options.latestMessage` when given. With a `provider` it sees only models of that vendor (a session cannot change vendor);
+   * with none, any vendor can win and `options.acceptProvider` says which of them a new session can be created on. Never throws:
+   * a failure is returned so the caller can fall back to Medium.
    */
   async route(provider: ProviderId | undefined, prompt: string, options: RouteOptions = {}): Promise<AutoRouteOutcome> {
     const task = prompt.slice(0, ROUTE_TASK_MAX_CHARS);
     if (!task.trim()) return { ok: false, reason: 'the message has no text to route' };
+    const latest = options.latestMessage?.slice(0, ROUTE_TASK_MAX_CHARS);
+    return this.ask(['--task', task, ...(latest?.trim() ? ['--latest-message', latest] : [])], provider, options);
+  }
+
+  /**
+   * Asks the router for the model with the most quota room at a level, with no classifier call. Like `route`, a `provider` limits
+   * it to that vendor and `options.acceptProvider` says which vendors a new session can be created on. Never throws.
+   */
+  async routeLevel(level: FixedModelProfileKey, provider: ProviderId | undefined, options: Pick<RouteOptions, 'acceptProvider'> = {}): Promise<AutoRouteOutcome> {
+    return this.ask(['--level', level], provider, options);
+  }
+
+  private async ask(target: string[], provider: ProviderId | undefined, options: RouteOptions): Promise<AutoRouteOutcome> {
     let stdout: string;
     try {
       ({ stdout } = await this.run(
         this.woPath,
-        ['route', '--task', task, '--launcher', 'console', ...(provider ? ['--provider', ROUTER_PROVIDER[provider]] : []), '--json'],
+        ['route', ...target, '--launcher', 'console', ...(provider ? ['--provider', ROUTER_PROVIDER[provider]] : []), '--json'],
         { timeoutMs: this.routeTimeoutMs },
       ));
     } catch (error) {
@@ -313,6 +356,9 @@ export class ModelProfileService {
       ...(result.quota_state ? { quotaState: result.quota_state } : {}),
       ...(result.reason ? { reason: result.reason } : {}),
       ...(result.provisional === true ? { provisional: true } : {}),
+      ...(result.level ? { level: result.level } : {}),
+      ...(result.level_source ? { levelSource: result.level_source } : {}),
+      ...(result.requested_effort ? { requestedEffort: result.requested_effort } : {}),
     };
   }
 }
@@ -342,7 +388,8 @@ function autoTarget(session: ProfiledRow): ModelTarget | undefined {
 
 /**
  * The model and effort a row's profile means, or undefined when it has none (no profile, or Auto before its first routing).
- * Throws `ModelProfilesUnavailableError` when a High, Medium or Low profile cannot be looked up.
+ * Throws `ModelProfilesUnavailableError` when the profiles cannot be loaded, and `ModelLevelUnavailableError` when the row's
+ * provider has no model at its level.
  */
 export async function sessionModelTarget(service: ModelProfileService, session: ProfiledRow): Promise<ModelTarget | undefined> {
   const key = rowProfile(session);

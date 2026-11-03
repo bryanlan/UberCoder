@@ -617,5 +617,5 @@ describe('scratch and Docker sweep', () => {
     const listingFails = runSweep({ ...options, apply: true, docker: (args: string[]) => { if (args[0] === 'version') return '27.0'; throw new Error('daemon restarting'); } });
     expect(listingFails.docker).toEqual({ available: false, reason: 'volume listing failed: daemon restarting', volumes: [] });
     expect(fs.existsSync(listingFails.file)).toBe(true);
-  });
+  }, 20_000); // four full sweeps, each about 1.5 s on a busy host
 });

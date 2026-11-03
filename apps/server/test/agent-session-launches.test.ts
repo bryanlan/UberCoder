@@ -270,12 +270,12 @@ describe('Granted real-session launch pipeline', () => {
 
   it('checks a launch that names no model against the Medium model of the catalog', async () => {
     const none = { model: undefined, effort: undefined };
-    // The stand-in catalog (test/helpers/fake-wo.mjs) makes gpt-6.1-sol the Codex Medium model.
-    const allowed = await fixture(2, ['gpt-6.1-sol']);
+    // The stand-in catalog (test/helpers/fake-wo.mjs) makes gpt-6.1-terra the Codex Medium model.
+    const allowed = await fixture(2, ['gpt-6.1-terra']);
     allowed.setMemory('MemAvailable: 100 kB');
     expect(await allowed.launch(none)).not.toMatchObject({ requiresGrant: true });
     const refused = await fixture(2, ['gpt-6-luna']);
-    expect(await refused.launch(none)).toMatchObject({ requiresGrant: true, model: 'gpt-6.1-sol' });
+    expect(await refused.launch(none)).toMatchObject({ requiresGrant: true, model: 'gpt-6.1-terra' });
     expect(refused.starts()).toBe(0);
   });
 

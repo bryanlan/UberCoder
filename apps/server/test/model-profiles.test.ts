@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ModelLevelUnavailableError,
   ModelProfileService,
   ModelProfilesUnavailableError,
   ROUTE_REPLY_MAX_CHARS,
@@ -15,15 +16,18 @@ import {
 } from '../src/model-profiles/service.js';
 
 const level = (model: string, label: string, effort: string) => ({ model, label, effort, launch_name: model });
+// Grok has no Ultra or High model, so `wo profiles` lists no entry for those levels.
 const PROFILES_JSON = JSON.stringify({ profiles: {
   codex: { provider: 'openai', levels: {
-    high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
+    ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'),
+    medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
   } },
   claude: { provider: 'anthropic', levels: {
-    high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+    ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
+    medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high'),
   } },
   grok: { provider: 'xai', levels: {
-    high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
+    medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
   } },
 } });
 const ROUTE_JSON = {
@@ -49,7 +53,8 @@ describe('model profile list', () => {
     let now = 1_000;
     const service = new ModelProfileService({ profilesCacheMs: 60_000 }, run, undefined, () => now);
     const first = await service.profiles();
-    expect(first.providers.claude.levels.low).toEqual({ model: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', effort: 'high', launchName: 'claude-sonnet-5-5' });
+    expect(first.providers.claude.levels.medium).toEqual({ model: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', effort: 'high', launchName: 'claude-sonnet-5-5' });
+    expect(Object.keys(first.providers.grok.levels)).toEqual(['medium', 'low']);
     expect(first.providers.codex.routerProvider).toBe('openai');
     now += 30_000;
     await service.profiles();
@@ -75,7 +80,21 @@ describe('model profile list', () => {
     await expect(service.entry('codex', 'high')).rejects.toBeInstanceOf(ModelProfilesUnavailableError);
     expect(calls).toHaveLength(2);
     answer = PROFILES_JSON;
-    await expect(service.entry('codex', 'high')).resolves.toMatchObject({ model: 'gpt-6-astra' });
+    await expect(service.entry('codex', 'ultra')).resolves.toMatchObject({ model: 'gpt-6-astra' });
+  });
+
+  it('names the provider and level when a provider has no model at that level, as a kind of unavailable profile', async () => {
+    const service = new ModelProfileService({}, runner({ profiles: () => PROFILES_JSON }).run);
+    const missing = service.entry('grok', 'ultra');
+    await expect(missing).rejects.toBeInstanceOf(ModelLevelUnavailableError);
+    await expect(missing).rejects.toBeInstanceOf(ModelProfilesUnavailableError);
+    await expect(service.entry('grok', 'high')).rejects.toThrow(/^Grok has no High model\.$/);
+    await expect(sessionModelTarget(service, { provider: 'grok', grokProfile: 'ultra' })).rejects.toThrow('Grok has no Ultra model.');
+    expect(peekSessionModelTarget(service, { provider: 'grok', grokProfile: 'ultra' })).toBeUndefined();
+    // Every provider must have a Medium model: the Console falls back to it.
+    const noMedium = JSON.parse(PROFILES_JSON);
+    delete noMedium.profiles.grok.levels.medium;
+    await expect(new ModelProfileService({}, runner({ profiles: () => JSON.stringify(noMedium) }).run).profiles()).rejects.toThrow(/unreadable answer/);
   });
 
   it('reports a timeout, a failed command and an unreadable answer in plain words', async () => {
@@ -107,9 +126,10 @@ describe('model profile list', () => {
     const service = new ModelProfileService({}, runner({ profiles: () => PROFILES_JSON }).run);
     const claude = { provider: 'claude' as const };
     expect(await sessionModelTarget(service, { ...claude })).toBeUndefined();
-    expect(peekSessionModelTarget(service, { ...claude, claudeProfile: 'low' })).toBeUndefined(); // nothing loaded yet
-    expect(await sessionModelTarget(service, { ...claude, claudeProfile: 'low' })).toEqual({ model: 'claude-sonnet-5-5', effort: 'high' });
-    expect(peekSessionModelTarget(service, { ...claude, claudeProfile: 'medium' })).toEqual({ model: 'claude-opus-5-5', effort: 'xhigh' });
+    expect(peekSessionModelTarget(service, { ...claude, claudeProfile: 'medium' })).toBeUndefined(); // nothing loaded yet
+    expect(await sessionModelTarget(service, { ...claude, claudeProfile: 'medium' })).toEqual({ model: 'claude-sonnet-5-5', effort: 'high' });
+    expect(peekSessionModelTarget(service, { ...claude, claudeProfile: 'high' })).toEqual({ model: 'claude-opus-5-5', effort: 'xhigh' });
+    expect(peekSessionModelTarget(service, { ...claude, claudeProfile: 'ultra' })).toEqual({ model: 'claude-fable-5-1', effort: 'xhigh' });
     // Auto runs on its latest decision and has no model before the first routing.
     expect(await sessionModelTarget(service, { ...claude, claudeProfile: 'auto', autoRoute: { routePending: true } })).toBeUndefined();
     expect(await sessionModelTarget(service, { ...claude, claudeProfile: 'auto', autoRoute: { routePending: false,
@@ -129,6 +149,34 @@ describe('Auto routing call', () => {
     } });
     await service.route('codex', 'add a flag');
     expect(calls[1]!.slice(-3)).toEqual(['--provider', 'openai', '--json']);
+  });
+
+  it('sends the newest message so the router can see a level or thinking level the person asked for, and keeps it final', async () => {
+    const asked = { ...ROUTE_JSON, role: null, model: 'claude-fable-5-1', label: 'Claude Fable 5.1', effort: 'medium', launch_name: 'claude-fable-5-1',
+      level: 'ultra', level_source: 'classifier', requested_effort: 'medium', classifier: { status: 'ok', role_choice: 'implementer' },
+      reason: 'Your latest message asked for the ultra level and medium thinking. Best ultra-level fit is Claude Fable 5.1.' };
+    const { run, calls } = runner({ route: () => JSON.stringify(asked) });
+    const service = new ModelProfileService({}, run);
+    const outcome = await service.route('claude', 'new prompt\n\nreply\n\nold prompt', { latestMessage: `use ultra, medium thinking${'y'.repeat(ROUTE_TASK_MAX_CHARS)}` });
+    expect(calls[0]!.slice(0, 5)).toEqual(['route', '--task', 'new prompt\n\nreply\n\nold prompt', '--latest-message', `use ultra, medium thinking${'y'.repeat(ROUTE_TASK_MAX_CHARS - 26)}`]);
+    expect(outcome).toMatchObject({ ok: true, decision: { launchName: 'claude-fable-5-1', effort: 'medium', level: 'ultra', levelSource: 'classifier', requestedEffort: 'medium' } });
+    expect(outcome.ok && 'role' in outcome.decision).toBe(false);
+    // A blank latest message is not sent.
+    await service.route('claude', 'task', { latestMessage: '   ' });
+    expect(calls[1]).not.toContain('--latest-message');
+  });
+
+  it('routes by a level with no classifier call, and reports a level the vendor lacks', async () => {
+    const levelRoute = { status: 'route', role: null, provider: 'openai', model: 'gpt-6-astra', label: 'GPT-6 Astra', effort: 'xhigh', launch_name: 'gpt-6-astra',
+      quota_state: 'surplus', level: 'ultra', level_source: 'caller', requested_effort: null, classifier: null, reason: 'Best ultra-level fit is GPT-6 Astra.' };
+    const { run, calls } = runner({ route: () => JSON.stringify(levelRoute) });
+    const outcome = await new ModelProfileService({}, run).routeLevel('ultra', undefined);
+    expect(calls[0]).toEqual(['route', '--level', 'ultra', '--launcher', 'console', '--json']);
+    expect(outcome).toEqual({ ok: true, provider: 'codex', decision: expect.objectContaining({ launchName: 'gpt-6-astra', level: 'ultra', levelSource: 'caller' }) });
+    const lacking = Object.assign(new Error('exit 4'), { code: 4, stdout: JSON.stringify({ status: 'unavailable', role: null, level: 'ultra',
+      reason: 'The ultra level has no model from xAI that the console launcher can start.' }) });
+    const grok = await new ModelProfileService({}, runner({ route: () => lacking }).run).routeLevel('ultra', 'grok');
+    expect(grok).toEqual({ ok: false, reason: 'The ultra level has no model from xAI that the console launcher can start.' });
   });
 
   it('leaves out role percent and difficulty when the classifier did not answer', async () => {
@@ -164,9 +212,9 @@ describe('Auto routing call', () => {
   });
 
   it('builds the Medium fallback decision with a visible warning', () => {
-    const medium = { model: 'claude-opus-5-5', label: 'Claude Opus 5.5', effort: 'xhigh', launchName: 'claude-opus-5-5' };
+    const medium = { model: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', effort: 'high', launchName: 'claude-sonnet-5-5' };
     expect(fallbackDecision('timed out after 8 s.', medium)).toMatchObject({
-      source: 'fallback', model: 'claude-opus-5-5', effort: 'xhigh', launchName: 'claude-opus-5-5',
+      source: 'fallback', model: 'claude-sonnet-5-5', effort: 'high', launchName: 'claude-sonnet-5-5',
       warning: 'Auto unavailable: timed out after 8 s. Using Medium.',
     });
     const none = fallbackDecision('wo is missing', undefined);
@@ -183,7 +231,7 @@ describe('the stand-in wo command (real subprocess path)', () => {
     const log = path.join(root, 'calls.jsonl');
     process.env.FAKE_WO_LOG = log;
     const service = new ModelProfileService({});
-    expect((await service.profiles()).providers.codex.levels.high.launchName).toBe('gpt-6-astra');
+    expect((await service.profiles()).providers.codex.levels.ultra?.launchName).toBe('gpt-6-astra');
     const hostile = 'fix `rm -rf /` $(whoami); echo "quoted" \'single\'';
     const outcome = await service.route('codex', hostile);
     expect(outcome).toMatchObject({ ok: true, decision: { launchName: 'gpt-6.1-terra' } });
@@ -220,12 +268,12 @@ describe('the stand-in wo command (real subprocess path)', () => {
 describe('Grok and the provider-neutral route', () => {
   const grokAnswer = { ...ROUTE_JSON, provider: 'xai', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launch_name: 'grok-4.7', quota_state: 'unknown' };
 
-  it('serves Grok\'s High, Medium and Low profiles from `wo profiles`', async () => {
+  it('serves Grok\'s Medium and Low profiles from `wo profiles`', async () => {
     const service = new ModelProfileService({}, runner({ profiles: () => PROFILES_JSON }).run);
     const profiles = await service.profiles();
     expect(profiles.providers.grok.routerProvider).toBe('xai');
     expect(profiles.providers.grok.levels.low).toEqual({ model: 'grok-4.6', label: 'Grok 4.6', effort: 'medium', launchName: 'grok-4.6' });
-    expect(await service.entry('grok', 'high')).toMatchObject({ launchName: 'grok-4.7', effort: 'xhigh' });
+    expect(await service.entry('grok', 'medium')).toMatchObject({ launchName: 'grok-4.7', effort: 'high' });
   });
 
   it('asks the router with no --provider when no provider is given, and says which Console provider won', async () => {

@@ -81,10 +81,12 @@ function autoChoiceText(decision: AutoDecision): string {
 /**
  * The Auto state a routing leaves on the row. `routed` counts the prompts routed since A was selected, this one included. The
  * prompt after the first is always checked once more, with the conversation so far; after that the choice is final unless it is
- * still provisional, and three routed prompts in all end it whatever the answer.
+ * still provisional, and three routed prompts in all end it whatever the answer. A choice the person asked for in their message (a
+ * level or a thinking level) is final at once, so a later check cannot quietly undo it.
  */
 function autoRouteFor(decision: AutoDecision, prompt: string, routed: number): AutoRoute {
-  const more = routed < MAX_ROUTED_PROMPTS && (routed === 1 || decision.provisional === true);
+  const asked = decision.level !== undefined || decision.requestedEffort !== undefined;
+  const more = !asked && routed < MAX_ROUTED_PROMPTS && (routed === 1 || decision.provisional === true);
   if (!more) return { routePending: false, decision: decision.provisional === true ? { ...decision, provisional: false } : decision };
   return { routePending: true, decision, routedPrompts: routed, previousPrompt: prompt.slice(0, ROUTE_TASK_MAX_CHARS) };
 }
@@ -110,7 +112,7 @@ interface SessionRecoveryDependencies {
 }
 
 interface SessionManagerOptions {
-  /** Reads the High/Medium/Low profiles and asks the Auto router. Omitted: a service on the configured `wo` path. */
+  /** Reads the Ultra/High/Medium/Low profiles and asks the Auto router. Omitted: a service on the configured `wo` path. */
   modelProfiles?: ModelProfileService;
   coordinationEnabled?: boolean;
   restoreGraceMs?: number;
@@ -1909,7 +1911,7 @@ export class SessionManager {
     await this.drainStructuredQueuedInput(session, record, attemptRevision, defer);
   }
 
-  /** The model a profile switch applies: the target an Auto decision carries, or the catalog's entry for High, Medium and Low. */
+  /** The model a profile switch applies: the target an Auto decision carries, or the catalog's entry for a fixed level. */
   private async requestTarget(provider: ProviderId, request: Pick<ModelProfileRequest, 'profile' | 'target' | 'autoRoute'>): Promise<AppliedModel | undefined> {
     if (request.target) return { ...request.target, label: request.autoRoute?.decision?.label };
     if (request.profile === 'auto') return undefined;
@@ -2910,7 +2912,7 @@ export class SessionManager {
 
   /**
    * Auto: before a person's message starts a turn, ask the router for a model once per selection of A and apply it through the
-   * same switch the H, M and L buttons use. The session then stays on that model, so later messages keep their prompt cache.
+   * same switch the level buttons use. The session then stays on that model, so later messages keep their prompt cache.
    * A failed or slow router applies Medium and says so; the message is never held back for longer than the router's timeout.
    * Runs under the session's command lock, so two messages cannot route twice.
    */
@@ -2943,7 +2945,8 @@ export class SessionManager {
       const task = rerouting
         ? composeRerouteTask({ prompt: text, assistantReply: await this.lastAssistantReplyStart(session), previousPrompt: previous?.previousPrompt })
         : text;
-      const outcome = await this.modelProfiles.route(session.provider, task);
+      // The newest message alone is also sent, so the router can see an explicit level or thinking level the person asked for.
+      const outcome = await this.modelProfiles.route(session.provider, task, { latestMessage: text });
       const latest = this.db.boundSessions.getById(session.id);
       // The row may have changed while the router ran (released, or a different profile chosen).
       if (!latest || activeModelProfile(latest) !== 'auto' || !latest.autoRoute?.routePending || this.hasLiveModelProfileRequest(latest)) return;
@@ -2960,7 +2963,7 @@ export class SessionManager {
     }
   }
 
-  /** Applies a decision through the same switch the H, M and L buttons use, and commits `route` as the row's Auto state with it. */
+  /** Applies a decision through the same switch the level buttons use, and commits `route` as the row's Auto state with it. */
   private async applyAutoDecision(latest: BoundSession, decision: AutoDecision, route: AutoRoute): Promise<void> {
     const target = decision.launchName && decision.effort ? { model: decision.launchName, effort: decision.effort } : undefined;
     const startedAt = nowIso();

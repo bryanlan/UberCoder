@@ -39,7 +39,7 @@ describe('Structured peer wake delivery', () => {
     await w.f.manager.wakePendingAssignments();
 
     expect(w.turnTexts()).toEqual([PEER_WAKE_PROMPT]);
-    expect(w.f.calls(w.native, 'sendTurn')[0]!.args[0]).toMatchObject({ model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect(w.f.calls(w.native, 'sendTurn')[0]!.args[0]).toMatchObject({ model: 'gpt-6.1-terra', effort: 'high' });
     expect(w.attempt(message.id)).toMatchObject({ status: 'submitted', sessionId: w.session.id, restoration: 'already_loaded' });
     await settle();
     expect(w.f.row(w.session.id).isWorking).toBe(true);

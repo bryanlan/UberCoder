@@ -291,7 +291,7 @@ export class BoundSessionsRepo {
         where id = ?
       `).run(
         input.profile,
-        // High, Medium and Low carry no Auto state; a switch to Auto commits the state its request carries.
+        // Ultra, High, Medium and Low carry no Auto state; a switch to Auto commits the state its request carries.
         input.profile === 'auto' && current.modelProfileRequest.autoRoute ? JSON.stringify(current.modelProfileRequest.autoRoute) : null,
         nextUpdatedAt(current.updatedAt, input.updatedAt),
         input.id,

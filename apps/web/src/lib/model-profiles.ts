@@ -36,5 +36,5 @@ export function activeProfileTarget(
   }
   if (state.status !== 'ready') return undefined;
   const entry = state.profiles.providers[provider].levels[profile as FixedModelProfileKey];
-  return { model: entry.launchName, effort: entry.effort };
+  return entry ? { model: entry.launchName, effort: entry.effort } : undefined;
 }

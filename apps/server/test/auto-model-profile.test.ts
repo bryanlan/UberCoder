@@ -7,14 +7,14 @@ import { eventLogLines, structuredSessionFixture, type StructuredSessionFixture 
 const level = (model: string, label: string, effort: string) => ({ model, label, effort, launch_name: model });
 const PROFILES = JSON.stringify({ profiles: {
   codex: { provider: 'openai', levels: {
-    high: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), medium: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
+    ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'),
+    medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh'),
   } },
   claude: { provider: 'anthropic', levels: {
-    high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
+    ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
+    medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high'),
   } },
-  grok: { provider: 'xai', levels: {
-    high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
-  } },
+  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
 } });
 const routed = (model: string, label: string, effort: string, extra: Record<string, unknown> = {}) => JSON.stringify({
   status: 'route', role: 'implementer', model, label, effort, launch_name: model, quota_state: 'on_pace',
@@ -44,6 +44,10 @@ function autoFixture() {
   return { f, ...wo };
 }
 afterEach(async () => { for (const f of open.splice(0)) await f.cleanup(); });
+const finishTurn = async (f: StructuredSessionFixture, id: string) => {
+  f.plugin.instance!.sessions[0]!.completeTurn();
+  await expect.poll(() => f.row(id).isWorking).toBe(false);
+};
 const sentTurns = (f: StructuredSessionFixture, ref: string) => f.calls(ref, 'sendTurn').map(call => call.args[0] as { text: string; model?: string; effort?: string });
 
 describe('Auto model profile on a structured session', () => {
@@ -63,7 +67,7 @@ describe('Auto model profile on a structured session', () => {
 
     await f.manager.sendInput(session.id, 'add a --json flag to the export command');
     expect(routeCalls).toHaveLength(1);
-    expect(routeCalls[0]).toEqual(['route', '--task', 'add a --json flag to the export command', '--launcher', 'console', '--provider', 'openai', '--json']);
+    expect(routeCalls[0]).toEqual(['route', '--task', 'add a --json flag to the export command', '--latest-message', 'add a --json flag to the export command', '--launcher', 'console', '--provider', 'openai', '--json']);
     expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'add a --json flag to the export command', model: 'gpt-6.1-terra', effort: 'low' })]);
     expect(f.row(session.id)).toMatchObject({
       codexProfile: 'auto', modelProfileRequest: undefined,
@@ -87,7 +91,7 @@ describe('Auto model profile on a structured session', () => {
     answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
     await f.manager.sendInput(session.id, 'second');
     expect(routeCalls).toHaveLength(2);
-    expect(routeCalls[1]).toEqual(['route', '--task', 'second\n\nfirst', '--launcher', 'console', '--provider', 'openai', '--json']);
+    expect(routeCalls[1]).toEqual(['route', '--task', 'second\n\nfirst', '--latest-message', 'second', '--launcher', 'console', '--provider', 'openai', '--json']);
     // A clear second answer is final, and the same model keeps running without a second status line.
     expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ launchName: 'gpt-6.1-terra' }) });
     f.plugin.instance!.sessions[0]!.completeTurn();
@@ -145,9 +149,9 @@ describe('Auto model profile on a structured session', () => {
     answers.push(Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }));
 
     await f.manager.sendInput(session.id, 'do the thing');
-    expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'do the thing', model: 'gpt-6.1-sol', effort: 'xhigh' })]);
+    expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ text: 'do the thing', model: 'gpt-6.1-terra', effort: 'high' })]);
     expect(f.row(session.id)).toMatchObject({ codexProfile: 'auto', autoRoute: { routePending: true, routedPrompts: 1, decision: {
-      source: 'fallback', model: 'gpt-6.1-sol', effort: 'xhigh', warning: 'Auto unavailable: timed out after 8 s. Using Medium.',
+      source: 'fallback', model: 'gpt-6.1-terra', effort: 'high', warning: 'Auto unavailable: timed out after 8 s. Using Medium.',
     } } });
     // The failed routing counts as the first prompt, so the second is checked again; a router that is still down changes nothing,
     // and the choice is then final.
@@ -156,7 +160,7 @@ describe('Auto model profile on a structured session', () => {
     await expect.poll(() => f.row(session.id).isWorking).toBe(false);
     await f.manager.sendInput(session.id, 'and again');
     expect(routeCalls).toHaveLength(2);
-    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'and again', model: 'gpt-6.1-sol', effort: 'xhigh' });
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'and again', model: 'gpt-6.1-terra', effort: 'high' });
     expect(f.row(session.id).autoRoute).toMatchObject({ routePending: false, decision: { source: 'fallback' } });
     f.plugin.instance!.sessions[0]!.completeTurn();
     await expect.poll(() => f.row(session.id).isWorking).toBe(false);
@@ -182,7 +186,7 @@ describe('Auto model profile on a structured session', () => {
     const { session } = await f.bindNew({ codexProfile: 'auto' });
     answers.push(JSON.stringify({ status: 'defer', reason: 'Background work waits.' }));
     await f.manager.sendInput(session.id, 'x');
-    expect(f.row(session.id).autoRoute?.decision).toMatchObject({ source: 'fallback', model: 'gpt-6.1-sol' });
+    expect(f.row(session.id).autoRoute?.decision).toMatchObject({ source: 'fallback', model: 'gpt-6.1-terra' });
     expect(f.row(session.id).autoRoute?.decision?.warning).toMatch(/^Auto unavailable: the router chose no model.* Using Medium\.$/);
   });
 
@@ -227,6 +231,62 @@ describe('Auto model profile on a structured session', () => {
   });
 });
 
+describe('A level or thinking level the message asks for', () => {
+  /** The router's answer when the latest message asked for a level (and maybe a thinking level): no role, and the request leads the reason. */
+  const askedLevel = (model: string, label: string, effort: string, level: string, requestedEffort?: string) => JSON.stringify({
+    status: 'route', role: null, level, level_source: 'classifier', requested_effort: requestedEffort ?? null,
+    model, label, effort, launch_name: model, quota_state: 'on_pace', classifier: null,
+    reason: `Your latest message asked for the ${level} level${requestedEffort ? ` and ${requestedEffort} thinking` : ''}. Best ${level}-level fit is ${label} at ${effort} effort.`,
+  });
+
+  it('follows a level the first message asks for, and does not check the second message again', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(askedLevel('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh', 'high'));
+    await f.manager.sendInput(session.id, 'use high for this: tidy the exporter');
+
+    expect(routeCalls[0]).toEqual(['route', '--task', 'use high for this: tidy the exporter', '--latest-message', 'use high for this: tidy the exporter',
+      '--launcher', 'console', '--provider', 'openai', '--json']);
+    expect(sentTurns(f, session.conversationRef)).toEqual([expect.objectContaining({ model: 'gpt-6.1-sol', effort: 'xhigh' })]);
+    // What the person asked for is final: no second-message check.
+    expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ level: 'high', levelSource: 'classifier', launchName: 'gpt-6.1-sol' }) });
+    expect(f.row(session.id).autoRoute?.decision).not.toHaveProperty('role');
+    expect(eventLogLines(f.row(session.id)).some(line => line.type === 'status' && line.text.startsWith('Auto chose') && line.text.includes('asked for the high level'))).toBe(true);
+    await finishTurn(f, session.id);
+    await f.manager.sendInput(session.id, 'and the tests');
+    expect(routeCalls).toHaveLength(1);
+  });
+
+  it('applies a level and thinking level the second message asks for, and then holds them', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'));
+    await f.manager.sendInput(session.id, 'hi, a question about the exporter');
+    await finishTurn(f, session.id);
+
+    answers.push(askedLevel('gpt-6-astra', 'GPT-6 Astra', 'medium', 'ultra', 'medium'));
+    await f.manager.sendInput(session.id, 'use ultra with medium thinking');
+    expect(routeCalls[1]!.slice(3, 5)).toEqual(['--latest-message', 'use ultra with medium thinking']);
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'use ultra with medium thinking', model: 'gpt-6-astra', effort: 'medium' });
+    expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ level: 'ultra', requestedEffort: 'medium' }) });
+    await finishTurn(f, session.id);
+    await f.manager.sendInput(session.id, 'third');
+    expect(routeCalls).toHaveLength(2);
+  });
+
+  it('treats a thinking level alone as final too, keeping the role the router read', async () => {
+    const { f, routeCalls, answers } = autoFixture();
+    const { session } = await f.bindNew({ codexProfile: 'auto' });
+    answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'xhigh', { requested_effort: 'xhigh' }));
+    await f.manager.sendInput(session.id, 'think hard about the exporter');
+    expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ role: 'implementer', requestedEffort: 'xhigh' }) });
+    expect(f.row(session.id).autoRoute?.decision).not.toHaveProperty('level');
+    await finishTurn(f, session.id);
+    await f.manager.sendInput(session.id, 'next');
+    expect(routeCalls).toHaveLength(1);
+  });
+});
+
 describe('Switching to and from Auto', () => {
   it('pressing H after Auto clears the Auto state and later messages are not routed', async () => {
     const { f, routeCalls, answers } = autoFixture();
@@ -241,7 +301,7 @@ describe('Switching to and from Auto', () => {
     expect(f.row(session.id).autoRoute).toBeUndefined();
     await f.manager.sendInput(session.id, 'second');
     expect(routeCalls).toHaveLength(1);
-    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6-astra', effort: 'xhigh' });
+    expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ model: 'gpt-6.1-sol', effort: 'xhigh' });
   });
 
   it('pressing A on a High session keeps its model until the next message is routed', async () => {
@@ -251,7 +311,7 @@ describe('Switching to and from Auto', () => {
     expect(pressed.session.modelProfileRequest).toMatchObject({ profile: 'auto', autoRoute: { routePending: true } });
     await expect.poll(() => f.row(session.id).codexProfile).toBe('auto');
     expect(f.row(session.id)).toMatchObject({ modelProfileRequest: undefined, autoRoute: { routePending: true } });
-    expect(f.plugin.instance!.sessions[0]!.options.model).toBe('gpt-6-astra');
+    expect(f.plugin.instance!.sessions[0]!.options.model).toBe('gpt-6.1-sol');
 
     answers.push(routed('gpt-6.1-terra', 'GPT-6.1 Terra', 'low'));
     await f.manager.sendInput(session.id, 'now route me');
@@ -262,10 +322,6 @@ describe('Switching to and from Auto', () => {
 
 describe('Provisional Auto choices', () => {
   const provisional = (model: string, label: string, effort: string) => routed(model, label, effort, { provisional: true, classifier: { status: 'cannot_tell', role_choice: 'implementer', role_probabilities: { implementer: 0.4 }, difficulty_choice: 'lighter' } });
-  const finishTurn = async (f: StructuredSessionFixture, id: string) => {
-    f.plugin.instance!.sessions[0]!.completeTurn();
-    await expect.poll(() => f.row(id).isWorking).toBe(false);
-  };
 
   it('records the flag, keeps the next prompt waiting to be routed, and remembers the text it saw', async () => {
     const { f, answers } = autoFixture();
@@ -290,7 +346,7 @@ describe('Provisional Auto choices', () => {
     await f.manager.sendInput(session.id, 'second, rewrite the export module');
     expect(routeCalls).toHaveLength(2);
     // The new prompt first, then the earlier one (the fixture's provider has no transcript to read a reply from).
-    expect(routeCalls[1]).toEqual(['route', '--task', 'second, rewrite the export module\n\nfirst, vague', '--launcher', 'console', '--provider', 'openai', '--json']);
+    expect(routeCalls[1]).toEqual(['route', '--task', 'second, rewrite the export module\n\nfirst, vague', '--latest-message', 'second, rewrite the export module', '--launcher', 'console', '--provider', 'openai', '--json']);
     expect(sentTurns(f, session.conversationRef).at(-1)).toMatchObject({ text: 'second, rewrite the export module', model: 'gpt-6.1-sol', effort: 'high' });
     expect(f.row(session.id).autoRoute).toEqual({ routePending: false, decision: expect.objectContaining({ launchName: 'gpt-6.1-sol', role: 'implementer' }) });
     expect(f.row(session.id).autoRoute?.decision).not.toHaveProperty('provisional');
