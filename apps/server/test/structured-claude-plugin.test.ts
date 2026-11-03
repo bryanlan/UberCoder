@@ -441,6 +441,14 @@ describe('turns', () => {
     expect(sequence).toEqual(['set_model:opus', 'effort:high', 'user:one', 'user:two']);
   });
 
+  it('changes and reads back effort while a turn is running', async () => {
+    const { setup, session, events } = await startSession({ turns: [{ steps: [{ hold: true }] }] });
+    await session.sendTurn({ text: 'working' });
+    await events.waitForType('turn.started');
+    await session.setEffort('high');
+    expect(receivedControls(setup.logFile).filter(frame => ['apply_flag_settings', 'get_settings'].includes(frame.request.subtype)).map(frame => frame.request.subtype)).toEqual(['apply_flag_settings', 'get_settings']);
+  });
+
   it('sends an image that already fits as it is: a base64 block before the text', async () => {
     const { setup, session, events } = await startSession();
     const image = path.join(setup.dir, 'shot.png');

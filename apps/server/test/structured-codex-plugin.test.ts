@@ -316,8 +316,8 @@ describe('codex request building', () => {
   });
 
   it('always asks Codex to wait for optional MCP servers, and adds the effort override only when given', () => {
-    expect(threadConfig({})).toEqual({ mcp_optional_startup_grace_ms: 10_000 });
-    expect(threadConfig({ effort: 'high' })).toEqual({ mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'high' });
+    expect(threadConfig({})).toEqual({ mcp_optional_startup_grace_ms: 10_000, features: { step_model_switching: true } });
+    expect(threadConfig({ effort: 'high' })).toEqual({ mcp_optional_startup_grace_ms: 10_000, features: { step_model_switching: true }, model_reasoning_effort: 'high' });
   });
 
   it('maps the other sandbox policies', () => {
@@ -677,7 +677,7 @@ describe('codex instance and session against a scripted app-server', () => {
       approvalPolicy: 'never',
       sandbox: 'danger-full-access',
       approvalsReviewer: 'user',
-      config: { mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'high' },
+      config: { mcp_optional_startup_grace_ms: 10_000, features: { step_model_switching: true }, model_reasoning_effort: 'high' },
       ephemeral: false,
     });
     const log = new EventLog(session);
@@ -1525,7 +1525,7 @@ describe('codex instance and session against a scripted app-server', () => {
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
         sandbox: 'danger-full-access',
-        config: { mcp_optional_startup_grace_ms: 10_000, model_reasoning_effort: 'low' },
+        config: { mcp_optional_startup_grace_ms: 10_000, features: { step_model_switching: true }, model_reasoning_effort: 'low' },
       });
       const log = new EventLog(session);
       await waitUntil(() => log.events.length >= 2);

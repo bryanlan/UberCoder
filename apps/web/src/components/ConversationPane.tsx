@@ -151,6 +151,7 @@ function SessionComposer({
   modelProfiles,
   visibleModel,
   modelProfileRequest,
+  thinkingEffort,
   queuedDraftText,
 }: {
   csrfToken?: string;
@@ -177,6 +178,7 @@ function SessionComposer({
   modelProfiles: ModelProfilesState;
   visibleModel?: string;
   modelProfileRequest?: ModelProfileRequest;
+  thinkingEffort?: string;
   queuedDraftText?: string;
 }) {
   const [draftText, setDraftText] = useState(() => composerDraftStore.get(conversationKey) ?? '');
@@ -199,6 +201,23 @@ function SessionComposer({
   const activeSessionIdRef = useRef(sessionId);
   activeSessionIdRef.current = sessionId;
   const [profileError, setProfileError] = useState<string>();
+  const [effortBusy, setEffortBusy] = useState(false);
+  const [effortError, setEffortError] = useState<string>();
+  const [chosenEffort, setChosenEffort] = useState(thinkingEffort);
+  useEffect(() => { setChosenEffort(thinkingEffort); }, [sessionId, thinkingEffort]);
+  useEffect(() => { setEffortBusy(false); setEffortError(undefined); }, [sessionId]);
+  async function changeThinkingEffort(effort: string) {
+    setEffortBusy(true);
+    setEffortError(undefined);
+    try {
+      await api.setSessionThinkingEffort(sessionId, effort, csrfToken);
+      if (activeSessionIdRef.current === sessionId) setChosenEffort(effort);
+    } catch (error) {
+      if (activeSessionIdRef.current === sessionId) setEffortError(error instanceof Error ? error.message : 'Could not change thinking level.');
+    } finally {
+      if (activeSessionIdRef.current === sessionId) setEffortBusy(false);
+    }
+  }
   const clipboardImages = useClipboardImages(conversationKey, sessionId, csrfToken);
   const [imageSubmitError, setImageSubmitError] = useState<string>();
   const [agentReferenceError, setAgentReferenceError] = useState<string>();
@@ -557,7 +576,7 @@ function SessionComposer({
   const bridgeBodyClassName = mobileCollapsible ? (mobileInputPanel === 'reply' ? 'px-3 py-2' : 'flex flex-col px-3 pb-2') : 'px-4 py-4';
   const activeTarget = activeProfileTarget(modelProfiles, provider, activeModelProfile, autoRoute);
   const currentProfileMatchesVisibleModel = activeModelProfile
-    ? (activeTarget ? visibleModelMatchesTarget(provider, activeTarget, visibleModel) : undefined) !== false
+    ? (activeTarget ? visibleModelMatchesTarget(provider, { ...activeTarget, effort: chosenEffort ?? activeTarget.effort }, visibleModel) : undefined) !== false
     : false;
   const profileLetters = MODEL_PROFILE_KEYS.filter((profile) => !levelMissing(profile)).map((profile) => MODEL_PROFILE_SHORTCUTS[profile]);
   const profileChoice = `${profileLetters.slice(0, -1).join(', ')}, or ${profileLetters.at(-1)}`;
@@ -667,6 +686,15 @@ function SessionComposer({
               </div>
             </div>
           )}
+          {(!mobileCollapsible || mobileInputPanel === 'controls') && <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
+            <label htmlFor="thinking-effort">Thinking level</label>
+            <select id="thinking-effort" value={chosenEffort ?? ''} disabled={effortBusy} onChange={event => { if (event.target.value) void changeThinkingEffort(event.target.value); }} className="rounded border border-slate-700 bg-slate-900 px-2 py-1.5">
+              <option value="" disabled>Profile default</option>
+              {(provider === 'codex' ? ['low', 'medium', 'high', 'xhigh', 'ultra'] : provider === 'claude' ? ['low', 'medium', 'high', 'xhigh', 'max'] : ['low', 'medium', 'high', 'xhigh']).map(effort => <option key={effort} value={effort}>{effort}</option>)}
+            </select>
+            <span className="text-slate-500">{provider === 'claude' ? 'Stays selected until changed. Claude applies it on the next turn.' : 'Stays selected until changed. A model call already underway keeps its setting.'}</span>
+            {effortError && <span role="alert" className="text-rose-300">{effortError}</span>}
+          </div>}
           {(!mobileCollapsible || mobileInputPanel === 'reply') && clipboardImages.items.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2" aria-label="Attached images">
               {clipboardImages.items.map(item => (
@@ -1320,6 +1348,7 @@ export function ConversationPane({
           autoRoute={boundSession.autoRoute}
           visibleModel={liveScreen?.model}
           modelProfileRequest={boundSession.modelProfileRequest}
+          thinkingEffort={boundSession.thinkingEffort}
         />
       ) : (
         <div className="border-t border-slate-800 bg-slate-950/90 px-4 py-4 text-sm text-slate-400">

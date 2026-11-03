@@ -391,6 +391,15 @@ describe('Auto model profile (A)', () => {
 });
 
 describe('model profile list from the server', () => {
+  it('changes thinking level directly and keeps the chosen value visible', async () => {
+    const change = vi.spyOn(api, 'setSessionThinkingEffort').mockResolvedValue({ session: boundSession({ thinkingEffort: 'high' }) });
+    try {
+      renderPane();
+      fireEvent.change(screen.getByLabelText('Thinking level'), { target: { value: 'high' } });
+      await waitFor(() => expect(change).toHaveBeenCalledWith('session-1', 'high', undefined));
+      await waitFor(() => expect(screen.getByLabelText('Thinking level')).toHaveValue('high'));
+    } finally { change.mockRestore(); }
+  });
   it('shows a clear error and disables every profile button when the list cannot be loaded', () => {
     renderPane({
       modelProfiles: { status: 'error', message: 'Model profiles unavailable: wo was not found at /x/wo' },

@@ -364,7 +364,8 @@ export class GrokSession implements TransportSession {
     try {
       // Model first: the efforts a model accepts depend on it.
       if (wantModel) this.readOptions(await this.setOption('model', wantModel));
-      if (wantEffort) this.readOptions(await this.setOption('reasoning_effort', wantEffort));
+      // A model change can change the available or current effort. Recheck after its response.
+      if (input.effort && input.effort !== this.effort) this.readOptions(await this.setOption('reasoning_effort', input.effort));
     } catch (error) {
       if (error instanceof JsonRpcRequestError) {
         throw new SendRejectedError(`Grok refused the model setting: ${this.describeError(error)}`);
@@ -373,6 +374,11 @@ export class GrokSession implements TransportSession {
       notSent.cause = error;
       throw notSent;
     }
+  }
+
+  async setEffort(effort: string): Promise<void> {
+    this.readOptions(await this.setOption('reasoning_effort', effort));
+    if (this.effort !== effort) throw new Error('Grok did not confirm the requested thinking level.');
   }
 
   private setOption(configId: 'model' | 'reasoning_effort', value: string): Promise<unknown> {

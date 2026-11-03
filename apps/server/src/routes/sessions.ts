@@ -79,6 +79,20 @@ export async function registerSessionRoutes(
   sessions: SessionManager,
   images?: ImageStore,
 ): Promise<void> {
+  app.post('/api/sessions/:sessionId/thinking-effort', async (request, reply) => {
+    try { await authService.ensureAuthenticated(request, reply); } catch { return; }
+    const sessionId = parseSessionId(request.params, reply);
+    if (!sessionId) return;
+    const body = z.object({ effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']) }).strict().safeParse(request.body);
+    if (!body.success) return reply.code(400).send({ error: 'Invalid thinking level.' });
+    if (!sessions.getSessionById(sessionId)) return reply.code(404).send({ error: 'Session not found.' });
+    try { return await sessions.setThinkingEffort(sessionId, body.data.effort); }
+    catch (error) {
+      if (error instanceof SessionInputRejectedError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  });
+
   app.post('/api/sessions/:sessionId/model-profile', async (request, reply) => {
     try {
       await authService.ensureAuthenticated(request, reply);

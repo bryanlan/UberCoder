@@ -89,6 +89,8 @@ export interface TransportSession {
   readonly turnUnidentified?: boolean;
   sendTurn(input: TurnInput): Promise<{ turnId: string }>; // rejects with PreviousTurnActiveError while a turn runs, NotSentError when nothing was written but a retry may work, SendRejectedError when nothing was written and a retry cannot work
   steer?(turnId: string, input: TurnInput): Promise<void>; // only when capabilities.steer !== 'none'; rejects with TurnNotActiveError when the turn already ended
+  /** Apply effort to a running session. A request already captured by the provider may retain its previous settings. */
+  setEffort?(effort: string, turnId?: string): Promise<void>;
   /**
    * Resolves when the request is accepted; the terminal follows as an event. A plugin whose stop also drops sends that were
    * queued behind the turn reports the steers among them (`cancelledSteerIds`: the `clientMessageId` the host passed to

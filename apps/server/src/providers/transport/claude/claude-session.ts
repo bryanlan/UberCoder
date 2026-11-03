@@ -666,6 +666,16 @@ export class ClaudeSession implements TransportSession {
     }
   }
 
+  async setEffort(effort: string): Promise<void> {
+    await this.client.sendControl({ subtype: 'apply_flag_settings', settings: { effortLevel: effort } }, { timeoutMs: this.timings.controlTimeoutMs });
+    const settings = await this.client.sendControl({ subtype: 'get_settings' }, { timeoutMs: this.timings.controlTimeoutMs });
+    const applied = settings.response?.applied;
+    if (!applied || typeof applied !== 'object' || !('effort' in applied) || applied.effort !== effort) {
+      throw new Error('Claude did not confirm the requested thinking level.');
+    }
+    this.effort = effort;
+  }
+
   private async applySettings(input: TurnInput): Promise<void> {
     if (input.model && input.model !== this.model) {
       await this.client.sendControl({ subtype: 'set_model', model: input.model }, { timeoutMs: this.timings.controlTimeoutMs });

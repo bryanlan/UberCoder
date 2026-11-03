@@ -175,7 +175,7 @@ export function buildAppServerEnv(base: NodeJS.ProcessEnv, home: string = os.hom
  * starting first (the value T3 Code uses).
  */
 export function threadConfig(options: Pick<OpenOptions, 'effort'>): NonNullable<ThreadStartParams['config']> {
-  return { mcp_optional_startup_grace_ms: 10_000, ...(options.effort ? { model_reasoning_effort: options.effort } : {}) };
+  return { mcp_optional_startup_grace_ms: 10_000, features: { step_model_switching: true }, ...(options.effort ? { model_reasoning_effort: options.effort } : {}) };
 }
 
 /**

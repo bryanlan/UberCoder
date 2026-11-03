@@ -30,9 +30,8 @@ export class BoundSessionsRepo {
     const session = mapBoundSessionRow(row);
     const queuedInputs = new InputQueue(this.sqlite).summaries(session.id);
     const pendingRequests = parsePendingRequests((this.sqlite.prepare('select value from meta where key = ?').get(structuredRequestsKey(session.id)) as { value: string } | undefined)?.value);
-    return queuedInputs.length || pendingRequests.length
-      ? { ...session, ...(queuedInputs.length ? { queuedInputs } : {}), ...(pendingRequests.length ? { pendingRequests } : {}) }
-      : session;
+    const thinkingEffort = (this.sqlite.prepare('select value from meta where key = ?').get(`session-thinking:${session.id}`) as { value: string } | undefined)?.value;
+    return { ...session, ...(queuedInputs.length ? { queuedInputs } : {}), ...(pendingRequests.length ? { pendingRequests } : {}), ...(thinkingEffort ? { thinkingEffort } : {}) };
   }
 
   upsert(session: BoundSession): void {
@@ -371,6 +370,16 @@ export class BoundSessionsRepo {
       limit 1
     `).get(projectSlug, provider, conversationRef) as SqliteRow | undefined;
     return row ? this.mapRow(row) : undefined;
+  }
+
+  getLastThinkingEffort(projectSlug: string, provider: string, conversationRef: string): string | undefined {
+    const row = this.sqlite.prepare(`
+      select m.value from bound_sessions bs
+      join meta m on m.key = 'session-thinking:' || bs.id
+      where bs.project_slug = ? and bs.provider = ? and bs.conversation_ref = ?
+      order by bs.started_at desc, bs.rowid desc limit 1
+    `).get(projectSlug, provider, conversationRef) as { value: string } | undefined;
+    return row?.value;
   }
 
   delete(id: string): void {

@@ -453,6 +453,8 @@ export interface CodexRequestMap {
   'thread/backgroundTerminals/terminate': { params: ThreadBackgroundTerminalsTerminateParams; result: ThreadBackgroundTerminalsTerminateResponse };
   'turn/start': { params: TurnStartParams; result: TurnStartResponse };
   'turn/steer': { params: TurnSteerParams; result: TurnSteerResponse };
+  'turn/settings/update': { params: { threadId: string; turnId: string; effort: string }; result: { status: 'applied' | 'targetUnavailable' } };
+  'thread/settings/update': { params: { threadId: string; effort: string }; result: Record<string, never> };
   'turn/interrupt': { params: TurnInterruptParams; result: TurnInterruptResponse };
   'model/list': { params: ModelListParams; result: ModelListResponse };
   'account/read': { params: GetAccountParams; result: GetAccountResponse };

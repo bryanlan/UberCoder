@@ -35,6 +35,49 @@ function grokFixture() {
 }
 
 describe('Structured human input', () => {
+  it('changes a running turn and retains the selected thinking level for later turns', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'first');
+    await settle();
+    const result = await f.manager.setThinkingEffort(session.id, 'high');
+    expect(f.calls(session.conversationRef, 'setEffort')[0]?.args).toEqual(['high', 'turn-1']);
+    expect(result.session.thinkingEffort).toBe('high');
+    f.thread(session.conversationRef).completeTurn();
+    await settle();
+    await send(f, session.id, 'second');
+    expect(f.calls(session.conversationRef, 'sendTurn')[1]?.args[0]).toMatchObject({ effort: 'high' });
+    expect(f.db.boundSessions.getById(session.id)?.thinkingEffort).toBe('high');
+  });
+
+  it('does not save an effort the provider rejected', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    f.thread(session.conversationRef).setEffort = async () => { throw new Error('unsupported effort'); };
+    await expect(f.manager.setThinkingEffort(session.id, 'ultra')).rejects.toThrow('unsupported effort');
+    expect(f.db.boundSessions.getById(session.id)?.thinkingEffort).toBeUndefined();
+  });
+
+  it('keeps the thinking preference after a backend restart', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await f.manager.setThinkingEffort(session.id, 'high');
+    const next = await f.restartBackend();
+    await next.manager.sendInput(session.id, 'continue');
+    const resumed = next.plugin.instances.flatMap(instance => instance.sessions).find(thread => thread.nativeSessionId === session.conversationRef);
+    expect(resumed?.options.effort).toBe('high');
+    expect(resumed?.calls.find(call => call.method === 'sendTurn')?.args[0]).toMatchObject({ effort: 'high' });
+  });
+  it('retains the thinking preference when a released conversation is opened again', async () => {
+    const f = fixture();
+    const { session } = await f.bindNew();
+    await f.manager.setThinkingEffort(session.id, 'high');
+    await f.manager.releaseSession(session.id);
+    const reopened = await f.bindHistory(session.conversationRef);
+    expect(reopened.id).not.toBe(session.id);
+    expect(reopened.thinkingEffort).toBe('high');
+    expect(f.thread(session.conversationRef).options.effort).toBe('high');
+  });
   it('starts a turn when idle, journaling the message from queued to submitted with its turn id', async () => {
     const f = fixture();
     const { session } = await f.bindNew();

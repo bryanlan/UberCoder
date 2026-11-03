@@ -391,6 +391,8 @@ export interface RunFailure {
 }
 
 export interface BoundSession {
+  /** Person-selected effort, retained for later turns until changed. */
+  thinkingEffort?: string;
   launchContext?: AgentLaunchContext;
   runFailure?: RunFailure;
   id: string;

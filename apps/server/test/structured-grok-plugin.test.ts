@@ -223,6 +223,18 @@ describe('Grok plugin: turns', () => {
     expect(events.terminalsOf(first.turnId)).toHaveLength(1);
   });
 
+  it('sets and confirms effort while a turn is running', async () => {
+    const s = fresh();
+    const session = s.track(await s.instance.start(s.open())) as GrokSession;
+    const events = new EventLog(session);
+    const { turnId } = await session.sendTurn(text('slow one'));
+    await session.setEffort('low');
+    expect(s.received('session/set_config_option').at(-1)?.params).toMatchObject({ sessionId: session.nativeSessionId, configId: 'reasoning_effort', value: 'low' });
+    expect(session.activeTurn).toBe(turnId);
+    s.release();
+    await events.waitForTerminal(turnId);
+  });
+
   it('sends session/cancel on interrupt and reports the turn as interrupted', async () => {
     const s = fresh();
     const session = s.track(await s.instance.start(s.open()));

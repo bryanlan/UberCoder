@@ -68,7 +68,7 @@ export interface GetContextUsageRequest {
   detail?: 'summary' | 'full';
 }
 
-export type OutboundControlRequest = InitializeRequest | InterruptRequest | SetModelRequest | ApplyFlagSettingsRequest | GetContextUsageRequest;
+export type OutboundControlRequest = InitializeRequest | InterruptRequest | SetModelRequest | ApplyFlagSettingsRequest | GetContextUsageRequest | { subtype: 'get_settings' };
 
 export interface ControlRequestFrame<R = OutboundControlRequest> {
   type: 'control_request';

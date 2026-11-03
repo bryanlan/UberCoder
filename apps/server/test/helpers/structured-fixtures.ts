@@ -85,6 +85,9 @@ class EventChannel {
 
 export class FakeTransportSession implements TransportSession {
   readonly calls: FakeCall[] = [];
+  async setEffort(effort: string, turnId?: string): Promise<void> {
+    this.calls.push({ method: 'setEffort', args: [effort, turnId] });
+  }
   readonly events: AsyncIterable<TransportEvent>;
   transcriptPath: string | undefined;
   activeTurnId: string | undefined;

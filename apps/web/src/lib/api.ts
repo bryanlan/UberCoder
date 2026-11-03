@@ -237,6 +237,9 @@ export const api = {
   cancelQueuedInput: (sessionId: string, requestId: string, csrfToken?: string) =>
     request<SessionInputResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/queued-inputs/${encodeURIComponent(requestId)}`, { method: 'DELETE' }, csrfToken),
   modelProfiles: () => request<ModelProfilesResponse>('/api/model-profiles', { cache: 'no-store' }),
+  setSessionThinkingEffort: (sessionId: string, effort: string, csrfToken?: string) =>
+    request<SessionModelProfileResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/thinking-effort`,
+      { method: 'POST', body: JSON.stringify({ effort }) }, csrfToken),
   setSessionModelProfile: (sessionId: string, profile: ModelProfileKey, csrfToken?: string) =>
     request<SessionModelProfileResponse>(
       `/api/sessions/${encodeURIComponent(sessionId)}/model-profile`,

@@ -104,6 +104,7 @@ const turns = [...(scenario.turns ?? [])];
 const seenUuids = new Set();
 const queue = []; // {uuid, content, priority}
 let running; // {uuids, steps, interrupted, wake, fold, ...}
+let appliedEffort;
 let eof = false;
 let lastResultWasError = false;
 let resultIndex = 0;
@@ -414,7 +415,11 @@ async function handleControl(frame) {
       reply(requestId, { model: `resolved-${request.model}` });
       return;
     case 'apply_flag_settings':
+      appliedEffort = request.settings.effortLevel;
       reply(requestId);
+      return;
+    case 'get_settings':
+      reply(requestId, { applied: { effort: appliedEffort } });
       return;
     case 'get_context_usage':
       if (scenario.contextUsage === 'error') replyError(requestId, 'get_context_usage is not available');

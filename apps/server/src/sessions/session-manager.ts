@@ -1662,6 +1662,10 @@ export class SessionManager {
       eventLogPath,
     };
     this.db.boundSessions.upsert(session);
+    if (!pendingRef) {
+      const previousEffort = this.db.boundSessions.getLastThinkingEffort(input.project.slug, providerId, input.conversationRef);
+      if (previousEffort) this.db.meta.set(`session-thinking:${sessionId}`, previousEffort);
+    }
     if (input.launchContext) this.db.boundSessions.setLaunchContext(sessionId, input.launchContext);
     if (startRoute) this.db.boundSessions.setAutoRoute(sessionId, startRoute, now);
 
@@ -1994,6 +1998,24 @@ export class SessionManager {
     });
     this.scheduleModelProfileDrain(sessionId);
     return response;
+  }
+
+  async setThinkingEffort(sessionId: string, effort: string): Promise<SessionModelProfileResponse> {
+    return await this.runtimes.run(sessionId, 'setThinkingEffort', async () => {
+      const session = this.mustGetSession(sessionId);
+      if (!session.shouldRestore || !['starting', 'bound'].includes(session.status) || !this.getCurrentRestorableSession(session)) {
+        throw new SessionInputRejectedError('This session no longer owns the conversation.');
+      }
+      try {
+        await this.structured.setThinkingEffort(session, effort);
+      } catch (error) {
+        throw new SessionInputRejectedError(`Could not change thinking level: ${structuredStatusReason(error)}`);
+      }
+      this.db.meta.set(`session-thinking:${sessionId}`, effort);
+      const updated = this.mustGetSession(sessionId);
+      this.eventBus.emit({ type: 'session.updated', session: updated });
+      return { session: updated };
+    });
   }
 
   async cancelModelProfileRequest(sessionId: string, requestId: string): Promise<SessionModelProfileResponse> {

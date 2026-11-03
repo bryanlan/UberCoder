@@ -750,13 +750,25 @@ export class StructuredSessionService {
     return 'applied';
   }
 
+  async setThinkingEffort(session: BoundSession, effort: string): Promise<void> {
+    const state = this.requireLoaded(session);
+    if (state.transport.turnUnidentified) throw new StructuredUnavailableError('The running turn has not yet been identified. Try again shortly.');
+    if (!state.transport.setEffort) throw new StructuredUnsupportedError('This provider does not support changing thinking level.');
+    try {
+      await state.transport.setEffort(effort, state.activeTurnId);
+    } catch (error) {
+      // A turn that ended during the request needs no live update; the preference still applies to its next turn.
+      if (!(error instanceof TurnNotActiveError) || this.turnRunning(session)) throw error;
+    }
+  }
+
   // ---- projection ------------------------------------------------------------------------------------
 
   /** The status the web polls on /screen: there is no terminal, so it is synthesized from the session's state. */
   screen(session: BoundSession): SessionScreen {
     const state = this.sessions.get(session.id);
     const selected = state?.target ?? this.targets.peek(session);
-    const model = selected ? `${selected.model} ${selected.effort}` : session.launchContext?.model;
+    const model = selected ? `${selected.model} ${session.thinkingEffort ?? selected.effort}` : session.launchContext?.model;
     // `asleep`: the row is not loaded in the provider (manual or idle sleep, or not restored yet). Loading it again reads `idle`.
     const status = `${providerLabel(session.provider)} ${!state?.loaded ? 'asleep' : state.activeTurnId || state.transport.turnUnidentified ? 'working' : 'idle'}`;
     const used = state?.usage?.used, max = state?.usage?.max;
@@ -777,9 +789,11 @@ export class StructuredSessionService {
   }
 
   private modelFor(state: LoadedSession): { model?: string; effort?: string } {
-    if (state.target) return { model: state.target.model, effort: state.target.effort };
+    const override = this.meta.get(`session-thinking:${state.sessionId}`);
+    if (state.target) return { model: state.target.model, effort: override ?? state.target.effort };
     const fallback = state.fallbackModel;
-    return { ...(fallback?.model ? { model: fallback.model } : {}), ...(fallback?.effort ? { effort: fallback.effort } : {}) };
+    const effort = override ?? fallback?.effort;
+    return { ...(fallback?.model ? { model: fallback.model } : {}), ...(effort ? { effort } : {}) };
   }
 
   private async startTurn(state: LoadedSession, input: TurnInput): Promise<string> {
@@ -842,7 +856,7 @@ export class StructuredSessionService {
       conversationId: sessionId,
       cwd,
       model: target?.model ?? fallbackModel.model,
-      effort: target?.effort ?? fallbackModel.effort,
+      effort: this.meta.get(`session-thinking:${sessionId}`) ?? target?.effort ?? fallbackModel.effort,
       policy: { approvals: 'never', sandbox: 'full-access' },
       ...this.identityOptions(provider, instance, sessionId, resuming, launchContext),
     };

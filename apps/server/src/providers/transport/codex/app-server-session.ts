@@ -555,6 +555,28 @@ export class CodexAppServerSession implements TransportSession {
   // -------------------------------------------------------------------------------------------------------
   // TransportSession
 
+  async setEffort(effort: string, turnId?: string): Promise<void> {
+    const client = this.host.client();
+    if (turnId) {
+      let result: { status: 'applied' | 'targetUnavailable' };
+      try {
+        result = await callCodex(client, 'turn/settings/update', { threadId: this.nativeSessionId, turnId, effort }, { timeoutMs: this.host.timings.requestTimeoutMs });
+      } catch (error) {
+        if (error instanceof JsonRpcRequestError && error.message.includes('step_model_switching')) {
+          throw new Error('This Codex turn started before live thinking changes were enabled. After it ends, suspend and resume the conversation, then change the level.');
+        }
+        throw error;
+      }
+      if (result.status !== 'applied') throw new TurnNotActiveError(turnId);
+    }
+    try {
+      await callCodex(client, 'thread/settings/update', { threadId: this.nativeSessionId, effort }, { timeoutMs: this.host.timings.requestTimeoutMs });
+    } catch (error) {
+      if (turnId) throw new Error(`The running Codex turn accepted the level, but saving it for later turns failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
   async sendTurn(input: TurnInput): Promise<{ turnId: string }> {
     if (this.ended) throw new NotSentError('The Codex session has ended.');
     if (this.activeTurnId !== null || this.pendingStart !== null) throw new PreviousTurnActiveError();
