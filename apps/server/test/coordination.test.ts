@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PROVIDERS } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import { CoordinationService, processStart } from '../src/coordination/service.js';
 import { PEER_WAKE_PROMPT } from '../src/coordination/wake.js';
@@ -933,6 +934,9 @@ describe('assignment coordination', () => {
     expect(wikiTool.name).toBe('agent_wiki');
     expect(wikiTool.inputSchema.properties.action.enum).toEqual(['list', 'search', 'read', 'history', 'write']);
     expect(wikiTool.inputSchema.required).toContain('checkout');
+    // The helper is a standalone script with its own copy of the provider list; it must offer every provider the Console can launch.
+    const grantsTool = JSON.parse(result.stdout).result.tools.find((candidate: { name: string }) => candidate.name === 'agent_grants');
+    expect(grantsTool.inputSchema.properties.provider.enum).toEqual([...PROVIDERS]);
   });
 
   it('registers a Grok process that inherited the Claude hook as grok', async () => {

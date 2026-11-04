@@ -68,7 +68,9 @@ The localhost development app disables PWA workers, so notifications require the
 ## Launch and restart real sessions
 
 `agent_grants launch` accepts `projectSlug`, `provider`, `model`, `effort`, `prompt`, `title` and `supervisorId`.
-Providers are `codex` and `claude`. The backend uses the same session manager and structured transport as the UI.
+Providers are `codex`, `claude`, `grok` and `vibe` (Mistral Vibe), the same four the Console starts for a person; a provider whose lane is off cannot launch.
+`model` takes the router's launch name for a level (`wo profiles --json`), for example `glm-5-3` for Vibe's Medium level; a launch that names no model runs the provider's Medium level. A grant's `limits.models` compares against that name.
+The backend uses the same session manager and structured transport as the UI.
 Sessions take no command-line flags: a request that carries a non-empty `flags` list is refused.
 The session appears in the list as **Launched by** its launcher.
 Use `launch_status` with the returned request ID to obtain the native assignment after registration.

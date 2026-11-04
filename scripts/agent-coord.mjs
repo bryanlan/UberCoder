@@ -369,7 +369,7 @@ Use status/history for ordinary progress when no recipient action or useful awar
     }, required: ['grantee','scope'] },
     humanMessageId: { type: 'string' }, reason: { type: 'string' }, grantId: { type: 'string' }, requestId: { type: 'string' }, sessionId: { type: 'string' },
     targetAssignmentId: { type: 'string', description: 'For restart, the recipient assignment ID instead of sessionId.' },
-    projectSlug: { type: 'string' }, provider: { type: 'string', enum: ['codex','claude'] }, model: { type: 'string' }, effort: { type: 'string' },
+    projectSlug: { type: 'string' }, provider: { type: 'string', enum: ['codex','claude','grok','vibe'] }, model: { type: 'string' }, effort: { type: 'string' },
     prompt: { type: 'string' }, title: { type: 'string' }, supervisorId: { type: 'string' },
   };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

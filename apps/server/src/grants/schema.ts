@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PROVIDERS } from '@agent-console/shared';
 
 export const grantDefinitionSchema = z.object({
   grantee: z.object({ kind: z.enum(['session', 'assignment', 'project']), id: z.string().min(1).max(200) }),
@@ -17,7 +18,7 @@ export const grantAgentSchema = z.object({
   definition: grantDefinitionSchema.optional(), humanMessageId: z.string().min(1).optional(),
   reason: z.string().trim().min(1).max(2000).optional(), grantId: z.string().uuid().optional(),
   sessionId: z.string().uuid().optional(), targetAssignmentId: z.string().uuid().optional(), requestId: z.string().uuid().optional(),
-  projectSlug: z.string().min(1).optional(), provider: z.enum(['codex', 'claude']).optional(),
+  projectSlug: z.string().min(1).optional(), provider: z.enum(PROVIDERS).optional(),
   model: z.string().min(1).max(160).optional(), effort: z.string().min(1).max(40).optional(),
   // Launch flags were command-line arguments of the tmux transport, and the structured transport passes none. An empty list is
   // still accepted because existing callers send `flags: []`; any flag fails the request instead of being dropped in silence.

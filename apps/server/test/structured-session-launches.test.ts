@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ProviderId } from '@agent-console/shared';
+import { PROVIDERS, type ProviderId } from '@agent-console/shared';
 import { CoordinationService } from '../src/coordination/service.js';
 import { GrantService } from '../src/grants/service.js';
 import { AgentSessionLaunches } from '../src/grants/session-launches.js';
@@ -85,6 +85,19 @@ describe('Granted launches', () => {
     const request = await launch();
     expect(request).toMatchObject({ status: 'failed', reason: expect.stringMatching(/not enabled for codex/) });
     expect(f.plugin.instances.flatMap(instance => instance.sessions)).toHaveLength(0);
+  });
+});
+
+describe('Launch provider', () => {
+  const base = { action: 'launch', assignmentId: randomUUID(), token: 'x'.repeat(32), projectSlug: 'demo', prompt: 'Work.' };
+
+  it('accepts every provider the Console runs, including grok and vibe', () => {
+    for (const provider of PROVIDERS) expect(grantAgentSchema.safeParse({ ...base, provider }).success, provider).toBe(true);
+    expect(PROVIDERS).toContain('vibe');
+  });
+
+  it('refuses a provider the Console does not run', () => {
+    expect(grantAgentSchema.safeParse({ ...base, provider: 'gemini' }).success).toBe(false);
   });
 });
 
