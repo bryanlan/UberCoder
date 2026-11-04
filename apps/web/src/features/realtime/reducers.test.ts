@@ -114,6 +114,62 @@ describe('realtime reducers', () => {
     expect(ended?.projects[0]?.providers.codex.conversations).toEqual([]);
   });
 
+  describe('a chat an agent launched', () => {
+    const launched = (humanRepliedAt?: string): BoundSession => session({
+      launchContext: {
+        launchedBy: 'assignment-1', launcherName: 'Planner lead', grantIds: ['grant-1'], requestId: 'req', supervisorId: 'assignment-1',
+        ...(humanRepliedAt ? { humanRepliedAt } : {}),
+      },
+    });
+    const chatOf = (current: TreeResponse | undefined) => current?.projects[0]?.providers.codex.conversations[0];
+
+    it('is labelled agent-driven until the person replies', () => {
+      const withLaunch = applySessionUpdateToTree(tree(), launched());
+      expect(chatOf(withLaunch)?.agentControlled).toEqual({ launcherName: 'Planner lead' });
+      expect(chatOf(applySessionUpdateToTree(tree(), launched('2026-03-07T00:05:00.000Z')))?.agentControlled).toBeUndefined();
+    });
+
+    it('stops being agent-driven when the person sends a message, and a message the Console writes does not count', () => {
+      const withLaunch = applySessionUpdateToTree(tree(), launched());
+      const quiet = applySessionActivityToTree(withLaunch, { sessionId: 'session-1', timestamp: '2026-03-07T00:04:00.000Z' });
+      expect(quiet?.boundSessions[0]?.launchContext?.humanRepliedAt).toBeUndefined();
+      expect(chatOf(quiet)?.agentControlled).toEqual({ launcherName: 'Planner lead' });
+
+      const replied = applySessionActivityToTree(withLaunch, { sessionId: 'session-1', timestamp: '2026-03-07T00:05:00.000Z', fromPerson: true });
+      expect(replied?.boundSessions[0]?.launchContext?.humanRepliedAt).toBe('2026-03-07T00:05:00.000Z');
+      expect(chatOf(replied)?.agentControlled).toBeUndefined();
+      // The label that names who launched it stays; only the "agent-driven" test changes.
+      expect(replied?.boundSessions[0]?.launchContext?.launcherName).toBe('Planner lead');
+    });
+
+    it('stays the person\'s when a later update was built before their reply was recorded', () => {
+      const replied = applySessionActivityToTree(applySessionUpdateToTree(tree(), launched()), {
+        sessionId: 'session-1', timestamp: '2026-03-07T00:05:00.000Z', fromPerson: true,
+      });
+      const stale = applySessionUpdateToTree(replied, { ...launched(), title: 'Renamed' });
+      expect(stale?.boundSessions[0]?.launchContext?.humanRepliedAt).toBe('2026-03-07T00:05:00.000Z');
+      expect(chatOf(stale)?.agentControlled).toBeUndefined();
+    });
+
+    it('leaves the agent group when the person reopens the saved chat and replies, though the new session has no launch record', () => {
+      const saved = tree([{
+        ref: 'pending:one', projectSlug: 'demo', provider: 'codex', kind: 'history', title: 'Saved agent chat', updatedAt: baseTime,
+        isBound: true, boundSessionId: 'session-1', degraded: false, agentControlled: { launcherName: 'Planner lead' },
+      }], [session()]);
+      const replied = applySessionActivityToTree(saved, { sessionId: 'session-1', timestamp: '2026-03-07T00:05:00.000Z', fromPerson: true });
+      expect(chatOf(replied)?.agentControlled).toBeUndefined();
+      expect(replied?.boundSessions[0]?.launchContext).toBeUndefined();
+      // Output the agent or provider writes does not do it.
+      expect(chatOf(applySessionActivityToTree(saved, { sessionId: 'session-1', timestamp: '2026-03-07T00:05:00.000Z' }))?.agentControlled)
+        .toEqual({ launcherName: 'Planner lead' });
+    });
+
+    it('ignores a reply in a chat the person started', () => {
+      const mine = applySessionActivityToTree(tree([], [session()]), { sessionId: 'session-1', timestamp: baseTime, fromPerson: true });
+      expect(mine?.boundSessions[0]?.launchContext).toBeUndefined();
+    });
+  });
+
   it('updates activity timestamps only for the matching bound session', () => {
     const current = conversationTimeline({ boundSession: session() });
     const updated = applySessionActivityToTimeline(current, {

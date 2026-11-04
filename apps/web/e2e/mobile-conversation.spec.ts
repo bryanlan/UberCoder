@@ -6,14 +6,21 @@ test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true
 async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queued' = 'accepted') {
   const stamp = new Date().toISOString();
   const calls: SessionKeystrokeRequest[] = [];
-  const chats: ConversationSummary[] = ['first', 'second', 'sleeping', 'history'].map(ref => ({
+  const chats: ConversationSummary[] = ['first', 'second', 'sleeping', 'history', 'agent-only', 'answered'].map(ref => ({
     ref, projectSlug: 'demo', provider: 'codex', kind: 'history', title: `${ref} conversation`,
     updatedAt: stamp, isBound: ref !== 'history', boundSessionId: ref !== 'history' ? ref : undefined, degraded: false,
   }));
+  chats.push({
+    ref: 'old-agent-run', projectSlug: 'demo', provider: 'codex', kind: 'history', title: 'old agent run conversation',
+    updatedAt: stamp, isBound: false, degraded: false, agentControlled: { launcherName: 'Planner lead' },
+  });
+  const launchContext = { launchedBy: 'assignment-1', launcherName: 'Planner lead', grantIds: ['grant-1'], requestId: 'req', supervisorId: 'assignment-1' };
   const sessions: BoundSession[] = chats.filter(chat => chat.isBound).map(chat => ({
     id: chat.ref, provider: 'codex', projectSlug: 'demo', conversationRef: chat.ref,
     status: 'bound', startedAt: stamp, updatedAt: stamp,
     isWorking: false, ...(chat.ref === 'sleeping' ? { manualSuspendedAt: stamp } : {}),
+    ...(chat.ref === 'agent-only' ? { launchContext } : {}),
+    ...(chat.ref === 'answered' ? { launchContext: { ...launchContext, humanRepliedAt: stamp } } : {}),
   }));
   const projects: ProjectSummary[] = ['demo', 'empty'].map(slug => ({
     slug, directoryName: slug, displayName: slug === 'demo' ? 'Demo project' : 'Empty project',
@@ -98,10 +105,19 @@ test('starts in reading mode and switches chats in a full-screen filtered list',
   await expect(list.locator(':scope > div').first()).toHaveCSS('background-color', 'rgb(2, 6, 23)');
   await expect(list.getByRole('heading', { name: 'Demo project' })).toBeVisible();
   await expect(list.getByRole('link', { name: /first conversation/ })).toBeVisible();
+  // An agent-launched chat shows once the person has replied in it; one the agent drives alone stays behind the filter.
+  await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
+  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeHidden();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeHidden();
   await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath('mobile-chats.png') });
   await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
+  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeHidden();
+  await expect(list.getByRole('link', { name: /old agent run conversation/ })).toBeHidden();
+  await list.getByRole('button', { name: 'Agent controlled', exact: true }).tap();
+  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
+  await expect(list.getByRole('link', { name: /old agent run conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeVisible();
   await expect(list.getByRole('heading', { name: 'Empty project' })).toBeVisible();
   await list.getByRole('link', { name: /second conversation/ }).tap();

@@ -118,6 +118,7 @@
   rules between durable provider transcript messages and temporary live event-log messages.
 - `apps/server/src/sessions/transcript-watcher.ts` - transcript-file change detection that refreshes
   selected timelines when provider history catches up.
+- `apps/server/src/sessions/human-reply-backfill.ts` - startup pass that records the first person message (`humanRepliedAt`) on agent-launched sessions from before replies were tracked, by reading each launched session's event log once. `apps/server/test/agent-controlled.test.ts` covers it and `markHumanReplied`.
 - `apps/server/src/sessions/tmux-row-conversion.ts` - the best-effort `tmux kill-session` the startup conversion runs for a
   row an earlier build left on the removed tmux transport; nothing else calls tmux.
 - `apps/web/src/features/conversation/useConversationData.ts` - conversation metadata query,

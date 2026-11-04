@@ -8,6 +8,12 @@ import type {
   ProviderId,
   TreeResponse,
 } from '@agent-console/shared';
+import { agentDrivenBy } from '@agent-console/shared';
+
+/** The list label for a chat an agent launched. It is cleared, not just left off, once the person has replied in the chat. */
+function agentControlledField(session: BoundSession): { agentControlled?: { launcherName: string } } {
+  return session.launchContext ? { agentControlled: agentDrivenBy(session.launchContext) } : {};
+}
 
 function isActiveSessionStatus(status: BoundSession['status']): boolean {
   return status === 'starting' || status === 'bound' || status === 'releasing';
@@ -29,7 +35,7 @@ function buildSyntheticConversationFromSession(session: BoundSession): ProjectSu
     isBound: true,
     boundSessionId: session.id,
     degraded: false,
-    ...(session.launchContext ? { agentControlled: { launcherName: session.launchContext.launcherName } } : {}),
+    ...agentControlledField(session),
     rawMetadata: {
       syntheticSessionPlaceholder: true,
     },
@@ -48,6 +54,12 @@ export function applySessionUpdateToTree(current: TreeResponse | undefined, sess
   }
 
   const active = isActiveSessionStatus(session.status);
+  const previous = current.boundSessions.find((item) => item.id === session.id);
+  // An update built before the person's reply was recorded must not make the chat agent-driven again.
+  const repliedAt = session.launchContext?.humanRepliedAt ?? previous?.launchContext?.humanRepliedAt;
+  if (session.launchContext && repliedAt && !session.launchContext.humanRepliedAt) {
+    session = { ...session, launchContext: { ...session.launchContext, humanRepliedAt: repliedAt } };
+  }
   const nextBoundSessions = current.boundSessions.filter((item) => item.id !== session.id);
   if (active) {
     nextBoundSessions.unshift(session);
@@ -82,7 +94,7 @@ export function applySessionUpdateToTree(current: TreeResponse | undefined, sess
                     updatedAt: session.lastCompletedAt ?? conversation.updatedAt,
                     isBound: active,
                     boundSessionId: active ? session.id : undefined,
-                    ...(session.launchContext ? { agentControlled: { launcherName: session.launchContext.launcherName } } : {}),
+                    ...agentControlledField(session),
                   }];
                 }
                 if (conversation.boundSessionId === session.id) {
@@ -115,12 +127,19 @@ export function applySessionUpdateToTree(current: TreeResponse | undefined, sess
 
 export function applySessionActivityToTree(
   current: TreeResponse | undefined,
-  input: { sessionId: string; timestamp: string },
+  input: { sessionId: string; timestamp: string; fromPerson?: boolean },
 ): TreeResponse | undefined {
   if (!current) {
     return current;
   }
 
+  const target = current.boundSessions.find((session) => session.id === input.sessionId);
+  // The person's first message in a chat an agent launched makes it theirs as well: it joins the list. That holds
+  // when they reopened a saved agent chat too, where the new session has no launch record but the chat is still marked.
+  const person = input.fromPerson === true ? target : undefined;
+  const firstReply = person?.launchContext !== undefined && !person.launchContext.humanRepliedAt;
+  const markedConversation = person !== undefined && current.projects.some((project) => project.slug === person.projectSlug
+    && project.providers[person.provider].conversations.some((conversation) => conversation.boundSessionId === person.id && conversation.agentControlled));
   return {
     ...current,
     boundSessions: current.boundSessions.map((session) => (
@@ -131,8 +150,23 @@ export function applySessionActivityToTree(
             updatedAt: input.timestamp,
             lastActivityAt: input.timestamp,
             lastOutputAt: input.timestamp,
+            ...(firstReply && session.launchContext ? { launchContext: { ...session.launchContext, humanRepliedAt: input.timestamp } } : {}),
           }
     )),
+    ...(person && markedConversation ? {
+      projects: current.projects.map((project) => (project.slug !== person.projectSlug ? project : {
+        ...project,
+        providers: {
+          ...project.providers,
+          [person.provider]: {
+            ...project.providers[person.provider],
+            conversations: project.providers[person.provider].conversations.map((conversation) => (
+              conversation.boundSessionId === person.id ? { ...conversation, agentControlled: undefined } : conversation
+            )),
+          },
+        },
+      })),
+    } : {}),
   };
 }
 

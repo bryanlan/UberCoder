@@ -3210,6 +3210,7 @@ export class SessionManager {
     const messageId = liveMessageId(session.id, offset);
     fs.appendFileSync(session.eventLogPath, `${JSON.stringify(event)}\n`);
     if (event.type === 'user-input') {
+      this.db.boundSessions.markHumanReplied(session.id, event.timestamp);
       const assignment = this.assignmentForSession(session);
       if (assignment) setPeerWakePaused(this.db, assignment.id, false);
       this.db.meta.set(`human-input:${session.id}`, JSON.stringify({ id: messageId, text: event.text, timestamp: event.timestamp }));

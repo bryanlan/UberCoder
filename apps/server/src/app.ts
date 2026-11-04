@@ -32,6 +32,7 @@ import { registerImageRoutes } from './images/routes.js';
 import { registerSettingsRoutes } from './routes/settings.js';
 import { AuthService } from './security/auth-service.js';
 import { SessionManager } from './sessions/session-manager.js';
+import { backfillHumanReplies } from './sessions/human-reply-backfill.js';
 import { GrantService } from './grants/service.js';
 import { GrantPushService } from './grants/push.js';
 import { WakeAlerts } from './coordination/wake-alerts.js';
@@ -253,6 +254,10 @@ export async function buildApp(options: AppOptions = {}) {
   const runtimeCleanup = sessions.cleanupEndedSessionRuntimeDirs().catch((error) => {
     app.log.warn({ err: error }, 'Startup session-runtime cleanup failed.');
   });
+  // Chats an agent launched before replies were tracked: mark the ones the person already answered.
+  const humanReplyBackfill = backfillHumanReplies(db, () => !db.isOpen()).catch((error) => {
+    app.log.warn({ err: error }, 'Startup human-reply backfill failed.');
+  });
   // Rebuild empty or outdated search indexes from cached conversations. Parser
   // upgrades invalidate search content even when transcript files are unchanged.
   // This runs off the startup path and yields between conversation writes.
@@ -270,7 +275,7 @@ export async function buildApp(options: AppOptions = {}) {
     clearInterval(wikiBackupTimer);
     await coordinationSocket?.close();
     await indexing.stop();
-    await Promise.all([runtimeCleanup, searchBackfill]);
+    await Promise.all([runtimeCleanup, searchBackfill, humanReplyBackfill]);
     await sessions.stop();
     liveOutputReader.clear();
     await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Final wiki backup failed.'));

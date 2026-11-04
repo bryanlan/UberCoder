@@ -104,7 +104,7 @@ export function applySessionEvent(event: SessionEvent, context: ApplySessionEven
   if (event.type === 'session.user-input') {
     context.queryClient.setQueryData<TreeResponse | undefined>(
       ['tree'],
-      (current) => applySessionActivityToTree(current, { sessionId: event.sessionId, timestamp: event.timestamp }),
+      (current) => applySessionActivityToTree(current, { sessionId: event.sessionId, timestamp: event.timestamp, fromPerson: true }),
     );
     context.queryClient.setQueryData<ConversationTimeline | undefined>(
       conversationMetaQueryKey(event.projectSlug, event.provider, event.conversationRef),

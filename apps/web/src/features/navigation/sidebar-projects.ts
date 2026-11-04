@@ -1,4 +1,4 @@
-import { PROVIDERS, type ProjectSummary, type ProviderId, type TreeResponse } from '@agent-console/shared';
+import { PROVIDERS, agentDrivenBy, type ProjectSummary, type ProviderId, type TreeResponse } from '@agent-console/shared';
 import { getConversationStatusColor } from './work-status';
 
 type ConversationItem = ProjectSummary['providers'][ProviderId]['conversations'][number];
@@ -78,7 +78,7 @@ export function deriveSidebarProjects({
           };
         }));
       const passesListFilters = (item: SidebarConversation, includeAgentControlled: boolean): boolean => {
-        if (!includeAgentControlled && (item.launchContext || item.conversation.agentControlled)) return false;
+        if (!includeAgentControlled && (agentDrivenBy(item.launchContext) || item.conversation.agentControlled)) return false;
         if (workMode && !item.conversation.isBound) return false;
         if ((activeOnly || mobileActiveOnly)
           && (!item.conversation.isBound || item.manualSuspendedAt || item.pressureSuspendedAt || item.idleSuspendedAt)) return false;
@@ -88,7 +88,7 @@ export function deriveSidebarProjects({
       };
       const combinedConversations = listedConversations.filter((item) => passesListFilters(item, showAgentControlled));
       const hiddenAgentControlledCount = showAgentControlled ? 0 : listedConversations
-        .filter((item) => (item.launchContext || item.conversation.agentControlled) && passesListFilters(item, true)).length;
+        .filter((item) => (agentDrivenBy(item.launchContext) || item.conversation.agentControlled) && passesListFilters(item, true)).length;
       const providerEntries = PROVIDERS.map((provider) => [provider, {
         ...project.providers[provider],
         conversations: combinedConversations.filter((item) => item.provider === provider).map((item) => item.conversation),
@@ -141,7 +141,7 @@ export function agentControlledConversationKeys(tree: TreeResponse | undefined):
     }
   }
   for (const session of tree?.boundSessions ?? []) {
-    if (session.launchContext) keys.add(agentControlledConversationKey(session.projectSlug, session.provider, session.conversationRef));
+    if (agentDrivenBy(session.launchContext)) keys.add(agentControlledConversationKey(session.projectSlug, session.provider, session.conversationRef));
   }
   return keys;
 }

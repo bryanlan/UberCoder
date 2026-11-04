@@ -133,6 +133,35 @@ export class BoundSessionsRepo {
     tx();
   }
 
+  /**
+   * Every retained session on the same chat as this one, itself included: same project and provider, sharing a
+   * conversation ref or the ref it resumed from. A chat the person resumes from history is a new row on the old chat.
+   */
+  sessionsOfConversation(id: string): BoundSession[] {
+    const own = this.sqlite.prepare('select project_slug, provider, conversation_ref, resume_conversation_ref from bound_sessions where id = ?').get(id) as SqliteRow | undefined;
+    if (!own) return [];
+    const rows = this.sqlite.prepare(`
+      select * from bound_sessions
+      where project_slug = ? and provider = ? and (conversation_ref in (?, ?) or resume_conversation_ref in (?, ?))
+    `).all(own.project_slug, own.provider, own.conversation_ref, own.resume_conversation_ref ?? null, own.conversation_ref, own.resume_conversation_ref ?? null) as SqliteRow[];
+    return rows.map(row => this.mapRow(row));
+  }
+
+  /**
+   * Records that the person sent a message in a chat. Every agent launch of that chat that had no reply yet is marked,
+   * including an ended one, so the chat leaves the agent-controlled group however the person got back into it.
+   * Returns the ids of the launch records it marked; a chat the person started themselves marks nothing.
+   */
+  markHumanReplied(id: string, at: string): string[] {
+    const marked: string[] = [];
+    for (const session of this.sessionsOfConversation(id)) {
+      if (!session.launchContext || session.launchContext.humanRepliedAt) continue;
+      this.setLaunchContext(session.id, { ...session.launchContext, humanRepliedAt: at });
+      marked.push(session.id);
+    }
+    return marked;
+  }
+
   // Independently owned state: ordinary screen/status upserts must not overwrite it.
   setLaunchContext(id: string, context: BoundSession['launchContext']): void {
     this.sqlite.prepare('update bound_sessions set launch_context_json=? where id=?').run(context ? JSON.stringify(context) : null, id);
@@ -309,7 +338,7 @@ export class BoundSessionsRepo {
     return rows.map(row => this.mapRow(row));
   }
 
-  /** Every retained agent launch, including sessions that have ended and left the chat tree. */
+  /** Every retained agent launch the person has not replied in, including sessions that have ended and left the chat tree. */
   listAgentLaunchMarks(): AgentLaunchMark[] {
     const rows = this.sqlite.prepare(`
       select project_slug, provider, conversation_ref, resume_conversation_ref, launch_context_json, updated_at
@@ -327,6 +356,8 @@ export class BoundSessionsRepo {
         continue;
       }
       if (!parsed || typeof parsed !== 'object') continue;
+      // The person has answered in this chat, so it is theirs as well as the agent's: the list shows it.
+      if ('humanRepliedAt' in parsed && parsed.humanRepliedAt) continue;
       const launcherName = 'launcherName' in parsed && typeof parsed.launcherName === 'string' ? parsed.launcherName : '';
       marks.push({
         projectSlug: String(row.project_slug),

@@ -419,6 +419,22 @@ describe('agent-controlled chats', () => {
     expect(historyShown[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper', 'old-helper']);
   });
 
+  it('lists an agent-launched chat once the person has replied in it, and counts it no longer as hidden', () => {
+    const replied: TreeResponse = {
+      ...tree,
+      boundSessions: [{ ...tree.boundSessions[0]!, launchContext: { ...launchContext, humanRepliedAt: '2026-07-01T10:30:00.000Z' } }],
+    };
+    const listed = deriveSidebarProjects({ ...options, tree: replied });
+    expect(listed[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper']);
+    expect(listed[0]?.hiddenAgentControlledCount).toBe(0);
+    // Saved history the agent launched and the person never answered stays behind the filter.
+    const history = deriveSidebarProjects({ ...options, tree: replied, workMode: false });
+    expect(history[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper']);
+    expect(history[0]?.hiddenAgentControlledCount).toBe(1);
+    expect(agentControlledConversationKeys(replied).has('alpha:codex:helper')).toBe(false);
+    expect(agentControlledConversationKeys(replied).has('alpha:codex:old-helper')).toBe(true);
+  });
+
   it('keeps agent-launched chats out of search results until the filter is on', () => {
     const keys = agentControlledConversationKeys(tree);
     const results = [

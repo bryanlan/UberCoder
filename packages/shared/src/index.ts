@@ -770,6 +770,15 @@ export interface AgentLaunchContext {
   model?: string;
   effort?: string;
   supervisorId: string;
+  /** When the person first sent a message in this chat. Present: the chat is no longer driven by the agent alone. */
+  humanRepliedAt?: string;
+}
+/**
+ * Who is driving a chat that an agent launched, or nothing once the person has replied in it. The chat list hides a chat
+ * only while this returns something; a chat the person answered is theirs as well and is listed like any other.
+ */
+export function agentDrivenBy(context: AgentLaunchContext | undefined): { launcherName: string } | undefined {
+  return context && !context.humanRepliedAt ? { launcherName: context.launcherName } : undefined;
 }
 export interface AgentGrantsSnapshot { grants: AgentGrant[]; uses: AgentGrantUse[]; nextUseOffset: number | null }
 
