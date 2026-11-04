@@ -43,6 +43,12 @@
       "command": ["grok"],
       "idleUnloadMinutes": 60,
       "env": {}
+    },
+    "vibe": {
+      "enabled": true,
+      "command": ["vibe-acp"],
+      "idleUnloadMinutes": 60,
+      "env": {}
     }
   },
   "modelRouting": {
@@ -73,6 +79,10 @@
     "grok": {
       "enabled": true,
       "discoveryRoot": "~/.grok"
+    },
+    "vibe": {
+      "enabled": true,
+      "discoveryRoot": "~/.vibe"
     }
   },
   "projects": {

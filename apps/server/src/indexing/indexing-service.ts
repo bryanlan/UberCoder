@@ -36,6 +36,7 @@ export function getProviderTranscriptWatchPaths(providerId: ProviderId, discover
     ];
   }
   if (providerId === 'grok') return [path.join(discoveryRoot, 'sessions')];
+  if (providerId === 'vibe') return [path.join(discoveryRoot, 'logs', 'session', 'unified')];
 
   return [
     path.join(discoveryRoot, 'projects'),
@@ -265,6 +266,7 @@ export class IndexingService {
           codex: { id: 'codex', label: 'Codex', conversations: [] },
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
+          vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
         },
       });
     }
@@ -306,6 +308,10 @@ export class IndexingService {
           grok: {
             ...project.providers.grok,
             conversations: project.providers.grok.conversations.sort(compareConversationTreeOrder),
+          },
+          vibe: {
+            ...project.providers.vibe,
+            conversations: project.providers.vibe.conversations.sort(compareConversationTreeOrder),
           },
         },
       }))

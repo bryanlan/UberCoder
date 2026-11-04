@@ -42,6 +42,7 @@ it.each([
         }] },
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
       },
     }],
   };
@@ -118,6 +119,7 @@ it.each(cases)('preserves $color for a $marker session with a $hours-hour-old re
         }] },
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
       },
     }],
   };
@@ -159,6 +161,7 @@ describe('New Chat options', () => {
           codex: { id: 'codex', label: 'Codex', conversations: [] },
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
+          vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
         },
       }],
     };
@@ -235,6 +238,14 @@ describe('New Chat options', () => {
     expect(screen.queryByRole('button', { name: /New Grok/ })).not.toBeInTheDocument();
   });
 
+  it('offers a new Mistral Vibe conversation from the project menu only when the tree advertises vibe', async () => {
+    const onNewConversation = renderSidebar(treeWithProject(['codex', 'claude', 'vibe']));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Project actions for Demo' }));
+    await user.click(screen.getByRole('button', { name: 'New Mistral Vibe conversation' }));
+    expect(onNewConversation).toHaveBeenLastCalledWith('demo', 'vibe');
+  });
+
   it('adds Grok to the mobile new-chat picker when its lane is on', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
       matches: true, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn(),
@@ -308,6 +319,7 @@ it('hides an agent-launched chat until Agent controlled is turned on', async () 
         ] },
         claude: { id: 'claude', label: 'Claude', conversations: [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
       },
     }],
   };
@@ -359,6 +371,7 @@ describe('Start (provider-neutral new chat)', () => {
           codex: { id: 'codex', label: 'Codex', conversations: [] },
           claude: { id: 'claude', label: 'Claude', conversations: [] },
           grok: { id: 'grok', label: 'Grok', conversations: [] },
+          vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
         },
       }],
     };
@@ -398,7 +411,7 @@ describe('Start (provider-neutral new chat)', () => {
 
   it.each([
     ['one provider is enabled', ['grok'] as TreeResponse['structuredProviders'], true],
-    ['every provider is enabled', ['codex', 'claude', 'grok'] as TreeResponse['structuredProviders'], true],
+    ['every provider is enabled', ['codex', 'claude', 'grok', 'vibe'] as TreeResponse['structuredProviders'], true],
     ['the list is empty', [] as TreeResponse['structuredProviders'], false],
   ])('shows or hides Start correctly when %s', async (_name, structuredProviders, shown) => {
     render(sidebarElement(treeWith(structuredProviders)));
@@ -435,6 +448,7 @@ describe('Start (provider-neutral new chat)', () => {
       codex: { routerProvider: 'openai', levels: { ultra: entry('GPT-6 Astra'), medium: entry('GPT-6.1 Terra') } },
       claude: { routerProvider: 'anthropic', levels: { ultra: entry('Claude Fable 5.1'), medium: entry('Claude Sonnet 5.5') } },
       grok: { routerProvider: 'xai', levels: { medium: entry('Grok 4.7') } },
+      vibe: { routerProvider: 'mistral', levels: {} },
     } };
     render(sidebarElement(treeWith(['codex', 'claude']), { onStartConversation, modelProfiles }));
     const user = userEvent.setup();

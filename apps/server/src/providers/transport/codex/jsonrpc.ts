@@ -274,8 +274,9 @@ export class JsonRpcClient {
    * and rejects with {@link JsonRpcExitError} (`sent: false`) when nothing was written because the channel had ended, or with the
    * write error itself when the outcome is unknown (the request stays pending and the channel's exit fails it). A caller that
    * must tell "never sent" from "sent, no answer yet" (a long turn) waits for `written` and not for `result`.
+   * `id` is the JSON-RPC id, present once a request was actually queued. A later connection matches a late answer by this id.
    */
-  startRequest<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): { written: Promise<void>; result: Promise<T> } {
+  startRequest<T = unknown>(method: string, params?: unknown, options: JsonRpcRequestOptions<T> = {}): { id?: number; written: Promise<void>; result: Promise<T> } {
     let markWritten!: () => void;
     let failWrite!: (error: unknown) => void;
     const written = new Promise<void>((resolveWritten, rejectWritten) => {
@@ -283,6 +284,7 @@ export class JsonRpcClient {
       failWrite = rejectWritten;
     });
     written.catch(() => undefined); // a caller that never looks at `written` must not see an unhandled rejection
+    let assigned: number | undefined;
     const result = new Promise<T>((resolve, reject) => {
       if (this.finished) {
         const notSent = this.exitError(false);
@@ -291,6 +293,7 @@ export class JsonRpcClient {
         return;
       }
       const id = this.nextRequestId();
+      assigned = id;
       const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
       const entry: PendingRequest = {
         method,
@@ -322,7 +325,7 @@ export class JsonRpcClient {
         reject(notSent);
       });
     });
-    return { written, result };
+    return { ...(assigned !== undefined ? { id: assigned } : {}), written, result };
   }
 
   /** Sends a notification. Rejects with {@link JsonRpcExitError} (`sent: false`) when the channel has ended. */

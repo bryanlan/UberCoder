@@ -20,6 +20,7 @@ async function openConversation(page: Page, provider: ProviderId, delivery: 'rej
       codex: { id: 'codex', label: 'Codex', conversations: provider === 'codex' ? [conversation] : [] },
       claude: { id: 'claude', label: 'Claude', conversations: provider === 'claude' ? [conversation] : [] },
       grok: { id: 'grok', label: 'Grok', conversations: [] },
+      vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
     },
   };
   const inputCalls: { sessionId: string; body: SessionKeystrokeRequest }[] = [];

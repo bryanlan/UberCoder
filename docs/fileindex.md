@@ -349,7 +349,19 @@ Run recovery ownership (requires explicit unattended permission):
   over the ACP JSON and the failure classifier), `index.ts`. It reuses the JSON-RPC client in `codex/jsonrpc.ts` (with the
   `"jsonrpc":"2.0"` field and `startRequest`/`onUnmatchedResponse` that ACP needs) and the event channel in `claude/`.
   `apps/server/test/structured-grok-plugin.test.ts` runs it against `apps/server/test/helpers/fake-grok.mjs`, an ACP agent stand-in
-  (also behind a real session host for the restart cases).
+  (also behind a real session host for the restart cases). The shared ACP pieces (readers, method names, standard update
+  mapping, permissions, prompt blocks, MCP list, environment, host id, unresponsive bound) live in
+  `apps/server/src/providers/transport/acp/`.
+- `apps/server/src/providers/transport/vibe/` — the Mistral Vibe plugin (`vibe-acp` with no flags, one process per
+  conversation behind its own session host `vibe-<conversationId>`): `vibe-instance.ts` (launch, attach-only reattach,
+  trust and auto-approve, `session/load`, the store check for a turn that finished while disconnected, coordination
+  registration, `probe`), `vibe-session.ts` (turns, model and thinking, cancel, the rate-limit notice, permission
+  decline, adoption by JSON-RPC request id), `protocol.ts` (capabilities, the quota command, Mistral key scrubbing).
+  `apps/server/src/providers/vibe-store.ts` reads `CURRENT` and the projection and refuses an unknown major format.
+  `apps/server/src/providers/vibe-provider.ts` and `providers/transcripts/vibe.ts` list and parse past sessions.
+  `apps/server/src/coordination/console-registration.ts` registers a Vibe conversation with the coordination service,
+  because Vibe has no session-start hook. `apps/server/test/structured-vibe-plugin.test.ts` runs it against
+  `apps/server/test/helpers/fake-vibe.mjs`.
 - `apps/server/src/sessions/structured/pending-requests.ts` — the meta key and projection of the questions a structured
   session is waiting on (`pendingRequests` on the row; the service owns the list).
 - `apps/web/src/components/PendingQuestionCard.tsx` — the question card in the conversation pane; its answer goes to

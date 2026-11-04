@@ -49,14 +49,14 @@ function startFixture(options: { grok?: boolean; profilesFail?: boolean; startDe
   const grokOn = options.grok !== false;
   const f = structuredSessionFixture({
     plugin: { id: 'codex' },
-    extraPlugins: [{ id: 'claude' }, { id: 'grok' }],
+    extraPlugins: [{ id: 'claude' }, { id: 'grok' }, { id: 'vibe' }],
     manager: {
       modelProfiles: wo.service,
       structuredSessions: { ...structuredSessionsConfig, grok: { enabled: grokOn, command: ['fake-grok'], idleUnloadMinutes: 60, env: {} } },
     },
   });
   open.push(f);
-  const plugins: Record<ProviderId, (typeof f)['plugin']> = { codex: f.plugin, claude: f.extraPlugins[0]!, grok: f.extraPlugins[1]! };
+  const plugins: Record<ProviderId, (typeof f)['plugin']> = { codex: f.plugin, claude: f.extraPlugins[0]!, grok: f.extraPlugins[1]!, vibe: f.extraPlugins[2]! };
   const deps = {
     db: f.db,
     projectService: { getMergedProviderSettings: () => providerSettings } as never,

@@ -13,6 +13,7 @@ import { ProjectService } from './projects/project-service.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { createClaudePlugin } from './providers/transport/claude/index.js';
 import { createGrokPlugin } from './providers/transport/grok/index.js';
+import { createVibePlugin } from './providers/transport/vibe/index.js';
 import { createCodexAppServerPlugin } from './providers/transport/codex/index.js';
 import { createLineTransportFactory } from './providers/transport/line-transport.js';
 import { TransportPluginRegistry } from './providers/transport/registry.js';
@@ -40,6 +41,7 @@ import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
 import { CoordinationService } from './coordination/service.js';
+import { registerConsoleConversation } from './coordination/console-registration.js';
 import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
 import { WikiService } from './wiki/service.js';
 import { registerWikiRoutes } from './wiki/routes.js';
@@ -71,7 +73,9 @@ export async function buildApp(options: AppOptions = {}) {
   });
   const eventBus = new RealtimeEventBus();
   const projectService = new ProjectService(configService);
-  const providerRegistry = new ProviderRegistry(db.transcriptParseCache);
+  const providerRegistry = new ProviderRegistry(db.transcriptParseCache, {
+    warn: (fields, message) => app.log.warn(fields, message),
+  });
   const liveOutputReader = new LiveOutputReader();
   const indexing = new IndexingService(configService, projectService, providerRegistry, db, eventBus,
     config.coordination.enabled ? (measurement) => { recordCoordinationTelemetry(config.runtimeDir, measurement); } : undefined);
@@ -82,6 +86,7 @@ export async function buildApp(options: AppOptions = {}) {
     transportPlugins.register(createCodexAppServerPlugin());
     transportPlugins.register(createClaudePlugin());
     transportPlugins.register(createGrokPlugin());
+    transportPlugins.register(createVibePlugin());
   }
   // Provider processes run behind session hosts that outlive this process, so a restart reconnects to them. Injected (test) plugins bring their own transport.
   const lineTransport = options.transportPlugins ? undefined : createLineTransportFactory({
@@ -103,7 +108,12 @@ export async function buildApp(options: AppOptions = {}) {
     pressureSuspendIdleMs: config.sessions.pressureSuspendIdleMinutes * 60 * 1000,
     transportPlugins,
     modelProfiles,
-    structuredSessions: { codex: config.structuredSessions.codex, claude: config.structuredSessions.claude, grok: config.structuredSessions.grok },
+    structuredSessions: {
+      codex: config.structuredSessions.codex,
+      claude: config.structuredSessions.claude,
+      grok: config.structuredSessions.grok,
+      vibe: config.structuredSessions.vibe,
+    },
     lineTransport,
     // A message attaches only the pasted images the image store holds, found directly in this directory.
     imageStoreDir,
@@ -129,6 +139,9 @@ export async function buildApp(options: AppOptions = {}) {
       .map(([slug, project]) => ({ slug, directory: path.resolve(project.path ?? path.join(config.projectsRoot, slug)) }))
       .sort((a,b) => b.directory.length - a.directory.length).find(project => cwd === project.directory || cwd.startsWith(project.directory + path.sep))?.slug);
   const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakeAssignments : undefined, grants);
+  if (config.coordination.enabled) {
+    sessions.setConversationRegistrar(async (input) => registerConsoleConversation(coordination, config.runtimeDir, input));
+  }
   const agentLaunches = new AgentSessionLaunches(db, grants, sessions, projectService, providerRegistry, eventBus,
     config.sessions.pressureSuspendAvailableMiB * 1024 * 1024);
   const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));

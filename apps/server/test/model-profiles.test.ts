@@ -56,6 +56,7 @@ describe('model profile list', () => {
     expect(first.providers.claude.levels.medium).toEqual({ model: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', effort: 'high', launchName: 'claude-sonnet-5-5' });
     expect(Object.keys(first.providers.grok.levels)).toEqual(['medium', 'low']);
     expect(first.providers.codex.routerProvider).toBe('openai');
+    expect(first.providers.vibe).toEqual({ routerProvider: 'mistral', levels: {} });
     now += 30_000;
     await service.profiles();
     expect(calls).toEqual([['profiles', '--json']]);
@@ -281,7 +282,7 @@ describe('Grok and the provider-neutral route', () => {
     const outcome = await new ModelProfileService({}, run).route(undefined, 'add a flag');
     expect(calls[0]).toEqual(['route', '--task', 'add a flag', '--launcher', 'console', '--json']);
     expect(outcome).toMatchObject({ ok: true, provider: 'grok', decision: { model: 'grok-4.7', launchName: 'grok-4.7', quotaState: 'unknown' } });
-    for (const [vendor, expected] of [['openai', 'codex'], ['anthropic', 'claude'], ['xai', 'grok']] as const) {
+    for (const [vendor, expected] of [['openai', 'codex'], ['anthropic', 'claude'], ['xai', 'grok'], ['mistral', 'vibe']] as const) {
       const routed = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: vendor }) }).run).route(undefined, 'x');
       expect(routed).toMatchObject({ ok: true, provider: expected });
     }
@@ -295,8 +296,29 @@ describe('Grok and the provider-neutral route', () => {
   });
 
   it('refuses a vendor the Console has no provider for', async () => {
-    const outcome = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: 'mistral' }) }).run).route(undefined, 'x');
-    expect(outcome).toMatchObject({ ok: false, reason: expect.stringContaining('mistral') });
+    const outcome = await new ModelProfileService({}, runner({ route: () => JSON.stringify({ ...ROUTE_JSON, provider: 'unknown-vendor' }) }).run).route(undefined, 'x');
+    expect(outcome).toMatchObject({ ok: false, reason: expect.stringContaining('unknown-vendor') });
+  });
+
+  it('serves Vibe Medium and Low from the optional mistral catalog block', async () => {
+    const listed = JSON.parse(PROFILES_JSON) as { profiles: Record<string, unknown> };
+    listed.profiles.vibe = {
+      provider: 'mistral',
+      levels: {
+        medium: { model: 'glm-5.3', label: 'GLM 5.3', effort: 'high', launch_name: 'glm-5-3' },
+        low: { model: 'glm-5.3-flash', label: 'GLM 5.3 Flash', effort: 'high', launch_name: 'zai-glm-5-3-flash' },
+      },
+    };
+    const service = new ModelProfileService({}, runner({ profiles: () => JSON.stringify(listed) }).run);
+    const profiles = await service.profiles();
+    expect(profiles.providers.vibe.routerProvider).toBe('mistral');
+    expect(profiles.providers.vibe.levels.medium).toEqual({ model: 'glm-5.3', label: 'GLM 5.3', effort: 'high', launchName: 'glm-5-3' });
+    expect(profiles.providers.vibe.levels.low).toEqual({ model: 'glm-5.3-flash', label: 'GLM 5.3 Flash', effort: 'high', launchName: 'zai-glm-5-3-flash' });
+    expect(profiles.providers.vibe.levels.ultra).toBeUndefined();
+    expect(profiles.providers.vibe.levels.high).toBeUndefined();
+    const wrong = JSON.parse(PROFILES_JSON) as { profiles: Record<string, unknown> };
+    wrong.profiles.vibe = { provider: 'openai', levels: { medium: level('glm-5.3', 'GLM 5.3', 'high') } };
+    await expect(new ModelProfileService({}, runner({ profiles: () => JSON.stringify(wrong) }).run).profiles()).rejects.toThrow(/models for vibe/);
   });
 
   it('uses the router\'s best alternative on a provider that can take new chats when its first choice cannot', async () => {

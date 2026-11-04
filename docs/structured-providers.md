@@ -20,7 +20,8 @@ way it drives a provider. On 2026-10-26 a conversation was one hidden tmux sessi
 terminal, pressed Enter, and inferred everything from the screen. The structured lane drives a provider
 through a protocol with explicit requests and events. Codex comes first, through `codex app-server`
 (JSON-RPC). Claude (Agent SDK) and ACP agents (Mistral Vibe, Grok if it speaks ACP) come later through
-the same plugin contract.
+the same plugin contract. Current status (2026-11-03): Codex, Claude, Grok and Mistral Vibe all run on
+this transport. Grok and Vibe share the ACP core in `providers/transport/acp/`.
 
 Settled with Bryan on 2026-10-26:
 
@@ -881,6 +882,129 @@ cancel, errors, permission, process death, `session/load`, adoption of an idle a
 host), `grok-provider.test.ts`, `start-conversation.test.ts`, `model-profiles.test.ts` and the Auto tests. One manual run
 against the real CLI: see the report of the work for the transcript.
 
+## Shared ACP core (`apps/server/src/providers/transport/acp/`)
+
+Grok and Mistral Vibe both speak the Agent Client Protocol. The parts they share live in `providers/transport/acp/` and
+are passed into each plugin as small helpers, not a class hierarchy: JSON readers, the standard method names, the
+`session/update` mapping (`agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update` into
+`item.completed` blocks, and `usage_update` into `usage.updated`), the declined permission result, image-then-text prompt
+blocks, the `mcpServers` list, environment scrubbing, launch-argv keys, the host id, the five-minute unresponsive bound,
+the ten-second local close after cancel, and the attach-only reattach decision. Each product keeps its own dialect.
+Grok keeps `grok` argv, the `_x.ai/*` extensions, `reasoning_effort`, its roster and its transcript store. Vibe keeps
+config ids `model` and `thinking`, its store, and the adoption below. The JSON-RPC client stays in `codex/jsonrpc.ts`;
+`startRequest` returns the request id so Vibe can match a late answer. Grok ignores that id and still matches any
+unmatched stop reason of its own.
+
+## Vibe plugin (`apps/server/src/providers/transport/vibe/`)
+
+Added 2026-11-03, branch `feature/vibe-provider`. Mistral Vibe (`vibe-acp`, Vibe 2.x / the installed 3.0.4, signed in
+through the OS keyring) is the fourth provider. It runs on the structured transport only. The shapes below were checked
+against the installed CLI's source and confirmed by the live proof on 2026-11-04 (see Verification). The stand-in is
+`test/helpers/fake-vibe.mjs`. Vibe follows `session/new` and `session/load` with `available_commands_update` (about
+0.1 s later) and other notices; only agent content (message, thought, tool call) opens a provider turn, so a notice
+never leaves the session reading "working".
+
+**Process.** `vibe-acp` with no flags, started through the session host relay with host id `vibe-<conversationId>` in
+the project directory. One process per conversation (`processModel: 'per-session'`). Model and thinking are config
+options, not argv. The command line is recorded in plugin meta (`vibe-launch:<conversationId>`). The child environment
+drops the same inherited identity variables as Grok, and also every Mistral API-key variable (`MISTRAL_API_KEY` and any
+`MISTRAL_*` name that contains KEY, TOKEN or SECRET) from both the inherited environment and the configured layers, so
+billing stays on the subscription keyring. `VIBE_HOME` overrides `~/.vibe`.
+
+**Protocol (ACP, JSON-RPC 2.0 on stdio, newline framing).**
+
+| Console action | ACP | Notes |
+| --- | --- | --- |
+| start | `initialize`, `session/new {cwd, mcpServers}` | Vibe returns the session id and `configOptions`. It emits `usage_update` before the reply (`used`, `size` 800000). A second `initialize` on the same process is accepted. |
+| trust and mode | `_trust/decision`, `session/set_config_option` | See "Workspace trust" below. Mode is set to `auto-approve` (the Console has no approval screen). Not done on an attach-only adopt. |
+| resume, no process left | `initialize`, `session/load {sessionId, cwd, mcpServers}` | `session/load` replays saved history as `session/update` before it answers; the plugin drops those updates. The turn record is cleared. An unknown id becomes `ResumeFailedError`. |
+| resume, process survived | attach-only connect, `initialize` again | No `session/list` and no `session/load`. Vibe's list has no activity flag, so it is not a roster. See below. |
+| send | `session/prompt {sessionId, prompt: [image blocks..., text]}` | Stays open for the whole turn. Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`, `tool_call`, `tool_call_update`, `usage_update`. The answer is `{stopReason}`. That answer is the turn end, exactly once. |
+| switch model or thinking | `session/set_config_option {sessionId, configId: 'model' \| 'thinking', value}` | Values are the launch names (`glm-5-3`, `mistral-large-4-0-3`, `zai-glm-5-3-flash`, `mistral-medium-3.5`) and `low`, `high`, `max`. Applied before the prompt, only when they differ, with no restart. An unknown value is `SendRejectedError` when the handshake listed the options. |
+| Stop | `session/cancel` (notification) | Vibe ends the turn with `stopReason: 'cancelled'`. If no answer comes within 10 seconds the turn is closed locally as interrupted. |
+| rate limit | JSON-RPC error `-31001` | The turn ends failed, retryable, with the notice "Mistral Vibe rate limit reached; try again later or switch provider". The plugin runs `wo quota limited --subscription mistral_vibe` (best effort, non-blocking; a failure is logged). The command is `VIBE_QUOTA_COMMAND`. |
+
+**Workspace trust.** A new workspace is untrusted. In Vibe 3.0.4 the project-doc loader skips an untrusted working
+directory, so that project's `AGENTS.md` is not in the instructions; the user-level file under `VIBE_HOME` still loads.
+`session/new` does not take a trust flag. When the reply's `_meta.workspace_trust.status` is `untrusted`, or the status
+cannot be read (`_trust/status` is tried once), the plugin calls `_trust/decision` with `trust_cwd` and then sets the
+current model again, which reloads the runtime and rebuilds the instructions. `trust_cwd` is persisted in
+`VIBE_HOME/trusted_folders.toml`. This choice is from the Vibe 3.0.4 source; a live prompt that would show the loaded
+instructions was not run. An unknown status is treated as untrusted so a configured project still gets its `AGENTS.md`.
+A failure is logged and the session still starts. Attach-only adopt does not trust and does not change mode, because
+the process may be mid-turn.
+
+**Events.** `session.native` (the session id and the `CURRENT` path), `session.state ready`, `turn.started`,
+`item.completed` (one per closed text block, and one per finished tool call), `usage.updated` (`used` / `size`,
+including the report `session/new` emits before it answers; dropped during `session/load` replay), `turn.terminal`
+exactly once, `notice`. `request.opened` is raised for `session/request_permission`; the plugin declines it as
+`cancelled`.
+
+**Capabilities.** `processModel: 'per-session'`, `nativeIds: 'server-allocated'`, `steer: 'none'` (a reply mid-turn
+cancels the running turn, keeps the reply queued, and sends it as the next turn, the same as Grok),
+`interrupt: 'terminal-follows'`, `images: true`, `modelSwitch: 'next-turn'`.
+
+**After a backend restart.** The process keeps running behind its session host. `reattach` and `resume` connect
+attach-only with the recorded argv and send `initialize` again. They do not call `session/list` or `session/load`, and
+they do not trust or set mode. When `session/prompt` is written, the plugin records `vibe-turn:<conversationId>` as
+`{turnId, requestId, startedAt, generation?, snapshotSequence?}`: the JSON-RPC id of that prompt, and the `CURRENT`
+pointer read just before the prompt was sent. The record is cleared at `turn.terminal`. On the new connection the
+recorded turn is adopted under that turn id before buffered notifications are handed to the session. Its end is the
+late answer to that request id. `JsonRpcClient` gives an answer no pending request owns to `onUnmatchedResponse`, and
+Vibe matches it by id. The request-id clock is `Date.now`, so a late answer never matches a new request. Streamed
+`session/update` for the session keeps flowing.
+
+The remaining hole is a turn that ended while no backend was connected, so there is no late answer. The plugin reads
+Vibe's saved store. The turn is finished only when both the generation and the snapshot sequence were recorded and the
+new `CURRENT` shows a different generation or a higher snapshot sequence, and the new generation's manifest
+`execution_state` is `quiescent`. Otherwise the turn stays adopted. A store that cannot be read does not end it. A
+running turn is never declared lost and no recovery input is sent. That store check applies only to a surviving
+process. When the process is gone, the turn record is cleared and `resume` starts `vibe-acp` and runs `session/load`.
+A host that runs but does not answer follows the shared unresponsive rule (left alone, then replaced after five
+minutes on an ordinary open; a reattach never replaces it).
+
+**Past conversations.** Vibe saves each session at `<VIBE_HOME or ~/.vibe>/logs/session/unified/<session id>/`
+(`meta.json` with `environment.working_directory`, title and `config.active_model`; `CURRENT` with
+`store_format` `mistral.vibe.unified-session-store/v1` and minor 10; `generations/<n>/manifest.json`; content-addressed
+`chunks/<sha256>.json`). `VibeProvider` lists the ones whose directory matches the project. An unknown major format is
+skipped and the reason is logged. Minor 10 and newer minors are read only while the pointer and the projection still
+have the fields this reader knows; an older minor is skipped. `parseVibeConversationFile` joins assistant (`harness`) text split across entries, keeps each user (`turn_start`)
+message separate (a cancelled turn and its reply stay two bubbles), and skips
+reasoning and `in_progress` blocks. The index watches the unified folder. Opening a past session binds it and
+`session/load` resumes it. A profile is stored in `bound_sessions.vibe_profile` (schema 24).
+
+**Coordination.** Vibe's hooks are only `post_agent`, `pre_tool` and `post_tool`, so a session-start hook cannot
+register it. The Console calls `registerConsoleConversation` when it starts, resumes or reattaches a Vibe conversation:
+provider `vibe`, the conversation's `AGENT_CONSOLE_SESSION_ID`, cwd, and the host process pid. The same client
+credential the hook would write is written under the runtime, and a later process for that conversation keeps that
+credential. The session-start context (assignment state and the
+peer-data notice) is prepended to the first prompt of a new conversation as a labelled block, and only after that
+prompt is written is the block cleared. Vibe stores block and message as one user message, so
+`parseVibeConversationFile` removes the block (`withoutSessionStartContext`) and the bubble, search and the
+wake/launch-prompt checks see only the person's words. The coordination MCP server is in `mcpServers`, as for Grok. Inbox delivery
+after the first prompt uses the Console's existing guarded P1 wake for an idle Console recipient. A per-turn inbox
+would need a Vibe hook; none is installed and `~/.vibe` is not configured for one. That remains a follow-up.
+
+**Limits.** `session/list` is a saved-session catalog, not a roster. There is no reset time on `-31001`. Whether a
+future Vibe refuses a second `initialize` is unverified beyond 3.0.4. The catalog block is keyed `vibe` with inner
+provider `mistral` (Medium `glm-5-3` / high, Low `glm-5.3-flash` / high, launch names `glm-5-3` and
+`zai-glm-5-3-flash`), as workflow_optimizer `feature/vibe-provider` ships it. Until that lands in the `wo` on PATH,
+`wo profiles` has no `vibe` block and Vibe has no levels (a level change is refused; the other providers are
+unaffected). A turn that ended while no backend was connected is judged from the store manifest (above); a turn closed
+that way reports `completed`, so a rate limit or cancel in that window loses its failure status. Text starting with `/`
+reaches Vibe's own slash-command handling, as typed.
+
+**Verification (2026-11-03).** `test/structured-vibe-plugin.test.ts` (launch, trust, event mapping, model and thinking
+switch, images, cancel, rate limit and the quota command, permission, process death, `session/load`, adoption of an
+idle survivor, a running survivor and a turn that finished while disconnected, behind a real session host) and
+`vibe-provider.test.ts`, and `console-registration.test.ts` (the credential is kept when a new process resumes the
+conversation). `scripts/prove-structured-vibe.mjs` is opt-in (`--run`, ports 14410–14419, throwaway `VIBE_HOME`).
+On 2026-11-04 it passed 6/6 against the real `vibe-acp` 3.0.4 on the Le Chat subscription: project tree, bind (the
+child is the Python interpreter running `vibe-acp` with no flags, no Mistral API key), registration and credential,
+a first reply with PONG whose user bubble is the message alone, Stop with the process surviving, and release ending
+session and process (evidence `test-results/structured-vibe-proof/2026-11-04T06-11-45-149Z.json`). The store change
+at turn end after a disconnect and `session/load` replay are still taken from the Vibe 3.0.4 source and the fake.
+
 ## SessionManager seams (slice 1)
 
 History: since Phase B these are no longer seams. The tmux branch is gone and each entry point runs the structured
@@ -1270,7 +1394,7 @@ History: item 5 (retire the tmux path) was done in Phase B on 2026-11-01.
 2. Approvals and questions UI with push notifications; thread policy `on-request`.
 3. Claude plugin (Agent SDK, one process per conversation; steer cancels running tools; interrupt ends
    the process and the next turn resumes). Resolve the Anthropic third-party login clause first.
-4. ACP plugin: Grok is done (see "Grok plugin"). Mistral Vibe and other ACP agents could reuse the same JSON-RPC client and
-   the roster-free parts of the plugin; each needs its own failure classification.
+4. ACP plugin: Grok and Mistral Vibe are done (see "Grok plugin", "Shared ACP core" and "Vibe plugin"). Another ACP agent
+   would add a dialect beside that core, including its own failure classification.
 5. Retire the tmux path per provider once the structured path has carried real work for a while; then
    supersede `design/extension-agent-lane`.

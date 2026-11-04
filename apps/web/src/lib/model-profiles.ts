@@ -15,10 +15,10 @@ export type ModelProfilesState =
   | { status: 'ready'; profiles: ModelProfilesResponse };
 
 /** The session field that holds each provider's profile. */
-const SESSION_PROFILE_FIELDS = { codex: 'codexProfile', claude: 'claudeProfile', grok: 'grokProfile' } as const satisfies Record<ProviderId, keyof BoundSession>;
+const SESSION_PROFILE_FIELDS = { codex: 'codexProfile', claude: 'claudeProfile', grok: 'grokProfile', vibe: 'vibeProfile' } as const satisfies Record<ProviderId, keyof BoundSession>;
 
 /** The profile a session is on, read from the field of its own provider. */
-export function sessionModelProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile'>): ModelProfileKey | undefined {
+export function sessionModelProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile'>): ModelProfileKey | undefined {
   return session[SESSION_PROFILE_FIELDS[session.provider]];
 }
 

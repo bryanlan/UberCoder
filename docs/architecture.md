@@ -562,6 +562,27 @@ removal of tmux); this section is the summary.
   lists the conversations saved for a project from it (matching the directory in `summary.json`, so past Grok chats can be
   reopened) and `providers/transcripts/grok.ts` joins the streamed chunks into messages. The model profiles come from the
   catalog's `grok` section, and a Grok session's profile is stored in `bound_sessions.grok_profile` (schema 21).
+  The ACP pieces Grok shares with Vibe live in `providers/transport/acp/`.
+- Vibe plugin: `providers/transport/vibe/` drives `vibe-acp` (no flags) over the same ACP core and declares
+  `processModel: 'per-session'`: one process per conversation behind its own session host (`vibe-<conversationId>`).
+  Vibe allocates the session id at `session/new`. Model and thinking are `session/set_config_option` (`model`,
+  `thinking`), applied on the next turn with no restart. Stop is `session/cancel`, closed locally after ten seconds
+  when no answer comes. A reply mid-turn cancels the running turn and is sent as the next one. Images are ACP image
+  blocks before the text. A permission request is declined. Mode is set to `auto-approve` on a new session and on a
+  fresh `session/load`. An untrusted workspace (Vibe then skips that project's `AGENTS.md`) is trusted with
+  `_trust/decision` `trust_cwd` and the model is set again so the instructions rebuild; an attach to a process that
+  is already running does not do this. Mistral API-key variables are stripped from the child so billing stays on the
+  OS keyring. After a backend restart the surviving process is adopted by the JSON-RPC id recorded in
+  `vibe-turn:<conversationId>` when the prompt was written; the late answer to that id ends the turn. If the saved
+  store shows that turn already finished (the `CURRENT` generation or snapshot sequence advanced and the new manifest
+  is quiescent), the adopted turn is completed from the store. A store that cannot say is left adopted. When the
+  process is gone, `resume` starts `vibe-acp` and runs `session/load`, and the replayed history is dropped. Durable
+  history is `~/.vibe/logs/session/unified/<session id>/` (`VIBE_HOME` overrides `~/.vibe`); `providers/vibe-provider.ts`
+  lists a project's sessions from `meta.json`, and `providers/transcripts/vibe.ts` joins the chunks. An unknown store
+  format is skipped. The model profiles come from the catalog's optional `vibe` block (router vendor `mistral`), and a
+  Vibe session's profile is stored in `bound_sessions.vibe_profile` (schema 24). Vibe has no session-start hook, so the
+  Console registers the conversation itself (`coordination/console-registration.ts`) and prepends that context to the
+  first prompt. A rate limit (`-31001`) ends the turn with a plain notice and records `wo quota limited --subscription mistral_vibe`.
 - Approvals: threads start with approval policy `never` and a full-access sandbox.
   A server request that still arrives (command, file or permission approval, MCP form) is declined and
   recorded as a status event. There is no approval UI.

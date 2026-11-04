@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { SessionCommandResult } from '../src/sessions/session-manager.js';
 import { SessionInputRejectedError } from '../src/sessions/session-manager.js';
 import { InputQueue, type QueuedInputRecord } from '../src/sessions/input-queue.js';
 import { imagePromptSuffix, withoutImageInstruction } from '../src/images/prompt.js';
 import { CoordinationService } from '../src/coordination/service.js';
+import { ModelProfileService } from '../src/model-profiles/service.js';
 import { peerWakeAttemptKey, peerWakePaused, type PeerWakeAttempt } from '../src/coordination/wake.js';
 import { NotSentError, SendRejectedError, TurnNotActiveError } from '../src/providers/transport/types.js';
 import { enableUnattendedRecovery, provider } from './helpers/session-fixtures.js';
@@ -25,12 +27,14 @@ function record(f: StructuredSessionFixture, sessionId: string, requestId: strin
   return JSON.parse(f.db.meta.get(`session-input:${sessionId}:${requestId}`)!) as QueuedInputRecord;
 }
 
-function grokFixture() {
+/** A provider that cannot steer. Vibe reads its levels from the fake `wo`, since the host's `wo` may not list Vibe yet. */
+function grokFixture(id: 'grok' | 'vibe' = 'grok') {
   return fixture({
-    plugin: { id: 'grok', capabilities: { steer: 'none' } },
-    provider: { ...provider, id: 'grok' },
+    plugin: { id, capabilities: { steer: 'none' } },
+    provider: { ...provider, id },
     manager: { structuredSessions: { ...structuredSessionsConfig,
-      grok: { enabled: true, command: ['fake-grok'], idleUnloadMinutes: 60, env: {} } } },
+      [id]: { enabled: true, command: [`fake-${id}`], idleUnloadMinutes: 60, env: {} } },
+      ...(id === 'vibe' ? { modelProfiles: new ModelProfileService({ woPath: fileURLToPath(new URL('./helpers/fake-wo.mjs', import.meta.url)) }) } : {}) },
   });
 }
 
@@ -362,6 +366,20 @@ describe('Structured human input', () => {
     expect(record(f, session.id, requestId)).toMatchObject({ turnId: 'turn-2', deliveryMode: 'turn' });
     expect(eventLogLines(f.row(session.id)).filter(line => line.type === 'user-input').map(line => line.text))
       .toEqual(['investigate', 'the planner chat is missing']);
+  });
+
+  it('interrupts a Mistral Vibe turn once for a queued reply, then submits the reply after the old turn ends', async () => {
+    const f = grokFixture('vibe');
+    const { session } = await f.bindNew();
+    await send(f, session.id, 'investigate');
+    await settle();
+    const requestId = randomUUID();
+    const result = await send(f, session.id, 'use the other file', requestId);
+    expect(result.queuedInput).toMatchObject({ requestId, state: 'queued', reason: 'Stopping the current turn to deliver your reply.' });
+    expect(f.calls(session.conversationRef, 'interrupt')).toHaveLength(1);
+    f.thread(session.conversationRef).completeTurn('interrupted');
+    await expect.poll(() => record(f, session.id, requestId).state, { timeout: 5000, interval: 50 }).toBe('submitted');
+    expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(2);
   });
 
   it('preserves consecutive Grok replies in FIFO order across the interrupted turns', async () => {

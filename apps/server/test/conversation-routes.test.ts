@@ -2672,7 +2672,7 @@ describe('conversation routes', () => {
       db: AppDatabase;
       tempDir: string;
       sessions: Record<string, unknown>;
-      structuredProviders?: Array<'codex' | 'claude' | 'grok'>;
+      structuredProviders?: Array<'codex' | 'claude' | 'grok' | 'vibe'>;
       start?: Parameters<typeof registerConversationRoutes>[9];
     }) {
       const app = fastify();
@@ -2708,7 +2708,7 @@ describe('conversation routes', () => {
       }
     }
 
-    const disabled = (provider: 'codex' | 'claude' | 'grok') => ({ error: new StructuredSessionDisabledError(provider).message });
+    const disabled = (provider: 'codex' | 'claude' | 'grok' | 'vibe') => ({ error: new StructuredSessionDisabledError(provider).message });
 
     it('refuses a new chat with 400, and starts nothing, unless the provider lane is enabled', async () => {
       await withDb(async (db, tempDir) => {

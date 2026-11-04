@@ -30,6 +30,7 @@ config.sessions.pressureSuspendAvailableMiB = 512;
 config.structuredSessions = {
   codex: { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
   claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} },
+  vibe: { enabled: false },
 };
 for (const provider of ['codex','claude']) config.providers[provider] = { enabled: true, discoveryRoot: installed.providers[provider]?.discoveryRoot ?? `~/.${provider}` };
 fs.writeFileSync(configPath, JSON.stringify(config), { mode: 0o600 });

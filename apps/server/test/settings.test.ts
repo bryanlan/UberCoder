@@ -41,6 +41,10 @@ async function setup(): Promise<{ configPath: string; root: string }> {
         enabled: true,
         discoveryRoot: '~/.claude',
       },
+      vibe: {
+        enabled: true,
+        discoveryRoot: path.join(tempDir, 'vibe-home'),
+      },
     },
     projects: {
       demo: {

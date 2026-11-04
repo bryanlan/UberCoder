@@ -32,6 +32,7 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       codex: { enabled: false, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} },
       claude: { enabled: false, command: ['claude'], idleUnloadMinutes: 60, env: {} },
       grok: { enabled: false, command: ['grok'], idleUnloadMinutes: 60, env: {} },
+      vibe: { enabled: false, command: ['vibe-acp'], idleUnloadMinutes: 60, env: {} },
     },
     security: {
       passwordHash: 'scrypt:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
@@ -56,6 +57,10 @@ function buildConfig(overrides: Partial<AppConfig['security']> = {}): AppConfig 
       grok: {
         enabled: true,
         discoveryRoot: '~/.grok',
+      },
+      vibe: {
+        enabled: false,
+        discoveryRoot: '/tmp/agent-console-auth-no-vibe',
       },
     },
     projects: {},

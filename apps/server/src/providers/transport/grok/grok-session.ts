@@ -11,7 +11,6 @@
 // no request, so its end is `turn_completed`. Either one ends the turn, whichever comes first, exactly once.
 
 import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
 import {
   NotSentError,
   PreviousTurnActiveError,
@@ -34,13 +33,13 @@ import {
   type JsonRpcNotification,
 } from '../codex/jsonrpc.js';
 import { redactFreeText } from '../codex/redact.js';
+import { DECLINED_PERMISSION, INTERRUPT_GRACE_MS, buildPromptBlocks, classifyStandardUpdate, completedToolCall } from '../acp/index.js';
 import {
   ACP,
   asNumber,
   asString,
   classifyGrokFailure,
   isRecord,
-  itemKindForTool,
   readConfigValue,
   readModels,
   stopReasonStatus,
@@ -73,7 +72,7 @@ export interface GrokTimings {
 export const DEFAULT_GROK_TIMINGS: GrokTimings = {
   initializeTimeoutMs: 30_000,
   requestTimeoutMs: 30_000,
-  interruptGraceMs: 10_000,
+  interruptGraceMs: INTERRUPT_GRACE_MS,
   closeGraceMs: 5_000,
   termGraceMs: 5_000,
 };
@@ -133,11 +132,6 @@ interface OpenPermission {
 
 const MAX_PENDING_PERMISSIONS = 32;
 const MAX_FINISHED_PROMPTS = 64;
-
-function isTransientFileError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN' || code === 'EBUSY' || code === 'EIO' || code === 'ENOMEM';
-}
 
 export class GrokSession implements TransportSession {
   readonly nativeSessionId: string;
@@ -286,7 +280,7 @@ export class GrokSession implements TransportSession {
     if (!open) throw new RequestNotPendingError(requestId);
     this.permissions.delete(requestId);
     // The Console has no approval screen and Grok runs with --always-approve, so a request that does reach here is declined.
-    open.resolve({ outcome: { outcome: 'cancelled' } });
+    open.resolve(DECLINED_PERMISSION);
     this.channel.push({ type: 'request.closed', requestId, outcome: 'declined' });
   }
 
@@ -313,7 +307,7 @@ export class GrokSession implements TransportSession {
     this.ended = true;
     this.clearTimers();
     this.unsubscribeAll();
-    for (const open of this.permissions.values()) open.resolve({ outcome: { outcome: 'cancelled' } });
+    for (const open of this.permissions.values()) open.resolve(DECLINED_PERMISSION);
     this.permissions.clear();
     this.channel.push({ type: 'session.state', state: 'stopped' });
     this.wakeExitWaiters();
@@ -332,21 +326,12 @@ export class GrokSession implements TransportSession {
     return redactFreeText(error instanceof Error ? error.message : String(error), 300);
   }
 
-  /** The prompt blocks: the text, then any images (base64, as ACP's `image` content block). */
+  /** The prompt blocks: the images, then the text (base64, as ACP's `image` content block). */
   private async buildPrompt(input: TurnInput): Promise<Array<Record<string, unknown>>> {
-    const blocks: Array<Record<string, unknown>> = [];
-    for (const image of input.images ?? []) {
-      let data: Buffer;
-      try {
-        data = await fs.promises.readFile(image.path);
-      } catch (error) {
-        if (isTransientFileError(error)) throw new NotSentError(`The message was not sent: an attachment could not be read (${this.describeError(error)}).`);
-        throw new SendRejectedError('An attached image is missing or cannot be read, so the message was not sent.');
-      }
-      blocks.push({ type: 'image', data: data.toString('base64'), mimeType: image.mimeType });
-    }
-    blocks.push({ type: 'text', text: input.text });
-    return blocks;
+    return buildPromptBlocks(input, {
+      onTransient: (error) => new NotSentError(`The message was not sent: an attachment could not be read (${this.describeError(error)}).`),
+      onMissing: () => new SendRejectedError('An attached image is missing or cannot be read, so the message was not sent.'),
+    });
   }
 
   /**
@@ -495,43 +480,47 @@ export class GrokSession implements TransportSession {
 
   private onSessionUpdate(params: Record<string, unknown>): void {
     const update = isRecord(params.update) ? params.update : {};
-    const type = asString(update.sessionUpdate);
+    const classified = classifyStandardUpdate(update);
     const meta = isRecord(params._meta) ? params._meta : {};
     // Settings changes show up whatever else is going on, including during a load.
-    if (type === 'config_option_update') {
+    if (classified.action === 'config') {
       this.readOptions(update);
       return;
     }
     if (this.loading) return; // saved history streamed back by session/load
     const total = asNumber(meta.totalTokens);
     const promptId = asString(meta.promptId);
-    switch (type) {
-      case 'agent_message_chunk':
-      case 'agent_thought_chunk': {
-        const turn = this.ensureProviderTurn();
+    // Grok reports context size on its own end-of-turn events. A standard usage_update is not one of those.
+    if (classified.action === 'usage') {
+      this.noteIgnored(`${ACP.update}:usage_update`);
+      return;
+    }
+    const noteTurn = (): TurnState | undefined => {
+      const turn = this.ensureProviderTurn();
+      if (!turn) return undefined;
+      if (promptId && !turn.promptId) turn.promptId = promptId;
+      if (total !== undefined) turn.contextTokens = total;
+      return turn;
+    };
+    switch (classified.action) {
+      case 'message':
+      case 'thought': {
+        const turn = noteTurn();
         if (!turn) return;
-        if (promptId && !turn.promptId) turn.promptId = promptId;
-        if (total !== undefined) turn.contextTokens = total;
-        this.openBlock(turn, type === 'agent_message_chunk' ? 'assistant' : 'reasoning');
+        this.openBlock(turn, classified.action === 'message' ? 'assistant' : 'reasoning');
         return;
       }
-      case 'tool_call':
-      case 'tool_call_update': {
-        const turn = this.ensureProviderTurn();
+      case 'tool':
+      case 'tool-update': {
+        const turn = noteTurn();
         if (!turn) return;
-        if (promptId && !turn.promptId) turn.promptId = promptId;
-        if (total !== undefined) turn.contextTokens = total;
-        this.onToolCall(turn, update, type === 'tool_call_update');
+        this.onToolCall(turn, update, classified.action === 'tool-update');
         return;
       }
-      case 'user_message_chunk':
-      case 'available_commands_update':
-      case 'current_mode_update':
-      case 'plan':
-      case 'session_info_update':
+      case 'ignore':
         return; // not activity of the agent
       default:
-        if (type) this.noteIgnored(`${ACP.update}:${type}`);
+        if (classified.type) this.noteIgnored(`${ACP.update}:${classified.type}`);
     }
   }
 
@@ -552,21 +541,16 @@ export class GrokSession implements TransportSession {
 
   private onToolCall(turn: TurnState, update: Record<string, unknown>, isUpdate: boolean): void {
     this.closeBlock(turn);
-    const toolCallId = asString(update.toolCallId);
-    if (!toolCallId) return;
-    const status = asString(update.status);
-    if (isUpdate && (status === 'completed' || status === 'failed') && !turn.tools.has(toolCallId)) {
-      turn.tools.add(toolCallId);
-      const title = asString(update.title);
-      this.channel.push({
-        type: 'item.completed',
-        turnId: turn.id,
-        itemId: toolCallId,
-        kind: itemKindForTool(update.kind, title) satisfies ItemKind,
-        replay: false,
-        ...(title ? { title: redactFreeText(title, 200) } : {}),
-      });
-    }
+    const tool = completedToolCall(update, isUpdate, turn.tools);
+    if (!tool) return;
+    this.channel.push({
+      type: 'item.completed',
+      turnId: turn.id,
+      itemId: tool.id,
+      kind: tool.kind satisfies ItemKind,
+      replay: false,
+      ...(tool.title ? { title: redactFreeText(tool.title, 200) } : {}),
+    });
   }
 
   private onExtUpdate(params: Record<string, unknown>): void {
@@ -642,7 +626,7 @@ export class GrokSession implements TransportSession {
 
   private onPermissionRequest(params: unknown): Promise<unknown> {
     const record = isRecord(params) ? params : {};
-    if (this.permissions.size >= MAX_PENDING_PERMISSIONS) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
+    if (this.permissions.size >= MAX_PENDING_PERMISSIONS) return Promise.resolve(DECLINED_PERMISSION);
     const toolCall = isRecord(record.toolCall) ? record.toolCall : {};
     const requestId = asString(toolCall.toolCallId) ?? randomUUID();
     const summary = redactFreeText(asString(toolCall.title) ?? 'Grok asked for permission', 200);
@@ -672,7 +656,7 @@ export class GrokSession implements TransportSession {
     };
     const turn = this.active;
     if (turn && !turn.terminal) this.finalize(turn, 'failed', failure, false);
-    for (const open of this.permissions.values()) open.resolve({ outcome: { outcome: 'cancelled' } });
+    for (const open of this.permissions.values()) open.resolve(DECLINED_PERMISSION);
     this.permissions.clear();
     this.channel.push({ type: 'session.state', state: 'stopped', ...(this.closing || exit.expected ? {} : { failure }) });
     this.wakeExitWaiters();

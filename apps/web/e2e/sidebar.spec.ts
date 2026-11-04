@@ -12,6 +12,7 @@ async function openConsole(page: Page): Promise<void> {
       codex: { id: 'codex', label: 'Codex', conversations: [conversation] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
       grok: { id: 'grok', label: 'Grok', conversations: [] },
+      vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
     },
   };
   await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
@@ -131,6 +132,7 @@ test('filters to active status chats beside Work mode and remembers the choice',
           updatedAt: ago(0), isBound: true, degraded: false,
         }] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
       },
     }],
     boundSessions: cases.flatMap(({ ref, session }) => session ? [{

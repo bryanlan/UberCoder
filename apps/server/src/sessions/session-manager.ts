@@ -63,12 +63,18 @@ interface AppliedModel extends ModelTarget {
 }
 
 export function profilePatch(provider: ProviderId, profile: ModelProfileKey | undefined) {
-  return provider === 'codex' ? { codexProfile: profile } : provider === 'grok' ? { grokProfile: profile } : { claudeProfile: profile };
+  if (provider === 'codex') return { codexProfile: profile };
+  if (provider === 'grok') return { grokProfile: profile };
+  if (provider === 'vibe') return { vibeProfile: profile };
+  return { claudeProfile: profile };
 }
 
 /** The profile a bind asked for, from the field that belongs to the provider. */
-function requestedProfileOf(providerId: ProviderId, input: { codexProfile?: ModelProfileKey; claudeProfile?: ModelProfileKey; grokProfile?: ModelProfileKey }): ModelProfileKey | undefined {
-  return providerId === 'codex' ? input.codexProfile : providerId === 'grok' ? input.grokProfile : input.claudeProfile;
+function requestedProfileOf(providerId: ProviderId, input: { codexProfile?: ModelProfileKey; claudeProfile?: ModelProfileKey; grokProfile?: ModelProfileKey; vibeProfile?: ModelProfileKey }): ModelProfileKey | undefined {
+  if (providerId === 'codex') return input.codexProfile;
+  if (providerId === 'grok') return input.grokProfile;
+  if (providerId === 'vibe') return input.vibeProfile;
+  return input.claudeProfile;
 }
 
 /** The status line that records an Auto choice made when a chat was started. */
@@ -329,6 +335,8 @@ export class SessionManager {
   private assignmentWakeRun?: Promise<void>;
   private wakeRequested = false;
   private readonly coordinationEnabled: boolean;
+  /** Set once coordination exists. A provider with no session-start hook (Vibe) calls it after its process is up. */
+  private conversationRegistrar?: PluginContext['registerConversation'];
   private readonly hasActiveLaunchAuthority?: (session: BoundSession) => boolean;
   private readonly notifyStructuredQuestion?: (notice: StructuredQuestionNotice) => void | Promise<unknown>;
   /** The model list shared with the web routes and granted launches: profiles come from here, never from a table in this repo. */
@@ -399,6 +407,7 @@ export class SessionManager {
           // The Console's coordination runtime and helper. A shared process serves every thread, so the identity has no session
           // id here; a per-session plugin gets its conversation's id with `OpenOptions.consoleIdentity`.
           ...(this.coordinationEnabled ? { coordination: { runtimeDir: this.runtimeDir, helperPath: this.coordinationHelperPath() } } : {}),
+          ...(this.coordinationEnabled ? { registerConversation: (input) => this.conversationRegistrar?.(input) ?? Promise.resolve() } : {}),
           log: {
             info: (bindings, message) => this.logger?.info?.(bindings, message),
             warn: (bindings, message) => this.logger?.warn(bindings, message),
@@ -1327,6 +1336,14 @@ export class SessionManager {
     return fileURLToPath(new URL('../../../../scripts/agent-coord.mjs', import.meta.url));
   }
 
+  /**
+   * Set once coordination exists. A provider with no session-start hook (Mistral Vibe) registers the live process here.
+   * Later `createContext` calls see it; a call before this resolves and the session still starts.
+   */
+  setConversationRegistrar(registrar: NonNullable<PluginContext['registerConversation']>): void {
+    this.conversationRegistrar = registrar;
+  }
+
   private async restoreSession(requestedSession: BoundSession, explicitResume = false, initialPrompt?: string, beforeStart?: () => void): Promise<BoundSession | undefined> {
     const session = this.getCurrentRestorableSession(requestedSession);
     if (!session) {
@@ -1373,6 +1390,7 @@ export class SessionManager {
     codexProfile?: ModelProfileKey;
     claudeProfile?: ModelProfileKey;
     grokProfile?: ModelProfileKey;
+    vibeProfile?: ModelProfileKey;
     /**
      * A structured chat started with a routing already made (the provider-neutral Start): the session starts on this Auto decision,
      * runs on its model from the first turn, and the initial prompt is not routed again. Needs the provider's `auto` profile.
@@ -2710,16 +2728,19 @@ export class SessionManager {
       if (this.inputQueue.get(sessionId, record.requestId)?.state !== 'submitting') return;
       if (error instanceof StructuredBusyError || error instanceof PreviousTurnActiveError) {
         // Keep the message durable before interrupting a Grok turn that cannot take a native steer.
+        const stopsForReply = session.provider === 'grok' || session.provider === 'vibe';
         this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined, reason: error instanceof StructuredBusyError
-          ? session.provider === 'grok' ? 'Stopping the current turn to deliver your reply.' : 'Waiting for the running turn to finish.'
+          ? stopsForReply ? 'Stopping the current turn to deliver your reply.' : 'Waiting for the running turn to finish.'
           : 'Waiting for the session to accept the message.' });
-        if (error instanceof StructuredBusyError && session.provider === 'grok') {
+        if (error instanceof StructuredBusyError && stopsForReply) {
           try {
             await this.structured.interruptForQueuedReply(session);
           } catch (interruptError) {
             // The reply was not sent and remains queued. An interrupt failure must not return a false send failure to
             // the browser, which could restore and resubmit the same draft while this durable copy is still pending.
-            this.logger?.warn({ err: interruptError, sessionId }, 'Grok interruption for a queued reply will be retried.');
+            this.logger?.warn({ err: interruptError, sessionId }, session.provider === 'grok'
+              ? 'Grok interruption for a queued reply will be retried.'
+              : 'Mistral Vibe interruption for a queued reply will be retried.');
             this.saveQueuedInput(sessionId, { ...record, notSentSince: undefined,
               reason: 'Could not stop the current turn yet. Your reply is saved and will be retried.' });
           }

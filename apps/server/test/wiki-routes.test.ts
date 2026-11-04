@@ -24,6 +24,7 @@ it('serves a project wiki with authentication, CSRF protection and conflict resp
     providers: {
       codex: { discoveryRoot: path.join(root, 'codex') },
       claude: { discoveryRoot: path.join(root, 'claude') },
+      vibe: { discoveryRoot: path.join(root, 'vibe') },
     },
     projects: { demo: { active: true, path: project } },
   }));

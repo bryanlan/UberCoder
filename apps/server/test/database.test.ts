@@ -402,7 +402,7 @@ describe('AppDatabase', () => {
       ['claude-high', 'claude', 'high'], ['claude-medium', 'claude', 'medium'], ['claude-low', 'claude', 'low'],
       ['grok-high', 'grok', 'high'], ['grok-medium', 'grok', 'medium'], ['grok-low', 'grok', 'low'],
     ];
-    const column = { codex: 'codex_profile', claude: 'claude_profile', grok: 'grok_profile' } as const;
+    const column = { codex: 'codex_profile', claude: 'claude_profile', grok: 'grok_profile', vibe: 'vibe_profile' } as const;
     for (const [id, provider] of rows) {
       before.boundSessions.upsert(boundSession({ id, provider, conversationRef: `${id}-ref`, updatedAt: '2026-11-01T00:00:00.000Z' }));
     }

@@ -25,6 +25,7 @@ for (const provider of ['claude', 'codex'] as const satisfies readonly ProviderI
         codex: { id: 'codex', label: 'Codex', conversations: provider === 'codex' ? [conversation] : [] },
         claude: { id: 'claude', label: 'Claude', conversations: provider === 'claude' ? [conversation] : [] },
         grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
       } }], boundSessions: [session],
     } }));
     await page.route(`**/api/conversations/demo/${provider}/image-chat/messages**`, route => route.fulfill({ json: { conversation, boundSession: session, messages, messagePage: { hasOlder: false, total: messages.length } } }));

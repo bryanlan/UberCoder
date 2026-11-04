@@ -545,6 +545,7 @@ export async function registerConversationRoutes(
         initialPrompt: parsedBody.data.initialPrompt,
         codexProfile: providerId === 'codex' ? existingSession?.codexProfile : undefined,
         grokProfile: providerId === 'grok' ? existingSession?.grokProfile : undefined,
+        vibeProfile: providerId === 'vibe' ? existingSession?.vibeProfile : undefined,
       });
       return { session };
     } catch (error) {

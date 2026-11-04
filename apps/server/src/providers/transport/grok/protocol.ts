@@ -3,18 +3,11 @@
 // untyped JSON: a reply that does not have the expected shape is ignored or refused, never trusted.
 
 import type { ProviderFailure } from '../types.js';
+import { asNumber, asString, isRecord, readConfigValue as readAnyConfigValue } from '../acp/readers.js';
+import { stopReasonStatus as stopReasonFor } from '../acp/updates.js';
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-export function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-export function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
+export { isRecord, asString, asNumber } from '../acp/readers.js';
+export { itemKindForTool } from '../acp/updates.js';
 
 /** The ACP method names the plugin sends. Extension methods carry the leading underscore ACP puts on the wire. */
 export const ACP = {
@@ -65,27 +58,12 @@ export function readModels(source: unknown): { current?: string; models: GrokMod
 
 /** The current value of a `select` config option (`model` or `reasoning_effort`) in a `configOptions` list. */
 export function readConfigValue(options: unknown, id: 'model' | 'reasoning_effort'): string | undefined {
-  if (!Array.isArray(options)) return undefined;
-  for (const option of options) {
-    if (isRecord(option) && option.id === id) return asString(option.currentValue);
-  }
-  return undefined;
+  return readAnyConfigValue(options, id);
 }
 
 /** ACP stop reasons, as a turn status. `max_tokens` and `max_turn_requests` end the turn normally; the notice says why it stopped. */
 export function stopReasonStatus(stopReason: unknown): { status: 'completed' | 'interrupted' | 'failed'; notice?: string } {
-  switch (stopReason) {
-    case 'cancelled':
-      return { status: 'interrupted' };
-    case 'refusal':
-      return { status: 'failed' };
-    case 'max_tokens':
-      return { status: 'completed', notice: 'Grok stopped because it reached its output limit for the turn.' };
-    case 'max_turn_requests':
-      return { status: 'completed', notice: 'Grok stopped because it reached its limit of model calls for the turn.' };
-    default:
-      return { status: 'completed' };
-  }
+  return stopReasonFor(stopReason, 'Grok');
 }
 
 const USAGE_LIMIT_PATTERN = /usage[_ ]limit|weekly limit|credit limit|spending cap|out of credits|usage_pool_exhausted|\b402\b/i;
@@ -99,21 +77,4 @@ export function classifyGrokFailure(code: number | undefined, message: string, d
   if (AUTH_PATTERN.test(detail)) return { class: 'permission_error', code: 'unauthorized', message, retryable: false };
   if (RATE_LIMIT_PATTERN.test(detail)) return { class: 'provider_error', code: 'rate_limited', message, retryable: true };
   return { class: 'provider_error', ...(code !== undefined ? { code: String(code) } : {}), message, retryable: false };
-}
-
-/** The kind the Console files a Grok tool call under, from the `kind` ACP gives it (`execute`, `edit`, `read`, `search`, `fetch`, ...). */
-export function itemKindForTool(kind: unknown, title: unknown): 'command' | 'file_change' | 'mcp' | 'search' | 'other' {
-  switch (kind) {
-    case 'execute':
-      return 'command';
-    case 'edit':
-    case 'delete':
-    case 'move':
-      return 'file_change';
-    case 'search':
-    case 'fetch':
-      return 'search';
-    default:
-      return typeof title === 'string' && /mcp/i.test(title) ? 'mcp' : 'other';
-  }
 }

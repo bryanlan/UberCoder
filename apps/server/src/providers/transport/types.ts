@@ -228,6 +228,19 @@ export interface PluginContext {
    * start time and boot. For a host that runs but no longer sends a welcome, which no connection can end the process through.
    */
   endHost?(hostId: string, graces?: { closeGraceMs?: number; termGraceMs?: number; staleTermGraceMs?: number }): Promise<void>;
+  /**
+   * Present when the Console registers a conversation itself (a provider with no session-start hook). Called after the
+   * process is up. `fresh` is true only for a new session, whose first prompt carries the returned session-start context.
+   * A failure here must not break the session: the plugin logs it and continues.
+   */
+  registerConversation?(input: {
+    provider: string;
+    nativeSessionId: string;
+    conversationId: string;
+    cwd: string;
+    pid: number;
+    fresh: boolean;
+  }): Promise<{ startupContext?: string } | void>;
 }
 
 /** `sendTurn` was called while the previous turn on the same session is still running. */

@@ -1,11 +1,11 @@
 # AGENTS.md
 
-This repo is a local, server-first Codex/Claude Agent Console with a Fastify backend, React PWA, shared contracts, and live sessions on a structured provider transport (Codex app-server, Claude headless stream-json) behind per-process session hosts. The tmux transport was removed in Phase B (2026-11); a row an earlier build left on it is converted when the backend starts.
+This repo is a local, server-first Codex/Claude Agent Console with a Fastify backend, React PWA, shared contracts, and live sessions on a structured provider transport (Codex app-server, Claude headless stream-json, Grok ACP, Mistral Vibe ACP) behind per-process session hosts. The tmux transport was removed in Phase B (2026-11); a row an earlier build left on it is converted when the backend starts.
 
 ## Quick Rules
 - Treat the backend as the source of truth for project, conversation, session, proxy, auth, and config state; the frontend must not become a raw terminal controller.
 - Keep projects explicit and config-backed. Do not reintroduce implicit immediate-child project discovery.
-- Preserve the one-conversation-to-one-provider-conversation model for live sessions: one restorable row owns one native Codex thread or Claude session on the structured transport. A provider whose lane is off (`structuredSessions.<provider>.enabled`) cannot run conversations.
+- Preserve the one-conversation-to-one-provider-conversation model for live sessions: one restorable row owns one native Codex thread, Claude session, Grok session or Mistral Vibe session on the structured transport. A provider whose lane is off (`structuredSessions.<provider>.enabled`) cannot run conversations.
 - Keep localhost proxy access authenticated and allowlisted per project/port.
 - Recency should move only from new user/agent activity and completed output after the idle window; old transcripts, restore events, repaint noise, and idle status changes do not count.
 - Conversation content comes from the provider transcript. The session event log adds only the person's messages and the Console's status lines as live rows; an automatic opening prompt (`agent-input`) and terminal output an earlier build logged (`raw-output`) are never promoted into transcript rows.
@@ -37,7 +37,7 @@ This repo is a local, server-first Codex/Claude Agent Console with a Fastify bac
 - Root workspace scripts build `packages/shared/` first; prefer root `npm` commands unless you intentionally need a package-local target.
 - Browser e2e artifacts under `test-results/` can be stale; rerun Playwright before treating them as current failures.
 - Playwright starts isolated backend/web servers with `reuseExistingServer: false`; use free E2E ports and its fixture config rather than a running Console service.
-- The real-provider proofs (`scripts/prove-*.mjs --run`) start real Claude and Codex processes with the host's logins; keep them opt-in.
+- The real-provider proofs (`scripts/prove-*.mjs --run`) start real Claude, Codex, and (for `prove-structured-vibe.mjs`) Mistral Vibe processes with the host's logins; keep them opt-in. The Vibe proof was not run when the provider was added.
 - Call out config schema, auth, proxy, session lifecycle, or localhost exposure changes explicitly in handoffs.
 
 ## Additional References

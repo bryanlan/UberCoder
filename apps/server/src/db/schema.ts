@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 23;
+export const CURRENT_SCHEMA_VERSION = 24;
 
 interface Migration {
   version: number;
@@ -326,6 +326,10 @@ const MIGRATIONS: Migration[] = [
       create index if not exists coordination_messages_sender on coordination_messages(sender_id, created_at);`);
   } },
   { version: 23, name: 'model-levels', up: renameProfilesToLevels },
+  { version: 24, name: 'vibe-cost-profile', up(sqlite) {
+    // The model profile of a Mistral Vibe session, beside the other providers' profile columns.
+    if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'vibe_profile', 'vibe_profile text');
+  } },
 ];
 
 /**

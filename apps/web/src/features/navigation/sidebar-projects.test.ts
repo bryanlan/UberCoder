@@ -51,6 +51,7 @@ function project({
       codex: { id: 'codex', label: 'Codex', conversations: codex },
       claude: { id: 'claude', label: 'Claude', conversations: claude },
       grok: { id: 'grok', label: 'Grok', conversations: grok },
+      vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
     },
   };
 }

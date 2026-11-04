@@ -20,6 +20,7 @@ function fixtures(started: boolean) {
       codex: { id: 'codex', label: 'Codex', conversations: [] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
       grok: { id: 'grok', label: 'Grok', conversations: started ? [conversation] : [] },
+      vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
     },
   };
   return { session, conversation, project };

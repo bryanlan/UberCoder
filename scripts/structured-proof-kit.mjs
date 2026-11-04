@@ -136,6 +136,7 @@ export const PROOF_PROCESS_KINDS = [
   { kind: 'codex app-server', fragment: 'codex app-server' },
   { kind: 'claude process', fragment: 'claude --output-format' },
   { kind: 'coordination MCP server', fragment: 'agent-coord.mjs mcp' },
+  { kind: 'vibe process', fragment: 'vibe-acp' },
 ];
 const readProc = (pid, file) => { try { return fs.readFileSync(`/proc/${pid}/${file}`, 'utf8'); } catch { return ''; } };
 /** Running, not merely a zombie awaiting its parent. */

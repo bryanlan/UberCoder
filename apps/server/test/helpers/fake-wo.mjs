@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 
 const at = (model, label, effort) => ({ model, label, effort, launch_name: model });
-// Each vendor's model at each level, as the catalog defines them. Grok has no Ultra or High model.
+// Each vendor's model at each level, as the catalog defines them. Grok and Mistral Vibe have no Ultra or High model.
 const LEVELS = {
   openai: {
     ultra: at('gpt-6-astra', 'GPT-6 Astra', 'xhigh'),
@@ -33,6 +33,10 @@ const LEVELS = {
     medium: at('grok-4.7', 'Grok 4.7', 'high'),
     low: at('grok-4.6', 'Grok 4.6', 'medium'),
   },
+  mistral: {
+    medium: { ...at('glm-5.3', 'GLM-5.3', 'high'), launch_name: 'glm-5-3' },
+    low: { ...at('glm-5.3-flash', 'GLM-5.3 Flash', 'high'), launch_name: 'zai-glm-5-3-flash' },
+  },
 };
 
 const args = process.argv.slice(2);
@@ -46,6 +50,7 @@ else if (args[0] === 'profiles') {
     codex: { provider: 'openai', levels: LEVELS.openai },
     claude: { provider: 'anthropic', levels: LEVELS.anthropic },
     grok: { provider: 'xai', levels: LEVELS.xai },
+    vibe: { provider: 'mistral', levels: LEVELS.mistral },
   } }));
 } else if (args[0] === 'route') {
   const provider = args[args.indexOf('--provider') + 1];
@@ -81,6 +86,7 @@ function routeRole(vendor, providerFilter, requestedEffort) {
     openai: ['gpt-6.1-terra', 'GPT-6.1 Terra'],
     anthropic: ['claude-sonnet-5-5', 'Claude Sonnet 5.5'],
     xai: ['grok-4.7', 'Grok 4.7'],
+    mistral: ['glm-5.3', 'GLM-5.3'],
   };
   const [model, label] = models[vendor];
   process.stdout.write(JSON.stringify({

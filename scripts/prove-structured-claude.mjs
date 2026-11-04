@@ -65,7 +65,7 @@ say(claudeVersion);
 
 kit.writeConfig(config => {
   // The lane under test is Claude's. Both lanes default to on, so the Codex lane is switched off by name.
-  config.structuredSessions = { codex: { enabled: false }, grok: { enabled: false }, claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
+  config.structuredSessions = { codex: { enabled: false }, grok: { enabled: false }, vibe: { enabled: false }, claude: { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} } };
 });
 
 // ---- where Claude keeps the transcript ---------------------------------------------------------------------

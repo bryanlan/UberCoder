@@ -43,7 +43,7 @@ export interface TestContext extends PluginContext {
   metaStore: Map<string, string>;
 }
 
-export function makeContext(runtimeDir: string, extra: Partial<Pick<PluginContext, 'coordination' | 'lineTransport'>> = {}): TestContext {
+export function makeContext(runtimeDir: string, extra: Partial<Pick<PluginContext, 'coordination' | 'lineTransport' | 'registerConversation'>> = {}): TestContext {
   const logs = { info: [] as Array<[object, string]>, warn: [] as Array<[object, string]>, debug: [] as Array<[object, string]> };
   const metaStore = new Map<string, string>();
   return {

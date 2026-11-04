@@ -384,7 +384,8 @@ describe('ConfigService', () => {
     const codexDefaults = { enabled: true, command: ['codex', 'app-server'], idleUnloadMinutes: 60, env: {} };
     const claudeDefaults = { enabled: true, command: ['claude'], idleUnloadMinutes: 60, env: {} };
     const grokDefaults = { enabled: true, command: ['grok'], idleUnloadMinutes: 60, env: {} };
-    const defaults = { codex: codexDefaults, claude: claudeDefaults, grok: grokDefaults };
+    const vibeDefaults = { enabled: true, command: ['vibe-acp'], idleUnloadMinutes: 60, env: {} };
+    const defaults = { codex: codexDefaults, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults };
 
     it('defaults to enabled when the block is absent or partial', async () => {
       const absent = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
@@ -412,6 +413,7 @@ describe('ConfigService', () => {
         expect(defaultStructuredProviderConfig('claude')).toEqual(claudeDefaults);
         expect(defaultStructuredProviderConfig('codex')).toEqual(codexDefaults);
         expect(defaultStructuredProviderConfig('grok')).toEqual(grokDefaults);
+        expect(defaultStructuredProviderConfig('vibe')).toEqual(vibeDefaults);
       } finally {
         for (const configPath of [first, second]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -421,8 +423,8 @@ describe('ConfigService', () => {
       const codexOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { codex: { enabled: false } } });
       const claudeOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { claude: { enabled: false } } });
       try {
-        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults, grok: grokDefaults });
-        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false }, grok: grokDefaults });
+        expect(new ConfigService(codexOff).getConfig().structuredSessions).toEqual({ codex: { ...codexDefaults, enabled: false }, claude: claudeDefaults, grok: grokDefaults, vibe: vibeDefaults });
+        expect(new ConfigService(claudeOff).getConfig().structuredSessions).toEqual({ codex: codexDefaults, claude: { ...claudeDefaults, enabled: false }, grok: grokDefaults, vibe: vibeDefaults });
       } finally {
         for (const configPath of [codexOff, claudeOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }
@@ -442,11 +444,13 @@ describe('ConfigService', () => {
           codex: { enabled: true, command: ['/opt/codex/bin/codex', 'app-server', '--verbose'], idleUnloadMinutes: 15, env: { CODEX_HOME: '~/alt' } },
           claude: { enabled: true, command: ['/opt/claude/bin/claude', '--debug'], idleUnloadMinutes: 20, env: { CLAUDE_CONFIG_DIR: '~/alt-claude' } },
           grok: grokDefaults,
+          vibe: vibeDefaults,
         });
         expect(new ConfigService(enabledOnly).getConfig().structuredSessions).toEqual({
           codex: { ...codexDefaults, enabled: true },
           claude: { ...claudeDefaults, enabled: true },
           grok: grokDefaults,
+          vibe: vibeDefaults,
         });
         for (const configPath of [invalid, invalidClaude, invalidIdle, invalidEnv]) expect(() => new ConfigService(configPath)).toThrow();
       } finally {
@@ -459,6 +463,7 @@ describe('ConfigService', () => {
         codex: { enabled: true, command: ['codex', 'app-server', '-c', 'log=debug'], idleUnloadMinutes: 5, env: { EXTRA: '1' } },
         claude: { enabled: true, command: ['claude', '--debug'], idleUnloadMinutes: 7, env: { OTHER: '2' } },
         grok: { enabled: true, command: ['grok'], idleUnloadMinutes: 9, env: { GROK_HOME: '~/.grok-alt' } },
+        vibe: { enabled: true, command: ['vibe-acp'], idleUnloadMinutes: 11, env: { VIBE_HOME: '~/.vibe-alt' } },
       };
       const configPath = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: block });
       try {
@@ -498,18 +503,20 @@ describe('ConfigService', () => {
       }
     });
 
-    it('gives Grok its own provider settings, rooted at ~/.grok, and offers Grok only while its structured lane is on', async () => {
-      const off = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { grok: { enabled: false }, claude: { enabled: false } } });
+    it('gives Grok and Vibe their own provider settings, and offers each only while its structured lane is on', async () => {
+      const off = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security, structuredSessions: { grok: { enabled: false }, vibe: { enabled: false }, claude: { enabled: false } } });
       const on = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security });
       const projectOff = await writeTempConfig({ projectsRoot: '/tmp/projects', providers: {}, security,
-        projects: { demo: { active: true, path: '/tmp/projects/demo', explicit: true, providers: { grok: { enabled: false } } } } });
+        projects: { demo: { active: true, path: '/tmp/projects/demo', explicit: true, providers: { grok: { enabled: false }, vibe: { enabled: false } } } } });
       try {
         expect(new ConfigService(off).getMergedProviderSettings('__global__', 'grok')).toMatchObject({ id: 'grok', enabled: false, discoveryRoot: path.join(os.homedir(), '.grok') });
         expect(new ConfigService(on).getMergedProviderSettings('__global__', 'grok')).toMatchObject({ id: 'grok', enabled: true, discoveryRoot: path.join(os.homedir(), '.grok') });
-        // Only Grok follows its lane flag: the history of Claude stays readable with its lane off.
+        expect(new ConfigService(off).getMergedProviderSettings('__global__', 'vibe')).toMatchObject({ id: 'vibe', enabled: false, discoveryRoot: path.join(os.homedir(), '.vibe') });
+        expect(new ConfigService(on).getMergedProviderSettings('__global__', 'vibe')).toMatchObject({ id: 'vibe', enabled: true, discoveryRoot: path.join(os.homedir(), '.vibe') });
+        // Grok and Vibe follow their lane flags. Claude history stays readable with its lane off.
         expect(new ConfigService(off).getMergedProviderSettings('__global__', 'claude').enabled).toBe(true);
-        // A project can still switch Grok off by itself.
         expect(new ConfigService(projectOff).getMergedProviderSettings('demo', 'grok').enabled).toBe(false);
+        expect(new ConfigService(projectOff).getMergedProviderSettings('demo', 'vibe').enabled).toBe(false);
       } finally {
         for (const configPath of [off, on, projectOff]) await fs.rm(path.dirname(configPath), { recursive: true, force: true });
       }

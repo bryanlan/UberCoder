@@ -13,7 +13,8 @@ async function openConversation(page: Page, provider: ProviderId, unavailable = 
     return { slug, directoryName: slug, displayName: slug, path: `/fixture/${slug}`, tags: [], allowedLocalhostPorts: [],
       providers: { codex: { id: 'codex', label: 'Codex', conversations: conversation.provider === 'codex' ? [conversation] : [] },
         claude: { id: 'claude', label: 'Claude', conversations: conversation.provider === 'claude' ? [conversation] : [] },
-        grok: { id: 'grok', label: 'Grok', conversations: [] }, } };
+        grok: { id: 'grok', label: 'Grok', conversations: [] },
+        vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] }, } };
   }
   const inputCalls: unknown[] = [];
   const lookups: string[] = [];

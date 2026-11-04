@@ -29,7 +29,7 @@ async function openConsole(page: Page, data = snapshot, openingTexts: Record<str
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture' } }));
   await page.route('**/api/projects/tree', (route) => route.fulfill({ json: { projects: data.workers.map((worker) => ({
     slug: worker.projectSlug, directoryName: worker.projectSlug, displayName: worker.projectName, path: `/tmp/${worker.projectSlug}`,
-    tags: [], allowedLocalhostPorts: [], providers: Object.fromEntries(['codex', 'claude', 'grok'].map((provider) => [provider, {
+    tags: [], allowedLocalhostPorts: [], providers: Object.fromEntries(['codex', 'claude', 'grok', 'vibe'].map((provider) => [provider, {
       id: provider, label: provider, conversations: worker.provider === provider ? [{ ref: worker.conversationRef, title: worker.title,
         provider, projectSlug: worker.projectSlug, kind: 'history', isBound: true, degraded: false, updatedAt: new Date().toISOString() }] : [],
     }])) })) , boundSessions: [] } }));

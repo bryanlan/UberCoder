@@ -35,8 +35,10 @@ export function composeRerouteTask(input: { prompt: string; assistantReply?: str
   return parts.join('\n\n').slice(0, ROUTE_TASK_MAX_CHARS);
 }
 
-const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic' | 'xai'> = { codex: 'openai', claude: 'anthropic', grok: 'xai' };
-const ROUTER_VENDORS = ['openai', 'anthropic', 'xai'] as const;
+const ROUTER_PROVIDER: Record<ProviderId, 'openai' | 'anthropic' | 'xai' | 'mistral'> = {
+  codex: 'openai', claude: 'anthropic', grok: 'xai', vibe: 'mistral',
+};
+const ROUTER_VENDORS = ['openai', 'anthropic', 'xai', 'mistral'] as const;
 
 /** The Console provider that runs a router vendor's models, or undefined for a vendor the Console has no provider for. */
 export function providerForRouterVendor(vendor: string | null | undefined): ProviderId | undefined {
@@ -79,13 +81,29 @@ const levelSchema = z.object({
   effort: z.string().min(1),
   launch_name: z.string().min(1),
 });
-// A provider may lack a level (Grok has no Ultra or High model). Every provider has a Medium model: it is the level the Console
-// falls back to when Auto cannot route and the default for a launch that names no model.
+// A provider may lack a level (Grok and Vibe have no Ultra or High model). A catalog that has not listed Vibe yet omits it;
+// Vibe then has no levels until workflow_optimizer ships the mistral block.
 const providerSchema = z.object({
   provider: z.enum(ROUTER_VENDORS),
   levels: z.object({ ultra: levelSchema.optional(), high: levelSchema.optional(), medium: levelSchema, low: levelSchema.optional() }),
 });
-const profilesSchema = z.object({ profiles: z.object({ codex: providerSchema, claude: providerSchema, grok: providerSchema }) });
+const profilesSchema = z.object({
+  profiles: z.object({
+    codex: providerSchema,
+    claude: providerSchema,
+    grok: providerSchema,
+    vibe: providerSchema.optional(),
+  }),
+});
+
+function levelsOf(entry: z.infer<typeof providerSchema>): Partial<Record<FixedModelProfileKey, ModelProfileEntry>> {
+  const levels: Partial<Record<FixedModelProfileKey, ModelProfileEntry>> = {};
+  for (const key of FIXED_MODEL_PROFILE_KEYS) {
+    const level = entry.levels[key];
+    if (level) levels[key] = { model: level.model, label: level.label, effort: level.effort, launchName: level.launch_name };
+  }
+  return levels;
+}
 
 const classifierSchema = z.object({
   status: z.string().optional(),
@@ -234,13 +252,13 @@ export class ModelProfileService {
       if (entry.provider !== ROUTER_PROVIDER[id]) {
         throw new ModelProfilesUnavailableError(`wo profiles lists ${entry.provider} models for ${id}`);
       }
-      const levels: Partial<Record<FixedModelProfileKey, ModelProfileEntry>> = {};
-      for (const key of FIXED_MODEL_PROFILE_KEYS) {
-        const level = entry.levels[key];
-        if (level) levels[key] = { model: level.model, label: level.label, effort: level.effort, launchName: level.launch_name };
-      }
-      providers[id] = { routerProvider: entry.provider, levels };
+      providers[id] = { routerProvider: entry.provider, levels: levelsOf(entry) };
     }
+    const vibe = parsed.profiles.vibe;
+    if (vibe && vibe.provider !== 'mistral') {
+      throw new ModelProfilesUnavailableError(`wo profiles lists ${vibe.provider} models for vibe`);
+    }
+    providers.vibe = { routerProvider: 'mistral', levels: vibe ? levelsOf(vibe) : {} };
     const profiles: ModelProfilesResponse = { providers, loadedAt: new Date(this.now()).toISOString() };
     this.cached = { profiles, at: this.now() };
     return profiles;
@@ -374,10 +392,13 @@ export function fallbackDecision(reason: string, medium: ModelProfileEntry | und
   };
 }
 
-type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'autoRoute'>;
+type ProfiledRow = Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile' | 'autoRoute'>;
 
-export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile'>): ModelProfileKey | undefined {
-  return session.provider === 'codex' ? session.codexProfile : session.provider === 'grok' ? session.grokProfile : session.claudeProfile;
+export function rowProfile(session: Pick<BoundSession, 'provider' | 'codexProfile' | 'claudeProfile' | 'grokProfile' | 'vibeProfile'>): ModelProfileKey | undefined {
+  if (session.provider === 'codex') return session.codexProfile;
+  if (session.provider === 'grok') return session.grokProfile;
+  if (session.provider === 'vibe') return session.vibeProfile;
+  return session.claudeProfile;
 }
 
 /** The target an Auto row runs on: its latest decision, or none before the first message has been routed. */

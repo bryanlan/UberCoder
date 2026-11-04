@@ -34,6 +34,7 @@ const readyProfiles: ModelProfilesState = {
         medium: level('grok-build-medium', 'Grok Build Medium', 'medium'),
         low: level('grok-build-low', 'Grok Build Low', 'low'),
       } },
+      vibe: { routerProvider: 'mistral', levels: {} },
     },
   },
 };
@@ -140,6 +141,7 @@ function project(): ProjectSummary {
       codex: { id: 'codex', label: 'Codex', conversations: [] },
       claude: { id: 'claude', label: 'Claude', conversations: [] },
       grok: { id: 'grok', label: 'Grok', conversations: [] },
+      vibe: { id: 'vibe', label: 'Mistral Vibe', conversations: [] },
     },
   };
 }

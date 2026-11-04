@@ -12,7 +12,6 @@
 // restart presents that same argv to find the process (the model on the command line is only the starting model; every turn
 // states its own model and effort). Nothing here makes a model call: `probe` and the handshake only read what Grok answers.
 
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,6 +36,7 @@ import {
   describeExit,
 } from '../codex/jsonrpc.js';
 import type { StructuredProviderConfig } from '../../../config/schema.js';
+import { buildChildEnv, buildMcpServers, createRequestIdClock, decideHandshakeFailure, expandHome, hostIdFor as acpHostId, UNRESPONSIVE_LIMIT_MS } from '../acp/index.js';
 import { ACP, asString, isRecord, readModels } from './protocol.js';
 import {
   DEFAULT_GROK_TIMINGS,
@@ -71,25 +71,12 @@ export interface GrokPluginOptions {
  * replaces it. Until then a timeout only lets go of the connection and reports busy: the process may just be slow, and ending it
  * ends the turn and the commands it runs. A reattach (attach-only) never ends a process. The same bound as the other plugins'.
  */
-export const GROK_UNRESPONSIVE_LIMIT_MS = 5 * 60_000;
+export const GROK_UNRESPONSIVE_LIMIT_MS = UNRESPONSIVE_LIMIT_MS;
 
 /** Per conversation: when the first of a run of consecutive handshake timeouts on ordinary opens happened. Held by the plugin, not an instance. */
 export type GrokUnresponsiveRuns = Map<string, number>;
 
 const BUSY_MESSAGE = 'The running Grok process for this conversation did not answer in time. It was left alone; try again in a moment.';
-
-/** Variables that carry the identity of whatever started this process; the child must not inherit them. */
-const SCRUBBED_EXACT = new Set(['CLAUDECODE', 'TMUX', 'TMUX_PANE', 'CODEX_THREAD_ID', 'NODE_OPTIONS', 'DEBUG']);
-
-function isInheritedIdentityKey(key: string): boolean {
-  return SCRUBBED_EXACT.has(key) || key.startsWith('CLAUDE_CODE_') || key.startsWith('AGENT_CONSOLE_') || key.startsWith('AGENT_COORD_');
-}
-
-function expandHome(value: string, home: string): string {
-  if (value === '~') return home;
-  if (value.startsWith('~/')) return path.join(home, value.slice(2));
-  return value;
-}
 
 /**
  * The child's environment. The inherited environment loses everything that names another session (`CLAUDECODE`, `CLAUDE_CODE_*`,
@@ -103,20 +90,7 @@ export function buildGrokEnv(input: {
   conversationId?: string;
   home?: string;
 }): Record<string, string> {
-  const home = input.home ?? os.homedir();
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input.base)) {
-    if (value === undefined || isInheritedIdentityKey(key)) continue;
-    env[key] = value;
-  }
-  for (const layer of [input.configEnv, input.optionsEnv]) {
-    for (const [key, value] of Object.entries(layer ?? {})) {
-      if (SCRUBBED_EXACT.has(key)) continue;
-      env[key] = expandHome(value, home);
-    }
-  }
-  if (input.conversationId) env.AGENT_CONSOLE_SESSION_ID = input.conversationId;
-  return env;
+  return buildChildEnv(input);
 }
 
 /** The argv for a conversation process. Model and effort are the starting values; each turn states its own. */
@@ -131,23 +105,11 @@ export function buildGrokArgv(input: { command: string[]; model?: string; effort
   ];
 }
 
-/** The per-session coordination MCP server, as ACP's `session/new` takes it (`env` is a list of name and value pairs). */
-export function buildMcpServers(coordination: PluginContext['coordination'], conversationId: string): Array<Record<string, unknown>> {
-  if (!coordination) return [];
-  return [{
-    name: 'agent_console_coordination',
-    command: 'node',
-    args: [coordination.helperPath, 'mcp'],
-    env: [
-      { name: 'AGENT_COORD_RUNTIME', value: coordination.runtimeDir },
-      { name: 'AGENT_CONSOLE_SESSION_ID', value: conversationId },
-    ],
-  }];
-}
+export { buildMcpServers };
 
 /** A session host id: letters, digits, `.`, `_` and `-` only. */
 export function hostIdFor(conversationId: string): string {
-  return `grok-${conversationId.replace(/[^A-Za-z0-9._-]/g, '-')}`.slice(0, 128);
+  return acpHostId('grok', conversationId);
 }
 
 /** Where plugin meta keeps what the host needs to find a conversation's process and its running turn again. */
@@ -184,15 +146,6 @@ export function toTransportError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-/** A request id that is larger than any this plugin used before, so a late answer to a request an earlier backend wrote never matches a new one. */
-function uniqueRequestIds(): () => number {
-  let last = Date.now();
-  return () => {
-    last = Math.max(last + 1, Date.now());
-    return last;
-  };
-}
-
 interface Handshaken {
   session: GrokSession;
   client: JsonRpcClient;
@@ -211,7 +164,7 @@ export class GrokInstance implements TransportInstance {
   private readonly factory: LineTransportFactory;
   private readonly now: () => number;
   private readonly unresponsiveRuns: GrokUnresponsiveRuns;
-  private readonly nextRequestId = uniqueRequestIds();
+  private readonly nextRequestId = createRequestIdClock();
   private readonly sessions = new Map<string, GrokSession>();
   /** Conversations being opened right now: a second open of the same one would put two processes on one session. */
   private readonly opening = new Set<string>();
@@ -518,24 +471,23 @@ export class GrokInstance implements TransportInstance {
       const timedOut = error instanceof JsonRpcTimeoutError;
       const busy = timedOut && (kind !== 'launch' || !fresh);
       if (!busy) this.unresponsiveRuns.delete(options.conversationId);
-      else if (kind !== 'reattach') {
-        const silentForMs = this.noteUnresponsive(options.conversationId);
-        if (silentForMs >= GROK_UNRESPONSIVE_LIMIT_MS) {
-          this.log.warn({ pid: client.pid, silentForMs, limitMs: GROK_UNRESPONSIVE_LIMIT_MS, error: errorText(error) }, 'the grok process has not answered for longer than the limit; ending it and starting a new one');
-          await client.close({ terminate: true }).catch(() => undefined); // ends the process and its host, like a release
-          this.forgetLaunch(options.conversationId);
-          this.unresponsiveRuns.delete(options.conversationId);
-          return undefined;
-        }
+      const silentForMs = busy && kind !== 'reattach' ? this.noteUnresponsive(options.conversationId) : 0;
+      const decision = decideHandshakeFailure({ kind, fresh, timedOut, silentForMs, limitMs: GROK_UNRESPONSIVE_LIMIT_MS });
+      if (decision === 'replace') {
+        this.log.warn({ pid: client.pid, silentForMs, limitMs: GROK_UNRESPONSIVE_LIMIT_MS, error: errorText(error) }, 'the grok process has not answered for longer than the limit; ending it and starting a new one');
+        await client.close({ terminate: true }).catch(() => undefined); // ends the process and its host, like a release
+        this.forgetLaunch(options.conversationId);
+        this.unresponsiveRuns.delete(options.conversationId);
+        return undefined;
       }
-      if (fresh && !busy) {
+      if (decision === 'fail-fresh') {
         await client.close({ terminate: true }).catch(() => undefined);
         this.forgetLaunch(options.conversationId);
       } else {
         // Do not end a process that may be running a turn for the person; let go of it.
         await client.close().catch(() => undefined);
       }
-      if (busy) {
+      if (decision === 'busy-leave') {
         this.log.warn({ pid: client.pid, error: errorText(error) }, 'a running grok process did not answer the handshake in time; it was left running');
         throw new TransportBusyError(BUSY_MESSAGE);
       }

@@ -3,6 +3,7 @@ import { LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES, type ConversationSummary } from
 import { parseClaudeConversationFile } from '../providers/transcripts/claude.js';
 import { parseCodexConversationFile } from '../providers/transcripts/codex.js';
 import { parseGrokConversationFile } from '../providers/transcripts/grok.js';
+import { parseVibeConversationFile } from '../providers/transcripts/vibe.js';
 import type { ProviderConversation } from '../providers/types.js';
 
 interface CachedProviderConversation {
@@ -119,7 +120,9 @@ export async function loadProviderConversationFromSummary(
           ? await parseClaudeConversationFile(parseInput)
           : summary.provider === 'grok'
             ? await parseGrokConversationFile(parseInput)
-            : await parseCodexConversationFile(parseInput);
+            : summary.provider === 'vibe'
+              ? await parseVibeConversationFile(parseInput)
+              : await parseCodexConversationFile(parseInput);
 
         const conversation: ProviderConversation = {
           summary: parsed.summary,
