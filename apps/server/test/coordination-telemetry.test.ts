@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { recordCoordinationTelemetry, readCoordinationTelemetry, TELEMETRY_MAX_OFFERS } from '../src/coordination/telemetry.js';
+import fastify from 'fastify';
+import { recordCoordinationTelemetry, recordHttpTelemetry, readCoordinationTelemetry, TELEMETRY_MAX_OFFERS } from '../src/coordination/telemetry.js';
 import { TELEMETRY_MAX_BYTES } from '../../../scripts/coordination-telemetry.mjs';
 
 const roots: string[] = [];
@@ -12,6 +13,22 @@ function fixture() {
   fs.mkdirSync(path.join(root, 'coordination'), { mode: 0o700 });
   return root;
 }
+it('identifies HTTP handlers by route template without storing private URLs or streaming lifetimes', async () => {
+  const root = fixture(), app = fastify();
+  app.addHook('onResponse', async (request, reply) => { recordHttpTelemetry(root, request, reply); });
+  app.get('/api/projects/:slug', async () => ({ ok: true }));
+  app.get('/api/events', async () => ({ ok: true }));
+  try {
+    await app.inject('/api/projects/PRIVATE_ID?token=PRIVATE_TOKEN');
+    await app.inject('/PRIVATE_UNKNOWN?secret=PRIVATE');
+    await app.inject('/api/events');
+    const file = path.join(root, 'coordination/telemetry', new Date().toISOString().slice(0,10) + '.jsonl');
+    const body = fs.readFileSync(file, 'utf8');
+    expect(body).not.toContain('PRIVATE');
+    const records = body.trim().split('\n').map(line => JSON.parse(line));
+    expect(records.map(r => r.action)).toEqual(['GET /api/projects/:slug', 'GET (unmatched)']);
+  } finally { await app.close(); }
+});
 it('records failures independently and excludes payloads and credentials', async () => {
   const root = fixture();
   expect(recordCoordinationTelemetry(root, { kind: 'rpc_client', action: 'poll', outcome: 'error', error: 'timeout', durationMs: 2300,
@@ -37,6 +54,10 @@ it('marks capacity limits and malformed logs as incomplete without breaking deli
   // Unrelated web errors cannot consume reserved delivery-failure storage.
   for (let i = 0; i < 20; i++) expect(recordCoordinationTelemetry(root, { kind: 'http', outcome: 'error', durationMs: 5 })).toBe(false);
   expect(fs.readdirSync(dir).some((name) => name.includes('.failures.'))).toBe(false);
+  expect(recordCoordinationTelemetry(root, { kind: 'operation', operation: 'main.sqlite.run',
+    phase: 'sync', durationMs: 1200, outcome: 'ok' })).toBe(true);
+  expect(recordCoordinationTelemetry(root, { kind: 'operation', operation: 'main.sqlite.run',
+    phase: 'sync', durationMs: 5, outcome: 'error', error: 'SQLITE_BUSY' })).toBe(true);
   // Restore a short file; the cap marker remains evidence of incomplete counts.
   fs.writeFileSync(file, '');
   // Routine capacity does not consume the reserved delivery-failure budget.
@@ -44,6 +65,7 @@ it('marks capacity limits and malformed logs as incomplete without breaking deli
   const result = await readCoordinationTelemetry(root, 0, Date.now() + 1000);
   expect(result.issues).toContainEqual(expect.stringContaining('counts are incomplete'));
   expect(result.summary.clientTimeouts).toBe(1);
+  expect(result.summary.operations.completed.count).toBe(2);
   expect(fs.readdirSync(dir)).toContain(new Date().toISOString().slice(0, 10) + '.failures.jsonl');
   expect(result.issues.join(' ')).toContain('Routine telemetry capacity');
 });

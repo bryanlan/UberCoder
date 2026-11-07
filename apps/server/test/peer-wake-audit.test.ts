@@ -48,6 +48,22 @@ async function fixture() {
   return { db, manager, service, session, sender, recipient, root, add };
 }
 describe('Peer wake audit', () => {
+
+  it('counts held mail for finished and disconnected recipients without wake bindings', async () => {
+    const f = await fixture();
+    const disconnected = f.service.register({ provider: 'codex', nativeSessionId: randomUUID(),
+      token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
+    f.service.send(f.sender, { id: randomUUID(), recipientId: disconnected, text: 'Retained result', priority: 'P2' });
+    f.service.send(f.sender, { id: randomUUID(), recipientId: f.recipient, text: 'Retained result', priority: 'P2' });
+    f.db.sqlite.prepare("update coordination_assignments set status='disconnected' where id=?").run(disconnected);
+    f.db.sqlite.prepare("update coordination_assignments set status='finished' where id=?").run(f.recipient);
+    const report = await auditPeerWakes(f.db.sqlite, { now: Date.now() });
+    expect(report.pendingByRecipientStatus).toEqual(expect.arrayContaining([
+      { status: 'disconnected', messages: 1, neverOffered: 1 },
+      { status: 'finished', messages: 1, neverOffered: 1 },
+    ]));
+    expect(report.counts.managedPendingMessages).toBe(0);
+  });
   it('warns on a failed wake even when no native response turn ever started', async () => {
     const f = await fixture(); f.add(now - 3 * minute, { failed: true });
     const report = await auditPeerWakes(f.db.sqlite, { now });
@@ -166,6 +182,9 @@ describe('Peer wake audit', () => {
       { kind: 'offer', timestamp: at, messageId: message.id, offeredAt: at - 500, outcome: 'abandoned' },
       { kind: 'offer', timestamp: at + 500, messageId: message.id, offeredAt: at, outcome: 'finished' },
       { kind: 'rpc_client', timestamp: now, action: 'poll', outcome: 'ok', durationMs: 4 },
+      { kind: 'operation', timestamp: at, operation: 'main.sqlite.get', phase: 'sync', outcome: 'ok', durationMs: 1900 },
+      { kind: 'operation', timestamp: now, operation: 'coordination.wake', phase: 'async', outcome: 'pending', durationMs: 1000, spanId: 1, pid: 123 },
+      { kind: 'event_loop', timestamp: now, maxMs: 20, cpuUserMs: 30, cpuSystemMs: 5, utilization: 0.2, rssBytes: 10000, windowMs: 10000 },
     ];
     fs.writeFileSync(path.join(directory, '2026-10-11.jsonl'), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
     const result = await auditPeerWakes(f.db.sqlite, { now, runtimeDir: f.root });
@@ -174,6 +193,10 @@ describe('Peer wake audit', () => {
     expect(result.transport).toMatchObject({ clientTimeouts: 1, hookFailures: 1, offerResponsesFinished: 1, offerResponsesAbandoned: 1,
       firstFinishedOfferDelayMs: { samples: 1, median: 1000 }, finishedOfferToAcknowledgementMs: { samples: 1, median: 1000 } });
     expect(JSON.stringify(result)).not.toContain('PRIVATE_PEER_TEXT');
+    expect(result.transport.operations.completed.count).toBe(1);
+    expect(result.transport.recent.operations.completed.count).toBe(0);
+    expect(result.transport.recent.operations.slowest).toMatchObject([{ operation: 'coordination.wake', spanId: 1, pid: 123 }]);
+    expect(result.transport.recent.eventLoop.slowestWindows[0]).toMatchObject({ cpuUserMs: 30, utilization: 0.2 });
   });
   it('warns after a completed unacknowledged wake well before the old ten-minute pending alert', async () => {
     const f = await fixture(); f.add(now - 3 * minute);

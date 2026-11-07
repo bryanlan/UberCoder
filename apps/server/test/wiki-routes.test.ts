@@ -17,6 +17,7 @@ it('serves a project wiki with authentication, CSRF protection and conflict resp
     projectsRoot: root,
     runtimeDir: path.join(root, 'runtime'),
     databasePath: path.join(root, 'console.sqlite'),
+    coordination: { enabled: true, pilotPaths: [project] },
     security: {
       passwordHash: 'scrypt:e63f79449b39327540c914ce72df7fd8:8b59c3daf10c16c5ea0c645aea6e47c7ede25beb73c167852b1cbbdf5d4bdad218bc4f25193ebfe2f29779e5d7cc995b890a6b46ea9c4c5096973b301087e4bc',
       sessionSecret: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',

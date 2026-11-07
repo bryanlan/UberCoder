@@ -59,6 +59,25 @@ function fixture() {
 }
 
 describe('assignment coordination', () => {
+  it('reports structured inbox backpressure and preserves retained mail and idempotent retries', async () => {
+    const { service, register, db, root, checkout } = fixture();
+    const sender = register(), recipient = register();
+    const first = { id: randomUUID(), recipientId: recipient.id, text: 'Retained result', priority: 'P2' as const };
+    service.send(sender.id, first);
+    for (let i = 1; i < 100; i++) service.send(sender.id, { ...first, id: randomUUID() });
+    expect(() => service.send(sender.id, { ...first, id: randomUUID() })).toThrowError(
+      expect.objectContaining({ code: 'recipient_inbox_full' }));
+    expect(service.send(sender.id, first).id).toBe(first.id);
+    expect(db.sqlite.prepare('select count(*) n from coordination_messages').get()).toEqual({ n: 100 });
+    expect(service.send(sender.id, { ...first, id: randomUUID(), priority: 'P1',
+      wakeReason: 'Assigned work is blocked; read the result now to resume the critical run.' }).queued).toBe(true);
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId: randomUUID(), pid: process.pid, cwd: checkout });
+    const response = await runHelper(root, checkout, ['send'], { recipientId: recipient.id, text: 'Another routine result', priority: 'P2' });
+    expect(response.code).not.toBe(0);
+    expect(JSON.parse(response.stderr.trim().split('\n').at(-1)!)).toMatchObject({ code: 'recipient_inbox_full' });
+  });
+
   it('keeps unchanged hooks free of durable state writes while persisting changed delivery state', async () => {
     const { root, checkout, service } = fixture();
     const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());

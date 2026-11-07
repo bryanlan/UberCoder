@@ -2,9 +2,11 @@ export const TELEMETRY_MAX_BYTES: number;
 export const TELEMETRY_FAILURE_MAX_BYTES: number;
 export const TELEMETRY_RETENTION_DAYS: number;
 export interface CoordinationTelemetryRecord {
-  kind: 'rpc_client' | 'rpc_server' | 'http' | 'event_loop' | 'index' | 'hook' | 'offer';
+  kind: 'rpc_client' | 'rpc_server' | 'http' | 'event_loop' | 'index' | 'hook' | 'offer' | 'operation';
   action?: string; outcome?: string; error?: string; durationMs?: number; event?: string;
   messageId?: string; offeredAt?: number; maxMs?: number; p99Ms?: number; samples?: number;
   operation?: string; project?: string; provider?: string; ref?: string; rows?: number;
+  startedAt?: number; spanId?: number; phase?: 'sync' | 'async'; fingerprint?: string; source?: string;
+  windowMs?: number; cpuUserMs?: number; cpuSystemMs?: number; utilization?: number; rssBytes?: number;
 }
 export function recordCoordinationTelemetry(runtimeDir: string, input: CoordinationTelemetryRecord): boolean;

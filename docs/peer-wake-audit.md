@@ -67,6 +67,45 @@ Native clients and the backend append whitelisted measurements to daily JSONL fi
 and records exclude prompts, peer text and credentials. Clients record request durations,
 timeouts and hook failures even when the backend cannot respond. The server records RPC and
 HTTP completion (excluding the long-lived event stream), abandoned responses, ten-second event-loop windows and search update costs.
+HTTP `action` contains the method and registered route template, such as
+`GET /api/projects/:slug`, never actual path parameters or query strings.
+Unmatched requests use `(unmatched)`. Older HTTP records have no route label;
+their duration alone cannot identify a slow handler or prove a hook timeout cause.
+
+With coordination enabled, main and wiki SQLite calls (`prepare`, `get`, `all`,
+`run`, `exec`, `pragma`) report calls taking at least 100 ms. Each `operation`
+record contains a synchronous phase, start time, duration, process ID, relative
+server call site when available and SHA-256 query fingerprint. It never contains
+SQL text, bound values or native error messages. SQLite BUSY/LOCKED codes report
+even below the threshold. Native transaction control, statement iterators and
+other processes/worker connections are outside this observer; existing search
+write telemetry remains separate.
+
+The coordination timer's reconciliation pass is timed synchronously. Wake processing and delivery
+alerts have asynchronous spans: one pending observation after one second, then
+a completion observation if they took at least 100 ms. Process ID and span ID
+join pending and completion records. A pending observation is historical, not
+proof that the operation is still pending when the report is read. Async elapsed
+time includes unrelated event-loop delays, so it does not alone prove provider
+or network latency. Diagnostic failures preserve operation results/exceptions.
+
+Each ten-second event-loop record also includes its actual window duration,
+process user/system CPU milliseconds, event-loop utilization and process RSS.
+High lag with high utilization and low CPU suggests blocking I/O or scheduling;
+high lag with substantial CPU suggests computation. Low loop lag during a long
+async span suggests a wait. These are clues to correlate with synchronous calls,
+HTTP routes and search timings, not causal proof. Process CPU includes workers.
+No samples can be collected while the process is frozen; they are written after
+it recovers. A crash can lose an unfinished synchronous operation.
+
+The audit includes `transport.operations` with complete observed completion and
+pending-observation counts and the 20 longest operation observations, plus the
+10 largest `transport.eventLoop.slowestWindows`. The same bounded detail exists
+under `recent` for the last ten minutes. One-second operations and SQLite lock
+refusals share reserved incident storage so a full routine file cannot hide them.
+Use the existing `--hours 1` audit after a stall; compare overlapping start/end
+times and process IDs before attributing a timeout. Deployment is required to
+collect these new fields; older logs cannot be retrospectively attributed.
 Offer history distinguishes a response that finished writing from one abandoned by the client.
 Neither outcome proves the agent read it; only acknowledgement records that claim.
 
@@ -74,6 +113,12 @@ The audit reports queue-to-first-finished-offer and finished-offer-to-acknowledg
 with sample counts, including messages delivered without a wake. First offers mean the first
 observed in the selected report window; earlier offers outside it or before collection remain
 unknown. `firstRecordedAt` and `lastRecordedAt` bound observed coverage.
+`pendingByRecipientStatus` counts all stored unacknowledged messages by recipient
+lifecycle status, excluding disposable fixtures. It includes held mail for
+finished or disconnected owners without restorable bindings. This is a current
+inbox snapshot, independent of the audit window and the narrower
+`managedPendingMessages` wake-candidate count. Stored expired bodies may remain
+until the live service's next expiry pass; the audit does not delete them.
 The event-loop percentile is explicitly the percentile of ten-second window maxima; it is
 not a percentile of every individual loop sample. Recent transport warnings clear after ten
 minutes; daily `observedWarnings` retains recovered failures throughout the reporting window.

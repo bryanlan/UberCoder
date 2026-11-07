@@ -46,7 +46,7 @@ import { registerConsoleConversation } from './coordination/console-registration
 import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
 import { WikiService } from './wiki/service.js';
 import { registerWikiRoutes } from './wiki/routes.js';
-import { recordCoordinationTelemetry, startCoordinationTelemetry } from './coordination/telemetry.js';
+import { recordCoordinationTelemetry, recordHttpTelemetry, startCoordinationTelemetry } from './coordination/telemetry.js';
 import { WorkerEvidenceSource } from './workers/evidence.js';
 import { SharedSummaryRuntime } from './workers/runtime.js';
 import { WorkerSummaryAudit } from './workers/audit.js';
@@ -55,6 +55,7 @@ import { WorkerSnapshotStore } from './workers/snapshot-store.js';
 import { WorkerUserActivity } from './workers/user-activity.js';
 import { registerWorkerRoutes } from './workers/routes.js';
 import { ConversationTitleService } from './titles/service.js';
+import { observeAsync, observeSync, type OperationObserver } from './runtime/slow-operations.js';
 
 export interface AppOptions {
   configPath?: string;
@@ -65,7 +66,9 @@ export interface AppOptions {
 export async function buildApp(options: AppOptions = {}) {
   const configService = new ConfigService(options.configPath);
   const config = configService.getConfig();
-  const db = new AppDatabase(config.databasePath);
+  const observe: OperationObserver | undefined = config.coordination.enabled
+    ? measurement => { recordCoordinationTelemetry(config.runtimeDir, measurement); } : undefined;
+  const db = new AppDatabase(config.databasePath, observe);
   const app = fastify({
     logger: true,
     bodyLimit: 2 * 1024 * 1024,
@@ -131,7 +134,8 @@ export async function buildApp(options: AppOptions = {}) {
   });
   const authService = new AuthService(config, db);
   const images = new ImageStore(imageStoreDir);
-  const wakeAssignments = () => { void sessions.wakePendingAssignments().catch((error: unknown) => app.log.warn({ err: error }, 'Assignment continuation failed.')); };
+  const wakeAssignments = () => { void observeAsync('coordination.wake', () => sessions.wakePendingAssignments(), observe)
+    .catch((error: unknown) => app.log.warn({ err: error }, 'Assignment continuation failed.')); };
   const grantPush = new GrantPushService(db, config.server.publicBaseUrl ?? `http://127.0.0.1:${config.server.port}`);
   const wakeAlerts = new WakeAlerts(db, (warning, delivered) => grantPush.wakeWarning(warning, delivered));
   grants = new GrantService(db, eventBus, wakeAssignments, grant => grantPush.request(grant),
@@ -145,7 +149,7 @@ export async function buildApp(options: AppOptions = {}) {
   }
   const agentLaunches = new AgentSessionLaunches(db, grants, sessions, projectService, providerRegistry, eventBus,
     config.sessions.pressureSuspendAvailableMiB * 1024 * 1024);
-  const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'));
+  const wiki = new WikiService(path.join(path.dirname(config.databasePath), 'wiki', 'agent-wiki.sqlite'), observe);
   const workerDirectory = path.join(config.runtimeDir, 'workers');
   const workers = new WorkerPanelService(new WorkerEvidenceSource(db, projectService, liveOutputReader),
     new SharedSummaryRuntime(config.workerSummaries.runtimeCommand, path.join(workerDirectory, 'runs')),
@@ -182,9 +186,7 @@ export async function buildApp(options: AppOptions = {}) {
 
   const instanceId = randomUUID();
   if (config.coordination.enabled) app.addHook('onResponse', async (request, reply) => {
-    if (request.routeOptions.url === '/api/events') return; // Stream lifetime is not request latency.
-    recordCoordinationTelemetry(config.runtimeDir, { kind: 'http', durationMs: reply.elapsedTime,
-      outcome: reply.statusCode >= 400 ? 'error' : 'ok' });
+    recordHttpTelemetry(config.runtimeDir, request, reply);
   });
   app.get('/api/health', async (_request, reply) => {
     // Public readiness only: a settings change may move the server to a new
@@ -242,8 +244,9 @@ export async function buildApp(options: AppOptions = {}) {
   if (config.coordination.enabled) agentLaunches.start();
   const stopTelemetry = config.coordination.enabled ? startCoordinationTelemetry(config.runtimeDir) : undefined;
   const coordinationTimer = config.coordination.enabled ? setInterval(() => {
-    coordination.reconcileProcesses(); wakeAssignments();
-    void wakeAlerts.check().catch(error => app.log.warn({ err: error }, 'Wake alert check failed; delivery guards remain unchanged.'));
+    observeSync('coordination.reconcile', () => coordination.reconcileProcesses(), observe); wakeAssignments();
+    void observeAsync('coordination.alerts', () => wakeAlerts.check(), observe)
+      .catch(error => app.log.warn({ err: error }, 'Wake alert check failed; delivery guards remain unchanged.'));
   }, 15_000) : undefined;
   coordinationTimer?.unref();
   const wikiBackupTimer = setInterval(() => { wiki.backup().catch((error) => app.log.warn({ err: error }, 'Wiki backup failed.')); }, 60 * 60 * 1000);

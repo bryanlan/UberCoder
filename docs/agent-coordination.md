@@ -223,6 +223,12 @@ result handoffs and overdue alerts.
 
 ### Send receipts
 
+A new message rejected for capacity returns `code: recipient_inbox_full` through
+the socket, CLI and MCP error paths. Producers should defer retries per recipient
+and capacity pool (P1 separately from P2/P3). Existing IDs still return their
+original receipt even when the inbox is full. Capacity refusal never deletes or
+acknowledges held mail or authorizes another recipient.
+
 Declared supervisor handoffs create a durable inbox message with an acknowledgement ID, in
 addition to the unattended-work signal. The inbox result survives permission changes and can
 request a response while the supervisor is waiting for input. A full inbox retains the handoff

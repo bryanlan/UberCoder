@@ -1,25 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { recordCoordinationTelemetry, TELEMETRY_MAX_BYTES, TELEMETRY_FAILURE_MAX_BYTES, type CoordinationTelemetryRecord } from '../../../../scripts/coordination-telemetry.mjs';
 
 export { recordCoordinationTelemetry };
 export type { CoordinationTelemetryRecord };
 
+/** Route templates identify slow handlers without recording actual URLs or IDs. */
+export function recordHttpTelemetry(runtimeDir: string,
+  request: { method: string; routeOptions: { url?: string } },
+  reply: { elapsedTime: number; statusCode: number }) {
+  if (request.routeOptions.url === '/api/events') return; // Stream lifetime is not latency.
+  return recordCoordinationTelemetry(runtimeDir, { kind: 'http', durationMs: reply.elapsedTime,
+    action: `${request.method} ${request.routeOptions.url ?? '(unmatched)'}`,
+    outcome: reply.statusCode >= 400 ? 'error' : 'ok' });
+}
+
 export function startCoordinationTelemetry(runtimeDir: string) {
   const delay = monitorEventLoopDelay({ resolution: 20 });
+  let windowStart = performance.now(), previousCpu = process.cpuUsage(), previousLoop = performance.eventLoopUtilization();
   delay.enable();
   const timer = setInterval(() => {
+    const now = performance.now(), cpu = process.cpuUsage(), loop = performance.eventLoopUtilization();
     recordCoordinationTelemetry(runtimeDir, { kind: 'event_loop', maxMs: delay.max / 1e6,
-      p99Ms: delay.percentile(99) / 1e6, samples: delay.count });
+      p99Ms: delay.percentile(99) / 1e6, samples: delay.count, windowMs: now - windowStart,
+      cpuUserMs: (cpu.user - previousCpu.user) / 1000, cpuSystemMs: (cpu.system - previousCpu.system) / 1000,
+      utilization: performance.eventLoopUtilization(loop, previousLoop).utilization, rssBytes: process.memoryUsage.rss() });
+    windowStart = now; previousCpu = cpu; previousLoop = loop;
     delay.reset();
   }, 10_000);
   timer.unref();
   return () => { clearInterval(timer); delay.disable(); };
 }
 
-interface Measurement extends CoordinationTelemetryRecord { timestamp: number; }
+export interface Measurement extends CoordinationTelemetryRecord { timestamp: number; pid?: number; }
 export const TELEMETRY_MAX_OFFERS = 100_000;
 export const TELEMETRY_MAX_LATENCY_SAMPLES = 1_000_000;
 
@@ -44,6 +59,8 @@ class Measurements {
   client = new Latencies(); server = new Latencies(); http = new Latencies(); index = new Latencies(); loop = new Latencies();
   clientTimeouts = 0; clientFailures = 0; hookFailures = 0; abandonedRequests = 0;
   loopSamples = 0; finishedOffers = 0; abandonedOffers = 0;
+  completedOperations = new Latencies(); pendingOperations = 0;
+  slowOperations: Measurement[] = []; slowWindows: Measurement[] = [];
   add(r: Measurement) {
     const duration = r.durationMs ?? 0;
     switch (r.kind) {
@@ -52,17 +69,26 @@ class Measurements {
       case 'http': this.http.add(duration); break;
       case 'index': this.index.add(duration); break;
       case 'hook': this.hookFailures += Number(r.outcome === 'error'); break;
-      case 'event_loop': this.loop.add(r.maxMs ?? 0); this.loopSamples += r.samples ?? 0; break;
+      case 'event_loop':
+        this.loop.add(r.maxMs ?? 0); this.loopSamples += r.samples ?? 0;
+        this.slowWindows.push(r); this.slowWindows.sort((a,b) => (b.maxMs ?? 0) - (a.maxMs ?? 0)); this.slowWindows.length = Math.min(this.slowWindows.length, 10);
+        break;
+      case 'operation':
+        if (r.outcome === 'pending') this.pendingOperations++;
+        else this.completedOperations.add(duration);
+        this.slowOperations.push(r); this.slowOperations.sort((a,b) => (b.durationMs ?? 0) - (a.durationMs ?? 0)); this.slowOperations.length = Math.min(this.slowOperations.length, 20);
+        break;
       case 'offer': this.finishedOffers += Number(r.outcome === 'finished'); this.abandonedOffers += Number(r.outcome === 'abandoned'); break;
     }
   }
-  get sampled() { return [this.client, this.server, this.http, this.index, this.loop].some((v) => v.count > v.values.length); }
+  get sampled() { return [this.client, this.server, this.http, this.index, this.loop, this.completedOperations].some((v) => v.count > v.values.length); }
   summary() {
     const loop = this.loop.summary();
     return { clientRequests: this.client.summary(), clientTimeouts: this.clientTimeouts, clientFailures: this.clientFailures,
       hookFailures: this.hookFailures, serverRequests: this.server.summary(), abandonedRequests: this.abandonedRequests,
       httpRequests: this.http.summary(), eventLoop: { windows: loop.count, samples: this.loopSamples,
-        p99WindowMaxMs: loop.p99Ms, maxMs: loop.maxMs }, searchUpdates: this.index.summary(),
+        p99WindowMaxMs: loop.p99Ms, maxMs: loop.maxMs, slowestWindows: this.slowWindows }, searchUpdates: this.index.summary(),
+      operations: { completed: this.completedOperations.summary(), pendingObservations: this.pendingOperations, slowest: this.slowOperations },
       offerResponsesFinished: this.finishedOffers, offerResponsesAbandoned: this.abandonedOffers };
   }
 }
@@ -108,8 +134,9 @@ export async function readCoordinationTelemetry(runtimeDir: string, from: number
       for await (const line of lines) {
         try {
           const r = JSON.parse(line) as Measurement;
-          if (!Number.isFinite(r.timestamp) || !['rpc_client', 'rpc_server', 'http', 'index', 'hook', 'event_loop', 'offer'].includes(r.kind)
-            || ['durationMs', 'maxMs', 'p99Ms', 'samples', 'offeredAt'].some((key) => key in r && !Number.isFinite(r[key as keyof Measurement]))) throw new Error('Invalid measurement');
+          if (!Number.isFinite(r.timestamp) || !['rpc_client', 'rpc_server', 'http', 'index', 'hook', 'event_loop', 'offer', 'operation'].includes(r.kind)
+            || ['durationMs', 'maxMs', 'p99Ms', 'samples', 'offeredAt', 'startedAt', 'spanId', 'pid', 'windowMs', 'cpuUserMs', 'cpuSystemMs', 'utilization', 'rssBytes']
+              .some((key) => key in r && !Number.isFinite(r[key as keyof Measurement]))) throw new Error('Invalid measurement');
           if (r.timestamp < from || r.timestamp > until) continue;
           firstRecordedAt = Math.min(firstRecordedAt ?? r.timestamp, r.timestamp);
           lastRecordedAt = Math.max(lastRecordedAt ?? r.timestamp, r.timestamp);

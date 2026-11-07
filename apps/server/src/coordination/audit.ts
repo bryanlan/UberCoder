@@ -162,6 +162,15 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       id: string; created_at: string; recipient_id: string; provider: string; sender_description: string; recipient_description: string;
     }>;
   const submitted = wakes.filter((w) => w.status === 'submitted');
+  // Managed wake candidates are only part of the inbox. Retain visibility of
+  // mail held for disconnected/finished owners even without a live binding.
+  const pendingByRecipientStatus = db.prepare(`select a.status, count(*) messages,
+    sum(m.supplied_at is null) neverOffered from coordination_messages m
+    join coordination_assignments a on a.id=m.recipient_id
+    join coordination_assignments b on b.id=m.sender_id
+    where m.acknowledged_at is null and not (a.description like '%Disposable%fixture%'
+      or a.description like '%Disposable%verification%' or b.description like '%Disposable%fixture%'
+      or b.description like '%Disposable%verification%') group by a.status`).all();
   const pairGroups = new Map<string, AuditedWake[]>();
   for (const w of submitted) for (const pair of new Set(w.messages.map((m) => [m.senderId, m.recipientId].sort().join(':'))))
     pairGroups.set(pair, [...pairGroups.get(pair) ?? [], w]);
@@ -226,7 +235,7 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       and json_extract(value,'$.createdAt')>=?`).get(iso(from)) as {n:number}).n,
     note:'Priority and expiry counts measure transport, not usefulness or billing savings. Inspect P1 content and actual next actions.'
   } : null;
-  return { priorityTrial, schemaVersion: 1, from: iso(from), until: iso(now), policy: WAKE_AUDIT_POLICY,
+  return { priorityTrial, pendingByRecipientStatus, schemaVersion: 1, from: iso(from), until: iso(now), policy: WAKE_AUDIT_POLICY,
     counts: { submittedWakes: submitted.length, attemptedMessages: messages.length,
       clientTimeouts: transportMetrics.clientTimeouts,
       hookFailures: transportMetrics.hookFailures,
@@ -248,6 +257,7 @@ export async function auditPeerWakes(db: Database.Database, options: { now?: num
       firstRecordedAt: telemetry?.firstRecordedAt == null ? null : iso(telemetry.firstRecordedAt),
       lastRecordedAt: telemetry?.lastRecordedAt == null ? null : iso(telemetry.lastRecordedAt),
       ...transportMetrics,
+      recent: telemetry?.recentSummary ?? summarizeCoordinationTelemetry([]),
       firstFinishedOfferDelayMs: { samples: finishedDelays.length, median: percentile(finishedDelays, .5), p95: percentile(finishedDelays, .95) },
       finishedOfferToAcknowledgementMs: { samples: offerAckDelays.length, median: percentile(offerAckDelays, .5), p95: percentile(offerAckDelays, .95) },
       offers: [...offers].map(([messageId, r]) => ({ messageId, firstAttemptAt: iso(r.firstAttempt),

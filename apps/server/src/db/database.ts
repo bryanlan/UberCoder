@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { observeSqlite, type OperationObserver } from '../runtime/slow-operations.js';
 import { migrateDatabase } from './schema.js';
 import { AuthSessionsRepo } from './repos/auth-sessions.js';
 import { BoundSessionsRepo } from './repos/bound-sessions.js';
@@ -27,9 +28,10 @@ export class AppDatabase {
   readonly uiPreferences: UiPreferencesRepo;
   readonly transcriptParseCache: TranscriptParseCacheRepo;
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, observe?: OperationObserver) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
     this.sqlite = new Database(databasePath);
+    if (observe) observeSqlite(this.sqlite, 'main', observe);
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('foreign_keys = ON');
     this.sqlite.pragma('cache_size = -65536');

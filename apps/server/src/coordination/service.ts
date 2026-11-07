@@ -358,7 +358,8 @@ export class CoordinationService {
     validateMessageOptions(input);
     if (!acceptsMessages(this.db, input.recipientId)) throw Object.assign(
       new Error('Recipient is a send-only service without an inbox reader. Send requests to a coordinating agent instead.'), { code: 'recipient_send_only' });
-    if (!hasInboxSpace(this.db,input.recipientId,input.priority)) throw new Error('Recipient inbox is full; wait for acknowledgements or message expiry.');
+    if (!hasInboxSpace(this.db,input.recipientId,input.priority)) throw Object.assign(
+      new Error('Recipient inbox is full; wait for acknowledgements or message expiry.'), { code: 'recipient_inbox_full' });
     this.db.sqlite.transaction(() => {
       this.db.sqlite.prepare('insert into coordination_messages values(?,?,?,?,?,null,null)').run(input.id, id, input.recipientId, input.text, new Date().toISOString());
       setMessagePolicy(this.db, input.id, id, input.recipientId, input.text, input);

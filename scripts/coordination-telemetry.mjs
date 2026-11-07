@@ -5,7 +5,8 @@ export const TELEMETRY_MAX_BYTES = 64 * 1024 * 1024;
 export const TELEMETRY_FAILURE_MAX_BYTES = 16 * 1024 * 1024;
 export const TELEMETRY_RETENTION_DAYS = 8;
 const fields = ['kind', 'action', 'outcome', 'error', 'durationMs', 'event', 'messageId', 'offeredAt',
-  'maxMs', 'p99Ms', 'samples', 'operation', 'project', 'provider', 'ref', 'rows'];
+  'maxMs', 'p99Ms', 'samples', 'operation', 'project', 'provider', 'ref', 'rows',
+  'startedAt', 'spanId', 'phase', 'fingerprint', 'source', 'windowMs', 'cpuUserMs', 'cpuSystemMs', 'utilization', 'rssBytes'];
 const lastPruned = new Map();
 
 /** Independent of the RPC/database: a blocked backend cannot erase client failures.
@@ -35,12 +36,13 @@ export function recordCoordinationTelemetry(runtimeDir, input) {
     // cannot exhaust the space used by later failures or inbox offers.
     const critical = (['rpc_client', 'rpc_server', 'hook'].includes(input.kind)
       && ['error', 'abandoned'].includes(input.outcome)) || input.kind === 'offer'
-      || (input.kind === 'event_loop' && input.maxMs >= 1000);
+      || (input.kind === 'event_loop' && input.maxMs >= 1000)
+      || (input.kind === 'operation' && (input.durationMs >= 1000 || /^SQLITE_(BUSY|LOCKED)/.test(input.error ?? '')));
     const stem = `${day}${critical ? '.failures' : ''}`;
     const limit = critical ? TELEMETRY_FAILURE_MAX_BYTES : TELEMETRY_MAX_BYTES;
     const file = path.join(directory, `${stem}.jsonl`);
     fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
-    const record = { timestamp: now };
+    const record = { timestamp: now, pid: process.pid };
     for (const key of fields) {
       const value = input[key];
       if ((typeof value === 'string' && value.length <= 180) || (typeof value === 'number' && Number.isFinite(value))) record[key] = value;
