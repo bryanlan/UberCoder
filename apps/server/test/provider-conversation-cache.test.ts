@@ -172,7 +172,9 @@ describe('provider conversation cache', () => {
     const stale = await loadProviderConversationFromSummary(summary, { allowStaleWhileChanging: true });
     expect(stale?.messages.at(-1)?.text).toBe('large first');
 
-    const fresh = await loadProviderConversationFromSummary(summary);
-    expect(fresh?.messages.at(-1)?.text).toBe('large second');
+    await vi.waitFor(async () => {
+      const refreshed = await loadProviderConversationFromSummary(summary, { allowStaleWhileChanging: true });
+      expect(refreshed?.messages.at(-1)?.text).toBe('large second');
+    });
   });
 });

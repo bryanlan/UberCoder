@@ -141,7 +141,8 @@ without forcing the web app to carry the full history payload on every refresh.
 `apps/server/src/lib/provider-conversation-cache.ts` re-parses small changing transcripts even while
 a bound session is working so provider-written mid-turn messages appear promptly. Transcripts at or
 above `LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES` in `packages/shared/src/index.ts` may serve a stale
-parse during the active turn to avoid expensive poll-time reparsing; the conversation route returns
+parse during the active turn while a single background refresh runs; later polls pick up the refreshed
+parse. The conversation route returns
 `transcriptSizeBytes`, and `ConversationPane.tsx` shows a dismissible large-chat warning for that
 case.
 Concurrent requests for the same transcript fingerprint share one parse. File identity,

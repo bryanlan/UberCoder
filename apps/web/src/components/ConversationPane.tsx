@@ -1260,8 +1260,8 @@ export function ConversationPane({
         <div className="flex items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
           <span>
             This chat&apos;s transcript is {Math.round((timeline.transcriptSizeBytes ?? 0) / (1024 * 1024))}MB.
-            Beyond {Math.round(LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES / (1024 * 1024))}MB, completed messages only
-            appear after each turn finishes — consider starting a new chat for snappier updates.
+            Beyond {Math.round(LARGE_TRANSCRIPT_STALE_THRESHOLD_BYTES / (1024 * 1024))}MB, messages may take longer
+            to appear — consider starting a new chat for snappier updates.
           </span>
           <button
             type="button"

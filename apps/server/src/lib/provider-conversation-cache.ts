@@ -94,8 +94,7 @@ export async function loadProviderConversationFromSummary(
       cached
       && cached.identity === identity
       && (
-        allowStale
-        || (cached.mtimeMs === stat.mtimeMs && cached.size === stat.size)
+        cached.mtimeMs === stat.mtimeMs && cached.size === stat.size
       )
     ) {
       refreshCacheRecency(key, cached);
@@ -104,7 +103,9 @@ export async function loadProviderConversationFromSummary(
 
     const fingerprint = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
     const pending = inFlightParses.get(key);
-    if (pending?.fingerprint === fingerprint) return await pending.promise;
+    if (pending && (pending.fingerprint === fingerprint || (allowStale && cached?.identity === identity))) {
+      return allowStale && cached?.identity === identity ? cached.conversation : await pending.promise;
+    }
 
     const generation = ++nextParseGeneration;
     const promise: Promise<ProviderConversation | null> = Promise.resolve().then(async () => {
@@ -137,14 +138,14 @@ export async function loadProviderConversationFromSummary(
         });
         return conversation;
       } catch {
-        if (inFlightParses.get(key)?.promise === promise) deleteCacheEntry(key);
+        if (inFlightParses.get(key)?.promise === promise && !cached) deleteCacheEntry(key);
         return null;
       } finally {
         if (inFlightParses.get(key)?.promise === promise) inFlightParses.delete(key);
       }
     });
     inFlightParses.set(key, { fingerprint, promise });
-    return await promise;
+    return allowStale && cached?.identity === identity ? cached.conversation : await promise;
   } catch {
     deleteCacheEntry(key);
     return null;
