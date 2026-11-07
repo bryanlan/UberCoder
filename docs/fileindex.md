@@ -13,7 +13,7 @@
   session event-log live rows.
 - `apps/server/src/routes/` - Fastify API routes for auth, conversations, sessions, projects,
   settings, and live events.
-- `apps/server/src/providers/` - Codex/Claude adapters and transcript normalization.
+- `apps/server/src/providers/` - Codex, Claude, Grok and Vibe adapters and transcript normalization.
 - `apps/server/test/` - Vitest coverage for server routes, providers, sessions, live output, and
   indexing behavior.
 - `apps/web/src/features/conversation/` - client-side conversation data fetching, scroll control,
