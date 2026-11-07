@@ -321,19 +321,16 @@ describe('Grok and the provider-neutral route', () => {
     await expect(new ModelProfileService({}, runner({ profiles: () => JSON.stringify(wrong) }).run).profiles()).rejects.toThrow(/models for vibe/);
   });
 
-  it('uses the router\'s best alternative on a provider that can take new chats when its first choice cannot', async () => {
+  it('rejects out-of-scope choices instead of replacing JEV selection with an alternative', async () => {
     const answer = { ...grokAnswer, alternatives: [
       { provider: 'xai', model: 'grok-4.6', label: 'Grok 4.6', effort: 'low', launch_name: 'grok-4.6', quota_state: 'unknown' },
       { provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launch_name: 'gpt-6.1-terra', quota_state: 'tight' },
     ] };
     const service = new ModelProfileService({}, runner({ route: () => JSON.stringify(answer) }).run);
     const outcome = await service.route(undefined, 'x', { acceptProvider: provider => provider !== 'grok' });
-    expect(outcome).toMatchObject({ ok: true, provider: 'codex', decision: {
-      model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launchName: 'gpt-6.1-terra', quotaState: 'tight',
-      reason: expect.stringContaining('GPT-6.1 Terra was used because Grok is not available for new chats'),
-    } });
+    expect(outcome).toEqual({ ok: false, reason: 'the router chose a model outside the enabled provider scope' });
     const none = await service.route(undefined, 'x', { acceptProvider: () => false });
-    expect(none).toEqual({ ok: false, reason: 'the router chose no model that a new chat can run on' });
+    expect(none).toEqual({ ok: false, reason: 'no provider is enabled for new chats' });
     // The first choice is used as it is when its provider can take the chat.
     expect(await service.route(undefined, 'x', { acceptProvider: () => true })).toMatchObject({ ok: true, provider: 'grok' });
   });
@@ -371,5 +368,25 @@ describe('composeRerouteTask', () => {
     expect(composeRerouteTask({ prompt: ' only this ' })).toBe('only this');
     expect(composeRerouteTask({ prompt: 'now', previousPrompt: 'before' })).toBe('now\n\nbefore');
     expect(composeRerouteTask({ prompt: 'now', assistantReply: '   ' })).toBe('now');
+  });
+});
+
+
+describe('direct JEV selection scope', () => {
+  it('offers enabled providers before selection and accepts a decision without task categories', async () => {
+    const answer = { status: 'route', provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'medium', launch_name: 'gpt-6.1-terra', reason: 'JEV selected from capabilities and quota.', selection_source: 'jev', selector: { status: 'ok' }, decision_id: 'synthetic' };
+    const { run, calls } = runner({ route: () => JSON.stringify(answer) });
+    const result = await new ModelProfileService({}, run).route(undefined, 'bounded task', { acceptProvider: id => id === 'codex' });
+    expect(calls[0]).toContain('--providers');
+    expect(calls[0]![calls[0]!.indexOf('--providers') + 1]).toBe('openai');
+    expect(result).toMatchObject({ ok: true, provider: 'codex', decision: { model: 'gpt-6.1-terra', effort: 'medium' } });
+    expect(result.ok && 'role' in result.decision).toBe(false);
+  });
+
+  it('makes no decision call when all lanes are disabled', async () => {
+    const { run, calls } = runner({});
+    const result = await new ModelProfileService({}, run).route(undefined, 'bounded task', { acceptProvider: () => false });
+    expect(result).toEqual({ ok: false, reason: 'no provider is enabled for new chats' });
+    expect(calls).toEqual([]);
   });
 });

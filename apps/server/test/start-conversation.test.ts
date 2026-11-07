@@ -13,9 +13,9 @@ const PROFILES = JSON.stringify({ profiles: {
   grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
 } });
 const routed = (vendor: string, model: string, label: string, effort: string, extra: Record<string, unknown> = {}) => JSON.stringify({
-  status: 'route', role: 'implementer', provider: vendor, model, label, effort, launch_name: model, quota_state: 'tight',
-  reason: `Best implementer fit is ${label}.`,
-  classifier: { status: 'ok', role_choice: 'implementer', role_probabilities: { implementer: 0.72 }, difficulty_choice: 'lighter' }, ...extra,
+  status: 'route', schema_version: 2, selection_source: 'jev', provider: vendor, model, label, effort, launch_name: model, quota_state: 'tight',
+  reason: `JEV selected ${label} from task demands, capability guidance and current quota.`,
+  selector: { status: 'ok', choice: `${model}@${effort}`, probability: 0.94 }, ...extra,
 });
 
 /** The router's answer to `route --level`: no role, the level and who asked for it. */
@@ -79,7 +79,7 @@ describe('Provider-neutral Start', () => {
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'high'));
     const started = await start('review the quota pacing code');
 
-    expect(wo.routeCalls).toEqual([['route', '--task', 'review the quota pacing code', '--latest-message', 'review the quota pacing code', '--launcher', 'console', '--json']]);
+    expect(wo.routeCalls).toEqual([['route', '--task', 'review the quota pacing code', '--latest-message', 'review the quota pacing code', '--launcher', 'console', '--providers', 'openai,anthropic,xai', '--json']]);
     expect(started).toMatchObject({ provider: 'grok', conversationRef: expect.stringMatching(/^pending:/) });
     expect(started.warning).toBeUndefined();
     expect(started.session).toMatchObject({ provider: 'grok' });
@@ -87,8 +87,9 @@ describe('Provider-neutral Start', () => {
       provider: 'grok', grokProfile: 'auto',
       // A clear Start choice is still checked once at the session's second prompt.
       autoRoute: { routePending: true, routedPrompts: 1, previousPrompt: 'review the quota pacing code', decision: { source: 'router', model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7',
-        role: 'implementer', rolePercent: 72, difficulty: 'lighter', quotaState: 'tight' } },
+        quotaState: 'tight' } },
     });
+    expect(f.row(started.session.id).autoRoute?.decision).not.toHaveProperty('role');
     // The process starts on the routed model, and the prompt is the first turn on it, sent once and not routed again.
     expect(f.extraPlugins[1]!.instance!.sessions[0]!.options).toMatchObject({ model: 'grok-4.7', effort: 'high' });
     expect(turns('grok')).toEqual([expect.objectContaining({ text: 'review the quota pacing code', model: 'grok-4.7', effort: 'high' })]);
@@ -110,14 +111,17 @@ describe('Provider-neutral Start', () => {
     }
   });
 
-  it('uses the router\'s best alternative when the provider it prefers has no lane', async () => {
+  it('limits selection to enabled lanes and visibly rejects an out-of-scope answer', async () => {
     const { f, wo, start } = startFixture({ grok: false });
     wo.answers.push(routed('xai', 'grok-4.7', 'Grok 4.7', 'high', { alternatives: [
       { provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launch_name: 'gpt-6.1-terra', quota_state: 'tight' },
     ] }));
     const started = await start('plan a migration');
     expect(started.provider).toBe('codex');
-    expect(f.row(started.session.id).autoRoute?.decision).toMatchObject({ launchName: 'gpt-6.1-terra', reason: expect.stringContaining('Grok is not available for new chats') });
+    expect(wo.routeCalls[0]).toContain('openai,anthropic');
+    expect(started.warning).toContain('the router chose a model outside the enabled provider scope');
+    expect(f.row(started.session.id)).toMatchObject({ codexProfile: 'medium' });
+    expect(f.row(started.session.id).autoRoute).toBeUndefined();
   });
 
   it('falls back to the configured default with a visible warning when routing fails, and still sends the prompt', async () => {
@@ -216,7 +220,7 @@ describe('Start on a level the person picked', () => {
     wo.answers.push(levelRouted('anthropic', 'claude-fable-5-1', 'Claude Fable 5.1', 'xhigh', 'ultra'));
     const started = await startAt('ultra', 'design the quota pacing rewrite');
 
-    expect(wo.routeCalls).toEqual([['route', '--level', 'ultra', '--launcher', 'console', '--json']]);
+    expect(wo.routeCalls).toEqual([['route', '--level', 'ultra', '--launcher', 'console', '--providers', 'openai,anthropic,xai', '--json']]);
     expect(started).toMatchObject({ provider: 'claude' });
     expect(started.warning).toBeUndefined();
     // The chat holds the level, not Auto: its next messages are not routed again.
@@ -228,13 +232,14 @@ describe('Start on a level the person picked', () => {
     expect(wo.routeCalls).toHaveLength(1);
   });
 
-  it('starts on the router\'s best alternative when the provider it prefers has no lane', async () => {
+  it('keeps the requested level and warns when the answer is outside enabled lanes', async () => {
     const { f, wo, startAt } = startFixture({ grok: false });
     wo.answers.push(levelRouted('xai', 'grok-4.7', 'Grok 4.7', 'high', 'medium', { alternatives: [
       { provider: 'openai', model: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', effort: 'high', launch_name: 'gpt-6.1-terra', quota_state: 'on_pace' },
     ] }));
     const started = await startAt('medium', 'x');
     expect(started.provider).toBe('codex');
+    expect(started.warning).toContain('the router chose a model outside the enabled provider scope');
     expect(f.row(started.session.id)).toMatchObject({ codexProfile: 'medium' });
   });
 

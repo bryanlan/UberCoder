@@ -157,7 +157,7 @@ export type AutoRouteOutcome =
   | { ok: false; reason: string };
 
 export interface RouteOptions {
-  /** For a provider-neutral route: the providers a session can be created on now. The first router option on one of them is used. */
+  /** For a provider-neutral route: the providers a session can be created on now. They restrict the inventory before selection. */
   acceptProvider?: (provider: ProviderId) => boolean;
   /**
    * The person's newest message (at most 2,000 characters are sent). The router reads it for an explicit level ("use high") or
@@ -286,11 +286,17 @@ export class ModelProfileService {
   }
 
   private async ask(target: string[], provider: ProviderId | undefined, options: RouteOptions): Promise<AutoRouteOutcome> {
+    const eligible = !provider && options.acceptProvider
+      ? (Object.keys(ROUTER_PROVIDER) as ProviderId[]).filter(id => options.acceptProvider!(id))
+      : undefined;
+    if (eligible?.length === 0) return { ok: false, reason: 'no provider is enabled for new chats' };
+    const scope = provider ? ['--provider', ROUTER_PROVIDER[provider]]
+      : eligible ? ['--providers', eligible.map(id => ROUTER_PROVIDER[id]).join(',')] : [];
     let stdout: string;
     try {
       ({ stdout } = await this.run(
         this.woPath,
-        ['route', ...target, '--launcher', 'console', ...(provider ? ['--provider', ROUTER_PROVIDER[provider]] : []), '--json'],
+        ['route', ...target, '--launcher', 'console', ...scope, '--json'],
         { timeoutMs: this.routeTimeoutMs },
       ));
     } catch (error) {
@@ -315,29 +321,9 @@ export class ModelProfileService {
       return { ok: false, reason: `the router chose a model from ${result.provider} for a ${provider} session` };
     }
     if (!provider && options.acceptProvider && !options.acceptProvider(chosenProvider)) {
-      return this.nextAcceptable(result, options.acceptProvider);
+      return { ok: false, reason: 'the router chose a model outside the enabled provider scope' };
     }
     return { ok: true, decision: this.decisionFrom(result), provider: chosenProvider };
-  }
-
-  /** The router's first choice is on a provider that cannot take new sessions: use its best alternative that can. */
-  private nextAcceptable(result: z.infer<typeof routeSchema>, accept: (provider: ProviderId) => boolean): AutoRouteOutcome {
-    for (const option of result.alternatives ?? []) {
-      const alternative = providerForRouterVendor(option.provider);
-      if (!alternative || !accept(alternative) || !option.launch_name || !option.model || !option.label || !option.effort) continue;
-      const decision = this.decisionFrom({
-        ...result,
-        provider: option.provider,
-        model: option.model,
-        label: option.label,
-        effort: option.effort,
-        launch_name: option.launch_name,
-        quota_state: option.quota_state ?? null,
-        reason: `${result.reason ?? ''} ${option.label} was used because ${PROVIDER_NAMES[providerForRouterVendor(result.provider)!]} is not available for new chats.`.trim(),
-      });
-      return { ok: true, decision, provider: alternative };
-    }
-    return { ok: false, reason: 'the router chose no model that a new chat can run on' };
   }
 
   private routeFailure(error: unknown): string {

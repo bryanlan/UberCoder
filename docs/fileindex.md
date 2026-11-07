@@ -426,3 +426,5 @@ Run recovery ownership (requires explicit unattended permission):
   structured liveness,
   `routes/{conversations,sessions,projects}.ts` and the web New Chat and `ConversationPane.tsx` controls
   move together; review them with `docs/structured-providers.md` and the structured tests.
+
+- `docs/model-router-direct-selection.md` — direct JEV routing inventory, enabled provider filtering, receipt compatibility and validation evidence.
