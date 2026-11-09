@@ -428,6 +428,19 @@ message cannot be cancelled.
 - `/keys` takes a complete message with Enter or Stop (Escape) alone. Review `apps/server/src/routes/sessions.ts`,
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-routes.test.ts` and
   `apps/server/test/session-input-queue.test.ts` before changing what the route accepts or how a queued message is sent.
+- The typed-input record is the permanent, append-only SQLite table `typed_input_records` (migration 25). It holds one row per
+  message the person typed into a Console conversation: session id, request id, provider, project slug, conversation ref (the
+  provider's thread or session id), `typed_at` (UTC, when the backend accepted it), the exact text and `how_sent`
+  (`immediate`: the provider took it in the request that carried it, a steer into a running turn included; `queued`: the input
+  journal held it first, for example a Grok or Vibe reply that waits for the running turn to end). A row is written where
+  `SessionManager.recordTypedInput` is called: after the provider accepts a direct send or a human opening message, and when the input
+  journal accepts or delivers a message. It is never written for an automatic opening prompt (`agent-input`), a peer or inbox
+  delivery, a recovery or continuation prompt, a status line, or a message the Console refused. Unlike `events.jsonl`, which a
+  session's end removes, the table has no relation to `bound_sessions` and triggers refuse UPDATE and DELETE, so ending,
+  releasing, restarting or sweeping a session never removes a row. Retention: kept indefinitely; nothing prunes the table. A failed
+  write is logged as an error and does not fail the send (the provider already has the message). Local tools read it with
+  `node scripts/typed-input-records.mjs --since <ISO> --until <ISO> [--db PATH]` (JSON lines, `since <= typedAt < until`) or
+  `select * from typed_input_records where typed_at >= ? and typed_at < ?` on the Console database opened read-only.
 - Completion recency moves after new trackable output has idled past the completion window. Review
   `apps/server/src/sessions/session-manager.ts`, `apps/server/test/session-recency.test.ts`, and
   `apps/server/test/session-lifecycle.test.ts`

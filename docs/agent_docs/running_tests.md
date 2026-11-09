@@ -51,6 +51,7 @@ it does not query the live Console database.
   Benchmark append updates on a consistent private SQLite copy and compare complete
   search results with a full rewrite before activating search-write optimizations.
 - Project/settings browser flow: `npm run test:e2e -- apps/web/e2e/settings.spec.ts` (builds the shared package first).
+- Typed-input record: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- typed-input-record`. Fixtures use a temporary SQLite file and fake transports.
 - Worktree cleanup guards: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- worktree-sweep`. These fixtures create private repositories and SQLite state; do not run the host sweep in apply mode as a test.
 - Shared wiki storage/search and API: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- wiki`. Fixtures use temporary Git repositories and SQLite files.
 

@@ -9,6 +9,7 @@ import { ConversationIndexRepo, pickPreferredConversation } from './repos/conver
 import { MetaRepo } from './repos/meta.js';
 import { PendingConversationsRepo } from './repos/pending-conversations.js';
 import { SearchIndexRepo } from './repos/search-index.js';
+import { TypedInputRecordsRepo } from './repos/typed-input-records.js';
 import { TitleOverridesRepo } from './repos/title-overrides.js';
 import { TranscriptParseCacheRepo } from './repos/transcript-parse-cache.js';
 import { UiPreferencesRepo } from './repos/ui-preferences.js';
@@ -27,6 +28,7 @@ export class AppDatabase {
   readonly authSessions: AuthSessionsRepo;
   readonly uiPreferences: UiPreferencesRepo;
   readonly transcriptParseCache: TranscriptParseCacheRepo;
+  readonly typedInputRecords: TypedInputRecordsRepo;
 
   constructor(databasePath: string, observe?: OperationObserver) {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -46,6 +48,7 @@ export class AppDatabase {
     this.authSessions = new AuthSessionsRepo(this.sqlite);
     this.uiPreferences = new UiPreferencesRepo(this.sqlite);
     this.transcriptParseCache = new TranscriptParseCacheRepo(this.sqlite);
+    this.typedInputRecords = new TypedInputRecordsRepo(this.sqlite);
   }
 
   close(): void {

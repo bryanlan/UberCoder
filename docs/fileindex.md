@@ -110,6 +110,9 @@
   message input, coordination wakes, the startup conversion of rows the removed tmux transport left, and recency timestamps.
 - `apps/server/src/sessions/input-queue.ts` - durable human-message delivery journals (`queued`, `submitting`,
   `submitted`, `failed`, `cancelled`) and the request summaries projected on bound sessions.
+- `apps/server/src/db/repos/typed-input-records.ts` - the permanent, append-only record of what the person typed
+  (`typed_input_records`, schema migration 25): `append` (once per session and request id) and `list` by time window. Written by
+  `SessionManager.recordTypedInput`; never deleted. Covered by `apps/server/test/typed-input-record.test.ts`.
 - `apps/web/src/components/QueuedInputNotice.tsx` - queued-message display and cancellation;
   pending requests stay separate from submitted transcript turns.
 - `apps/server/src/sessions/live-output/reader.ts` and `event-log-reader.ts` - live rows from the session event log:
@@ -158,6 +161,7 @@
 - `apps/web/src/lib/query-client.ts` - authentication cache shared by the API client and React.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
+- `scripts/typed-input-records.mjs` - read-only listing of the typed-input record for a time window, as JSON lines; the entry point for a local collector.
 - `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees and landed or expired snapshot branches across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.
 - `apps/server/test/proxy-allowlist.test.ts` - key tracked file or entrypoint for this repo.

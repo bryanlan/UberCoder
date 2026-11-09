@@ -286,6 +286,7 @@ function sessionCommandResult(
 
 interface SessionManagerLogger {
   warn(bindings: unknown, message?: string): void;
+  error?(bindings: unknown, message?: string): void;
   info?(bindings: unknown, message?: string): void;
 }
 
@@ -1740,7 +1741,10 @@ export class SessionManager {
       if (input.startNotice) this.appendEvent(current, { type: 'status', text: input.startNotice, timestamp: nowIso() });
       if (initialPrompt) {
         if (input.initialPromptIsHuman !== false && !input.autoDecision) await this.routeAutoBeforeTurn(current, initialPrompt);
-        await this.structured.submitHuman(current, { requestId: randomUUID(), text: initialPrompt });
+        const initialRequestId = randomUUID();
+        await this.structured.submitHuman(current, { requestId: initialRequestId, text: initialPrompt });
+        // An automatic opening prompt (a launch brief) is not the person's message and is not recorded.
+        if (input.initialPromptIsHuman !== false) this.recordTypedInput(current, initialRequestId, initialPrompt, nowIso(), 'immediate');
         recordedInitialUserInput = recordedUserInputFromEvent(this.appendEvent(current, {
           type: input.initialPromptIsHuman === false ? 'agent-input' : 'user-input',
           text: initialPrompt,
@@ -1784,6 +1788,21 @@ export class SessionManager {
       throw new SessionInputRejectedError(SESSION_NOT_RUNNING_INPUT_MESSAGE);
     }
     return await this.submitStructuredText(liveSession, text);
+  }
+
+  /**
+   * Appends to the permanent typed-input record. Called only where the person's own message is accepted: after the provider took a
+   * direct send, and when the input journal accepts or delivers one. A write failure is logged as an error and does not throw: each
+   * call site is either past delivery (throwing would make the browser resend a message the provider already has) or covered by
+   * the delivery site's second attempt.
+   */
+  private recordTypedInput(session: BoundSession, requestId: string, text: string, typedAt: string, howSent: 'immediate' | 'queued'): void {
+    try {
+      this.db.typedInputRecords.append({ sessionId: session.id, requestId, provider: session.provider, projectSlug: session.projectSlug,
+        conversationRef: session.conversationRef, typedAt, text, howSent });
+    } catch (error) {
+      this.logger?.error?.({ err: error, sessionId: session.id, requestId }, 'Could not write the typed-input record; the message itself was not affected.');
+    }
   }
 
   private updateBoundSessionFields(sessionId: string, patch: Partial<BoundSession>): BoundSession {
@@ -1874,7 +1893,14 @@ export class SessionManager {
       this.saveQueuedInput(sessionId, record);
     }
     if (interrupted) throw new SessionInputRejectedError('This send was cancelled by a later Stop or message. It was not sent.');
-    await this.drainQueuedInputInternal(sessionId);
+    try {
+      await this.drainQueuedInputInternal(sessionId, record.requestId);
+    } finally {
+      // A message this request did not deliver (it waits, or the attempt failed) was still accepted into the journal: it is
+      // recorded as queued now, and a later delivery finds the row and leaves it.
+      const accepted = this.inputQueue.get(sessionId, record.requestId);
+      if (accepted?.state !== 'submitted' && accepted?.state !== 'cancelled') this.recordTypedInput(session, record.requestId, text, record.requestedAt, 'queued');
+    }
     record = this.inputQueue.get(sessionId, record.requestId)!;
     this.scheduleInputDrain(sessionId);
     const result = sessionCommandResult(this.mustGetSession(sessionId), record.recordedUserInput);
@@ -1902,7 +1928,8 @@ export class SessionManager {
     this.inputDrainTimers.set(sessionId, timer);
   }
 
-  private async drainQueuedInputInternal(sessionId: string): Promise<void> {
+  /** `originRequestId`: the send whose own request runs this drain; a message delivered in its own request was sent immediately. */
+  private async drainQueuedInputInternal(sessionId: string, originRequestId?: string): Promise<void> {
     if (this.stopped || !this.db.isOpen()) return;
     const first = this.inputQueue.list(sessionId)[0];
     if (!first || ['submitting', 'failed'].includes(first.state)) return;
@@ -1930,7 +1957,7 @@ export class SessionManager {
     if (this.stopped || session.manualSuspendedAt || session.pressureSuspendedAt || session.modelProfileRequest?.state === 'applying') {
       defer('Waiting for the session to resume.'); return;
     }
-    await this.drainStructuredQueuedInput(session, record, attemptRevision, defer);
+    await this.drainStructuredQueuedInput(session, record, attemptRevision, defer, originRequestId);
   }
 
   /** The model a profile switch applies: the target an Auto decision carries, or the catalog's entry for a fixed level. */
@@ -2573,7 +2600,7 @@ export class SessionManager {
         throw this.structuredInputError(error);
       }
       // A question the agent asked in a message is answered with a message of the person's: it counts as their input.
-      if (sent.message) this.recordStructuredHumanInput(session, sent.message);
+      if (sent.message) this.recordStructuredHumanInput(session, sent.message, randomUUID());
       return this.mustGetSession(sessionId);
     });
   }
@@ -2623,17 +2650,19 @@ export class SessionManager {
 
   private async submitStructuredText(session: BoundSession, text: string): Promise<SessionCommandResult> {
     await this.routeAutoBeforeTurn(session, text);
+    const requestId = randomUUID();
     try {
-      await this.structured.submitHuman(session, { requestId: randomUUID(), text }, structuredImages(text, this.imageStoreDir));
+      await this.structured.submitHuman(session, { requestId, text }, structuredImages(text, this.imageStoreDir));
     } catch (error) {
       throw this.structuredInputError(error);
     }
-    return this.recordStructuredHumanInput(session, text);
+    return this.recordStructuredHumanInput(session, text, requestId);
   }
 
   /** A message the person sent reached the provider: it is their activity, and the conversation log records it. */
-  private recordStructuredHumanInput(session: BoundSession, text: string): SessionCommandResult {
+  private recordStructuredHumanInput(session: BoundSession, text: string, requestId: string): SessionCommandResult {
     const inputAt = nowIso();
+    this.recordTypedInput(session, requestId, text, inputAt, 'immediate');
     const updated = this.updateBoundSessionFields(session.id, { updatedAt: inputAt, lastActivityAt: inputAt });
     const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text, timestamp: inputAt }));
     return sessionCommandResult(updated, recordedUserInput);
@@ -2699,6 +2728,7 @@ export class SessionManager {
     record: QueuedInputRecord,
     attemptRevision: number,
     defer: (reason: string) => void,
+    originRequestId?: string,
   ): Promise<void> {
     const sessionId = staleSession.id;
     let session = staleSession;
@@ -2721,6 +2751,8 @@ export class SessionManager {
       await this.routeAutoBeforeTurn(session, record.text);
       const sent = await this.structured.submitHuman(session, record, structuredImages(record.text, this.imageStoreDir));
       const inputAt = nowIso();
+      // Typed when the journal accepted it; a no-op when the originating request already recorded it.
+      this.recordTypedInput(session, record.requestId, record.text, record.requestedAt, record.requestId === originRequestId ? 'immediate' : 'queued');
       const updated = this.updateBoundSessionFields(sessionId, { updatedAt: inputAt, lastActivityAt: inputAt });
       const recordedUserInput = recordedUserInputFromEvent(this.appendEvent(updated, { type: 'user-input', text: record.text, timestamp: inputAt }));
       this.saveQueuedInput(sessionId, { ...sending, state: 'submitted', turnId: sent.turnId, deliveryMode: sent.mode, recordedUserInput, notSentSince: undefined });

@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 24;
+export const CURRENT_SCHEMA_VERSION = 25;
 
 interface Migration {
   version: number;
@@ -329,6 +329,30 @@ const MIGRATIONS: Migration[] = [
   { version: 24, name: 'vibe-cost-profile', up(sqlite) {
     // The model profile of a Mistral Vibe session, beside the other providers' profile columns.
     if (tableExists(sqlite, 'bound_sessions')) addColumnIfMissing(sqlite, 'bound_sessions', 'vibe_profile', 'vibe_profile text');
+  } },
+  { version: 25, name: 'typed-input-records', up(sqlite) {
+    // The permanent, append-only record of what the person typed into a Console conversation. It has no foreign key to
+    // bound_sessions and the triggers refuse UPDATE and DELETE, so ending, releasing or sweeping a session never removes a row.
+    sqlite.exec(`
+      create table if not exists typed_input_records (
+        id integer primary key autoincrement,
+        session_id text not null,
+        request_id text not null,
+        provider text not null,
+        project_slug text not null,
+        conversation_ref text not null,
+        typed_at text not null,
+        recorded_at text not null,
+        text text not null,
+        how_sent text not null check (how_sent in ('immediate', 'queued')),
+        unique (session_id, request_id)
+      );
+      create index if not exists typed_input_records_typed_at on typed_input_records(typed_at);
+      create trigger if not exists typed_input_records_no_update before update on typed_input_records
+        begin select raise(abort, 'typed_input_records is append-only'); end;
+      create trigger if not exists typed_input_records_no_delete before delete on typed_input_records
+        begin select raise(abort, 'typed_input_records is append-only'); end;
+    `);
   } },
 ];
 

@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 // Console schema versions whose assignment, scope and binding semantics this script was reviewed against.
-export const SUPPORTED_SCHEMA_VERSIONS = [17, 18, 19, 20, 21, 22, 23, 24];
+export const SUPPORTED_SCHEMA_VERSIONS = [17, 18, 19, 20, 21, 22, 23, 24, 25];
 export const DEFAULT_COOLDOWN_HOURS = 24;
 const CACHEDIR_SIGNATURE = 'Signature: 8a477f597d28d172789f06886806bc55';
 const DISPOSABLE_DIR_NAMES = new Set(['__pycache__']);
