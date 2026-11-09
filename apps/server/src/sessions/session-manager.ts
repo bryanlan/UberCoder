@@ -2591,7 +2591,7 @@ export class SessionManager {
   private structuredTextRejection(text: string, provider: ProviderId): string | undefined {
     // A caption is judged without the image envelope after it.
     if (STRUCTURED_SLASH_COMMAND.test(imagePromptDisplay(text).text.trim())) {
-      return 'Slash commands are terminal controls and are not available here. Send the request as a normal message. Nothing was sent.';
+      return 'Slash commands are not supported here. To change the model level, open Session controls and choose Auto, Ultra, High, Medium or Low. To ask for a specific model or thinking level, select Auto and request it in plain English. Nothing was sent.';
     }
     const files = structuredImages(text, this.imageStoreDir);
     if (files && !this.structured.supportsImages(provider)) {

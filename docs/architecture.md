@@ -278,7 +278,9 @@ takes `keys: ['Enter']` with `text`/`submittedText` (and optionally `submissionI
 to send a message, or `keys: ['Escape']` alone to stop the running turn; any other key, text without
 Enter, or a field the route does not take is refused with 400 and nothing is sent. A message that is
 only a slash command word is refused at admission (terminal controls do not exist on the structured
-transport).
+transport). The refusal directs the person to Session controls for model levels; Auto can route an
+explicit plain-English request for a model or thinking level. A slash command with arguments is
+ordinary message text and does not change session settings.
 
 Complete chat drafts carry a UUID `submissionId` on `/keys`. The backend journals each request in
 SQLite metadata (`sessions/input-queue.ts`) as `queued`, `submitting` (the request was handed to the

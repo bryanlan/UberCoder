@@ -562,15 +562,16 @@ describe('Structured input that has no meaning without a terminal', () => {
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
   });
 
-  it('rejects a message that is only a slash command, on every submit path, without pausing automatic input', async () => {
+  it('rejects a message that is only a slash command with model-control guidance, on every submit path, without pausing automatic input', async () => {
     const f = fixture();
     const { session } = await f.bindNew();
     const assignment = enableUnattendedRecovery(f.db, 'codex', session.conversationRef);
     const revision = new InputQueue(f.db.sqlite).revision(session.id);
-    await rejected(send(f, session.id, '/compact'));
-    await rejected(send(f, session.id, '  /model  '));
-    await rejected(f.manager.sendInput(session.id, '/status'));
-    await rejected(f.manager.sendKeystrokes(session.id, { text: '/review', keys: ['Enter'] }));
+    const message = 'Slash commands are not supported here. To change the model level, open Session controls and choose Auto, Ultra, High, Medium or Low. To ask for a specific model or thinking level, select Auto and request it in plain English. Nothing was sent.';
+    await expect(send(f, session.id, '/compact')).rejects.toThrow(message);
+    await expect(send(f, session.id, '  /model  ')).rejects.toThrow(message);
+    await expect(f.manager.sendInput(session.id, '/status')).rejects.toThrow(message);
+    await expect(f.manager.sendKeystrokes(session.id, { text: '/review', keys: ['Enter'] })).rejects.toThrow(message);
     expect(f.calls(session.conversationRef, 'sendTurn')).toHaveLength(0);
     // Nothing was sent, so nothing a sent message does happened either: no pause, no new input revision, no journal entry.
     expect(peerWakePaused(f.db, assignment)).toBe(false);
