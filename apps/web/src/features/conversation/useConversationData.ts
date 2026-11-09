@@ -385,7 +385,7 @@ export function useConversationData({
     resumeError: boundSession && resumeAttempt?.sessionId === boundSession.id ? resumeAttempt.error : undefined,
     resuming: Boolean(boundSession && resumeAttempt?.sessionId === boundSession.id && resumeAttempt.pending),
     retryResume,
-    loading: metaQuery.isLoading || (messagesQuery.isLoading && !messagesQuery.data),
+    loading: Boolean(enabled && !selectedMetaTimeline && metaQuery.isFetching),
     hasOlderMessages: Boolean(messagesQuery.hasNextPage),
     loadingOlderMessages: messagesQuery.isFetchingNextPage,
     loadOlderMessages,

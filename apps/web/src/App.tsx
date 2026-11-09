@@ -1124,6 +1124,10 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
             <NotFoundPane />
           ) : routeSelection.kind === 'wiki' && project ? (
             <WikiPage projectSlug={project.slug} projectName={project.displayName} csrfToken={authQuery.data?.csrfToken} />
+          ) : creatingConversationKey ? (
+            <div role="status" className="flex h-full items-center justify-center p-8 text-center text-slate-400">
+              Creating conversation…
+            </div>
           ) : (
             <ConversationPane
               csrfToken={authQuery.data?.csrfToken}
