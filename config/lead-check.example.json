@@ -1,0 +1,9 @@
+{
+  "goals": "/home/bryan/code/waltium-planner/docs/product-goals.md",
+  "steering": "/home/bryan/code/waltium-planner/var/client-work/next-version-20261106/V3-LIST.md",
+  "decisions": "/home/bryan/code/waltium/var/artifacts/planner/lead-directions-20261010.md",
+  "queue": "/home/bryan/code/waltium/var/artifacts/planner/v2/CARD-QUEUE.md",
+  "repositories": ["/home/bryan/code/waltium-planner", "/home/bryan/code/waltium-calc-engine"],
+  "records": "/home/bryan/code/waltium/var/artifacts/lead-check/records",
+  "console_db": "/home/bryan/.local/share/agent-console/agent-console.sqlite"
+}
