@@ -147,7 +147,8 @@ def run(cfg, plumbing=False, force=False):
         prompt += 'The runner writes the record at ' + str(run_dir / 'record.md') + ' and appends your line for Bryan. '
         prompt += 'After round two, wait once more for the lead, repeating pending waits. Then return ONLY a JSON object '
         prompt += 'with answer_summary (at most two short lines), commitment (one short line), and bryan_line '
-        prompt += '(on track, redirected: from X to Y, or needs you: what and why). '
+        prompt += '(on track, optionally followed by a colon and what is new for him to open; redirected: from X to Y; '
+        prompt += 'or needs you: what and why). '
         prompt += 'Do not write files yourself. If no answer, finish with needs you: no answer from the lead.'
         result = None
         model = {}
@@ -167,9 +168,9 @@ def run(cfg, plumbing=False, force=False):
             final = json.loads(raw)
             if len(exchange.rounds) != 2 or exchange.pending:
                 raise ValueError('Checker did not complete both rounds')
-            line = final['bryan_line'].strip()
-            if not (line == 'on track' or line.startswith(('redirected: ', 'needs you: '))) or '\n' in line:
-                raise ValueError('Invalid Bryan line')
+            line = ' '.join(final['bryan_line'].split())
+            if not (line == 'on track' or line.startswith(('on track: ', 'redirected: ', 'needs you: '))):
+                raise ValueError('Bryan line must start with on track, redirected: or needs you:')
             if exchange.timed_out:
                 line = 'needs you: no answer from the lead'
             record = ('Time: ' + stamp + '\nAsked: ' + exchange.rounds[0]['sent'] + '\nLead: ' + final['answer_summary']
@@ -180,6 +181,7 @@ def run(cfg, plumbing=False, force=False):
         except Exception as error:
             line = 'needs you: no answer from the lead' if exchange.timed_out else 'needs you: scheduled check failed; inspect its private record'
             record = 'Time: ' + stamp + '\n' + line + '\nCompleted rounds: ' + str(len(exchange.rounds)) + '\nFailure type: ' + type(error).__name__
+            record += '\nFailure: ' + ' '.join(str(error).split())[:200]
             status = 'failed'
         finally:
             (run_dir / 'exchange.json').write_text(json.dumps(exchange.rounds, indent=2))

@@ -94,6 +94,16 @@ class Checks(unittest.TestCase):
             self.assertNotIn('body excluded', pack)
 
     def test_no_answer_writes_record_line_and_usage(self):
+        self.no_answer_run('on track', 'partial')
+
+    def test_on_track_line_may_say_what_is_new_to_open(self):
+        self.no_answer_run('on track: the second page is new\nto open', 'partial')
+
+    def test_unknown_line_fails_and_record_says_why(self):
+        result = self.no_answer_run('all good', 'failed')
+        self.assertIn('Failure: Bryan line must start with', result['record'])
+
+    def no_answer_run(self, bryan_line, expected_status):
         with tempfile.TemporaryDirectory() as d:
             prompt = Path(d) / 'prompt'; prompt.write_text('Test prompt')
             cfg = {'records': d, 'checker_prompt': str(prompt), 'lead_session': 'fixture', 'reply_timeout_sec': .001, 'poll_sec': .002}
@@ -102,18 +112,19 @@ class Checks(unittest.TestCase):
                 for text in ('Bryan: first', 'Bryan: second'):
                     host.dispatch('send_message', {'text': text})
                     host.dispatch('wait_for_reply', {})
-                return {'ok': True, 'response_text': json.dumps({'answer_summary': 'No answer', 'commitment': 'None', 'bryan_line': 'on track'}),
+                return {'ok': True, 'response_text': json.dumps({'answer_summary': 'No answer', 'commitment': 'None', 'bryan_line': bryan_line}),
                     'llm_usage': {'input_tokens': 10, 'output_tokens': 2, 'total_tokens': 12}}
             with patch.object(r, 'Console') as c, patch.object(r.pack_module, 'build_pack', return_value='pack'), \
                  patch.object(r.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps({'model': 'fixture', 'effort': 'high'}))), \
                  patch('agent_consult.scripts.run_agent_consult.run_agent', side_effect=checker):
                 c.return_value.messages.return_value = []
                 result = r.run(cfg)
-            self.assertEqual(result['status'], 'partial')
+            self.assertEqual(result['status'], expected_status)
             self.assertEqual(result['line'], 'needs you: no answer from the lead')
             self.assertEqual(result['llm_usage']['total_tokens'], 12)
             self.assertIn('needs you: no answer from the lead', (Path(d) / 'LINES.md').read_text())
             self.assertTrue((Path(result['evidence']) / 'record.md').exists())
+            return result
 
     def test_credential_creation_never_overwrites_or_prints_key(self):
         import subprocess
