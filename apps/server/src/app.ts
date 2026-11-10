@@ -24,6 +24,7 @@ import { registerConversationRoutes } from './routes/conversations.js';
 import { registerEventRoutes } from './routes/events.js';
 import { registerProjectRoutes } from './routes/projects.js';
 import { registerSearchRoutes } from './routes/search.js';
+import { registerPersonMessageRoutes } from './routes/person-message.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerModelProfileRoutes } from './routes/model-profiles.js';
 import { ModelProfileService } from './model-profiles/service.js';
@@ -204,6 +205,7 @@ export async function buildApp(options: AppOptions = {}) {
   await registerConversationRoutes(app, authService, db, projectService, providerRegistry, sessions, eventBus, liveOutputReader, structuredProviders,
     { modelProfiles, startDefault: config.modelRouting.startDefault });
   await registerSessionRoutes(app, authService, db, projectService, sessions, images);
+  registerPersonMessageRoutes(app, config.runtimeDir, sessions, projectService, providerRegistry, liveOutputReader, db);
   await registerModelProfileRoutes(app, authService, modelProfiles);
   registerImageRoutes(app, authService, sessions, images);
   await registerEventRoutes(app, authService, eventBus);
