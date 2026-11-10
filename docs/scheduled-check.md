@@ -25,9 +25,9 @@ Both require loopback plus a bearer key from `runtimeDir/person-message.key`, an
 
 ## Timer
 
-`/home/bryan/code/waltium-wt/scheduled-check-registration/config/jobs/console_scheduled_check_two_hourly.toml` is the reviewed source for the disabled Waltium registry installation (branch `feat/scheduled-check-registration`). The installed canonical registry file has identical bytes. It uses the existing scheduler every two hours at minute zero, one attempt, and a 45-minute outer timeout. Its branch workdir is intentional until integration; update the registered workdir to the integrated checkout before removing the branch worktree. No OS cron entry is added.
+The Waltium scheduler job `console_scheduled_check_two_hourly` (`/home/bryan/code/waltium/config/jobs/console_scheduled_check_two_hourly.toml`) runs the runner from this repository's main checkout every two hours at minute zero, machine-local time, with one attempt and a 45-minute outer timeout. It uses the existing scheduler wake-up and adds no OS cron entry of its own. The job is enabled in its checked-in definition (live since 2026-11-10).
 
-From `/home/bryan/code/waltium`, enable with `python3 -m waltiumctl jobs set-enabled console_scheduled_check_two_hourly --enabled true --updated-by bryan --execute`; disable with the same command and `--enabled false`. The timer is initially registered off. Enabling requires the source changes deployed to the running Console, the private target config checked and the local credential generated. This build does not restart or redeploy the live Console.
+From `/home/bryan/code/waltium`, turn it off with `python3 -m waltiumctl jobs set-enabled console_scheduled_check_two_hourly --enabled false --updated-by bryan --execute`; turn it back on with the same command and `--enabled true`. A run needs the running Console to carry this source, the private target config to name the current lead, and the local credential to exist (`--init-credential` creates it once). The scheduler starts the runner in cron's bare environment: the router is called by absolute path and the checker program resolves through the shared runtime's fallback path.
 
 ## Verification
 
