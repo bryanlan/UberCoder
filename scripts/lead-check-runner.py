@@ -117,6 +117,38 @@ def definitions():
     ]
 
 
+def final_answer(text):
+    """Return the checker's closing JSON object, also when a sentence or a code fence surrounds it."""
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char != '{':
+            continue
+        try:
+            value, _ = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and 'bryan_line' in value:
+            return value
+    raise ValueError('Checker answer holds no JSON object with bryan_line')
+
+
+def compact_record(stamp, rounds, final, line, limit=3000):
+    """Build the record the next check reads. Long messages are cut here; exchange.json keeps them whole."""
+    sent = [rounds[0]['sent'], rounds[1]['sent']]
+    mark = ' [cut; whole text in exchange.json]'
+    while True:
+        record = ('Time: ' + stamp + '\nAsked: ' + sent[0] + '\nLead: ' + final['answer_summary']
+            + '\nSteered: ' + sent[1] + '\nCommitment: ' + final['commitment'] + '\nBryan: ' + line)
+        over = len(record.encode()) - limit
+        if over <= 0:
+            return record
+        longest = 0 if len(sent[0]) >= len(sent[1]) else 1
+        text = sent[longest].removesuffix(mark)
+        if len(text) <= 200:
+            raise ValueError('Record exceeds ' + str(limit) + ' bytes')
+        sent[longest] = text[:max(200, len(text) - over - len(mark))].rstrip() + mark
+
+
 def run(cfg, plumbing=False, force=False):
     records = Path(cfg['records'])
     records.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -162,10 +194,7 @@ def run(cfg, plumbing=False, force=False):
                 hard_timeout_sec=cfg.get('checker_timeout_sec', 2400), intent='custom')
             if not result.get('ok'):
                 raise RuntimeError('Checker failed; see private runtime artifacts')
-            raw = result['response_text'].strip()
-            if raw.startswith('```'):
-                raw = '\n'.join(raw.splitlines()[1:-1])
-            final = json.loads(raw)
+            final = final_answer(result['response_text'])
             if len(exchange.rounds) != 2 or exchange.pending:
                 raise ValueError('Checker did not complete both rounds')
             line = ' '.join(final['bryan_line'].split())
@@ -173,10 +202,7 @@ def run(cfg, plumbing=False, force=False):
                 raise ValueError('Bryan line must start with on track, redirected: or needs you:')
             if exchange.timed_out:
                 line = 'needs you: no answer from the lead'
-            record = ('Time: ' + stamp + '\nAsked: ' + exchange.rounds[0]['sent'] + '\nLead: ' + final['answer_summary']
-                + '\nSteered: ' + exchange.rounds[1]['sent'] + '\nCommitment: ' + final['commitment'] + '\nBryan: ' + line)
-            if len(record.encode()) > 3000:
-                raise ValueError('Record exceeds 3000 bytes')
+            record = compact_record(stamp, exchange.rounds, final, line)
             status = 'partial' if exchange.timed_out else 'updated'
         except Exception as error:
             line = 'needs you: no answer from the lead' if exchange.timed_out else 'needs you: scheduled check failed; inspect its private record'

@@ -103,16 +103,39 @@ class Checks(unittest.TestCase):
         result = self.no_answer_run('all good', 'failed')
         self.assertIn('Failure: Bryan line must start with', result['record'])
 
-    def no_answer_run(self, bryan_line, expected_status):
+    def test_answer_inside_a_sentence_and_code_fence_is_read(self):
+        result = self.no_answer_run('redirected: from {a} to b', 'partial',
+            wrap=lambda answer: 'Both rounds are done; here is the result.\n\n```json\n' + answer + '\n```\n')
+        self.assertNotIn('Failure', result['record'])
+
+    def test_answer_without_the_object_fails_and_record_says_why(self):
+        result = self.no_answer_run('on track', 'failed', wrap=lambda answer: 'on track {not json}')
+        self.assertIn('Failure: Checker answer holds no JSON object', result['record'])
+
+    def test_long_messages_are_cut_in_the_record_not_failed(self):
+        result = self.no_answer_run('on track', 'partial', messages=('Bryan: ' + 'first ' * 400, 'Bryan: ' + 'second ' * 400))
+        self.assertLessEqual(len(result['record'].encode()), 3000)
+        self.assertIn('[cut; whole text in exchange.json]', result['record'])
+        self.assertTrue(result['record'].endswith('Bryan: needs you: no answer from the lead'))
+        rounds = [{'sent': 'Bryan: ' + 'first ' * 400}, {'sent': 'Bryan: ' + 'second ' * 400}]
+        r.compact_record('time', rounds, {'answer_summary': 'a', 'commitment': 'c'}, 'on track')
+        self.assertEqual(rounds[1]['sent'], 'Bryan: ' + 'second ' * 400)  # exchange.json is written from these, whole
+
+    def test_record_too_long_without_the_messages_fails_and_says_why(self):
+        final = {'answer_summary': 'x' * 4000, 'commitment': 'None'}
+        with self.assertRaisesRegex(ValueError, 'Record exceeds 3000 bytes'):
+            r.compact_record('time', [{'sent': 'Bryan: first'}, {'sent': 'Bryan: second'}], final, 'on track')
+
+    def no_answer_run(self, bryan_line, expected_status, wrap=lambda answer: answer, messages=('Bryan: first', 'Bryan: second')):
         with tempfile.TemporaryDirectory() as d:
             prompt = Path(d) / 'prompt'; prompt.write_text('Test prompt')
             cfg = {'records': d, 'checker_prompt': str(prompt), 'lead_session': 'fixture', 'reply_timeout_sec': .001, 'poll_sec': .002}
             def checker(**kwargs):
                 host = kwargs['tool_host']
-                for text in ('Bryan: first', 'Bryan: second'):
+                for text in messages:
                     host.dispatch('send_message', {'text': text})
                     host.dispatch('wait_for_reply', {})
-                return {'ok': True, 'response_text': json.dumps({'answer_summary': 'No answer', 'commitment': 'None', 'bryan_line': bryan_line}),
+                return {'ok': True, 'response_text': wrap(json.dumps({'answer_summary': 'No answer', 'commitment': 'None', 'bryan_line': bryan_line}, indent=2)),
                     'llm_usage': {'input_tokens': 10, 'output_tokens': 2, 'total_tokens': 12}}
             with patch.object(r, 'Console') as c, patch.object(r.pack_module, 'build_pack', return_value='pack'), \
                  patch.object(r.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps({'model': 'fixture', 'effort': 'high'}))), \
