@@ -161,6 +161,8 @@
 - `apps/web/src/lib/query-client.ts` - authentication cache shared by the API client and React.
 - `apps/web/e2e/settings.spec.ts` - browser coverage for settings, explicit project additions, and legacy project migration behavior.
 - `scripts/generate-password-hash.mjs` - operator helper for auth password hashes.
+- `apps/server/src/routes/person-message.ts` - loopback-only, bearer-key routes for the local scheduled progress checker to send a prefixed message to and read recent messages from a bound session; operational contract: `docs/scheduled-check.md`.
+- `scripts/lead-check-pack.py`, `scripts/lead-check-runner.py`, and `config/lead-check.example.json` - bounded private progress pack and scheduled checker runner/config template; see `docs/scheduled-check.md` for setup, credential boundary and run commands.
 - `scripts/typed-input-records.mjs` - read-only listing of the typed-input record for a time window, as JSON lines; the entry point for a local collector.
 - `scripts/worktree-sweep.mjs` - inventory and guarded cleanup of agent-created Git worktrees and landed or expired snapshot branches across Console repositories; reads Console SQLite read-only. Contract: `docs/worktree-lifecycle.md`; fixtures in `apps/server/test/worktree-sweep.test.ts`.
 - `apps/server/test/auth.test.ts` - key tracked file or entrypoint for this repo.

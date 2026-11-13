@@ -52,6 +52,7 @@ it does not query the live Console database.
   search results with a full rewrite before activating search-write optimizations.
 - Project/settings browser flow: `npm run test:e2e -- apps/web/e2e/settings.spec.ts` (builds the shared package first).
 - Typed-input record: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- typed-input-record`. Fixtures use a temporary SQLite file and fake transports.
+- Scheduled progress checker: `python3 scripts/test-lead-check.py` exercises selected runner logic and pack construction on mocked data; it does not invoke the checker/model call or run the pack script as a command. `NODE_ENV=test npm run test -w @agent-console/server -- --maxWorkers=1 test/person-message.test.ts` covers the local message routes with an isolated session fixture. The opt-in `scheduled-check-proof.test.ts` uses scripted lead-session replies and makes live checker/model calls with provider credentials and usage; it is documented in `docs/scheduled-check.md`.
 - Worktree cleanup guards: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- worktree-sweep`. These fixtures create private repositories and SQLite state; do not run the host sweep in apply mode as a test.
 - Shared wiki storage/search and API: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- wiki`. Fixtures use temporary Git repositories and SQLite files.
 
