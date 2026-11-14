@@ -94,6 +94,8 @@ interface TurnState {
   terminal: boolean;
   openBlock?: 'assistant' | 'reasoning';
   blockCount: number;
+  hasAssistantText: boolean;
+  sawAssistantChunk: boolean;
   tools: Set<string>;
   interruptTimer?: ReturnType<typeof setTimeout>;
 }
@@ -398,7 +400,7 @@ export class VibeSession implements TransportSession {
   }
 
   private beginTurn(origin: 'user' | 'provider', id: string, adopted: boolean): TurnState {
-    const turn: TurnState = { id, origin, adopted, terminal: false, blockCount: 0, tools: new Set() };
+    const turn: TurnState = { id, origin, adopted, terminal: false, blockCount: 0, hasAssistantText: false, sawAssistantChunk: false, tools: new Set() };
     this.active = turn;
     this.channel.push({ type: 'turn.started', turnId: id, origin, replay: false, ...(adopted ? { adopted: true } : {}) });
     return turn;
@@ -414,6 +416,9 @@ export class VibeSession implements TransportSession {
     const record = isRecord(response) ? response : {};
     const { status, notice } = stopReasonStatus(record.stopReason, 'Mistral Vibe');
     if (notice) this.notice('info', notice);
+    if (status === 'completed' && !turn.adopted && turn.sawAssistantChunk && !turn.hasAssistantText) {
+      this.notice('warn', 'Mistral Vibe finished with an empty response. Check the agent’s work before retrying.');
+    }
     const failure = status === 'failed'
       ? { class: 'provider_error' as const, code: String(record.stopReason), message: 'Mistral Vibe declined to answer.', retryable: false }
       : undefined;
@@ -485,12 +490,23 @@ export class VibeSession implements TransportSession {
       case 'message':
       case 'thought': {
         const turn = this.ensureTurn();
+        if (turn && classified.action === 'message') {
+          const content = isRecord(update.content) ? update.content : {};
+          if (content.type === 'text' && typeof content.text === 'string') {
+            turn.sawAssistantChunk = true;
+            if (content.text.trim()) turn.hasAssistantText = true;
+          }
+        }
         if (turn) this.openBlock(turn, classified.action === 'message' ? 'assistant' : 'reasoning');
         return;
       }
       case 'tool':
       case 'tool-update': {
         const turn = this.ensureTurn();
+        if (turn && classified.action === 'tool') {
+          turn.hasAssistantText = false;
+          turn.sawAssistantChunk = false;
+        }
         if (turn) this.onToolCall(turn, update, classified.action === 'tool-update');
         return;
       }

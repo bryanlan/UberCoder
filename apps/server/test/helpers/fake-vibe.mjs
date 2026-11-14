@@ -198,6 +198,12 @@ async function runPrompt(id, params) {
     };
     return;
   }
+  if (text.includes('blank-answer')) {
+    chunk(session.id, 'agent_message_chunk', ' ');
+    writeStore(session, session.generation, 'quiescent');
+    endTurn(id, session, 'end_turn');
+    return;
+  }
   chunk(session.id, 'agent_message_chunk', 'Hello from fake vibe');
   usage(session.id, 1234);
   session.entries.push({

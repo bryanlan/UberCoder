@@ -318,6 +318,15 @@ describe('Vibe plugin: turns', () => {
     expect(failTerminal).toMatchObject({ status: 'failed', failure: { class: 'provider_error', code: '-32603' } });
   });
 
+  it('warns when Vibe ends with a whitespace-only response', async () => {
+    const s = fresh();
+    const session = s.track(await s.instance.start(s.open()));
+    const events = new EventLog(session);
+    const { turnId } = await session.sendTurn(text('blank-answer'));
+    await events.waitForTerminal(turnId);
+    expect(events.of('notice')).toContainEqual(expect.objectContaining({ level: 'warn', text: expect.stringContaining('empty response') }));
+  });
+
   it('declines a permission request the agent raises, and tells the agent it was cancelled', async () => {
     const s = fresh();
     const session = s.track(await s.instance.start(s.open()));
