@@ -362,7 +362,7 @@ Run recovery ownership (requires explicit unattended permission):
 - `apps/server/src/providers/transport/vibe/` — the Mistral Vibe plugin (`vibe-acp` with no flags, one process per
   conversation behind its own session host `vibe-<conversationId>`): `vibe-instance.ts` (launch, attach-only reattach,
   trust and auto-approve, `session/load`, the store check for a turn that finished while disconnected, coordination
-  registration, `probe`), `vibe-session.ts` (turns, model and thinking, cancel, the rate-limit notice, permission
+  registration, `probe`), `vibe-session.ts` (turns, model and thinking, cancel, rate-limit and empty-response notices, permission
   decline, adoption by JSON-RPC request id), `protocol.ts` (capabilities, the quota command, Mistral key scrubbing).
   `apps/server/src/providers/vibe-store.ts` reads `CURRENT` and the projection and refuses an unknown major format.
   `apps/server/src/providers/vibe-provider.ts` and `providers/transcripts/vibe.ts` list and parse past sessions.

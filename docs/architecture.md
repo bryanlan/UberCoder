@@ -609,7 +609,7 @@ removal of tmux); this section is the summary.
   format is skipped. The model profiles come from the catalog's optional `vibe` block (router vendor `mistral`), and a
   Vibe session's profile is stored in `bound_sessions.vibe_profile` (schema 24). Vibe has no session-start hook, so the
   Console registers the conversation itself (`coordination/console-registration.ts`) and prepends that context to the
-  first prompt. A rate limit (`-31001`) ends the turn with a plain notice and records `wo quota limited --subscription mistral_vibe`.
+  first prompt. A rate limit (`-31001`) ends the turn with a plain notice and records `wo quota limited --subscription mistral_vibe`. A completed live turn that emitted assistant text chunks but no non-whitespace assistant text warns that the response is empty; adopted turns are excluded.
 - Approvals: threads start with approval policy `never` and a full-access sandbox.
   A server request that still arrives (command, file or permission approval, MCP form) is declined and
   recorded as a status event. There is no approval UI.
