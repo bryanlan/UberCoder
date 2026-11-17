@@ -83,6 +83,49 @@ function indexHistory(db: AppDatabase, session: BoundSession): string {
 }
 
 describe('Granted real-session launch pipeline', () => {
+  it('returns an explicit queued outcome, reason and queue position to launch and launch_status', async () => {
+    const f = await fixture(); f.setMemory('MemAvailable: 100 kB');
+    const result = await f.launch();
+    expect(result).toMatchObject({ outcome: 'queued', attentionRequired: true, launchConfirmed: false,
+      requests: [{ outcome: 'queued', queuePosition: 1, reason: 'Waiting for available memory.', launchConfirmed: false }] });
+    expect(f.launches.status(f.actor)).toMatchObject({ outcome: 'queued', attentionRequired: true, launchConfirmed: false });
+  });
+
+  it('does not report success for a bound session whose opening turn never started', async () => {
+    const f = await fixture(), read = f.db.boundSessions.getById.bind(f.db.boundSessions);
+    vi.spyOn(f.db.boundSessions, 'getById').mockImplementation(id => {
+      const session = read(id);
+      return session?.launchContext ? { ...session, isWorking:false, lastResponseAt:undefined } : session;
+    });
+    const result = await f.launch();
+    expect(result).toMatchObject({ outcome: 'starting', attentionRequired: true, launchConfirmed: false });
+    const request = f.launches.status(f.actor).requests[0]!;
+    f.db.meta.set(`session-request-start:${request.id}`, new Date(Date.now() - 4000).toISOString());
+    expect(f.launches.status(f.actor, request.id)).toMatchObject({ outcome: 'attention_required', attentionRequired: true, launchConfirmed: false,
+      requests: [{ status: 'starting', reason: expect.stringContaining('working') }] });
+    await f.launches.drain();
+    expect(f.launches.status(f.actor, request.id).requests[0]?.status).toBe('starting');
+  });
+
+  it('delivers one durable P2 cancellation notice when inherited authority expires', async () => {
+    const f = await fixture();
+    // The same private grant now ends with the lead assignment.
+    f.db.sqlite.prepare("update agent_grants set definition_json=json_set(definition_json,'$.expiry',json(?)) where id=?")
+      .run(JSON.stringify({kind:'assignment_finished',assignmentId:f.actor}),f.grant.id);
+    await f.launch(); const child = f.child(f.launches.status(f.actor).requests[0]!.sessionId);
+    f.setMemory('MemAvailable: 100 kB');
+    const queued = await f.launches.request(child, 'launch_session', { projectSlug: project.slug, provider: 'codex', prompt: 'Complete delegated work' });
+    f.coordination.finish(f.actor, 'Complete');
+    await f.launches.drain();
+    expect(f.launches.status(child)).toMatchObject({ outcome:'cancelled', launchConfirmed:false });
+    const inbox = f.coordination.poll(child).messages;
+    expect('requests' in queued).toBe(true);
+    if (!('requests' in queued)) throw new Error('Expected a queued request');
+    expect(inbox).toEqual([expect.objectContaining({ priority:'P2', text: expect.stringContaining(queued.requests[0]!.id) })]);
+    await f.launches.drain(); expect(f.coordination.poll(child).messages).toHaveLength(0); // Offered messages cool down; no duplicate row.
+    expect(f.db.sqlite.prepare('select count(*) as n from coordination_messages where recipient_id=?').get(child)).toEqual({n:1});
+  });
+
   it.each(['memory', 'launch', 'failure'] as const)('does not resurrect cancellation during a %s retry', async boundary => {
     const f = await fixture(); f.setMemory('MemAvailable: 100 kB');
     await f.launch();
@@ -249,6 +292,22 @@ describe('Granted real-session launch pipeline', () => {
     const child = f.child(result.sessionId); expect(f.grants.grantsFor(child)[0]?.id).toBe(f.grant.id); expect(continuationControl(f.db, child)).toMatchObject({ continuation: 'unattended', supervisorId: f.actor });
     expect(f.grants.latestHumanInput(child)).toBeUndefined();
     await expect(f.grants.record(child, { grantee: { kind: 'assignment', id: child }, scope: 'Copied opener' }, `live:${result.sessionId}:0`)).rejects.toThrow('not Console human input');
+  });
+
+  it('counts only sessions launched under the limited grant, rather than every child inheriting it', async () => {
+    const f = await fixture(3);
+    const log = f.row(f.lead).eventLogPath!, offset = fs.statSync(log).size;
+    fs.appendFileSync(log, JSON.stringify({type:'user-input',text:'Authorize a separate one-helper lane.',timestamp:new Date().toISOString()}) + '\n');
+    const limited = await f.grants.record(f.actor, {grantee:{kind:'assignment',id:f.actor},scope:'A separate helper lane',limits:{maxConcurrentSessions:1}}, `live:${f.lead}:${offset}`);
+    await f.launch({grantId:f.grant.id});
+    const inherited = f.launches.status(f.actor).requests[0]!.session!;
+    expect(inherited.launchContext?.grantIds).toContain(limited.id);
+    // A different grant paid for the existing session, so the limited grant still has its one slot.
+    const first = await f.launch({grantId:limited.id});
+    expect(first).toMatchObject({launchConfirmed:true});
+    const second = await f.launch({grantId:limited.id});
+    expect(second).toMatchObject({outcome:'queued',launchConfirmed:false,reason:'Waiting for a granted session slot.'});
+    expect(f.starts()).toBe(2);
   });
 
   it('applies concurrent limits across inherited helpers and frees the slot without a new approval', async () => {

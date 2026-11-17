@@ -12,6 +12,9 @@ export async function dispatchGrants(coordination: CoordinationService, grants: 
   coordination.authenticate(input.assignmentId, input.token);
   grants.bindAssignment(input.assignmentId, input.consoleSessionId);
   switch (input.action) {
+    case 'correct_projects':
+      if (!input.grantId || !input.projectSlugCorrections) throw new Error('grantId and projectSlugCorrections are required.');
+      return { grant: grants.correctProjects(input.assignmentId, input.grantId, input.projectSlugCorrections) };
     case 'list': return grants.listFor(input.assignmentId);
     case 'record':
       if (!input.definition || !input.humanMessageId) throw new Error('definition and humanMessageId are required.');

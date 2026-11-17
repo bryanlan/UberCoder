@@ -754,7 +754,11 @@ export interface AgentGrant extends AgentGrantDefinition {
   requesterName: string;
   granteeName: string;
   reason?: string;
-  provenance?: { kind: 'human_message' | 'approval'; quote: string; sessionId?: string; messageId?: string };
+  provenance?: { kind: 'human_message' | 'approval'; quote: string; sessionId?: string; messageId?: string;
+    recordedGrantee?: AgentGrantDefinition['grantee'];
+    handoffs?: Array<{ fromAssignmentId: string; toAssignmentId: string; timestamp: string }>;
+    projectCorrections?: Array<{ assignmentId: string; corrections: Record<string, string>; timestamp: string }>;
+  };
   createdAt: string;
   decidedAt?: string;
 }
@@ -786,8 +790,12 @@ export interface AgentSessionRequest {
   id: string; assignmentId: string; grantId: string; action: AgentGrantAction;
   status: 'queued' | 'starting' | 'completed' | 'failed' | 'cancelled';
   sessionId: string; title?: string; reason: string | null; updatedAt: string;
+  outcome?: 'queued' | 'starting' | 'attention_required' | 'working' | 'completed' | 'failed' | 'cancelled';
+  queuePosition?: number; attentionRequired?: boolean; launchConfirmed?: boolean;
 }
 export interface AgentSessionRequests {
   requests: AgentSessionRequest[]; availableBytes?: number; requiredBytes: number;
+  /** Single-request responses repeat the launch signal at the top level. */
+  outcome?: AgentSessionRequest['outcome']; attentionRequired?: boolean; launchConfirmed?: boolean; reason?: string | null;
 }
 export interface AgentSessionCancellation extends AgentSessionRequests { cancelled: boolean; reason?: string }

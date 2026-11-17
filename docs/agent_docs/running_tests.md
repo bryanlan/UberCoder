@@ -8,6 +8,9 @@ The worker suite verifies that a costly SQLite query leaves the owning event loo
 it does not query the live Console database.
 ## Primary Commands
 - `npm test` - builds the shared package and runs the server Vitest suite.
+  For shared-machine serial execution, first build shared, then use
+  `NODE_ENV=test npm run test -w @agent-console/server -- --maxWorkers=1 --fileParallelism=false`.
+  Extra flags on root `npm test` do not reach its nested server test command.
 - `npm run typecheck` - builds the shared package, then typechecks the server and web packages.
 - `npm run build` - builds the shared package, server package, and web/PWA bundle.
 - `npm run test:e2e` - builds the shared package and runs Playwright browser coverage on isolated

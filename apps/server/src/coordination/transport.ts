@@ -18,7 +18,7 @@ const text = z.string().trim().min(1);
 // (it loads Claude's hooks), and is also a Console provider that runs on the structured transport.
 const coordinationProviders = PROVIDERS;
 const inputSchema = z.object({
-  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']),
+  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
@@ -33,6 +33,7 @@ const inputSchema = z.object({
   task: z.object({ deliverable: text.max(500).optional(), doneWhen: text.max(500).optional(), evidencePath: text.max(1000).optional(), state: z.enum(['working', 'blocked', 'done']).optional(), actionNeeded: text.max(500).nullable().optional() }).strict().optional(),
   expectedTaskRevision: z.number().int().nonnegative().optional(), awaiting: text.max(500).nullable().optional(),
   offset: z.number().int().nonnegative().default(0),
+  successorId: z.string().uuid().optional(),
   recipientId: z.string().uuid().optional(), messageId: z.string().uuid().optional(),
   text: text.max(2000).optional(), messageIds: z.array(z.string().uuid()).max(100).optional(),
 }).strict();
@@ -76,6 +77,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     case 'update': return service.update(id, input);
     case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor, wakeReason: input.wakeReason });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));
+    case 'handoff': return service.handoff(id, need(input.successorId, 'successorId'), need(input.summary, 'summary'), input);
     case 'finish': return service.finish(id, need(input.summary, 'summary'), input);
     case 'disconnect': return service.disconnect(id);
   }

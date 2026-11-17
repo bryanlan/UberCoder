@@ -108,6 +108,9 @@ Each request reserves one session ID before launch. Requests survive a backend r
 Retry with the same `requestId` to retrieve the same action rather than launch another session.
 The queue checks `MemAvailable` against the configured pressure floor plus 250 MiB per new session.
 It waits for memory or the grant's concurrent-session slot, then continues without another approval.
+The slot counts running sessions whose original launch request used that grant.
+Merely inheriting a grant does not consume its session slots; restart keeps the
+original launch request as the accounting source.
 `launch_status` explains queued, starting, completed, failed and cancelled session actions.
 Use `cancel` with the original `requestId` to withdraw your own queued action, including launch,
 restart or close. Cancellation needs no new grant and survives backend restart. Every queue
@@ -149,3 +152,64 @@ Run the opt-in real-session proofs described in [Running Tests](agent_docs/runni
 Deploy backend, browser, shared contracts and the canonical helper together.
 Migrations 16 and 17 add grant records, uses, subscriptions, launch requests and session launch context.
 Back up SQLite and installed builds before activation. Verify schema, served assets and surviving native process identities after restart.
+
+## Transfer a lead's assignment
+
+Before retiring a lead, call coordination `handoff` with `successorId` and `summary`.
+It transfers active grants whose `assignment_finished` expiry names that lead,
+then finishes the old assignment in one transaction. Assignment grantees naming
+that lead move to the successor. Grant IDs, scope, actions, project restrictions,
+model restrictions, concurrency limits and original human provenance stay intact.
+A dated provenance entry identifies both assignments. Inherited grant IDs remain
+valid in running children. Finishing the successor expires those same records.
+`until_revoked`, revoked, pending, denied and expired records do not transfer.
+Plain `finish` retains its existing expiry behavior; it never guesses a successor.
+
+Supervised children move to the successor without clearing Stop, waits, recovery
+state or continuation permission. Late child registration follows recorded
+successors. This operation starts no session and grants no unattended permission
+to the successor. Launch ownership stays with its original assignment; handoff
+does not authorize the successor to close another assignment's sessions. Requests
+already queued by the retiring lead cancel when it finishes; child requests keep
+their inherited grants. The successor receives a durable P2 handoff notice unless
+the caller explicitly chooses another priority. Same-successor retries are
+idempotent; a different successor is refused.
+
+```json
+{"action":"handoff","successorId":"<successor-assignment-id>","summary":"Continue the authorized work; evidence in the handoff report."}
+```
+
+Run this through `agent_coordination` or the canonical helper's `handoff` command.
+An older running backend requires an authorized release before it supports it.
+
+## Read launch outcomes and repair project keys
+
+`launch` gives the real queue up to three seconds before returning. A queued
+response includes `outcome:queued`, `attentionRequired:true`,
+`launchConfirmed:false`, its reason and a one-based global `queuePosition`.
+It does not establish that a helper is running. A starting request that is still
+unconfirmed after three seconds reports `outcome:attention_required`.
+`launch_status` uses the same fields. A launch or restart reaches `completed` only
+after its session is bound and its opening turn is running or has a confirmed
+response. A bound idle row alone is insufficient. Timeout reporting does not kill
+or duplicate a provider that may still start. Keep the request ID and inspect it.
+Grant cancellation places one durable P2 notice in the launcher's inbox; it does
+not wake an idle launcher. Close requests retain their own completion semantics.
+
+Grant creation, requests and approvals validate exact configured project keys,
+including a project grantee. An unknown key is rejected before mutation. This
+would have prevented accepting `agent-console` when the actual configured key is
+`UberCoder--agent-console-mvp--agent-console`.
+Re-recording the same human message/grantee remains idempotent; it does not edit
+an existing record or revive revoked authority. For a legacy active record with
+a mistyped key, the original recording assignment may use:
+
+```json
+{"action":"correct_projects","grantId":"<grant-id>","projectSlugCorrections":{"mistyped-key":"exact-configured-key"}}
+```
+
+This repairs only unknown restricted keys. It cannot change a known restriction,
+remove restrictions, alter scope/actions/limits/expiry, or revive expired grants.
+It retains the grant ID and original provenance and appends an audit note. The
+agent must map the original human-authorized project to its exact config key;
+this operation supplies no authority to add a different project.

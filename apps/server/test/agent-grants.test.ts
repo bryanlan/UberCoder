@@ -8,6 +8,7 @@ import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { GrantService } from '../src/grants/service.js';
 import { GrantPushService } from '../src/grants/push.js';
 import { CoordinationService } from '../src/coordination/service.js';
+import { dispatchCoordination } from '../src/coordination/transport.js';
 import { dispatchGrants } from '../src/grants/transport.js';
 import { continuationControl } from '../src/coordination/continuation.js';
 
@@ -16,7 +17,7 @@ afterEach(() => cleanup.splice(0).forEach(fn => fn()));
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'console-grants-'));
   const db = new AppDatabase(path.join(root, 'fixture.sqlite'));
-  const wake = vi.fn(), notify = vi.fn(async () => {}), grants = new GrantService(db, new RealtimeEventBus(), wake, notify);
+  const wake = vi.fn(), notify = vi.fn(async () => {}), grants = new GrantService(db, new RealtimeEventBus(), wake, notify, undefined, undefined, () => ['demo']);
   const coordination = new CoordinationService(db, { enabled: true, pilotPaths: [] }, undefined, grants);
   const native = randomUUID(), token = randomUUID(), assignment = coordination.register({ provider: 'codex', nativeSessionId: native, pid: process.pid, token, cwd: root }).assignmentId!;
   const sessionId = randomUUID(), log = path.join(root, 'events.jsonl');
@@ -34,6 +35,98 @@ function fixture() {
 }
 
 describe('Bryan standing grants', () => {
+  it('rejects unknown project restrictions at record, request and approval before writing', async () => {
+    const f = fixture(), invalid = { ...f.definition, projectSlugs: ['wrong-demo'] };
+    await expect(f.grants.record(f.assignment, invalid, f.input('Authorize demo helpers.'))).rejects.toThrow('Unknown configured project');
+    expect(() => f.grants.request(f.assignment, invalid, 'Helpers')).toThrow('Unknown configured project');
+    expect(() => f.grants.request(f.assignment, { ...f.definition, grantee: { kind: 'project', id: 'wrong-demo' } }, 'Helpers')).toThrow('Unknown configured project');
+    expect(f.grants.snapshot().grants).toHaveLength(0);
+    const request = f.grants.request(f.assignment, f.definition, 'Helpers');
+    expect(() => f.grants.decide(request.id, 'approve', invalid)).toThrow('Unknown configured project');
+    expect(f.grants.get(request.id)?.status).toBe('pending');
+  });
+
+  it('corrects only unknown project restrictions on the same active grant, preserving authority and provenance', async () => {
+    const f = fixture(), grant = await f.grants.record(f.assignment, f.definition, f.input('Authorize demo helpers.'));
+    // Pre-validation legacy record, using only this disposable database.
+    f.db.sqlite.prepare("update agent_grants set definition_json=json_set(definition_json,'$.projectSlugs',json('[\"wrong-demo\"]')) where id=?").run(grant.id);
+    const result = await dispatchGrants(f.coordination, f.grants, { action: 'correct_projects', assignmentId: f.assignment, token: f.token,
+      grantId: grant.id, projectSlugCorrections: { 'wrong-demo': 'demo' } }) as {grant: typeof grant};
+    expect(result.grant).toMatchObject({ id: grant.id, scope: grant.scope, actions: grant.actions, limits: grant.limits, expiry: grant.expiry, projectSlugs: ['demo'],
+      provenance: { quote: grant.provenance!.quote, projectCorrections: [{ corrections: { 'wrong-demo': 'demo' } }] } });
+    expect(() => f.grants.correctProjects(f.assignment, grant.id, { demo: 'demo' })).toThrow('unknown restricted project');
+    expect(() => f.grants.correctProjects(randomUUID(), grant.id, { demo: 'demo' })).toThrow('recording assignment');
+    f.grants.revoke(grant.id);
+    expect(() => f.grants.correctProjects(f.assignment, grant.id, { demo: 'demo' })).toThrow('active grant');
+  });
+
+  it('atomically hands off finish-bound grants, keeps child inheritance and waits, and expires on successor finish', async () => {
+    const f = fixture();
+    const source = f.input('Authorize demo helpers.');
+    const grant = await f.grants.record(f.assignment, { ...f.definition, expiry: { kind: 'assignment_finished' }, projectSlugs: ['demo'], limits: { maxConcurrentSessions: 2, models: ['gpt-6-luna'] } }, source);
+    const register = () => f.coordination.register({ provider: 'codex', nativeSessionId: randomUUID(), token: randomUUID(), pid: process.pid, cwd: f.root }).assignmentId!;
+    const successor = register(), child = register();
+    const native = f.db.sqlite.prepare('select native_session_id as native from coordination_assignments where id=?').get(child) as { native: string };
+    const childSession = randomUUID();
+    f.db.boundSessions.upsert({ id: childSession, provider: 'codex', projectSlug: 'demo', conversationRef: native.native, status: 'bound', shouldRestore: true,
+      startedAt: new Date().toISOString(), updatedAt: new Date().toISOString(), launchContext: { launchedBy: f.assignment, launcherName: 'Lead', grantIds: [grant.id], requestId: randomUUID(), supervisorId: f.assignment } });
+    f.db.boundSessions.setLaunchContext(childSession, { launchedBy: f.assignment, launcherName: 'Lead', grantIds: [grant.id], requestId: randomUUID(), supervisorId: f.assignment });
+    f.coordination.update(child, { continuation: 'unattended', supervisorId: f.assignment, awaiting: 'External job' });
+    const before = continuationControl(f.db, child);
+    const result = await dispatchCoordination(f.coordination, { action: 'handoff', assignmentId: f.assignment, token: f.token, successorId: successor, summary: 'Continue the assigned work' });
+    expect(result).toMatchObject({ handedOff: true, successorId: successor, grantIds: [grant.id] });
+    expect(f.grants.get(grant.id)).toMatchObject({ status: 'active', grantee: { kind: 'assignment', id: successor }, expiry: { assignmentId: successor }, scope: grant.scope,
+      actions: grant.actions, projectSlugs: grant.projectSlugs, limits: grant.limits, provenance: { quote: grant.provenance!.quote, handoffs: [{fromAssignmentId: f.assignment, toAssignmentId: successor}] } });
+    expect(f.grants.grantsFor(child).map(g => g.id)).toEqual([grant.id]);
+    expect(continuationControl(f.db, child)).toMatchObject({ ...before, revision: before.revision + 1, supervisorId: successor });
+    expect(f.grants.grantsFor(successor).map(g => g.id)).toEqual([grant.id]);
+    expect(f.coordination.handoff(f.assignment, successor, 'Retry')).toMatchObject({ handedOff: true });
+    expect(f.grants.get(grant.id)?.provenance?.handoffs).toHaveLength(1);
+    expect((await f.grants.record(f.assignment, f.definition, source)).id).toBe(grant.id);
+    expect(f.grants.snapshot().grants).toHaveLength(1);
+    expect(() => f.coordination.handoff(f.assignment, child, 'Wrong successor')).toThrow('different successor');
+    const late = register();
+    const lateNative = f.db.sqlite.prepare('select native_session_id as native from coordination_assignments where id=?').get(late) as {native:string};
+    const lateSession = randomUUID();
+    f.db.boundSessions.upsert({ ...f.db.boundSessions.getById(childSession)!, id:lateSession, conversationRef:lateNative.native, resumeConversationRef:lateNative.native });
+    f.db.boundSessions.setLaunchContext(lateSession, { ...f.db.boundSessions.getById(childSession)!.launchContext! });
+    f.grants.bindAssignment(late, lateSession);
+    expect(continuationControl(f.db, late)).toMatchObject({supervisorId:successor,continuation:'unattended'});
+    const restarted = new GrantService(f.db, new RealtimeEventBus());
+    expect(restarted.grantsFor(child).map(g => g.id)).toEqual([grant.id]);
+    f.coordination.finish(successor, 'Finished');
+    expect(f.grants.get(grant.id)?.status).toBe('expired');
+    expect(f.grants.grantsFor(child)).toEqual([]);
+  });
+
+  it('leaves until-revoked, revoked and differently expiring grants outside a handoff', async () => {
+    const f = fixture();
+    const successor = f.coordination.register({provider:'codex', nativeSessionId:randomUUID(),token:randomUUID(),pid:process.pid,cwd:f.root}).assignmentId!;
+    const permanent = await f.grants.record(f.assignment, f.definition, f.input('Authorize helpers until revoked.'));
+    const revoked = await f.grants.record(f.assignment, {...f.definition, expiry:{kind:'assignment_finished'}}, f.input('Authorize temporary helpers.'));
+    f.grants.revoke(revoked.id);
+    const other = await f.grants.record(f.assignment, {...f.definition, expiry:{kind:'assignment_finished',assignmentId:successor}}, f.input('Authorize successor-bound helpers.'));
+    expect(f.coordination.handoff(f.assignment,successor,'Continue')).toMatchObject({grantIds:[]});
+    expect(f.grants.get(permanent.id)).toMatchObject({status:'active',grantee:{id:f.assignment},expiry:{kind:'until_revoked'}});
+    expect(f.grants.get(revoked.id)?.status).toBe('revoked');
+    expect(f.grants.get(other.id)).toMatchObject({status:'active',grantee:{id:f.assignment},expiry:{assignmentId:successor}});
+    expect(f.grants.grantsFor(successor)).toEqual([]);
+  });
+
+  it('sends one P2 notice when the successor is already the supervisor', () => {
+    const f=fixture(), successor=f.coordination.register({provider:'codex',nativeSessionId:randomUUID(),token:randomUUID(),pid:process.pid,cwd:f.root}).assignmentId!;
+    f.coordination.update(f.assignment,{supervisorId:successor});
+    f.coordination.handoff(f.assignment,successor,'Continue the work');
+    expect(f.coordination.poll(successor).messages).toEqual([expect.objectContaining({priority:'P2'})]);
+  });
+
+  it('rejects invalid handoffs without transferring grants or finishing the caller', async () => {
+    const f = fixture(), grant = await f.grants.record(f.assignment, { ...f.definition, expiry: { kind: 'assignment_finished' } }, f.input('Authorize helpers.'));
+    expect(() => f.coordination.handoff(f.assignment, f.assignment, 'Self')).toThrow('distinct unfinished');
+    expect(() => f.coordination.handoff(f.assignment, randomUUID(), 'Unknown')).toThrow();
+    expect(f.grants.get(grant.id)).toMatchObject({status:'active',expiry:{assignmentId:f.assignment}});
+  });
+
   it('keeps revocation when an in-flight agent repeats the original human message', async () => {
     const f=fixture(),source=f.input('I authorize all needed planner work.');
     const grant=await f.grants.record(f.assignment,f.definition,source);f.grants.revoke(grant.id);

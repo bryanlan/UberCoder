@@ -11,6 +11,8 @@ import { CoordinationService, processStart } from '../src/coordination/service.j
 import { PEER_WAKE_PROMPT } from '../src/coordination/wake.js';
 import { checkoutIdentity } from '../src/coordination/git.js';
 import { dispatchCoordination, registerCoordinationRoutes, startCoordinationSocket } from '../src/coordination/transport.js';
+import { GrantService } from '../src/grants/service.js';
+import { RealtimeEventBus } from '../src/realtime/event-bus.js';
 import { WikiService } from '../src/wiki/service.js';
 import { readCoordinationTelemetry } from '../src/coordination/telemetry.js';
 
@@ -924,6 +926,22 @@ describe('assignment coordination', () => {
     }
   });
 
+  it('hands off an assignment through the real CLI and returns the same result on MCP retry', async () => {
+    const f = fixture(), successor = f.register();
+    const service = new CoordinationService(f.db, {enabled:true,pilotPaths:[f.checkout]}, undefined, new GrantService(f.db,new RealtimeEventBus()));
+    const ipc = await startCoordinationSocket(service, f.root); cleanups.push(() => ipc.close());
+    const registration = await runHelper(f.root,f.checkout,['register'],{provider:'codex',nativeSessionId:randomUUID(),pid:process.pid,cwd:f.checkout});
+    expect(registration.code,registration.stderr).toBe(0);
+    const input = {successorId:successor.id,summary:'Continue the approved work'};
+    const cli = await runHelper(f.root,f.checkout,['handoff'],input);
+    expect(cli.code,cli.stderr).toBe(0); expect(JSON.parse(cli.stdout)).toMatchObject({handedOff:true,successorId:successor.id,grantIds:[]});
+    const retry = await runHelper(f.root,f.checkout,['mcp'],{jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'agent_coordination',arguments:{action:'handoff',...input}}});
+    expect(retry.code,retry.stderr).toBe(0);
+    const result = JSON.parse(retry.stdout).result; expect(result.isError).toBe(false);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({handedOff:true,successorId:successor.id});
+    expect(service.poll(successor.id).messages).toHaveLength(1);
+  });
+
   it('removes enforcement actions from RPC and MCP discovery', async () => {
     const { root, checkout, service, register } = fixture();
     const a = register();
@@ -935,11 +953,12 @@ describe('assignment coordination', () => {
     const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
-    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']);
+    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
     expect(tool.inputSchema.properties).not.toHaveProperty('notifySupervisor');
     expect(tool.inputSchema.properties).toHaveProperty('task');
+    expect(tool.inputSchema.properties).toHaveProperty('successorId');
     expect(tool.inputSchema.properties).toHaveProperty('expectedTaskRevision');
     expect(tool.inputSchema.properties.description).toMatchObject({ maxLength: 500 });
     expect(tool.inputSchema.properties.summary).toMatchObject({ maxLength: 2000 });
@@ -955,6 +974,8 @@ describe('assignment coordination', () => {
     expect(wikiTool.inputSchema.required).toContain('checkout');
     // The helper is a standalone script with its own copy of the provider list; it must offer every provider the Console can launch.
     const grantsTool = JSON.parse(result.stdout).result.tools.find((candidate: { name: string }) => candidate.name === 'agent_grants');
+    expect(grantsTool.inputSchema.properties.action.enum).toContain('correct_projects');
+    expect(grantsTool.inputSchema.properties).toHaveProperty('projectSlugCorrections');
     expect(grantsTool.inputSchema.properties.provider.enum).toEqual([...PROVIDERS]);
   });
 

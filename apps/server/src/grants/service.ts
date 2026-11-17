@@ -12,7 +12,7 @@ interface GrantRow { id: string; created_by_assignment_id: string; status: Agent
 function authorityRecord(grant: AgentGrant) {
   return { id: grant.id, grantee: grant.grantee, actions: grant.actions, scope: grant.scope, projectSlugs: grant.projectSlugs,
     limits: grant.limits, expiry: grant.expiry, status: grant.status,
-    provenance: grant.provenance ? { kind: grant.provenance.kind, messageId: grant.provenance.messageId, sessionId: grant.provenance.sessionId } : undefined };
+    provenance: grant.provenance ? { kind: grant.provenance.kind, messageId: grant.provenance.messageId, sessionId: grant.provenance.sessionId, handoffs: grant.provenance.handoffs, projectCorrections: grant.provenance.projectCorrections } : undefined };
 }
 
 /** Cooperative-agent standing authority. Human provenance uses Console's input log. */
@@ -20,7 +20,8 @@ export class GrantService {
   constructor(private readonly db: AppDatabase, private readonly events: RealtimeEventBus,
     private readonly wake: () => void = () => {}, private readonly notify: (grant: AgentGrant) => Promise<void> = async () => {},
     private readonly onRegistration?: (sessionId: string, provider: ProviderId, nativeSessionId: string) => void,
-    private readonly projectForPath?: (cwd: string) => string | undefined) {}
+    private readonly projectForPath?: (cwd: string) => string | undefined,
+    private readonly configuredProjects: () => string[] = () => []) {}
 
   bindAssignment(assignmentId: string, consoleSessionId?: string, cwd?: string): void {
     if (cwd) { const project = this.projectForPath?.(cwd); if (project) this.db.meta.set(`assignment-project:${assignmentId}`, project); }
@@ -31,8 +32,13 @@ export class GrantService {
     this.db.meta.set(`console-session:${assignmentId}`, consoleSessionId);
     this.db.meta.set(`assignment-project:${assignmentId}`, session.projectSlug);
     if (session.launchContext && this.grantsFor(assignmentId).length && continuationControl(this.db, assignmentId).revision === 0) {
-      const supervisor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(session.launchContext.supervisorId) as { status: string } | undefined;
-      setContinuation(this.db, assignmentId, 'unattended', supervisor && supervisor.status !== 'finished' ? session.launchContext.supervisorId : null);
+      let supervisorId = session.launchContext.supervisorId;
+      const seen = new Set<string>();
+      while (this.db.meta.get(`assignment-successor:${supervisorId}`) && !seen.has(supervisorId)) {
+        seen.add(supervisorId); supervisorId = this.db.meta.get(`assignment-successor:${supervisorId}`)!;
+      }
+      const supervisor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(supervisorId) as { status: string } | undefined;
+      setContinuation(this.db, assignmentId, 'unattended', supervisor && supervisor.status !== 'finished' && supervisorId !== assignmentId ? supervisorId : null);
     }
     if (session.launchContext && (session.conversationRef.startsWith('pending:') || !this.db.conversationIndex.get(session.projectSlug, native.provider, native.native_session_id)?.transcriptPath))
       this.onRegistration?.(consoleSessionId, native.provider, native.native_session_id);
@@ -146,6 +152,9 @@ export class GrantService {
 
   private definition(assignmentId: string, raw: unknown): AgentGrantDefinition {
     const definition = grantDefinitionSchema.parse(raw);
+    const slugs = [...definition.projectSlugs, ...(definition.grantee.kind === 'project' ? [definition.grantee.id] : [])];
+    const unknown = slugs.filter(slug => !this.configuredProjects().includes(slug));
+    if (unknown.length) throw new Error(`Unknown configured project slug(s): ${unknown.join(', ')}. Use exact config keys; use correct_projects for an existing active grant with a mistyped project slug.`);
     if (definition.expiry.kind === 'assignment_finished') definition.expiry.assignmentId ??= assignmentId;
     return definition;
   }
@@ -169,7 +178,7 @@ export class GrantService {
     // The cooperative agent records the authorized scope; the complete human
     // message stays as provenance, including any separate instructions to the lead.
     const existing = (this.db.sqlite.prepare('select id,definition_json,provenance_json from agent_grants where created_by_assignment_id=? and provenance_json is not null')
-      .all(assignmentId) as Array<{ id: string; definition_json: string; provenance_json: string }>).find(row => JSON.stringify((JSON.parse(row.definition_json) as AgentGrantDefinition).grantee) === JSON.stringify(definition.grantee)
+      .all(assignmentId) as Array<{ id: string; definition_json: string; provenance_json: string }>).find(row => JSON.stringify((JSON.parse(row.provenance_json) as NonNullable<AgentGrant['provenance']>).recordedGrantee ?? (JSON.parse(row.definition_json) as AgentGrantDefinition).grantee) === JSON.stringify(definition.grantee)
         && JSON.parse(row.provenance_json).messageId === humanMessageId);
     if (existing) return this.get(existing.id)!;
     return this.insert(assignmentId, definition, 'active', undefined, { kind: 'human_message', quote: event.text, messageId: humanMessageId, sessionId: source.id });
@@ -196,8 +205,8 @@ export class GrantService {
     const prior = this.get(id);
     if (!prior) throw new Error('Grant request not found.');
     if (prior.status !== 'pending') throw new Error('This request has already been decided.');
-    const definition = editedDefinition ? this.definition(prior.createdByAssignmentId, editedDefinition)
-      : { grantee: prior.grantee, actions: prior.actions, scope: prior.scope, projectSlugs: prior.projectSlugs, limits: prior.limits, expiry: prior.expiry };
+    const original = { grantee: prior.grantee, actions: prior.actions, scope: prior.scope, projectSlugs: prior.projectSlugs, limits: prior.limits, expiry: prior.expiry };
+    const definition = decision === 'approve' ? this.definition(prior.createdByAssignmentId, editedDefinition ?? original) : original;
     const now = new Date().toISOString();
     this.db.sqlite.prepare('update agent_grants set status=?,definition_json=?,provenance_json=?,decided_at=? where id=?')
       .run(decision === 'approve' ? 'active' : 'denied', JSON.stringify(definition), decision === 'approve'
@@ -217,6 +226,43 @@ export class GrantService {
     if (!this.get(id)) throw new Error('Grant not found.');
     this.db.sqlite.prepare("update agent_grants set status='revoked',decided_at=? where id=?").run(new Date().toISOString(), id);
     this.pauseUnsupportedSessions();
+    this.changed(id); return this.get(id)!;
+  }
+
+  /** Transfer the same grant IDs so inherited sessions retain authority and shared limits. Called inside coordination's transaction. */
+  handoff(from: string, to: string): string[] {
+    const transferred: string[] = [];
+    for (const grant of this.allGrants()) {
+      if (grant.status !== 'active' || grant.expiry.kind !== 'assignment_finished'
+        || (grant.expiry.assignmentId ?? grant.createdByAssignmentId) !== from) continue;
+      const { grantee, actions, scope, projectSlugs, limits } = grant;
+      const definition: AgentGrantDefinition = { grantee: grantee.kind === 'assignment' && grantee.id === from ? { ...grantee, id: to } : grantee,
+        actions, scope, projectSlugs, limits, expiry: { kind: 'assignment_finished', assignmentId: to } };
+      const provenance = { ...grant.provenance!, recordedGrantee: grant.provenance?.recordedGrantee ?? grant.grantee, handoffs: [...(grant.provenance?.handoffs ?? []), { fromAssignmentId: from, toAssignmentId: to, timestamp: new Date().toISOString() }] };
+      this.db.sqlite.prepare('update agent_grants set definition_json=?,provenance_json=? where id=?')
+        .run(JSON.stringify(definition), JSON.stringify(provenance), grant.id);
+      transferred.push(grant.id);
+      this.changed(grant.id);
+    }
+    return transferred;
+  }
+
+  /** Only repair unknown project keys; never alter valid restrictions or revive expired authority. */
+  correctProjects(assignmentId: string, id: string, corrections: Record<string, string>): AgentGrant {
+    const grant = this.get(id);
+    if (!grant || grant.status !== 'active' || grant.createdByAssignmentId !== assignmentId)
+      throw new Error('Only the recording assignment can correct its active grant.');
+    const known = this.configuredProjects();
+    if (!Object.keys(corrections).length) throw new Error('Supply projectSlugCorrections from unknown keys to exact configured keys.');
+    const original = [...grant.projectSlugs, ...(grant.grantee.kind === 'project' ? [grant.grantee.id] : [])];
+    for (const [from, to] of Object.entries(corrections)) {
+      if (!original.includes(from) || known.includes(from) || !known.includes(to))
+        throw new Error('Corrections may only replace an unknown restricted project with a configured project.');
+    }
+    const definition = this.definition(assignmentId, { grantee: grant.grantee.kind === 'project' ? { ...grant.grantee, id: corrections[grant.grantee.id] ?? grant.grantee.id } : grant.grantee,
+      actions: grant.actions, scope: grant.scope, projectSlugs: grant.projectSlugs.map(slug => corrections[slug] ?? slug), limits: grant.limits, expiry: grant.expiry });
+    const provenance = { ...grant.provenance!, projectCorrections: [...(grant.provenance?.projectCorrections ?? []), { assignmentId, corrections, timestamp: new Date().toISOString() }] };
+    this.db.sqlite.prepare('update agent_grants set definition_json=?,provenance_json=? where id=?').run(JSON.stringify(definition), JSON.stringify(provenance), id);
     this.changed(id); return this.get(id)!;
   }
 

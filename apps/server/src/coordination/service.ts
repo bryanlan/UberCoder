@@ -494,7 +494,34 @@ export class CoordinationService {
       nextOffset: offset + events.length < totalEvents ? offset + events.length : null };
   }
 
-  finish(id: string, summary: string, options: MessageOptions = {}) {
+  handoff(id: string, successorId: string, summary: string, options: MessageOptions = {}) {
+    return this.db.sqlite.transaction(() => {
+      const previous = this.db.meta.get(`assignment-successor:${id}`);
+      if (previous) {
+        if (previous !== successorId) throw new Error('Assignment already handed off to a different successor.');
+        return { handedOff: true, successorId };
+      }
+      if (id === successorId || this.assignment(id).status === 'finished' || this.assignment(successorId).status === 'finished')
+        throw new Error('Handoff requires two distinct unfinished assignments.');
+      if (!this.grants) throw new Error('Grant service is unavailable.');
+      validateMessageOptions(options);
+      const grantIds = this.grants.handoff(id, successorId);
+      // Preserve waits, Stop, recovery and continuation permission while moving supervision.
+      const workers = this.db.sqlite.prepare("select id from coordination_assignments where status!='finished' and id!=?").all(id) as Array<{ id: string }>;
+      for (const worker of workers) {
+        const control = continuationControl(this.db, worker.id);
+        if (control.supervisorId !== id) continue;
+        saveContinuation(this.db, worker.id, { ...control, supervisorId: worker.id === successorId ? null : successorId, revision: control.revision + 1 });
+      }
+      this.send(id, { id: randomUUID(), recipientId: successorId, text: `Assignment handoff from ${id}: ${summary}. Active finish-bound grants transferred: ${grantIds.join(', ') || 'none'}. Review their existing scope and limits with agent_grants list.`, priority: options.priority ?? 'P2', validFor: options.validFor ?? 604800, wakeReason: options.wakeReason });
+      this.db.meta.set(`assignment-successor:${id}`, successorId);
+      this.event(successorId, null, 'updated', `Handoff from ${id}: ${summary}. Transferred grants: ${grantIds.join(', ') || 'none'}.`);
+      this.finish(id, summary, options, successorId);
+      return { handedOff: true, successorId, grantIds };
+    }).immediate();
+  }
+
+  finish(id: string, summary: string, options: MessageOptions = {}, notifiedSupervisorId?: string) {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
       if (current.status === 'finished') return { finished: true };
@@ -504,7 +531,7 @@ export class CoordinationService {
       this.grants?.expireForAssignment(id);
       this.event(id, null, 'finished', summary);
       if (current.task) updateTask(this.db, id, { state: 'done' });
-      if (current.task?.state !== 'done') this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
+      if (current.task?.state !== 'done' && current.supervisorId !== notifiedSupervisorId) this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
       return { finished: true };
     }).immediate();
   }

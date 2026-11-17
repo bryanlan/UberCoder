@@ -143,7 +143,7 @@ export async function buildApp(options: AppOptions = {}) {
     (sessionId, provider, nativeSessionId) => { void sessions.adoptRegisteredSession(sessionId, provider, nativeSessionId).catch(error => app.log.warn({ err: error }, 'Registered session adoption deferred.')); },
     cwd => Object.entries(config.projects).filter(([, project]) => project.active)
       .map(([slug, project]) => ({ slug, directory: path.resolve(project.path ?? path.join(config.projectsRoot, slug)) }))
-      .sort((a,b) => b.directory.length - a.directory.length).find(project => cwd === project.directory || cwd.startsWith(project.directory + path.sep))?.slug);
+      .sort((a,b) => b.directory.length - a.directory.length).find(project => cwd === project.directory || cwd.startsWith(project.directory + path.sep))?.slug, () => Object.keys(config.projects));
   const coordination = new CoordinationService(db, config.coordination, config.coordination.enabled ? wakeAssignments : undefined, grants);
   if (config.coordination.enabled) {
     sessions.setConversationRegistrar(async (input) => registerConsoleConversation(coordination, config.runtimeDir, input));
