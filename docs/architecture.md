@@ -348,35 +348,18 @@ message cannot be cancelled.
 - Explicit recent-conversation auto-tracking uses `autoTrackedAt` only for provenance in the sidebar.
   It must not write `lastActivityAt`, `lastCompletedAt`, or `lastResponseAt`, reorder projects as if user or
   agent work occurred, or run during Settings' ordinary project-tree refresh.
-- Work mode filters conversation children to bound sessions while retaining every configured active
-  project from the server tree. Projects remain navigable with new-conversation actions when their
-  last child is released or evicted, and show "No active conversations." when empty. Projects with
-  bound conversations sort above empty projects in Work mode; each group follows the selected recent
-  activity or manual order, so a newly bound conversation returns its project to that order.
-- The desktop Active only toggle beside Work mode remembers its setting locally. It filters the
-  project chat list to bound, unsuspended sessions whose current dot is green, red, or yellow,
-  using the same status rules as the dots. All suspension reasons are excluded even when the dot
-  is green or yellow. The filter updates with response age, works with Work mode on or off, and
-  retains configured projects and their new-conversation actions. Mobile filters are independent.
-- Chats an agent launched under a standing grant are ordinary conversations. While the agent drives
-  one alone, the chat list and chat search hide it until the Agent controlled filter is on. The first
-  message the person sends in that chat ends this: the session record keeps a `humanRepliedAt` time
-  in its launch record (`markHumanReplied`, called from `SessionManager.appendEvent` for every
-  `user-input` event), and the chat then appears in the list and search like any other. The reply
-  is permanent. The agent's own opening prompt (`agent-input`) and later agent messages do not count.
-  A reply marks every agent launch of that chat, so a person who reopens a saved agent chat and
-  replies in the new session also brings it into the list. The launcher's name stays on the chat's
-  badge. A chat launched before the Console tracked replies is recovered at startup by
-  `backfillHumanReplies`, which reads the first `user-input` line of the event log of each session on
-  the chat once. The filter is remembered in the browser, is off by default, and
-  is available on desktop and mobile. It does not stop the agent, unload its transcript, or free the
-  provider process. That memory belongs to the running session, not to the list row. Opening a chat
-  by its address still works, and the worker panel still lists workers. The tree marks agent-driven
-  chats with `agentControlled`, including saved history after the session ends; a chat the person has
-  replied in is no longer marked. A live session is also recognized from its launch record, through
-  `agentDrivenBy` in the shared package. The web client applies a reply as soon as the
-  `session.user-input` event arrives, so the chat appears without a reload. A project whose visible
-  chats are all hidden this way says that agent-launched chats are hidden.
+- Desktop Work Mode shows chats whose status dot is purple, amber, yellow, green, or red.
+  Gray and unbound chats remain available with Work Mode off. Configured projects and their
+  new-conversation actions remain visible when no chats match.
+- Recent Activity narrows Work Mode to yellow and green dots, including suspended chats.
+  Active Only narrows Work Mode to chats without manual, pressure, or idle suspension.
+  These two filters are mutually exclusive. Turning Work Mode off clears both and disables
+  their controls. Filter choices persist locally; conflicting saved choices are normalized.
+  Recent Activity filters chats independently of the saved project sorting preference.
+  Mobile's existing Show all / Active only controls remain independent of desktop filters.
+- Agent-launched chats follow the same list filters and appear in search without an extra toggle.
+  Their launcher badges and launch/reply provenance remain available; hiding or showing a row
+  does not stop its provider process.
 - Each project chat menu offers Close for a bound session. Close uses the authenticated release
   action to stop the provider process, clear runtime state and end the restorable binding. The chat
   disappears from Work mode and its saved history remains visible when Work mode is off. Closing

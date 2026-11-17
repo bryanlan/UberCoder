@@ -49,6 +49,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { WikiPage } from './pages/WikiPage';
 import { GrantsPage } from './pages/GrantsPage';
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from './lib/useMediaQuery';
+import { useChatFilters } from './features/navigation/useChatFilters';
 import { useMobileViewport } from './features/navigation/useMobileViewport';
 import { isBoundSessionSuspended } from '@agent-console/shared';
 import type { MobileInputPanel } from './components/ConversationPane';
@@ -110,9 +111,7 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
   const currentSelectionRef = useRef(routeSelection);
   currentSelectionRef.current = routeSelection;
   const [navOpen, setNavOpen] = useLocalStorageBoolean('agent-console:nav-open:v2', true);
-  const [workMode, setWorkMode] = useLocalStorageBoolean('agent-console:work-mode', true);
-  const [activeOnly, setActiveOnly] = useLocalStorageBoolean('agent-console:active-only', false);
-  const [showAgentControlled, setShowAgentControlled] = useLocalStorageBoolean('agent-console:show-agent-controlled', false);
+  const { workMode, activeOnly, recentActivity, toggleFilter } = useChatFilters();
   const [mobileChromeHidden, setMobileChromeHidden] = useLocalStorageBoolean('agent-console:mobile-chrome-hidden:v2', true);
   const [lastConsolePath, setLastConsolePath] = useLocalStorageString('agent-console:last-console-path', '/');
   const [eventError, setEventError] = useState<string>();
@@ -876,13 +875,6 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
     }
   }
 
-  async function handleToggleRecentActivity(): Promise<void> {
-    await handleUpdateUiPreferences(
-      { recentActivitySortEnabled: !uiPreferences.recentActivitySortEnabled },
-      'Unable to update sidebar sorting.',
-    );
-  }
-
   async function handleReorderProjects(sourceSlug: string, targetSlug: string): Promise<void> {
     if (sourceSlug === targetSlug) {
       return;
@@ -951,14 +943,13 @@ function AppShell({ routeSelection }: { routeSelection: ConsoleRouteSelection })
         open={isMobile ? mobileNavOpen : navOpen}
         onClose={closeSidebarIfMobile}
         workMode={workMode}
-        onToggleWorkMode={() => setWorkMode((current) => !current)}
+        onToggleWorkMode={() => toggleFilter('workMode')}
         activeOnly={activeOnly}
-        onToggleActiveOnly={() => setActiveOnly((current) => !current)}
-        showAgentControlled={showAgentControlled}
-        onToggleAgentControlled={() => setShowAgentControlled((current) => !current)}
+        onToggleActiveOnly={() => toggleFilter('activeOnly')}
+        recentActivity={recentActivity}
         recentActivitySortEnabled={uiPreferences.recentActivitySortEnabled}
         manualProjectOrder={uiPreferences.manualProjectOrder}
-        onToggleRecentActivity={handleToggleRecentActivity}
+        onToggleRecentActivity={() => toggleFilter('recentActivity')}
         onReorderProjects={handleReorderProjects}
         onNewConversation={handleNewConversation}
         onStartConversation={handleStartConversation}

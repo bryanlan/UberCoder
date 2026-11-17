@@ -105,17 +105,15 @@ test('starts in reading mode and switches chats in a full-screen filtered list',
   await expect(list.locator(':scope > div').first()).toHaveCSS('background-color', 'rgb(2, 6, 23)');
   await expect(list.getByRole('heading', { name: 'Demo project' })).toBeVisible();
   await expect(list.getByRole('link', { name: /first conversation/ })).toBeVisible();
-  // An agent-launched chat shows once the person has replied in it; one the agent drives alone stays behind the filter.
+  // Agent-launched chats follow the same filters as other conversations.
   await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
-  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeHidden();
+  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeHidden();
   await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath('mobile-chats.png') });
   await list.getByRole('button', { name: 'Show all', exact: true }).tap();
   await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
-  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeHidden();
-  await expect(list.getByRole('link', { name: /old agent run conversation/ })).toBeHidden();
-  await list.getByRole('button', { name: 'Agent controlled', exact: true }).tap();
+  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /old agent run conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeVisible();

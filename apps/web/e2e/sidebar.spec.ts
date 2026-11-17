@@ -16,7 +16,7 @@ async function openConsole(page: Page): Promise<void> {
     },
   };
   await page.route('**/api/auth/me', route => route.fulfill({ json: { authenticated: true, csrfToken: 'fixture-only' } }));
-  await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects: [project], boundSessions: [] } }));
+  await page.route('**/api/projects/tree', route => route.fulfill({ json: { projects: [project], boundSessions: [{ id: 'c1', provider: 'codex', projectSlug: 'demo', conversationRef: 'c1', status: 'bound', startedAt: conversation.updatedAt, updatedAt: conversation.updatedAt, lastResponseAt: conversation.updatedAt }] } }));
   await page.route('**/api/conversations/demo/codex/c1/title', async route => {
     expect(route.request().method()).toBe('PUT');
     conversation.title = route.request().postDataJSON().title;
@@ -144,31 +144,43 @@ test('filters to active status chats beside Work mode and remembers the choice',
   await page.route('**/api/projects/tree', route => route.fulfill({ json: tree }));
   await page.goto('/');
   const sidebar = page.getByRole('complementary', { name: 'Chats' });
-  const activeOnly = sidebar.getByRole('button', { name: 'Active only', exact: true });
-  await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
-  await expect(sidebar.getByRole('link', { name: /History chat/ })).toHaveCount(0);
-  await sidebar.getByRole('button', { name: 'Work mode', exact: true }).click();
-  // Browse mode caps the list until expanded.
-  await sidebar.getByRole('button', { name: /Show all/ }).click();
-  await expect(sidebar.getByRole('link', { name: /History chat/ })).toBeVisible();
+  const activeOnly = sidebar.getByRole('button', { name: 'Active Only', exact: true });
+  const recent = sidebar.getByRole('button', { name: 'Recent Activity', exact: true });
+  const work = sidebar.getByRole('button', { name: 'Work Mode', exact: true });
+  await expect(sidebar.getByRole('button', { name: 'Agent controlled' })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: /Gray chat/ })).toHaveCount(0);
   await activeOnly.click();
-  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
   for (const { ref } of cases) {
     await expect(sidebar.getByRole('link', { name: new RegExp(ref) })).toHaveCount(
-      ['Green chat', 'Red chat', 'Yellow chat'].includes(ref) ? 1 : 0,
+      ['Green chat', 'Red chat', 'Yellow chat', 'Amber chat', 'Purple chat'].includes(ref) ? 1 : 0,
     );
   }
-  await page.screenshot({ path: testInfo.outputPath('active-only.png') });
+  await recent.click();
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
+  for (const { ref } of cases) {
+    await expect(sidebar.getByRole('link', { name: new RegExp(ref) })).toHaveCount(
+      ['Green chat', 'Yellow chat', 'Manual chat', 'Pressure chat'].includes(ref) ? 1 : 0,
+    );
+  }
   await page.reload();
-  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
-  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toHaveCount(0);
-  await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toBeVisible();
+  await expect(recent).toHaveAttribute('aria-pressed', 'true');
   await page.clock.fastForward(30_000);
   await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toHaveCount(0);
-  await expect(sidebar.getByRole('link', { name: /Red chat/ })).toBeVisible();
-  await sidebar.getByRole('button', { name: 'Work mode', exact: true }).click();
-  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toHaveCount(0);
   await activeOnly.click();
+  await expect(recent).toHaveAttribute('aria-pressed', 'false');
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
+  await work.click();
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
+  await expect(activeOnly).toBeDisabled();
+  await expect(recent).toBeDisabled();
+  await sidebar.getByRole('button', { name: /Show all/ }).click();
+  await expect(sidebar.getByRole('link', { name: /History chat/ })).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: /Gray chat/ })).toBeVisible();
+  await page.reload();
+  await expect(work).toHaveAttribute('aria-pressed', 'false');
+  await work.click();
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
+  await expect(recent).toHaveAttribute('aria-pressed', 'false');
   await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toBeVisible();
-  await expect(sidebar.getByRole('link', { name: /Amber chat/ })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('chat-filters.png') });
 });

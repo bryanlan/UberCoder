@@ -16,7 +16,7 @@ async function openChat(page: Page, provider: ProviderId, kind: ConversationKind
   const session: BoundSession = {
     id: 'session-to-close', provider, projectSlug: 'demo', conversationRef: ref,
     status: 'bound', shouldRestore: true,
-    startedAt: stamp, updatedAt: stamp, isWorking: false,
+    startedAt: stamp, updatedAt: stamp, lastResponseAt: stamp, isWorking: false,
   };
   const conversation: ConversationSummary = {
     ref, provider, projectSlug: 'demo', kind, title: 'Chat to close',
@@ -106,7 +106,7 @@ for (const provider of ['codex', 'claude'] as const) {
       expect(calls.releases).toBe(1);
       expect(calls.binds).toBe(0);
 
-      await page.getByRole('button', { name: 'Work mode', exact: true }).click();
+      await page.getByRole('button', { name: 'Work Mode', exact: true }).click();
       await expect(page.locator('aside').getByRole('link', { name: /Chat to close/ })).toBeVisible();
       await page.getByRole('button', { name: 'Conversation actions for Chat to close' }).click();
       await expect(page.getByRole('button', { name: 'Close', exact: true })).toBeDisabled();
@@ -119,7 +119,7 @@ for (const provider of ['codex', 'claude'] as const) {
 
 test('Close preserves Browse mode and the current view for a background chat', async ({ page }) => {
   const { calls } = await openChat(page, 'claude');
-  await page.getByRole('button', { name: 'Work mode', exact: true }).click();
+  await page.getByRole('button', { name: 'Work Mode', exact: true }).click();
   await page.locator('aside').getByRole('link', { name: 'Demo', exact: true }).click();
   await closeChat(page);
   await expect(page).toHaveURL(/\/projects\/demo$/);

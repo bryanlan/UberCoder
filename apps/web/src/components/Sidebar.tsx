@@ -6,7 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type ReactNode } from 'react';
 import { api } from '../lib/api';
 import { copyTextToClipboard } from '../lib/clipboard';
-import { agentControlledConversationKeys, deriveSidebarProjects, withoutAgentControlledSearchResults, type SidebarProject } from '../features/navigation/sidebar-projects';
+import { deriveSidebarProjects, type SidebarProject } from '../features/navigation/sidebar-projects';
 import { conversationStatusClasses, getConversationStatusColor } from '../features/navigation/work-status';
 import { useSidebarWidth } from '../features/navigation/useSidebarWidth';
 import { MOBILE_LAYOUT_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -29,12 +29,10 @@ interface SidebarProps {
   onToggleWorkMode: () => void;
   activeOnly: boolean;
   onToggleActiveOnly: () => void;
-  /** Off by default. On shows chats an agent launched. Hiding them does not stop those agents. */
-  showAgentControlled?: boolean;
-  onToggleAgentControlled?: () => void;
+  recentActivity?: boolean;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
-  onToggleRecentActivity: () => Promise<void>;
+  onToggleRecentActivity: () => void;
   onReorderProjects: (sourceSlug: string, targetSlug: string) => Promise<void>;
   onNewConversation: (projectSlug: string, provider: ProviderId) => void;
   /** Provider-neutral Start: resolves true when the chat was created. */
@@ -836,9 +834,7 @@ function ProjectSection({
           </div>
         ) : (
           <div className="px-3 py-2 text-sm text-slate-500">
-            {project.hiddenAgentControlledCount > 0
-              ? 'Agent-launched chats are hidden.'
-              : workMode || activeOnly ? 'No active conversations.' : 'No conversations indexed yet.'}
+            {workMode || activeOnly ? 'No active conversations.' : 'No conversations indexed yet.'}
           </div>
         )}
       </div>
@@ -902,8 +898,7 @@ export function Sidebar({
   onToggleWorkMode,
   activeOnly,
   onToggleActiveOnly,
-  showAgentControlled = false,
-  onToggleAgentControlled,
+  recentActivity = false,
   recentActivitySortEnabled,
   manualProjectOrder,
   onToggleRecentActivity,
@@ -960,11 +955,7 @@ export function Sidebar({
     queryFn: ({ signal }) => api.searchConversations(trimmedSubmittedSearchQuery, { limit: 24, signal }),
     enabled: Boolean(trimmedSubmittedSearchQuery),
   });
-  const searchResults = withoutAgentControlledSearchResults(
-    showingSubmittedSearchResults ? searchQueryResult.data?.results ?? [] : [],
-    agentControlledConversationKeys(tree),
-    showAgentControlled,
-  );
+  const searchResults = showingSubmittedSearchResults ? searchQueryResult.data?.results ?? [] : [];
   const searchLoading = showingSubmittedSearchResults && searchQueryResult.isFetching;
   const searchError = showingSubmittedSearchResults && searchQueryResult.error instanceof Error
     ? searchQueryResult.error.message
@@ -987,7 +978,7 @@ export function Sidebar({
       manualProjectOrder,
       mobileActiveOnly: isMobile && !mobileShowAll,
       activeOnly: !isMobile && activeOnly,
-      showAgentControlled,
+      recentActivity: !isMobile && recentActivity,
       nowMs,
     });
     if (!isMobile || !mobileShowAll) return projects;
@@ -999,7 +990,7 @@ export function Sidebar({
           .sort((a, b) => b.activityTimestamp.localeCompare(a.activityTimestamp))
           .slice(0, mobileChatsPerProject),
       }));
-  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, showAgentControlled, nowMs]);
+  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, recentActivity, nowMs]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -1045,6 +1036,8 @@ export function Sidebar({
             {!isMobile && <button
               type="button"
               onClick={onToggleWorkMode}
+              aria-pressed={workMode}
+              title="Show chats with purple, amber, yellow, green, or red status"
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition',
                 workMode
@@ -1052,48 +1045,37 @@ export function Sidebar({
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
-              Work mode
+              Work Mode
             </button>}
             {!isMobile && <button
               type="button"
               onClick={onToggleActiveOnly}
               aria-pressed={activeOnly}
-              title="Show only unsuspended chats with green, red, or yellow status"
+              disabled={!workMode}
+              title="Show only chats that are not suspended"
               className={clsx(
-                'rounded-full border px-3 py-1.5 text-xs font-medium transition',
+                'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
                 activeOnly
                   ? enabledToggleClassName
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
-              Active only
+              Active Only
             </button>}
-            <button
-              type="button"
-              onClick={() => onToggleAgentControlled?.()}
-              aria-pressed={showAgentControlled}
-              title="Show chats an agent launched. They stay hidden, including in search, until this is on. Hiding them does not stop those agents."
-              className={clsx(
-                'rounded-full border px-3 py-1.5 text-xs font-medium transition',
-                showAgentControlled
-                  ? enabledToggleClassName
-                  : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
-              )}
-            >
-              Agent controlled
-            </button>
             {!isMobile && <button
               type="button"
-              onClick={() => void onToggleRecentActivity()}
-              disabled={updatingUiPreferences}
+              onClick={onToggleRecentActivity}
+              aria-pressed={recentActivity}
+              title="Show chats with yellow or green status"
+              disabled={!workMode}
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
-                recentActivitySortEnabled
+                recentActivity
                   ? enabledToggleClassName
                   : 'border-slate-700 text-slate-300 hover:border-slate-500 hover:bg-slate-800',
               )}
             >
-              Recent activity
+              Recent Activity
             </button>}
             <div className="relative min-w-[13rem] flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />

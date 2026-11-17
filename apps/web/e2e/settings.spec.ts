@@ -45,7 +45,7 @@ test.describe('settings project management', () => {
     await expect(page.locator('body')).toContainText('UberCoder--agent-console-mvp--agent-console');
     await expect(page.locator('body')).toContainText('agent-console-mvp/agent-console');
     await page.getByRole('link', { name: 'Back to Console' }).click();
-    await page.getByRole('button', { name: 'Work mode' }).click();
+    await page.getByRole('button', { name: 'Work Mode' }).click();
     await page.getByRole('button', { name: 'Refresh project tree' }).click();
     await expect(page.locator('body')).toContainText('Legacy migrated Codex conversation');
   });

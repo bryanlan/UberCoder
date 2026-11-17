@@ -20,7 +20,7 @@ const cases = (['manualSuspendedAt', 'pressureSuspendedAt', 'idleSuspendedAt'] a
 
 it.each([
   { workMode: true, activeOnly: false },
-  { workMode: false, activeOnly: true },
+  { workMode: true, activeOnly: true },
 ])('keeps a project and its new-conversation actions after its last child is evicted with Work mode $workMode and Active only $activeOnly', async ({ workMode, activeOnly }) => {
   vi.spyOn(Date, 'now').mockReturnValue(now);
   const tree: TreeResponse = {
@@ -297,7 +297,7 @@ describe('New Chat options', () => {
   });
 });
 
-it('hides an agent-launched chat until Agent controlled is turned on', async () => {
+it('shows agent-launched chats without an Agent controlled filter', async () => {
   const tree: TreeResponse = {
     structuredProviders: ['codex'],
     boundSessions: [{
@@ -325,13 +325,11 @@ it('hides an agent-launched chat until Agent controlled is turned on', async () 
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   client.setQueryData(['network-info'], {});
-  const onToggleAgentControlled = vi.fn();
-  const element = (showAgentControlled: boolean) => (
+  const element = () => (
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <Sidebar
-          tree={tree} open workMode activeOnly={false} onToggleActiveOnly={() => {}}
-          showAgentControlled={showAgentControlled} onToggleAgentControlled={onToggleAgentControlled}
+          tree={tree} open workMode={false} activeOnly={false} onToggleActiveOnly={() => {}}
           recentActivitySortEnabled={false} manualProjectOrder={[]}
           onClose={() => {}} onToggleWorkMode={() => {}} onNewConversation={() => {}} onStartConversation={async () => true}
           onToggleRecentActivity={async () => {}} onReorderProjects={async () => {}}
@@ -343,18 +341,11 @@ it('hides an agent-launched chat until Agent controlled is turned on', async () 
       </MemoryRouter>
     </QueryClientProvider>
   );
-  const view = render(element(false));
+  render(element());
   expect(screen.getByRole('link', { name: /My chat/ })).toBeInTheDocument();
-  expect(screen.queryByRole('link', { name: /Helper chat/ })).not.toBeInTheDocument();
-  const toggle = screen.getByRole('button', { name: 'Agent controlled' });
-  expect(toggle).toHaveAttribute('aria-pressed', 'false');
-  await userEvent.setup().click(toggle);
-  expect(onToggleAgentControlled).toHaveBeenCalledOnce();
-
-  view.rerender(element(true));
   expect(screen.getByRole('link', { name: /Helper chat/ })).toBeInTheDocument();
   expect(screen.getByText('Launched by Planner lead')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Agent controlled' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.queryByRole('button', { name: 'Agent controlled' })).not.toBeInTheDocument();
 });
 
 describe('Start (provider-neutral new chat)', () => {

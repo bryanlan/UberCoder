@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BoundSession, ConversationSummary, ProjectSummary, ProviderId, TreeResponse } from '@agent-console/shared';
-import { agentControlledConversationKeys, deriveSidebarProjects, withoutAgentControlledSearchResults } from './sidebar-projects';
+import { deriveSidebarProjects } from './sidebar-projects';
 
 function conversation({
   ref,
@@ -78,6 +78,7 @@ function boundSession({
     startedAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-01T00:00:00.000Z',
     lastCompletedAt,
+    lastResponseAt: lastCompletedAt ?? '2026-07-01T00:00:00.000Z',
     autoTrackedAt,
   };
 }
@@ -92,7 +93,7 @@ describe('deriveSidebarProjects', () => {
         grok: [conversation({ ref: 'g1', provider: 'grok', projectSlug: 'alpha', updatedAt: '2026-07-01T10:00:00.000Z', isBound: true })],
       })],
       structuredProviders: [],
-      boundSessions: [],
+      boundSessions: [boundSession({ projectSlug: 'alpha', provider: 'codex', conversationRef: 'c1' }), boundSession({ projectSlug: 'alpha', provider: 'grok', conversationRef: 'g1' })],
     };
 
     const [alpha] = deriveSidebarProjects({ tree, workMode: true, recentActivitySortEnabled: false, manualProjectOrder: [] });
@@ -182,7 +183,7 @@ describe('deriveSidebarProjects', () => {
         provider: 'codex',
         conversationRef: 'older-source',
         autoTrackedAt: '2026-07-01T12:00:00.000Z',
-      })],
+      }), boundSession({ projectSlug: 'genuinely-newer', provider: 'claude', conversationRef: 'newer-source' })],
     };
 
     const visibleProjects = deriveSidebarProjects({
@@ -255,7 +256,7 @@ describe('deriveSidebarProjects', () => {
         }),
         project({ slug: 'empty', displayName: 'Empty' }),
       ],
-      boundSessions: [],
+      boundSessions: [boundSession({ projectSlug: 'active', provider: 'codex', conversationRef: 'bound' })],
     };
 
     const visibleProjects = deriveSidebarProjects({
@@ -278,6 +279,7 @@ describe('deriveSidebarProjects', () => {
 
     const reboundTree: TreeResponse = {
       ...tree,
+      boundSessions: [...tree.boundSessions, boundSession({ projectSlug: 'inactive', provider: 'claude', conversationRef: 'only-history' })],
       projects: tree.projects.map((item) => item.slug === 'inactive' ? {
         ...item,
         providers: {
@@ -335,7 +337,7 @@ describe('Active only', () => {
     { ref: 'yellow', provider: 'claude', session: { lastResponseAt: ago(11.99) } },
     { ref: 'amber', provider: 'codex', session: { lastResponseAt: ago(12) } },
     { ref: 'purple', provider: 'claude', session: { lastResponseAt: ago(48) } },
-    { ref: 'gray', provider: 'codex', session: {} },
+    { ref: 'gray', provider: 'codex', session: { lastResponseAt: undefined } },
     { ref: 'failed', provider: 'claude', session: { lastResponseAt: ago(0.5), runFailure: failures } },
     { ref: 'retrying', provider: 'codex', session: { lastResponseAt: ago(0.5), runFailure: { ...failures, status: 'retrying' } } },
     { ref: 'manual', provider: 'codex', session: { lastResponseAt: ago(0.5), manualSuspendedAt: ago(0) } },
@@ -358,20 +360,24 @@ describe('Active only', () => {
     }] : []),
   };
 
-  it.each([true, false])('keeps only unsuspended red, green and yellow chats with Work mode %s', (workMode) => {
-    const options = { tree, workMode, recentActivitySortEnabled: true, manualProjectOrder: [], nowMs };
-    const projects = deriveSidebarProjects({ ...options, activeOnly: true });
+  it.each([
+    { activeOnly: false, recentActivity: false, refs: ['green', 'amber', 'retrying', 'manual', 'idle', 'red', 'yellow', 'purple', 'pressure'] },
+    { activeOnly: true, recentActivity: false, refs: ['green', 'amber', 'retrying', 'red', 'yellow', 'purple'] },
+    { activeOnly: false, recentActivity: true, refs: ['green', 'retrying', 'manual', 'yellow', 'pressure'] },
+  ])('filters by status and suspension: $activeOnly / $recentActivity', ({ refs, ...filters }) => {
+    const projects = deriveSidebarProjects({ tree, workMode: true, recentActivitySortEnabled: true, manualProjectOrder: [], nowMs, ...filters });
     expect(projects.map(item => item.slug)).toEqual(['alpha', 'empty']);
-    const visible = projects[0]!;
-    expect(visible.combinedConversations.map(item => item.conversation.ref)).toEqual(['green', 'retrying', 'red', 'yellow']);
-    expect(visible.providers.codex.conversations.map(item => item.ref)).toEqual(['green', 'retrying']);
-    expect(visible.providers.claude.conversations.map(item => item.ref)).toEqual(['red', 'yellow']);
-    expect(deriveSidebarProjects(options)[0]?.combinedConversations).toHaveLength(workMode ? 11 : 12);
+    expect(projects[0]?.combinedConversations.map(item => item.conversation.ref)).toEqual(refs);
     expect(tree.projects[0]?.providers.codex.conversations).toHaveLength(7);
   });
 
+  it('shows all chats when Work Mode is off even with stale subfilters', () => {
+    const projects = deriveSidebarProjects({ tree, workMode: false, activeOnly: true, recentActivity: true, recentActivitySortEnabled: false, manualProjectOrder: [], nowMs });
+    expect(projects[0]?.combinedConversations).toHaveLength(12);
+  });
+
   it('removes a yellow chat as its response reaches twelve hours old', () => {
-    const options = { tree, workMode: true, activeOnly: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
+    const options = { tree, workMode: true, recentActivity: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
     expect(deriveSidebarProjects({ ...options, nowMs })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(true);
     expect(deriveSidebarProjects({ ...options, nowMs: nowMs + 60_000 })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(false);
   });
@@ -403,46 +409,10 @@ describe('agent-controlled chats', () => {
   };
   const options = { tree, workMode: true, recentActivitySortEnabled: false, manualProjectOrder: [] };
 
-  it('hides agent-launched chats until the filter is on, including saved history outside Work mode', () => {
-    const hidden = deriveSidebarProjects(options);
-    expect(hidden[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine']);
-    expect(hidden[0]?.hiddenAgentControlledCount).toBe(1);
-
-    const shown = deriveSidebarProjects({ ...options, showAgentControlled: true });
-    expect(shown[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper']);
-    expect(shown[0]?.hiddenAgentControlledCount).toBe(0);
-
+  it('includes agent-launched chats and their saved history', () => {
     const history = deriveSidebarProjects({ ...options, workMode: false });
-    expect(history[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine']);
-    expect(history[0]?.hiddenAgentControlledCount).toBe(2);
-    const historyShown = deriveSidebarProjects({ ...options, workMode: false, showAgentControlled: true });
-    expect(historyShown[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper', 'old-helper']);
-  });
-
-  it('lists an agent-launched chat once the person has replied in it, and counts it no longer as hidden', () => {
-    const replied: TreeResponse = {
-      ...tree,
-      boundSessions: [{ ...tree.boundSessions[0]!, launchContext: { ...launchContext, humanRepliedAt: '2026-07-01T10:30:00.000Z' } }],
-    };
-    const listed = deriveSidebarProjects({ ...options, tree: replied });
-    expect(listed[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper']);
-    expect(listed[0]?.hiddenAgentControlledCount).toBe(0);
-    // Saved history the agent launched and the person never answered stays behind the filter.
-    const history = deriveSidebarProjects({ ...options, tree: replied, workMode: false });
-    expect(history[0]?.combinedConversations.map((item) => item.conversation.ref)).toEqual(['mine', 'helper']);
-    expect(history[0]?.hiddenAgentControlledCount).toBe(1);
-    expect(agentControlledConversationKeys(replied).has('alpha:codex:helper')).toBe(false);
-    expect(agentControlledConversationKeys(replied).has('alpha:codex:old-helper')).toBe(true);
-  });
-
-  it('keeps agent-launched chats out of search results until the filter is on', () => {
-    const keys = agentControlledConversationKeys(tree);
-    const results = [
-      { projectSlug: 'alpha', provider: 'codex', conversationRef: 'mine' },
-      { projectSlug: 'alpha', provider: 'codex', conversationRef: 'helper' },
-      { projectSlug: 'alpha', provider: 'codex', conversationRef: 'old-helper' },
-    ];
-    expect(withoutAgentControlledSearchResults(results, keys, false).map((item) => item.conversationRef)).toEqual(['mine']);
-    expect(withoutAgentControlledSearchResults(results, keys, true)).toHaveLength(3);
+    expect(history[0]?.combinedConversations.map(item => item.conversation.ref)).toEqual(['mine', 'helper', 'old-helper']);
+    const work = deriveSidebarProjects(options);
+    expect(work[0]?.combinedConversations.map(item => item.conversation.ref)).toEqual(['helper']);
   });
 });
