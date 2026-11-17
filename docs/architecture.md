@@ -32,8 +32,8 @@ the app opens conversations in reading mode with a compact
 project/chat header and persistent Chats, Reply and Controls actions. Chats fills
 the screen and groups conversations by project. Work Mode, Recent Activity and
 Active Only use the same saved state and filtering rules as desktop, with buttons
-at least 44 CSS pixels tall. Work Mode includes suspended chats unless Active Only
-is enabled. Configured projects stay visible when no chats match.
+at least 44 CSS pixels tall. Work Mode includes suspended chats; Active Only hides
+them unless they are working. Configured projects stay visible when no chats match.
 Turning Work Mode off provides access to history and enables a project selector
 and a 5, 20 or 50 chats per project limit, defaulting to all projects and 20.
 Each project's limit applies to its newest conversations across Codex, Claude,
@@ -354,7 +354,8 @@ message cannot be cancelled.
   new-conversation actions remain visible when no chats match.
 - Recent Activity narrows Work Mode to red (working), yellow and green dots, including
   suspended chats. Working chats stay visible regardless of their last response age.
-  Active Only narrows Work Mode to chats without manual, pressure, or idle suspension.
+  Active Only includes red working chats and chats without manual, pressure, or idle suspension.
+  Red status bypasses both subfilters, even with a suspension marker or no confirmed response.
   These two filters are mutually exclusive. Turning Work Mode off clears both and disables
   their controls. Filter choices persist locally; conflicting saved choices are normalized.
   Recent Activity filters chats independently of the saved project sorting preference.

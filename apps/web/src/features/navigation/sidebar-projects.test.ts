@@ -341,13 +341,24 @@ describe('Active only', () => {
 
   it.each([
     { activeOnly: false, recentActivity: false, refs: ['green', 'amber', 'retrying', 'manual', 'idle', 'red', 'yellow', 'purple', 'pressure'] },
-    { activeOnly: true, recentActivity: false, refs: ['green', 'amber', 'retrying', 'red', 'yellow', 'purple'] },
+    { activeOnly: true, recentActivity: false, refs: ['green', 'amber', 'retrying', 'idle', 'red', 'yellow', 'purple'] },
     { activeOnly: false, recentActivity: true, refs: ['green', 'retrying', 'manual', 'idle', 'red', 'yellow', 'pressure'] },
   ])('filters by status and suspension: $activeOnly / $recentActivity', ({ refs, ...filters }) => {
     const projects = deriveSidebarProjects({ tree, workMode: true, recentActivitySortEnabled: true, manualProjectOrder: [], nowMs, ...filters });
     expect(projects.map(item => item.slug)).toEqual(['alpha', 'empty']);
     expect(projects[0]?.combinedConversations.map(item => item.conversation.ref)).toEqual(refs);
     expect(tree.projects[0]?.providers.codex.conversations).toHaveLength(7);
+  });
+
+  it.each(['manual', 'pressure', 'idle'])('includes a working chat with %s suspension, then hides it when work stops', (ref) => {
+    const options = { tree, workMode: true, activeOnly: true, recentActivitySortEnabled: false, manualProjectOrder: [], nowMs };
+    const visible = (isWorking: boolean) => deriveSidebarProjects({
+      ...options,
+      tree: { ...tree, boundSessions: tree.boundSessions.map(session => session.conversationRef === ref ? { ...session, isWorking, lastResponseAt: isWorking ? undefined : session.lastResponseAt } : session) },
+    })[0]?.combinedConversations.map(item => item.conversation.ref);
+    expect(visible(false)).not.toContain(ref);
+    expect(visible(true)).toContain(ref);
+    expect(visible(false)).not.toContain(ref);
   });
 
   it('shows an older chat while it works, then filters it again when work stops', () => {

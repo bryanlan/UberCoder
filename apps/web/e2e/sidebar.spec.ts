@@ -154,7 +154,7 @@ test(`chat filters match status, persist, and stay exclusive at ${width}px`, asy
   await activeOnly.click();
   for (const { ref } of cases) {
     await expect(sidebar.getByRole('link', { name: new RegExp(ref) })).toHaveCount(
-      ['Green chat', 'Red chat', 'Yellow chat', 'Amber chat', 'Purple chat'].includes(ref) ? 1 : 0,
+      ['Green chat', 'Red chat', 'Yellow chat', 'Amber chat', 'Purple chat', 'Idle chat'].includes(ref) ? 1 : 0,
     );
   }
   await recent.click();
@@ -173,6 +173,8 @@ test(`chat filters match status, persist, and stay exclusive at ${width}px`, asy
   await activeOnly.click();
   await expect(recent).toHaveAttribute('aria-pressed', 'false');
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
+  await expect(sidebar.getByRole('link', { name: /Idle chat/ })).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: /Red chat/ })).toBeVisible();
   await work.click();
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
   await expect(activeOnly).toBeDisabled();

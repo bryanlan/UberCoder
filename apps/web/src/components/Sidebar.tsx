@@ -1049,7 +1049,7 @@ export function Sidebar({
               onClick={onToggleActiveOnly}
               aria-pressed={activeOnly}
               disabled={!workMode}
-              title="Show only chats that are not suspended"
+              title="Show working chats and chats that are not suspended"
               className={clsx(
                 isMobile && 'min-h-11',
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
