@@ -30,16 +30,17 @@ First-class runtime surfaces:
 On narrow screens, including touch screens below 1024 CSS pixels in landscape,
 the app opens conversations in reading mode with a compact
 project/chat header and persistent Chats, Reply and Controls actions. Chats fills
-the screen and groups active conversations by project. Its default filter hides
-history, manual/pressure/idle suspensions and projects with no remaining chats.
-Show all and search provide access to hidden history; New chat includes active
-configured projects with existing directories, including projects hidden by the
-active-chat display filter. Show all offers a project selector and a 5, 20 or 50 chats
-per project limit, defaulting to all projects and 20. Each project's limit applies
-to its newest conversations across Codex, Claude, Grok and Vibe together. These selectors
-are hidden during transcript search and new-chat selection; active-only browsing
-ignores them. These are display filters and do not change session state.
-Desktop navigation retains its existing Work/Browse filtering and sizing.
+the screen and groups conversations by project. Work Mode, Recent Activity and
+Active Only use the same saved state and filtering rules as desktop, with buttons
+at least 44 CSS pixels tall. Work Mode includes suspended chats unless Active Only
+is enabled. Configured projects stay visible when no chats match.
+Turning Work Mode off provides access to history and enables a project selector
+and a 5, 20 or 50 chats per project limit, defaulting to all projects and 20.
+Each project's limit applies to its newest conversations across Codex, Claude,
+Grok and Vibe together. These selectors are hidden during transcript search,
+new-chat selection and Work Mode. New chat includes active configured projects
+with existing directories. These display filters do not change session state.
+Desktop retains its existing sidebar sizing.
 
 Reply and Controls share one optional panel. Reply starts at one line, grows to
 at most 112 pixels or 22% of the visible viewport with a 44-pixel minimum, and
@@ -348,7 +349,7 @@ message cannot be cancelled.
 - Explicit recent-conversation auto-tracking uses `autoTrackedAt` only for provenance in the sidebar.
   It must not write `lastActivityAt`, `lastCompletedAt`, or `lastResponseAt`, reorder projects as if user or
   agent work occurred, or run during Settings' ordinary project-tree refresh.
-- Desktop Work Mode shows chats whose status dot is purple, amber, yellow, green, or red.
+- Work Mode on desktop and mobile shows chats whose status dot is purple, amber, yellow, green, or red.
   Gray and unbound chats remain available with Work Mode off. Configured projects and their
   new-conversation actions remain visible when no chats match.
 - Recent Activity narrows Work Mode to yellow and green dots, including suspended chats.
@@ -356,7 +357,8 @@ message cannot be cancelled.
   These two filters are mutually exclusive. Turning Work Mode off clears both and disables
   their controls. Filter choices persist locally; conflicting saved choices are normalized.
   Recent Activity filters chats independently of the saved project sorting preference.
-  Mobile's existing Show all / Active only controls remain independent of desktop filters.
+  Mobile and desktop share these saved filters. Mobile uses touch-sized controls; with Work Mode
+  off, its project selector and per-project chat limit remain available for browsing history.
 - Agent-launched chats follow the same list filters and appear in search without an extra toggle.
   Their launcher badges and launch/reply provenance remain available; hiding or showing a row
   does not stop its provider process.

@@ -103,7 +103,9 @@ test('opens conversation rename empty and saves the entered name', async ({ page
   await expect(page.getByRole('link', { name: /CODEX: New conversation name/ })).toBeVisible();
 });
 
-test('filters to active status chats beside Work mode and remembers the choice', async ({ page }, testInfo) => {
+for (const width of [1280, 390, 320]) {
+test(`chat filters match status, persist, and stay exclusive at ${width}px`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 844 });
   const now = Date.parse('2026-10-30T12:00:00Z');
   const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
   await page.clock.install({ time: now });
@@ -173,7 +175,7 @@ test('filters to active status chats beside Work mode and remembers the choice',
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
   await expect(activeOnly).toBeDisabled();
   await expect(recent).toBeDisabled();
-  await sidebar.getByRole('button', { name: /Show all/ }).click();
+  if (width >= 1024) await sidebar.getByRole('button', { name: /Show all/ }).click();
   await expect(sidebar.getByRole('link', { name: /History chat/ })).toBeVisible();
   await expect(sidebar.getByRole('link', { name: /Gray chat/ })).toBeVisible();
   await page.reload();
@@ -182,5 +184,17 @@ test('filters to active status chats beside Work mode and remembers the choice',
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
   await expect(recent).toHaveAttribute('aria-pressed', 'false');
   await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toBeVisible();
+  for (const button of [work, recent, activeOnly]) {
+    const box = (await button.boundingBox())!;
+    if (width < 1024) expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('chat-filters.png') });
+  await activeOnly.click();
+  await page.setViewportSize({ width: width < 1024 ? 1280 : 390, height: 844 });
+  await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
+  await expect(sidebar.getByRole('link', { name: /Manual chat/ })).toHaveCount(0);
 });
+
+}

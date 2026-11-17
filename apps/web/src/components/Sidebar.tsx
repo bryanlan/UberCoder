@@ -920,7 +920,6 @@ export function Sidebar({
 }: SidebarProps) {
   const isMobile = useMediaQuery(MOBILE_LAYOUT_QUERY);
   const nowMs = useNowMs();
-  const [mobileShowAll, setMobileShowAll] = useState(false);
   const [mobileProjectFilter, setMobileProjectFilter] = useState('');
   const [mobileChatsPerProject, setMobileChatsPerProject] = useState(20);
   const [newChatMode, setNewChatMode] = useState(false);
@@ -928,7 +927,6 @@ export function Sidebar({
     if (!open) setNewChatMode(false);
   }, [open]);
   const { width, resizing, separatorProps } = useSidebarWidth(open);
-  const effectiveWorkMode = isMobile ? !mobileShowAll : workMode;
   const creatingAnyConversation = Boolean(creatingConversationKey);
   const enabledProviders = tree?.structuredProviders ?? [];
   const [draggingProjectSlug, setDraggingProjectSlug] = useState<string>();
@@ -973,15 +971,14 @@ export function Sidebar({
   const visibleProjects = useMemo(() => {
     const projects = deriveSidebarProjects({
       tree,
-      workMode: effectiveWorkMode,
+      workMode,
       recentActivitySortEnabled,
       manualProjectOrder,
-      mobileActiveOnly: isMobile && !mobileShowAll,
-      activeOnly: !isMobile && activeOnly,
-      recentActivity: !isMobile && recentActivity,
+      activeOnly,
+      recentActivity,
       nowMs,
     });
-    if (!isMobile || !mobileShowAll) return projects;
+    if (!isMobile || workMode) return projects;
     return projects
       .filter(project => !mobileProjectFilter || project.slug === mobileProjectFilter)
       .map(project => ({
@@ -990,7 +987,7 @@ export function Sidebar({
           .sort((a, b) => b.activityTimestamp.localeCompare(a.activityTimestamp))
           .slice(0, mobileChatsPerProject),
       }));
-  }, [manualProjectOrder, recentActivitySortEnabled, tree, effectiveWorkMode, isMobile, mobileShowAll, mobileProjectFilter, mobileChatsPerProject, activeOnly, recentActivity, nowMs]);
+  }, [manualProjectOrder, recentActivitySortEnabled, tree, workMode, isMobile, mobileProjectFilter, mobileChatsPerProject, activeOnly, recentActivity, nowMs]);
 
   function handleProjectDrop(targetSlug: string): void {
     if (!draggingProjectSlug || draggingProjectSlug === targetSlug) {
@@ -1016,7 +1013,7 @@ export function Sidebar({
           <div className="flex items-center justify-between border-b border-slate-800 px-4 py-4">
             <div>
               <div className="text-lg font-semibold">{isMobile ? newChatMode ? "New chat" : "Chats" : "Agent Console"}</div>
-              <div className="text-xs text-slate-400">{isMobile ? newChatMode ? "Choose a project and agent" : mobileShowAll ? "Browse conversations by project" : "Active conversations by project" : "project → provider → conversation"}</div>
+              <div className="text-xs text-slate-400">{isMobile ? newChatMode ? "Choose a project and agent" : workMode ? "Work conversations by project" : "Browse conversations by project" : "project → provider → conversation"}</div>
             </div>
             <button
               type="button"
@@ -1028,17 +1025,17 @@ export function Sidebar({
             </button>
           </div>
           {isMobile && <div className="flex gap-2 border-b border-slate-800 px-4 py-2">
-            <button type="button" aria-pressed={mobileShowAll} onClick={() => { setMobileShowAll(value => !value); setNewChatMode(false); }} className="min-h-11 rounded-xl border border-slate-700 px-3 text-sm">{mobileShowAll ? 'Active only' : 'Show all'}</button>
             <button type="button" onClick={() => { setNewChatMode(value => !value); setSearchQuery(''); setSubmittedSearchQuery(''); }} className="min-h-11 rounded-xl border border-sky-400/30 px-3 text-sm text-sky-200">{newChatMode ? 'Back to chats' : 'New chat'}</button>
             <button type="button" aria-label="Close chats" onClick={onClose} className="ml-auto min-h-11 min-w-11 rounded-xl border border-slate-700 p-2"><X className="mx-auto h-5 w-5" /></button>
           </div>}
           <div className="flex flex-wrap gap-2 border-b border-slate-800 px-4 py-3">
-            {!isMobile && <button
+            <button
               type="button"
               onClick={onToggleWorkMode}
               aria-pressed={workMode}
               title="Show chats with purple, amber, yellow, green, or red status"
               className={clsx(
+                isMobile && 'min-h-11',
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition',
                 workMode
                   ? enabledToggleClassName
@@ -1046,14 +1043,15 @@ export function Sidebar({
               )}
             >
               Work Mode
-            </button>}
-            {!isMobile && <button
+            </button>
+            <button
               type="button"
               onClick={onToggleActiveOnly}
               aria-pressed={activeOnly}
               disabled={!workMode}
               title="Show only chats that are not suspended"
               className={clsx(
+                isMobile && 'min-h-11',
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
                 activeOnly
                   ? enabledToggleClassName
@@ -1061,14 +1059,15 @@ export function Sidebar({
               )}
             >
               Active Only
-            </button>}
-            {!isMobile && <button
+            </button>
+            <button
               type="button"
               onClick={onToggleRecentActivity}
               aria-pressed={recentActivity}
               title="Show chats with yellow or green status"
               disabled={!workMode}
               className={clsx(
+                isMobile && 'min-h-11',
                 'rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60',
                 recentActivity
                   ? enabledToggleClassName
@@ -1076,7 +1075,7 @@ export function Sidebar({
               )}
             >
               Recent Activity
-            </button>}
+            </button>
             <div className="relative min-w-[13rem] flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
               <input
@@ -1109,7 +1108,7 @@ export function Sidebar({
               ) : null}
             </div>
           </div>
-          {isMobile && mobileShowAll && !newChatMode && !showingSubmittedSearchResults && (
+          {isMobile && !workMode && !newChatMode && !showingSubmittedSearchResults && (
             <div className="grid grid-cols-2 gap-3 border-b border-slate-800 px-4 py-3">
               <label className="min-w-0 text-xs text-slate-400">
                 Project
@@ -1161,8 +1160,8 @@ export function Sidebar({
                 key={project.slug}
                 project={project}
                 nowMs={nowMs}
-                workMode={effectiveWorkMode}
-                activeOnly={!isMobile && activeOnly}
+                workMode={workMode}
+                activeOnly={activeOnly}
                 mobile={isMobile}
                 creatingConversationKey={creatingConversationKey}
                 creatingAnyConversation={creatingAnyConversation}
@@ -1197,7 +1196,7 @@ export function Sidebar({
               />
             )) : (
               <div className="rounded-2xl border border-dashed border-slate-700 p-6 text-sm text-slate-400">
-                {isMobile && !mobileShowAll ? 'No active chats. Start a new chat or choose Show all.' : 'No active projects are visible yet. Check your config JSON and refresh.'}
+                No active projects are visible yet. Check your config JSON and refresh.
               </div>
             )}
           </div>

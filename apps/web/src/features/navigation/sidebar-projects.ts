@@ -38,7 +38,6 @@ export function deriveSidebarProjects({
   workMode,
   recentActivitySortEnabled,
   manualProjectOrder,
-  mobileActiveOnly = false,
   activeOnly = false,
   recentActivity = false,
   nowMs = Date.now(),
@@ -47,7 +46,6 @@ export function deriveSidebarProjects({
   workMode: boolean;
   recentActivitySortEnabled: boolean;
   manualProjectOrder: string[];
-  mobileActiveOnly?: boolean;
   activeOnly?: boolean;
   recentActivity?: boolean;
   nowMs?: number;
@@ -76,8 +74,6 @@ export function deriveSidebarProjects({
           };
         }));
       const combinedConversations = listedConversations.filter((item) => {
-        if (mobileActiveOnly) return item.conversation.isBound
-          && !(item.manualSuspendedAt || item.pressureSuspendedAt || item.idleSuspendedAt);
         if (!workMode) return true;
         const color = getConversationStatusColor(item.conversation.isBound, item.lastResponseAt, item.isWorking, nowMs, item.runFailure);
         if (color === 'unbound' || color === 'gray') return false;
@@ -99,7 +95,6 @@ export function deriveSidebarProjects({
         latestActivityAt,
       };
     })
-    .filter((project) => !mobileActiveOnly || project.combinedConversations.length > 0)
     .sort((a, b) => {
       if (workMode) {
         const aHasActiveConversation = a.combinedConversations.length > 0;

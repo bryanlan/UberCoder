@@ -17,7 +17,7 @@ async function openMobile(page: Page, delivery: 'accepted' | 'rejected' | 'queue
   const launchContext = { launchedBy: 'assignment-1', launcherName: 'Planner lead', grantIds: ['grant-1'], requestId: 'req', supervisorId: 'assignment-1' };
   const sessions: BoundSession[] = chats.filter(chat => chat.isBound).map(chat => ({
     id: chat.ref, provider: 'codex', projectSlug: 'demo', conversationRef: chat.ref,
-    status: 'bound', startedAt: stamp, updatedAt: stamp,
+    status: 'bound', startedAt: stamp, updatedAt: stamp, lastResponseAt: stamp,
     isWorking: false, ...(chat.ref === 'sleeping' ? { manualSuspendedAt: stamp } : {}),
     ...(chat.ref === 'agent-only' ? { launchContext } : {}),
     ...(chat.ref === 'answered' ? { launchContext: { ...launchContext, humanRepliedAt: stamp } } : {}),
@@ -108,12 +108,11 @@ test('starts in reading mode and switches chats in a full-screen filtered list',
   // Agent-launched chats follow the same filters as other conversations.
   await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
-  await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeHidden();
-  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
+  await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeVisible();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('mobile-chats.png') });
-  await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  await list.getByRole('button', { name: 'Work Mode', exact: true }).tap();
   await expect(list.getByRole('link', { name: /answered conversation/ })).toBeVisible();
-  await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /agent-only conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /old agent run conversation/ })).toBeVisible();
   await expect(list.getByRole('link', { name: /sleeping conversation/ })).toBeVisible();
@@ -141,7 +140,7 @@ test('filters all mobile chats by project and caps the newest chats across both 
   await page.getByRole('button', { name: 'Chats', exact: true }).tap();
   const list = page.getByRole('complementary', { name: 'Chats' });
   await expect(list.getByRole('combobox')).toHaveCount(0);
-  await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  await list.getByRole('button', { name: 'Work Mode', exact: true }).tap();
   const projectFilter = list.getByRole('combobox', { name: 'Project', exact: true });
   const limit = list.getByRole('combobox', { name: 'Chats per project', exact: true });
   await expect(projectFilter).toHaveValue('');
@@ -177,11 +176,11 @@ test('filters all mobile chats by project and caps the newest chats across both 
   await list.getByRole('button', { name: 'Back to chats', exact: true }).tap();
   await expect(projectFilter).toHaveValue('empty');
   await expect(limit).toHaveValue('5');
-  await list.getByRole('button', { name: 'Active only', exact: true }).tap();
+  await list.getByRole('button', { name: 'Work Mode', exact: true }).tap();
   await expect(projectFilter).toBeHidden();
   await expect(list.getByRole('link', { name: /first conversation/ })).toBeVisible();
-  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeHidden();
-  await list.getByRole('button', { name: 'Show all', exact: true }).tap();
+  await expect(list.getByRole('heading', { name: 'Empty project' })).toBeVisible();
+  await list.getByRole('button', { name: 'Work Mode', exact: true }).tap();
   await expect(projectFilter).toHaveValue('empty');
   await projectFilter.selectOption('');
   await expect(list.getByRole('link', { name: /demo catalog chat/ })).toHaveCount(5);
@@ -260,7 +259,7 @@ for (const delivery of ['accepted', 'queued', 'rejected'] as const) {
   });
 }
 
-test('new chat includes projects hidden from the active list and small phones keep navigation usable', async ({ page }) => {
+test('new chat includes empty projects and small phones keep navigation usable', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 });
   await openMobile(page);
   await page.getByRole('button', { name: 'Chats', exact: true }).tap();
