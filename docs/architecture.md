@@ -352,8 +352,9 @@ message cannot be cancelled.
 - Work Mode on desktop and mobile shows chats whose status dot is purple, amber, yellow, green, or red.
   Gray and unbound chats remain available with Work Mode off. Configured projects and their
   new-conversation actions remain visible when no chats match.
-- Recent Activity narrows Work Mode to red (working), yellow and green dots, including
-  suspended chats. Working chats stay visible regardless of their last response age.
+- Recent Activity narrows Work Mode to red (working), green, yellow, and amber dots, including
+  suspended chats. Amber ends 48 hours after the last response. Working chats stay visible
+  regardless of their last response age.
   Active Only includes red working chats and chats without manual, pressure, or idle suspension.
   Red status bypasses both subfilters, even with a suspension marker or no confirmed response.
   These two filters are mutually exclusive. Turning Work Mode off clears both and disables

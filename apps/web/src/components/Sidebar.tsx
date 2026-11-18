@@ -1064,7 +1064,7 @@ export function Sidebar({
               type="button"
               onClick={onToggleRecentActivity}
               aria-pressed={recentActivity}
-              title="Show working chats and chats with yellow or green status"
+              title="Show working chats and chats with green, yellow, or amber status"
               disabled={!workMode}
               className={clsx(
                 isMobile && 'min-h-11',

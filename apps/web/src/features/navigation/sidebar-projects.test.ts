@@ -342,7 +342,7 @@ describe('Active only', () => {
   it.each([
     { activeOnly: false, recentActivity: false, refs: ['green', 'amber', 'retrying', 'manual', 'idle', 'red', 'yellow', 'purple', 'pressure'] },
     { activeOnly: true, recentActivity: false, refs: ['green', 'amber', 'retrying', 'idle', 'red', 'yellow', 'purple'] },
-    { activeOnly: false, recentActivity: true, refs: ['green', 'retrying', 'manual', 'idle', 'red', 'yellow', 'pressure'] },
+    { activeOnly: false, recentActivity: true, refs: ['green', 'amber', 'retrying', 'manual', 'idle', 'red', 'yellow', 'pressure'] },
   ])('filters by status and suspension: $activeOnly / $recentActivity', ({ refs, ...filters }) => {
     const projects = deriveSidebarProjects({ tree, workMode: true, recentActivitySortEnabled: true, manualProjectOrder: [], nowMs, ...filters });
     expect(projects.map(item => item.slug)).toEqual(['alpha', 'empty']);
@@ -375,10 +375,16 @@ describe('Active only', () => {
     expect(projects[0]?.combinedConversations).toHaveLength(12);
   });
 
-  it('removes a yellow chat as its response reaches twelve hours old', () => {
+  it('keeps a chat when it turns amber and removes it when it turns purple', () => {
     const options = { tree, workMode: true, recentActivity: true, recentActivitySortEnabled: true, manualProjectOrder: [] };
-    expect(deriveSidebarProjects({ ...options, nowMs })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(true);
-    expect(deriveSidebarProjects({ ...options, nowMs: nowMs + 60_000 })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow')).toBe(false);
+    const lastResponse = Date.parse(ago(11.99));
+    const visible = (hoursSinceResponse: number) => deriveSidebarProjects({
+      ...options, nowMs: lastResponse + hoursSinceResponse * 3_600_000,
+    })[0]?.combinedConversations.some(item => item.conversation.ref === 'yellow');
+    expect(visible(11.99)).toBe(true);
+    expect(visible(12)).toBe(true);
+    expect(visible(47.99)).toBe(true);
+    expect(visible(48)).toBe(false);
   });
 });
 

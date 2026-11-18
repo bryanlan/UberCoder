@@ -78,7 +78,7 @@ export function deriveSidebarProjects({
         const color = getConversationStatusColor(item.conversation.isBound, item.lastResponseAt, item.isWorking, nowMs, item.runFailure);
         if (color === 'unbound' || color === 'gray') return false;
         if (color === 'red') return true;
-        if (recentActivity) return color === 'green' || color === 'yellow';
+        if (recentActivity) return color === 'green' || color === 'yellow' || color === 'amber';
         return !activeOnly || !(item.manualSuspendedAt || item.pressureSuspendedAt || item.idleSuspendedAt);
       });
       const providerEntries = PROVIDERS.map((provider) => [provider, {

@@ -117,7 +117,7 @@ test(`chat filters match status, persist, and stay exclusive at ${width}px`, asy
     { ref: 'Purple chat', session: { lastResponseAt: ago(48) } },
     { ref: 'Gray chat', session: {} },
     { ref: 'Manual chat', session: { lastResponseAt: ago(0.5), manualSuspendedAt: ago(0) } },
-    { ref: 'Pressure chat', session: { lastResponseAt: ago(2), pressureSuspendedAt: ago(0) } },
+    { ref: 'Pressure chat', session: { lastResponseAt: ago(48 - 10 / 3600), pressureSuspendedAt: ago(0) } },
     { ref: 'Idle chat', session: { isWorking: true, idleSuspendedAt: ago(0) } },
     { ref: 'History chat' },
   ];
@@ -161,7 +161,7 @@ test(`chat filters match status, persist, and stay exclusive at ${width}px`, asy
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'false');
   for (const { ref } of cases) {
     await expect(sidebar.getByRole('link', { name: new RegExp(ref) })).toHaveCount(
-      ['Green chat', 'Red chat', 'Yellow chat', 'Manual chat', 'Pressure chat', 'Idle chat'].includes(ref) ? 1 : 0,
+      ['Green chat', 'Red chat', 'Yellow chat', 'Amber chat', 'Manual chat', 'Pressure chat', 'Idle chat'].includes(ref) ? 1 : 0,
     );
   }
   await page.reload();
@@ -169,7 +169,8 @@ test(`chat filters match status, persist, and stay exclusive at ${width}px`, asy
   await page.clock.fastForward(30_000);
   await expect(sidebar.getByRole('link', { name: /Red chat/ })).toBeVisible();
   await expect(sidebar.getByRole('link', { name: /Idle chat/ })).toBeVisible();
-  await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: /Yellow chat/ })).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: /Pressure chat/ })).toHaveCount(0);
   await activeOnly.click();
   await expect(recent).toHaveAttribute('aria-pressed', 'false');
   await expect(activeOnly).toHaveAttribute('aria-pressed', 'true');
