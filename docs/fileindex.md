@@ -135,10 +135,10 @@
   its message box (`SessionComposer`: a complete message with images, Stop, per-conversation drafts, a resizable desktop box and
   the mobile Reply and Controls panels), the draft-preserving Alt+A/Alt+H/Alt+M/Alt+L Codex/Claude profile controls, the Auto route line and fallback warning,
   the model-list error state and the status strip. The web has no terminal surface: no key buttons, screen panel, raw output or debug panel.
-- `apps/web/src/features/navigation/route-selection.ts` and `sidebar-projects.ts` - route params,
-  404 selection, sidebar ordering, Work-mode filtering of conversation children while retaining
-  configured active projects, and separation of provider response status
-  from genuine activity ordering.
+- `apps/web/src/features/navigation/route-selection.ts`, `sidebar-projects.ts`, and
+  `useChatFilters.ts` - route params, 404 selection, sidebar ordering and shared desktop/mobile
+  Work Mode, Recent Activity, and Active Only state and filtering while retaining configured
+  projects, plus separation of provider response status from genuine activity ordering.
 - `apps/web/src/features/navigation/useSidebarWidth.ts` - browser-local desktop sidebar sizing,
   pointer and keyboard resizing, viewport bounds, and saved width restoration.
 - `apps/web/src/features/navigation/useMobileViewport.ts` and `apps/web/src/lib/useMediaQuery.ts` -
@@ -150,7 +150,9 @@
 - `apps/web/src/features/realtime/connection.ts`, `apply-session-event.ts`, and `reducers.ts` -
   frontend realtime connection and query-cache updates.
 - `apps/web/src/components/Sidebar.tsx` and `ConversationPane.tsx` - main conversation navigation
-  and display shell surfaces. `ConversationPane.tsx` also renders the dismissible warning when a
+  and display shell surfaces; `Sidebar.test.tsx`, `sidebar-projects.test.ts`, and
+  `useChatFilters.test.ts` cover sidebar controls, project derivation, and saved filter behavior.
+  `ConversationPane.tsx` also renders the dismissible warning when a
   conversation transcript is large enough that active-turn updates may lag behind provider writes.
 - `apps/web/src/components/StartComposer.tsx` - the small box behind the Start entry (project name, a first message, Ctrl+Enter to send); `App.tsx` `handleStartConversation` posts it to `POST /api/conversations/:projectSlug/start`, opens the chat the server created and shows the server's `warning` when routing failed. `apps/web/src/lib/provider-icons.ts` holds the per-provider icons; `apps/web/e2e/start-conversation.spec.ts` covers Start in the browser (not run in CI here).
 - `packages/shared/src/index.ts` - shared API contracts, including

@@ -26,7 +26,8 @@ it does not query the live Console database.
 - Engineering metadata export: `npm run build -w @agent-console/shared && NODE_ENV=test npm run test -w @agent-console/server -- engineering-summary export-redaction`.
   Private SQLite, Git and process fixtures cover source failures, provenance, configured project
   paths and credential redaction, including the source CLI, without opening live databases.
-- Mobile layout: `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane sidebar-projects Sidebar`;
+- Sidebar navigation and filters: `NODE_ENV=test npm run test -w @agent-console/web -- sidebar-projects useChatFilters Sidebar`;
+  mobile layout and composer: `NODE_ENV=test npm run test -w @agent-console/web -- ConversationPane`;
   browser checks: `NODE_ENV=test npm run test:e2e -- apps/web/e2e/mobile-conversation.spec.ts apps/web/e2e/input-rejection.spec.ts apps/web/e2e/sidebar.spec.ts`.
   Use free E2E ports. These fixtures mock provider input and simulate a visualViewport-only
   keyboard resize/pan without changing the layout viewport. They verify reading space,
