@@ -357,6 +357,16 @@ describe('IndexingService', () => {
         isBound: false,
         degraded: false,
       },
+      {
+        ref: 'issue-reference-chat',
+        kind: 'history',
+        projectSlug: 'demo',
+        provider: 'codex',
+        title: '#109 lane M-W: fix the importer',
+        updatedAt: '2026-06-17T17:31:00.000Z',
+        isBound: false,
+        degraded: false,
+      },
     ]);
     db.pendingConversations.put({
       ref: 'pending:hidden-cli',
@@ -386,7 +396,7 @@ describe('IndexingService', () => {
 
     await indexing.loadProjectMetadata({ backfillSearchIndex: true });
 
-    expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['visible-chat']);
+    expect(indexing.getTree().projects[0]?.providers.codex.conversations.map((item) => item.ref)).toEqual(['visible-chat', 'issue-reference-chat']);
     db.close();
   });
 

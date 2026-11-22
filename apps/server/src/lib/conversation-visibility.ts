@@ -6,8 +6,10 @@ type SessionVisibilityLookup = {
   getIndexedConversation(projectSlug: string, provider: ProviderId, conversationRef: string): ConversationSummary | undefined;
 };
 
+// An automated prompt opens with a markdown heading ("### Review ..."). A title
+// such as "#109 lane" is an issue reference, not a heading, and stays visible.
 export function isSystemInvocationConversationTitle(title: string): boolean {
-  return title.trimStart().startsWith('#');
+  return /^#+(\s|$)/.test(title.trimStart());
 }
 
 export function isCodexExecInvocationConversation(conversation: Partial<Pick<ConversationSummary, 'provider' | 'rawMetadata'>>): boolean {
