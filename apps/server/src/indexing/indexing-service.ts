@@ -236,13 +236,19 @@ export class IndexingService {
 
   /** The tree without the provider lanes, which the route adds from the session manager. */
   getTree(): Omit<TreeResponse, 'structuredProviders'> {
+    // One index read serves both the live-session visibility check and the history list; a lookup per
+    // live session re-ran the closed-conversation scan each time and cost about a second per tree (2026-11-21).
+    const indexed = this.db.conversationIndex.list();
+    const indexedByKey = new Map(indexed.map((conversation) => [
+      `${conversation.projectSlug}\0${conversation.provider}\0${conversation.ref}`, conversation,
+    ]));
     const activeSessions = this.db.boundSessions.listTreeVisible()
       .filter((session) => isTreeVisibleBoundSession(session) && isBoundSessionVisibleInDiscovery(session, {
         getPendingConversation: (ref) => this.db.pendingConversations.get(ref),
-        getIndexedConversation: (projectSlug, provider, conversationRef) => this.db.conversationIndex.get(projectSlug, provider, conversationRef),
+        getIndexedConversation: (projectSlug, provider, conversationRef) => indexedByKey.get(`${projectSlug}\0${provider}\0${conversationRef}`),
       }));
     const activeSessionIds = new Set(activeSessions.map((session) => session.id));
-    const history = this.db.conversationIndex.list().filter(isConversationVisibleInDiscovery);
+    const history = indexed.filter(isConversationVisibleInDiscovery);
     const pending = this.db.pendingConversations.list()
       .filter((conversation) => typeof conversation.rawMetadata?.adoptedConversationRef !== 'string')
       .filter(isConversationVisibleInDiscovery)
