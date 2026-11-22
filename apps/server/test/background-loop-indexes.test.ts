@@ -5,7 +5,7 @@ import { BLOCKED_SUPERVISOR_HANDOFF_SQL } from '../src/db/schema.js';
 // The wake loop, the project tree and the handoff flush run every few seconds. Each of these reads scanned a whole
 // table on the live file (2026-11-22); the plans must keep using the migration 26 indexes.
 const db = new AppDatabase(':memory:');
-const plan = (sql: string) => (db.sqlite.prepare(`explain query plan ${sql}`).all() as Array<{ detail: string }>)
+const plan = (sql: string, ...params: string[]) => (db.sqlite.prepare(`explain query plan ${sql}`).all(...params) as Array<{ detail: string }>)
   .map(row => row.detail).join('\n');
 const sqlOf = (read: () => unknown) => {
   const prepare = vi.spyOn(db.sqlite, 'prepare');
@@ -23,6 +23,13 @@ it('finds the newest session row of a conversation through the conversation inde
     const [sql] = sqlOf(read);
     expect(plan(sql!)).toContain('bound_sessions_conversation');
   }
+});
+
+it('looks up one conversation without grouping every closed session', () => {
+  const [sql] = sqlOf(() => db.conversationIndex.get('demo', 'codex', 'ref'));
+  const detail = plan(sql!, 'demo', 'codex', 'ref');
+  expect(detail).toContain('bound_sessions_conversation');
+  expect(detail).not.toContain('MATERIALIZE');
 });
 
 it('reads only blocked supervisor handoffs', () => {

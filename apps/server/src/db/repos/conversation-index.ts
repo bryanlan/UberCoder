@@ -115,10 +115,14 @@ export class ConversationIndexRepo {
 
   get(projectSlug: string, provider: string, ref: string): ConversationSummary | undefined {
     const row = this.sqlite.prepare(`
-      select ci.*, cto.title as override_title, bs.id as bound_session_id, closed.last_closed_at
+      select ci.*, cto.title as override_title, bs.id as bound_session_id, (
+        -- One conversation's closed time through bound_sessions_conversation; joining closedConversationsSql grouped every
+        -- session row on each call, and session watchers call this for every live session on each index refresh.
+        select max(closed.updated_at) from bound_sessions closed
+        where closed.project_slug = ci.project_slug and closed.provider = ci.provider and closed.conversation_ref = ci.ref
+          and closed.status = 'ended' and closed.should_restore = 0
+      ) as last_closed_at
       from conversation_index ci
-      left join (${closedConversationsSql}) closed
-        on closed.project_slug = ci.project_slug and closed.provider = ci.provider and closed.conversation_ref = ci.ref
       left join conversation_title_overrides cto
         on cto.project_slug = ci.project_slug and cto.provider = ci.provider and cto.ref = ci.ref
       left join bound_sessions bs

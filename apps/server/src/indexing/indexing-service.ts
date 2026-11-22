@@ -230,7 +230,8 @@ export class IndexingService {
 
     const timestamp = nowIso();
     this.db.meta.set('lastIndexedAt', timestamp);
-    this.eventBus.emit({ type: 'conversation.index-updated', timestamp });
+    // Scoped: listeners re-check only this project's sessions of this provider, not every live session.
+    this.eventBus.emit({ type: 'conversation.index-updated', projectSlug, provider: providerId, timestamp });
     await this.syncWatchers();
   }
 
