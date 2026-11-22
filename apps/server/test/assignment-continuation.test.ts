@@ -27,6 +27,14 @@ function fixture() {
 }
 
 describe('Explicit unattended continuation contract', () => {
+  it('checks an assignment without a wait without opening a write transaction', () => {
+    const f = fixture();
+    const transaction = vi.spyOn(f.db.sqlite, 'transaction');
+    expect(alertOverdueAwait(f.db, f.worker.id)).toBe(false);
+    expect(transaction).not.toHaveBeenCalled();
+    transaction.mockRestore();
+  });
+
   it('starts waiting for input and never infers permission from active status or worker facts', () => {
     const f = fixture();
     expect(f.service.agentStatus(f.parent.id).assignment).toMatchObject({ status: 'active', continuation: 'waiting_for_input', supervisorId: null, recovery: null });
