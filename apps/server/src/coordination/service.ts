@@ -15,6 +15,8 @@ const assignmentColumns = `id, provider, native_session_id as nativeSessionId, d
 const scopeColumns = `assignment_id as assignmentId, checkout, repository, summary`;
 const eventColumns = `seq, assignment_id as assignmentId, checkout, kind, text, timestamp`;
 const messageColumns = `id, sender_id as senderId, recipient_id as recipientId, text, created_at as createdAt, supplied_at as suppliedAt, acknowledged_at as acknowledgedAt`;
+export const STALE_ASSIGNMENT_MS = 7 * 24 * 60 * 60_000;
+export const STALE_ASSIGNMENT_NOTE = 'Closed automatically: the agent disconnected at least seven days ago and its chat is closed. History, task and messages are kept; a resumed agent sets status active to continue.';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const compact = (value: string, limit: number) => value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 
@@ -533,6 +535,47 @@ export class CoordinationService {
       if (current.task) updateTask(this.db, id, { state: 'done' });
       if (current.task?.state !== 'done' && current.supervisorId !== notifiedSupervisorId) this.notifySupervisor(id, 'A supervised worker completed its assignment.', options);
       return { finished: true };
+    }).immediate();
+  }
+
+  /**
+   * Closes assignments whose agent disconnected at least a week ago and whose chat is no longer open. Each one
+   * otherwise stays in every wake pass and grant check forever (1,927 such rows on 2026-11-21). This is not
+   * completion: the supervisor is not told and the task keeps its state. Finish-bound grants expire, as on any
+   * finish. A resumed agent sets status active to continue. Returns the number closed.
+   */
+  retireStaleAssignments(now: number, limit: number): number {
+    const cutoff = new Date(now - STALE_ASSIGNMENT_MS).toISOString();
+    const candidates = this.db.sqlite.prepare(`select id, provider, native_session_id as nativeSessionId from coordination_assignments
+      where status='disconnected' and last_seen_at<? order by last_seen_at`).all(cutoff) as Array<{ id: string; provider: string; nativeSessionId: string }>;
+    if (!candidates.length) return 0;
+    // Read open chats and latest activity once; per-row lookups scan unindexed columns (about 60 s for 1,900 rows).
+    const open = new Set<string>(), openSessions = new Set<string>();
+    for (const row of this.db.sqlite.prepare(`select id, provider, conversation_ref as ref, resume_conversation_ref as resumeRef
+      from bound_sessions where should_restore=1 and status!='ended'`).all() as Array<{ id: string; provider: string; ref: string; resumeRef: string | null }>) {
+      openSessions.add(row.id);
+      open.add(`${row.provider}\0${row.ref}`);
+      if (row.resumeRef) open.add(`${row.provider}\0${row.resumeRef}`);
+    }
+    // An assignment can also be tied to its chat by the Console session it registered from.
+    for (const row of this.db.sqlite.prepare("select key, value from meta where key like 'console-session:%'").all() as Array<{ key: string; value: string }>) {
+      if (openSessions.has(row.value)) open.add(`assignment\0${row.key.slice('console-session:'.length)}`);
+    }
+    const latest = new Map((this.db.sqlite.prepare('select assignment_id as id, max(timestamp) as last from coordination_events group by assignment_id')
+      .all() as Array<{ id: string; last: string }>).map((row) => [row.id, row.last]));
+    const ids = candidates
+      .filter((row) => !open.has(`${row.provider}\0${row.nativeSessionId}`) && !open.has(`assignment\0${row.id}`) && (latest.get(row.id) ?? '') < cutoff)
+      .slice(0, limit).map((row) => row.id);
+    if (!ids.length) return 0;
+    return this.db.sqlite.transaction(() => {
+      const finish = this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=? and status='disconnected'");
+      const closed = ids.filter((id) => finish.run(id).changes > 0);
+      for (const id of closed) {
+        setContinuation(this.db, id, 'waiting_for_input');
+        this.event(id, null, 'finished', STALE_ASSIGNMENT_NOTE);
+      }
+      this.grants?.expireForAssignments(closed);
+      return closed.length;
     }).immediate();
   }
 

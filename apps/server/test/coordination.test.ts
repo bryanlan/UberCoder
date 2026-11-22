@@ -7,7 +7,7 @@ import fastify from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROVIDERS } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
-import { CoordinationService, processStart } from '../src/coordination/service.js';
+import { CoordinationService, STALE_ASSIGNMENT_MS, STALE_ASSIGNMENT_NOTE, processStart } from '../src/coordination/service.js';
 import { PEER_WAKE_PROMPT } from '../src/coordination/wake.js';
 import { checkoutIdentity } from '../src/coordination/git.js';
 import { dispatchCoordination, registerCoordinationRoutes, startCoordinationSocket } from '../src/coordination/transport.js';
@@ -866,6 +866,46 @@ describe('assignment coordination', () => {
     expect(git(checkout, ['diff', '--binary', 'HEAD'])).toBe(before);
     expect(service.snapshot(checkout).events.some((e) => e.text === 'Draft remains in src/a.txt')).toBe(true);
     expect(service.snapshot(checkout)).not.toHaveProperty('claims');
+  });
+
+  it('closes week-old disconnected assignments whose chat is closed, quietly and in batches', () => {
+    const f = fixture();
+    const service = new CoordinationService(f.db, { enabled: true, pilotPaths: [f.checkout] }, undefined, new GrantService(f.db, new RealtimeEventBus()));
+    const lead = f.register(), worker = f.register(), openChat = f.register(), linked = f.register(), recent = f.register(), live = f.register(), extra = f.register();
+    service.update(worker.id, { supervisorId: lead.id, task: { deliverable: 'Draft', doneWhen: 'Reviewed', evidencePath: 'notes.md', state: 'working' } });
+    for (const a of [lead, worker, openChat, linked, recent, extra]) service.disconnect(a.id);
+    const now = Date.now(), old = new Date(now - STALE_ASSIGNMENT_MS - 60_000).toISOString();
+    for (const a of [lead, worker, openChat, linked, live, extra]) {
+      f.db.sqlite.prepare('update coordination_assignments set last_seen_at=? where id=?').run(old, a.id);
+      f.db.sqlite.prepare('update coordination_events set timestamp=? where assignment_id=?').run(old, a.id);
+    }
+    // `recent` registered long ago but disconnected today: its latest activity keeps it.
+    f.db.sqlite.prepare('update coordination_assignments set last_seen_at=? where id=?').run(old, recent.id);
+    f.db.sqlite.prepare(`insert into bound_sessions (id, project_slug, provider, conversation_ref, tmux_session_name, title, status, should_restore, started_at, updated_at)
+      values (?, 'p', 'codex', ?, '', 'Open chat', 'bound', 1, ?, ?)`).run('open-session', openChat.nativeSessionId, old, old);
+    f.db.meta.set(`console-session:${linked.id}`, 'open-session');
+    const definition = { grantee: { kind: 'project', id: 'p' }, actions: ['launch_session'], scope: 'Test', projectSlugs: ['p'],
+      limits: {}, expiry: { kind: 'assignment_finished', assignmentId: lead.id } };
+    f.db.sqlite.prepare('insert into agent_grants values(?,?,?,?,?,?,?,null)').run('lead-grant', lead.id, 'active', JSON.stringify(definition), '{}', 'Test', old);
+    const inboxBefore = f.db.sqlite.prepare('select count(*) n from coordination_messages where recipient_id=?').get(lead.id);
+
+    expect(service.retireStaleAssignments(now, 2)).toBe(2);
+    expect(service.retireStaleAssignments(now, 2)).toBe(1);
+    expect(service.retireStaleAssignments(now, 2)).toBe(0);
+
+    const status = (id: string) => (f.db.sqlite.prepare('select status from coordination_assignments where id=?').get(id) as { status: string }).status;
+    expect([lead, worker, extra].map((a) => status(a.id))).toEqual(['finished', 'finished', 'finished']);
+    expect(status(openChat.id)).toBe('disconnected');
+    expect(status(linked.id)).toBe('disconnected');
+    expect(status(recent.id)).toBe('disconnected');
+    expect(status(live.id)).toBe('active');
+    expect((f.db.sqlite.prepare('select status from agent_grants where id=?').get('lead-grant') as { status: string }).status).toBe('expired');
+    // Not completion: the supervisor gets no mail and the worker keeps its task state.
+    expect(f.db.sqlite.prepare('select count(*) n from coordination_messages where recipient_id=?').get(lead.id)).toEqual(inboxBefore);
+    expect(service.agentStatus(worker.id).assignment?.task?.state).toBe('working');
+    expect(service.agentStatus(worker.id).assignment?.continuation).toBe('waiting_for_input');
+    const last = f.db.sqlite.prepare('select kind, text from coordination_events where assignment_id=? order by seq desc limit 1').get(worker.id);
+    expect(last).toEqual({ kind: 'finished', text: STALE_ASSIGNMENT_NOTE });
   });
 
   it('serves every wiki action through the real MCP helper for both providers without coordination-only arguments', async () => {

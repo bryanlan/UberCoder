@@ -43,6 +43,7 @@ import { LiveOutputReader } from './sessions/live-output/reader.js';
 import { RestartService } from './runtime/restart-service.js';
 import { ConversationSearchService } from './search/conversation-search.js';
 import { CoordinationService } from './coordination/service.js';
+
 import { registerConsoleConversation } from './coordination/console-registration.js';
 import { registerCoordinationRoutes, startCoordinationSocket } from './coordination/transport.js';
 import { WikiService } from './wiki/service.js';
@@ -57,6 +58,9 @@ import { WorkerUserActivity } from './workers/user-activity.js';
 import { registerWorkerRoutes } from './workers/routes.js';
 import { ConversationTitleService } from './titles/service.js';
 import { observeAsync, observeSync, type OperationObserver } from './runtime/slow-operations.js';
+
+/** Stale assignments closed per coordination tick: 0.2-0.4 s of database work on a live-data copy (2026-11-21). */
+const STALE_RETIRE_BATCH = 100;
 
 export interface AppOptions {
   configPath?: string;
@@ -245,8 +249,20 @@ export async function buildApp(options: AppOptions = {}) {
   const coordinationSocket = config.coordination.enabled ? await startCoordinationSocket(coordination, config.runtimeDir, wiki, grants, agentLaunches) : undefined;
   if (config.coordination.enabled) agentLaunches.start();
   const stopTelemetry = config.coordination.enabled ? startCoordinationTelemetry(config.runtimeDir) : undefined;
+  // Stale disconnected assignments close hourly; a full batch means a backlog, so the next tick takes another.
+  let nextStaleRetireAt = 0;
   const coordinationTimer = config.coordination.enabled ? setInterval(() => {
-    observeSync('coordination.reconcile', () => coordination.reconcileProcesses(), observe); wakeAssignments();
+    observeSync('coordination.reconcile', () => coordination.reconcileProcesses(), observe);
+    if (Date.now() >= nextStaleRetireAt) {
+      nextStaleRetireAt = Date.now() + 60 * 60_000;
+      try {
+        const closed = observeSync('coordination.retireStale', () => coordination.retireStaleAssignments(Date.now(), STALE_RETIRE_BATCH), observe);
+        if (closed >= STALE_RETIRE_BATCH) nextStaleRetireAt = 0;
+      } catch (error) {
+        app.log.warn({ err: error }, 'Closing stale assignments failed; retrying in an hour.');
+      }
+    }
+    wakeAssignments();
     void observeAsync('coordination.alerts', () => wakeAlerts.check(), observe)
       .catch(error => app.log.warn({ err: error }, 'Wake alert check failed; delivery guards remain unchanged.'));
   }, 15_000) : undefined;

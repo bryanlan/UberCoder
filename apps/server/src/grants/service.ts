@@ -269,10 +269,16 @@ export class GrantService {
   }
 
   expireForAssignment(assignmentId: string): void {
-    const rows = this.db.sqlite.prepare(`update agent_grants set status='expired',decided_at=?
+    this.expireForAssignments([assignmentId]);
+  }
+
+  /** Expires every finish-bound grant of these assignments with one pause pass, however many grants expire. */
+  expireForAssignments(assignmentIds: string[]): void {
+    const now = new Date().toISOString();
+    const expire = this.db.sqlite.prepare(`update agent_grants set status='expired',decided_at=?
       where status='active' and json_extract(definition_json,'$.expiry.kind')='assignment_finished'
-      and coalesce(json_extract(definition_json,'$.expiry.assignmentId'),created_by_assignment_id)=? returning id`)
-      .all(new Date().toISOString(), assignmentId) as Array<{ id: string }>;
+      and coalesce(json_extract(definition_json,'$.expiry.assignmentId'),created_by_assignment_id)=? returning id`);
+    const rows = assignmentIds.flatMap((id) => expire.all(now, id) as Array<{ id: string }>);
     if (!rows.length) return;
     this.pauseUnsupportedSessions();
     for (const row of rows) this.changed(row.id);
