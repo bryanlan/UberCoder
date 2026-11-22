@@ -286,6 +286,11 @@ export async function buildApp(options: AppOptions = {}) {
   const searchBackfill = indexing.loadProjectMetadata({ backfillSearchIndex: true }).catch(() => {
     app.log.warn('Startup search-index backfill failed; use project refresh to rebuild.');
   });
+  // Codex chats made while the backend was down, or never indexed, join the index one file at a time.
+  // It waits for the backfill, which stops as soon as any other index work is queued.
+  const codexCatchUp = searchBackfill.then(() => indexing.catchUpCodexHistory()).catch((error) => {
+    app.log.warn({ err: error }, 'Startup Codex history catch-up failed; use project refresh to rebuild.');
+  });
 
   app.addHook('onClose', async () => {
     await agentLaunches.stop();
@@ -297,7 +302,7 @@ export async function buildApp(options: AppOptions = {}) {
     clearInterval(wikiBackupTimer);
     await coordinationSocket?.close();
     await indexing.stop();
-    await Promise.all([runtimeCleanup, searchBackfill, humanReplyBackfill]);
+    await Promise.all([runtimeCleanup, searchBackfill, codexCatchUp, humanReplyBackfill]);
     await sessions.stop();
     liveOutputReader.clear();
     await wiki.backup().catch((error) => app.log.warn({ err: error }, 'Final wiki backup failed.'));

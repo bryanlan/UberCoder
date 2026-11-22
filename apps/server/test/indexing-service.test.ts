@@ -6,6 +6,7 @@ import type { ConversationSummary } from '@agent-console/shared';
 import { AppDatabase } from '../src/db/database.js';
 import type { MergedProviderSettings } from '../src/config/service.js';
 import {
+  getCodexTranscriptIndexDelay,
   getProviderTranscriptRefreshDelay,
   getProviderTranscriptWatchPaths,
   IndexingService,
@@ -59,6 +60,130 @@ describe('IndexingService', () => {
     expect(getProviderTranscriptRefreshDelay('codex', 'change', '/state/codex/sessions/chat.jsonl')).toBeUndefined();
     expect(getProviderTranscriptRefreshDelay('claude', 'add', '/state/claude/projects/demo/chat.jsonl')).toBe(750);
     expect(getProviderTranscriptRefreshDelay('claude', 'change', '/state/claude/projects/demo/notes.txt')).toBeUndefined();
+  });
+
+  it('indexes a new Codex transcript soon and a growing one after a pause', () => {
+    expect(getCodexTranscriptIndexDelay('add', '/state/codex/sessions/2026/11/22/rollout-a.jsonl')).toBe(2_000);
+    expect(getCodexTranscriptIndexDelay('change', '/state/codex/sessions/2026/11/22/rollout-a.jsonl')).toBe(20_000);
+    expect(getCodexTranscriptIndexDelay('unlink', '/state/codex/sessions/2026/11/22/rollout-a.jsonl')).toBeUndefined();
+    expect(getCodexTranscriptIndexDelay('add', '/state/codex/sessions/notes.txt')).toBeUndefined();
+  });
+
+  it('indexes a growing Codex chat once per write burst, every ten minutes once titled and every two before', async () => {
+    vi.useFakeTimers();
+    try {
+      const indexing = new IndexingService({} as never, {} as never, {} as never, {} as never, new RealtimeEventBus());
+      const internals = indexing as unknown as {
+        scheduleCodexFileIndex(filePath: string, isGrowth: boolean, delayMs: number): void;
+        indexCodexFile(filePath: string): Promise<string[]>;
+        codexFileIndexedAt: Map<string, { at: number; minIntervalMs: number }>;
+      };
+      const indexed: Array<[string, number]> = [];
+      // The chat file has its first message; the agent-launched helper's opens with a launch prompt.
+      internals.indexCodexFile = async (filePath) => {
+        indexed.push([path.basename(filePath), Date.now() - started]);
+        internals.codexFileIndexedAt.set(filePath, {
+          at: Date.now(),
+          minIntervalMs: filePath.endsWith('chat.jsonl') ? 10 * 60_000 : 2 * 60_000,
+        });
+        return [];
+      };
+      const started = Date.now();
+      const write = (name: string) => internals.scheduleCodexFileIndex(`/codex/sessions/${name}`, true, 20_000);
+
+      write('chat.jsonl');
+      write('helper.jsonl');
+      await vi.advanceTimersByTimeAsync(15_000);
+      write('chat.jsonl');
+      write('helper.jsonl');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(indexed).toEqual([['chat.jsonl', 20_000], ['helper.jsonl', 20_000]]);
+
+      write('chat.jsonl');
+      write('helper.jsonl');
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(indexed).toEqual([
+        ['chat.jsonl', 20_000], ['helper.jsonl', 20_000], ['helper.jsonl', 140_000], ['chat.jsonl', 620_000],
+      ]);
+      await indexing.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('indexes unindexed Codex transcripts one file at a time without touching sibling rows', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-console-indexing-'));
+    const sessionsDir = path.join(tempDir, 'codex', 'sessions', '2026', '11', '22');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const refs = {
+      chat: '11111111-1111-4111-8111-111111111111',
+      exec: '22222222-2222-4222-8222-222222222222',
+      subagent: '33333333-3333-4333-8333-333333333333',
+      launched: '44444444-4444-4444-8444-444444444444',
+    };
+    const writeTranscript = (ref: string, meta: Record<string, unknown>, userText?: string) => fs.writeFile(
+      path.join(sessionsDir, `rollout-2026-11-22T00-00-00-${ref}.jsonl`),
+      [
+        { timestamp: '2026-11-22T00:00:00.000Z', type: 'session_meta', payload: { id: ref, cwd: project.path, ...meta } },
+        ...(userText ? [{ timestamp: '2026-11-22T00:00:01.000Z', type: 'response_item',
+          payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: userText }] } }] : []),
+      ].map((record) => JSON.stringify(record)).join('\n') + '\n',
+    );
+    await writeTranscript(refs.chat, { originator: 'codex_cli_rs' }, '#109 lane: fix the importer');
+    await writeTranscript(refs.exec, { originator: 'codex_exec' }, 'Review this diff');
+    await writeTranscript(refs.subagent, { thread_source: 'subagent' }, 'Look up the schema');
+    await writeTranscript(refs.launched, { originator: 'codex_cli_rs' });
+
+    const db = new AppDatabase(path.join(tempDir, 'agent-console.sqlite'));
+    const sibling: ConversationSummary = {
+      ref: 'sibling-chat', kind: 'history', projectSlug: project.slug, provider: 'codex', title: 'Sibling chat',
+      updatedAt: '2026-11-01T00:00:00.000Z', transcriptPath: path.join(tempDir, 'gone.jsonl'), isBound: false, degraded: false,
+    };
+    db.conversationIndex.upsert(sibling);
+    db.searchIndex.replaceConversation(project.slug, 'codex', sibling.ref, [], { transcriptPath: sibling.transcriptPath, size: 1, mtimeMs: 1 });
+    // A launcher's session already indexed this chat under the title it chose; the transcript has no user message yet.
+    db.conversationIndex.upsert({ ...sibling, ref: refs.launched, title: 'Lane helper', transcriptPath: undefined });
+
+    const events: unknown[] = [];
+    const eventBus = new RealtimeEventBus();
+    eventBus.subscribe((event) => events.push(event));
+    const provider = new CodexProvider(db.transcriptParseCache);
+    const summarize = vi.spyOn(provider, 'summarizeFileForProjects');
+    const indexing = new IndexingService(
+      { getProjectsRoot: () => tempDir } as never,
+      {
+        listActiveProjects: async () => [project],
+        getMergedProviderSettings: (_project: ActiveProject, providerId: string) => ({
+          id: providerId, enabled: providerId === 'codex', discoveryRoot: path.join(tempDir, 'codex'),
+        }),
+      } as never,
+      { get: () => provider } as never,
+      db,
+      eventBus,
+    );
+
+    await indexing.catchUpCodexHistory();
+
+    expect(db.conversationIndex.get(project.slug, 'codex', refs.chat)?.title).toBe('#109 lane: fix the importer');
+    expect(db.searchIndex.getConversationState(project.slug, 'codex', refs.chat)?.transcriptPath).toContain(refs.chat);
+    expect(db.conversationIndex.get(project.slug, 'codex', refs.exec)).toBeUndefined();
+    expect(db.conversationIndex.get(project.slug, 'codex', refs.subagent)).toBeUndefined();
+    expect(db.conversationIndex.get(project.slug, 'codex', refs.launched)?.title).toBe('Lane helper');
+    expect(db.conversationIndex.get(project.slug, 'codex', sibling.ref)?.title).toBe('Sibling chat');
+    expect(db.searchIndex.getConversationState(project.slug, 'codex', sibling.ref)?.size).toBe(1);
+    expect(events).toEqual([expect.objectContaining({ type: 'conversation.index-updated', projectSlug: project.slug, provider: 'codex' })]);
+
+    // A second pass skips every indexed file without opening it and finds nothing to do.
+    summarize.mockClear();
+    events.length = 0;
+    await indexing.catchUpCodexHistory();
+    expect(summarize.mock.calls.map(([filePath]) => path.basename(filePath)).sort()).toEqual([
+      `rollout-2026-11-22T00-00-00-${refs.exec}.jsonl`,
+      `rollout-2026-11-22T00-00-00-${refs.subagent}.jsonl`,
+    ]);
+    expect(events).toEqual([]);
+    await indexing.stop();
+    db.close();
   });
 
   it('starts from cached index data without scanning provider transcripts', async () => {

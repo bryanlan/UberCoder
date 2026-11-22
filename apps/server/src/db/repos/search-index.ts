@@ -215,6 +215,19 @@ export class SearchIndexRepo {
     }]));
   }
 
+  getConversationState(projectSlug: string, provider: ProviderId, conversationRef: string): ConversationSearchStateRow | undefined {
+    const row = this.sqlite.prepare(`
+      select transcript_path, size, mtime_ms
+      from conversation_search_state
+      where project_slug = ? and provider = ? and ref = ?
+    `).get(projectSlug, provider, conversationRef) as SqliteRow | undefined;
+    return row ? {
+      transcriptPath: optionalString(row.transcript_path),
+      size: numberOrUndefined(row.size),
+      mtimeMs: numberOrUndefined(row.mtime_ms),
+    } : undefined;
+  }
+
   replaceConversation(
     projectSlug: string,
     provider: ProviderId,

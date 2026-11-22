@@ -148,6 +148,14 @@ export class ConversationIndexRepo {
     return row ? mapConversationIndexRow(row) : undefined;
   }
 
+  /** The stored title, without a title override. */
+  getStoredTitle(projectSlug: string, provider: string, ref: string): string | undefined {
+    const row = this.sqlite.prepare(`
+      select title from conversation_index where project_slug = ? and provider = ? and ref = ?
+    `).get(projectSlug, provider, ref) as { title: string } | undefined;
+    return row?.title;
+  }
+
   hasRows(): boolean {
     const row = this.sqlite.prepare(`select 1 from conversation_index limit 1`).get() as { 1: number } | undefined;
     return Boolean(row);

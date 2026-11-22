@@ -95,7 +95,8 @@
   chunking, persisted/live result merge, recency buckets, ranking, hidden conversation filtering,
   live pending-session search, and transcript-backed live-output exclusions.
 - `apps/server/src/indexing/indexing-service.ts` - provider conversation indexing plus missing
-  search-index row backfill from cached conversation summaries on startup or metadata priming.
+  search-index row backfill from cached conversation summaries on startup or metadata priming, and
+  per-file Codex indexing (startup catch-up and watcher) that upserts one transcript's rows at a time.
 - `apps/server/src/sessions/pending-adoption.ts` - pending session adoption helper that can bind a
   live session to provider-readable conversations even before search indexing has caught up.
 - `apps/server/src/providers/transcripts/base.ts` - shared transcript summaries; pending-match

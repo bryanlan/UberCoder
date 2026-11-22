@@ -4,7 +4,7 @@ import type { ProjectSummary, ProviderId, TreeResponse } from '@agent-console/sh
 import { PROVIDERS } from '@agent-console/shared';
 import type { ConfigService, MergedProviderSettings } from '../config/service.js';
 import { AppDatabase, pickPreferredConversation, type ConversationSearchIndexChunk, type ConversationSearchStateRow } from '../db/database.js';
-import { statFileSafe } from '../providers/file-utils.js';
+import { listFilesRecursive, pathExists, statFileSafe } from '../providers/file-utils.js';
 import { buildSyntheticConversationFromSession } from '../lib/conversation-summary.js';
 import { loadProviderConversationFromSummary } from '../lib/provider-conversation-cache.js';
 import { nowIso } from '../lib/time.js';
@@ -23,6 +23,21 @@ import type { CoordinationTelemetryRecord } from '../coordination/telemetry.js';
 
 const PROVIDER_ROOT_DISCOVERY_REFRESH_DELAY_MS = 750;
 const SEARCH_INDEX_WRITE_PAUSE_MS = 5;
+const CODEX_NEW_FILE_INDEX_DELAY_MS = 2_000;
+// A running Codex chat appends to its file on every step, and a large one takes seconds to parse.
+// A write schedules one index this long after it; writes in the meantime join that index.
+const CODEX_CHANGED_FILE_INDEX_DELAY_MS = 20_000;
+// A growing chat is re-indexed at most this often, so its search rows trail it by up to this long.
+const CODEX_CHANGED_FILE_MIN_INTERVAL_MS = 10 * 60_000;
+// Before its first message a chat's title is a placeholder, so it is re-indexed sooner. An
+// agent-launched chat opens with a launch prompt, not a person's message, and stays on this interval.
+const CODEX_UNTITLED_FILE_MIN_INTERVAL_MS = 2 * 60_000;
+
+type SearchUpdate = { chunks: ConversationSearchIndexChunk[]; state: ConversationSearchStateRow };
+type CodexProjectGroup = { sessionsRoot: string; settings: MergedProviderSettings; projects: ActiveProject[] };
+
+const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+const pauseBetweenWrites = () => new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
 
 function searchParserVersionKey(projectSlug: string, providerId: ProviderId): string {
   return `searchParserVersion:${projectSlug}:${providerId}`;
@@ -66,11 +81,24 @@ export function getProviderTranscriptRefreshDelay(
   return undefined;
 }
 
+/** How long to wait before indexing one Codex transcript after a file event; undefined when the event needs no index. */
+export function getCodexTranscriptIndexDelay(eventName: string, changedPath: string): number | undefined {
+  if (!changedPath.endsWith('.jsonl')) return undefined;
+  if (eventName === 'add') return CODEX_NEW_FILE_INDEX_DELAY_MS;
+  if (eventName === 'change') return CODEX_CHANGED_FILE_INDEX_DELAY_MS;
+  return undefined;
+}
+
 export class IndexingService {
   private watchers: FSWatcher[] = [];
   private refreshTimer?: NodeJS.Timeout;
   private refreshDueAt?: number;
   private readonly scopedRefreshTimers = new Map<string, NodeJS.Timeout>();
+  private readonly codexFileTimers = new Map<string, NodeJS.Timeout>();
+  /** When each Codex transcript was last indexed, and the shortest wait before its next growth index. */
+  private readonly codexFileIndexedAt = new Map<string, { at: number; minIntervalMs: number }>();
+  private stopped = false;
+  private codexGroupsCache?: { projects: ActiveProject[]; groups: CodexProjectGroup[] };
   private projectCache: Awaited<ReturnType<ProjectService['listActiveProjects']>> = [];
   private watchConfigSignature?: string;
   private refreshPromise?: Promise<void>;
@@ -91,6 +119,11 @@ export class IndexingService {
   }
 
   async stop(): Promise<void> {
+    this.stopped = true;
+    for (const timer of this.codexFileTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.codexFileTimers.clear();
     clearTimeout(this.refreshTimer);
     this.refreshTimer = undefined;
     this.refreshDueAt = undefined;
@@ -399,6 +432,12 @@ export class IndexingService {
         }
       }
 
+      const codexIndexDelayMs = getCodexTranscriptIndexDelay(eventName, changedPath);
+      if (codexIndexDelayMs !== undefined && this.codexProjectGroupForTranscript(changedPath)) {
+        this.scheduleCodexFileIndex(changedPath, eventName === 'change', codexIndexDelayMs);
+        return;
+      }
+
       const providerRootRefreshDelayMs = getProviderTranscriptRefreshDelay('codex', eventName, changedPath);
       if (providerRootRefreshDelayMs !== undefined) {
         this.scheduleRefresh(providerRootRefreshDelayMs);
@@ -471,50 +510,14 @@ export class IndexingService {
     }
 
     const indexedStates = this.db.searchIndex.getConversationStates(project.slug, providerId);
-    const updates: Array<{
-      ref: string;
-      chunks: ConversationSearchIndexChunk[];
-      state: ConversationSearchStateRow;
-    }> = [];
+    const updates: Array<SearchUpdate & { ref: string }> = [];
     const failedRefs: string[] = [];
     for (const summary of deduped.values()) {
-      const stat = summary.transcriptPath ? await statFileSafe(summary.transcriptPath) : undefined;
-      const indexed = indexedStates.get(summary.ref);
-      if (
-        hasCurrentParserVersion
-        && indexed
-        && indexed.transcriptPath === summary.transcriptPath
-        && stat
-        && indexed.size === stat.size
-        && indexed.mtimeMs === stat.mtimeMs
-      ) {
-        continue;
-      }
-      try {
-        const conversation = await loadProviderConversationFromSummary(summary)
-          ?? await provider.getConversation(project, summary.ref, settings);
-        if (!conversation) {
-          failedRefs.push(summary.ref);
-          continue;
-        }
-        updates.push({
-          ref: summary.ref,
-          chunks: buildConversationSearchChunks({
-            project,
-            conversation: {
-              ...conversation.summary,
-              title: summary.title,
-              isBound: summary.isBound,
-              boundSessionId: summary.boundSessionId,
-            },
-            messages: conversation.messages,
-          }),
-          state: { transcriptPath: summary.transcriptPath, size: stat?.size, mtimeMs: stat?.mtimeMs },
-        });
-      } catch {
-        failedRefs.push(summary.ref);
-        continue;
-      }
+      const update = await this.buildSearchUpdate(
+        project, provider, settings, summary, indexedStates.get(summary.ref), hasCurrentParserVersion,
+      );
+      if (update === 'failed') failedRefs.push(summary.ref);
+      else if (update !== 'unchanged') updates.push({ ref: summary.ref, ...update });
     }
     const vanishedRefs = [...indexedStates.keys()].filter((ref) => !deduped.has(ref));
 
@@ -529,7 +532,7 @@ export class IndexingService {
       this.db.searchIndex.deleteConversation(project.slug, providerId, ref);
       this.observeSearchStep?.({ kind: 'index', operation: 'delete', project: project.slug,
         provider: providerId, ref, durationMs: performance.now() - started });
-      await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
+      await pauseBetweenWrites();
     }
     for (const update of updates) {
       if (options.shouldCommit && !options.shouldCommit()) return;
@@ -537,12 +540,197 @@ export class IndexingService {
       this.db.searchIndex.replaceConversation(project.slug, providerId, update.ref, update.chunks, update.state);
       this.observeSearchStep?.({ kind: 'index', operation: 'replace', project: project.slug,
         provider: providerId, ref: update.ref, rows: update.chunks.length, durationMs: performance.now() - started });
-      await new Promise<void>((resolve) => setTimeout(resolve, SEARCH_INDEX_WRITE_PAUSE_MS));
+      await pauseBetweenWrites();
     }
     // Stamp only a completed refresh. Interrupted work keeps the old version
     // so the next refresh cannot mistake partially rebuilt rows for current ones.
     if (options.shouldCommit && !options.shouldCommit()) return;
     this.db.meta.set(parserVersionKey, parserVersion);
+  }
+
+  /** Search chunks for one conversation, or 'unchanged' when its indexed transcript state still matches the file. */
+  private async buildSearchUpdate(
+    project: ActiveProject,
+    provider: ProviderAdapter,
+    settings: MergedProviderSettings,
+    summary: ConversationSummary,
+    indexed: ConversationSearchStateRow | undefined,
+    hasCurrentParserVersion: boolean,
+  ): Promise<SearchUpdate | 'unchanged' | 'failed'> {
+    const stat = summary.transcriptPath ? await statFileSafe(summary.transcriptPath) : undefined;
+    if (
+      hasCurrentParserVersion
+      && indexed
+      && indexed.transcriptPath === summary.transcriptPath
+      && stat
+      && indexed.size === stat.size
+      && indexed.mtimeMs === stat.mtimeMs
+    ) {
+      return 'unchanged';
+    }
+    try {
+      const conversation = await loadProviderConversationFromSummary(summary)
+        ?? await provider.getConversation(project, summary.ref, settings);
+      if (!conversation) return 'failed';
+      return {
+        chunks: buildConversationSearchChunks({
+          project,
+          conversation: {
+            ...conversation.summary,
+            title: summary.title,
+            isBound: summary.isBound,
+            boundSessionId: summary.boundSessionId,
+          },
+          messages: conversation.messages,
+        }),
+        state: { transcriptPath: summary.transcriptPath, size: stat?.size, mtimeMs: stat?.mtimeMs },
+      };
+    } catch {
+      return 'failed';
+    }
+  }
+
+  /**
+   * Indexes the Codex transcripts that are new or changed since they were last indexed, one file at a
+   * time. Codex chats otherwise reached the index only through a manual refresh, which rescans every
+   * project's whole history. Runs once after startup; the file watcher covers later writes.
+   */
+  async catchUpCodexHistory(): Promise<void> {
+    const projects = await this.projectService.listActiveProjects();
+    this.projectCache = projects;
+    const touched = new Set<string>();
+    for (const group of this.codexProjectGroups(projects)) {
+      if (this.stopped || !(await pathExists(group.sessionsRoot))) continue;
+      const indexedFiles = new Map<string, ConversationSearchStateRow>();
+      for (const project of group.projects) {
+        for (const state of this.db.searchIndex.getConversationStates(project.slug, 'codex').values()) {
+          if (state.transcriptPath) indexedFiles.set(state.transcriptPath, state);
+        }
+      }
+      const files = await listFilesRecursive(group.sessionsRoot, (candidate) => candidate.endsWith('.jsonl'));
+      for (const filePath of files) {
+        if (this.stopped) return;
+        const indexedState = indexedFiles.get(filePath);
+        if (indexedState) {
+          const stat = await statFileSafe(filePath);
+          if (stat && stat.size === indexedState.size && stat.mtimeMs === indexedState.mtimeMs) continue;
+        }
+        let projectSlugs: string[] = [];
+        await this.enqueueRefresh(async () => { projectSlugs = await this.indexCodexFile(filePath); });
+        for (const projectSlug of projectSlugs) touched.add(projectSlug);
+        if (projectSlugs.length > 0) await pauseBetweenWrites();
+        else await yieldToEventLoop();
+      }
+    }
+    // One event per project: listeners re-check that project's Codex sessions once, not once per file.
+    if (!this.stopped) this.emitCodexIndexUpdates([...touched]);
+  }
+
+  private scheduleCodexFileIndex(filePath: string, isGrowth: boolean, delayMs: number): void {
+    const scheduled = this.codexFileTimers.get(filePath);
+    if (isGrowth) {
+      if (scheduled) return;
+      const lastIndexed = this.codexFileIndexedAt.get(filePath);
+      if (lastIndexed) {
+        delayMs = Math.max(delayMs, lastIndexed.at + lastIndexed.minIntervalMs - Date.now());
+      }
+    }
+    clearTimeout(scheduled);
+    this.codexFileTimers.set(filePath, setTimeout(() => {
+      this.codexFileTimers.delete(filePath);
+      let projectSlugs: string[] = [];
+      void this.enqueueRefresh(async () => { projectSlugs = await this.indexCodexFile(filePath); })
+        .then(() => this.emitCodexIndexUpdates(projectSlugs))
+        .catch(() => {
+          // Provider file notifications are advisory; the next write or a manual refresh can retry.
+        });
+    }, delayMs));
+  }
+
+  /** Adds or updates one Codex transcript's index and search rows in each project it belongs to; returns those projects. */
+  private async indexCodexFile(filePath: string): Promise<string[]> {
+    const provider = this.providerRegistry.get('codex');
+    const group = this.codexProjectGroupForTranscript(filePath);
+    if (this.stopped || !group || !(provider instanceof CodexProvider)) return [];
+    const touched: string[] = [];
+    const summaries = await provider.summarizeFileForProjects(filePath, group.projects);
+    const hasFirstMessage = summaries.some((summary) => typeof summary.rawMetadata?.firstUserTextHash === 'string');
+    this.codexFileIndexedAt.set(filePath, {
+      at: Date.now(),
+      minIntervalMs: hasFirstMessage ? CODEX_CHANGED_FILE_MIN_INTERVAL_MS : CODEX_UNTITLED_FILE_MIN_INTERVAL_MS,
+    });
+    for (const summary of summaries) {
+      const project = group.projects.find((candidate) => candidate.slug === summary.projectSlug);
+      if (!project || this.stopped) continue;
+      // A transcript with no user message yet carries a placeholder title; keep the title a live session gave its row.
+      const storedTitle = this.db.conversationIndex.getStoredTitle(project.slug, 'codex', summary.ref);
+      const item = storedTitle !== undefined && typeof summary.rawMetadata?.firstUserTextHash !== 'string'
+        ? { ...summary, title: storedTitle }
+        : summary;
+      if (!isConversationVisibleInDiscovery(item)) continue;
+      this.db.conversationIndex.upsert(item);
+      touched.push(project.slug);
+
+      // Read the row back for the title override and the bound session the search rows carry.
+      const indexed = this.db.conversationIndex.get(project.slug, 'codex', item.ref);
+      if (!indexed) continue;
+      const update = await this.buildSearchUpdate(
+        project,
+        provider,
+        group.settings,
+        indexed,
+        this.db.searchIndex.getConversationState(project.slug, 'codex', indexed.ref),
+        this.db.meta.get(searchParserVersionKey(project.slug, 'codex')) === String(TRANSCRIPT_PARSER_VERSION),
+      );
+      if (update === 'unchanged' || this.stopped) continue;
+      const started = performance.now();
+      if (update === 'failed') {
+        this.db.searchIndex.deleteConversation(project.slug, 'codex', indexed.ref);
+        this.observeSearchStep?.({ kind: 'index', operation: 'delete', project: project.slug,
+          provider: 'codex', ref: indexed.ref, durationMs: performance.now() - started });
+        continue;
+      }
+      this.db.searchIndex.replaceConversation(project.slug, 'codex', indexed.ref, update.chunks, update.state);
+      this.observeSearchStep?.({ kind: 'index', operation: 'replace', project: project.slug,
+        provider: 'codex', ref: indexed.ref, rows: update.chunks.length, durationMs: performance.now() - started });
+    }
+    return touched;
+  }
+
+  private emitCodexIndexUpdates(projectSlugs: string[]): void {
+    if (projectSlugs.length === 0) return;
+    const timestamp = nowIso();
+    this.db.meta.set('lastIndexedAt', timestamp);
+    // Scoped to the project, as the Claude refresh is: its Codex sessions, pending ones included, re-check
+    // their conversation; sessions in other projects and of other providers do not.
+    for (const projectSlug of new Set(projectSlugs)) {
+      this.eventBus.emit({ type: 'conversation.index-updated', projectSlug, provider: 'codex', timestamp });
+    }
+  }
+
+  /** Projects with Codex enabled, grouped by the sessions directory their transcripts live in. */
+  private codexProjectGroups(projects: ActiveProject[]): CodexProjectGroup[] {
+    const groups = new Map<string, CodexProjectGroup>();
+    for (const project of projects) {
+      const settings = this.projectService.getMergedProviderSettings(project, 'codex');
+      if (!settings.enabled) continue;
+      const sessionsRoot = path.join(settings.discoveryRoot, 'sessions');
+      const group = groups.get(sessionsRoot);
+      if (group) group.projects.push(project);
+      else groups.set(sessionsRoot, { sessionsRoot, settings, projects: [project] });
+    }
+    return [...groups.values()];
+  }
+
+  private codexProjectGroupForTranscript(filePath: string): CodexProjectGroup | undefined {
+    // A running chat fires a change event on every write; group once per project list, not per event.
+    if (this.codexGroupsCache?.projects !== this.projectCache) {
+      this.codexGroupsCache = { projects: this.projectCache, groups: this.codexProjectGroups(this.projectCache) };
+    }
+    return this.codexGroupsCache.groups.find((group) => {
+      const relativePath = path.relative(group.sessionsRoot, filePath);
+      return relativePath && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+    });
   }
 
   private async backfillMissingSearchIndexRows(projectsOverride?: ActiveProject[]): Promise<void> {

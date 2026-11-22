@@ -253,6 +253,17 @@ Search updates commit one conversation at a time and pause between writes so a
 full refresh does not hold the live database writer lock for an entire project. A failed individual
 transcript load should not break the conversation tree.
 
+Codex transcripts reach the index one file at a time without a full refresh. After the startup
+search backfill, `catchUpCodexHistory()` indexes every Codex transcript that has no search state or
+whose size or modification time changed, then emits one project-scoped `conversation.index-updated`
+per project it touched; a pass with nothing new reads only the first line of exec and subagent
+transcripts. The watcher then indexes a new transcript about two seconds after it appears and a
+growing one 20 seconds after a write, at most every ten minutes once it has a first message and every
+two minutes before (an agent-launched chat opens with a launch prompt and stays on two). Each file upserts only its own index and search rows,
+never replacing a project's list. Exec runs (`codex exec`) and subagent threads are skipped on this
+path because nobody opens them as chats; a manual refresh still lists them. A chat with no first
+message yet keeps the title a live session already gave its row.
+
 The top-left refresh action explicitly requests recent Codex auto-tracking. The server first
 re-indexes every configured active project, then may resume unbound Codex history with real
 provider activity during the preceding eight hours into Console sessions. Claude discovery is
