@@ -717,7 +717,22 @@ export interface LineTransportFactoryOptions {
   /** How long a connection to a running host may take, and how long its welcome may take. Defaults 3 s and 5 s. For tests. */
   hostConnectTimeoutMs?: number;
   hostWelcomeTimeoutMs?: number;
+  /** `sessions.agentSlice`: start each host in its own systemd scope inside this user slice. */
+  agentSlice?: string;
 }
+
+/**
+ * The command that starts a session host. With a slice, `systemd-run --scope` moves itself into a new scope in that
+ * slice and then execs the host in place, so the spawned PID is still the host's. A failure there (no user manager,
+ * a bad slice) ends the start like any host that exits before it serves; there is no unscoped retry.
+ */
+export function sessionHostSpawn(nodePath: string, hostArgs: string[], agentSlice: string | undefined): { file: string; args: string[] } {
+  if (agentSlice === undefined) return { file: nodePath, args: hostArgs };
+  return { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--slice=${agentSlice}`, '--', nodePath, ...hostArgs] };
+}
+
+// `systemd-run --user` finds the user manager through these; the host's filtered environment drops them.
+const SYSTEMD_USER_ENV_NAMES = ['XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
 
 export interface HostGraces {
   closeGraceMs?: number;
@@ -807,10 +822,18 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
     const program = !fs.existsSync(options.hostProgramPath) && options.hostProgramPath.endsWith('.js') && fs.existsSync(`${options.hostProgramPath.slice(0, -3)}.ts`)
       ? `${options.hostProgramPath.slice(0, -3)}.ts`
       : options.hostProgramPath;
-    const host = spawn(process.execPath, [program, '--socket', paths.socket, '--record', paths.record, '--cwd', request.cwd, '--env-file', paths.env, '--', ...request.argv], {
+    const launch = sessionHostSpawn(process.execPath, [program, '--socket', paths.socket, '--record', paths.record, '--cwd', request.cwd, '--env-file', paths.env, '--', ...request.argv], options.agentSlice);
+    const env = hostEnvironment(process.env);
+    if (options.agentSlice !== undefined) {
+      for (const name of SYSTEMD_USER_ENV_NAMES) {
+        const value = process.env[name];
+        if (value !== undefined) env[name] = value;
+      }
+    }
+    const host = spawn(launch.file, launch.args, {
       detached: true,
       stdio: ['ignore', logFd, logFd],
-      env: hostEnvironment(process.env),
+      env,
       cwd: paths.dir,
     });
     fs.closeSync(logFd);
@@ -824,7 +847,7 @@ export function createLineTransportFactory(options: LineTransportFactoryOptions)
     try {
       const deadline = Date.now() + (options.hostStartTimeoutMs ?? HOST_START_TIMEOUT_MS);
       for (;;) {
-        if (hostError) throw new LineTransportSpawnError(program, hostError);
+        if (hostError) throw new LineTransportSpawnError(options.agentSlice === undefined ? program : launch.file, hostError);
         if (hostExit) throw new Error(`The session host exited before it served (code ${hostExit.code ?? 'none'}, signal ${hostExit.signal ?? 'none'}): ${hostLogTail(paths.log)}`);
         if (fs.existsSync(paths.socket)) {
           try {

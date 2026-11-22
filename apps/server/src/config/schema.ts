@@ -72,6 +72,9 @@ const sessionsConfigSchema = z.preprocess(rejectRemovedKeys({
   restoreGraceHours: z.number().positive().default(1),
   pressureSuspendAvailableMiB: z.number().positive().default(3072),
   pressureSuspendIdleMinutes: z.number().positive().default(60),
+  // The systemd user slice each session host (and so each provider and every job it runs) starts in, so that agents'
+  // builds and tests yield the CPU to the backend under load. Unset: hosts start in the backend's own group.
+  agentSlice: z.string().regex(/^[A-Za-z0-9_:.\\-]+\.slice$/, 'agentSlice must be a systemd slice name ending in .slice').optional(),
 })).default({
   restoreGraceHours: 1,
   pressureSuspendAvailableMiB: 3072,

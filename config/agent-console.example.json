@@ -23,7 +23,8 @@
   "sessions": {
     "restoreGraceHours": 1,
     "pressureSuspendAvailableMiB": 3072,
-    "pressureSuspendIdleMinutes": 60
+    "pressureSuspendIdleMinutes": 60,
+    "agentSlice": "app-agentsessions.slice"
   },
   "structuredSessions": {
     "codex": {

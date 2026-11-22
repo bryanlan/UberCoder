@@ -102,6 +102,7 @@ export async function buildApp(options: AppOptions = {}) {
     runtimeDir: config.runtimeDir,
     log: { info: (fields, message) => app.log.info(fields, message), warn: (fields, message) => app.log.warn(fields, message) },
     hostProgramPath: fileURLToPath(new URL('./providers/transport/session-host.js', import.meta.url)),
+    agentSlice: config.sessions.agentSlice,
   });
   const imageStoreDir = path.join(path.dirname(config.databasePath), 'images');
   const modelProfiles = new ModelProfileService(config.modelRouting, undefined, app.log);

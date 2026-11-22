@@ -12,6 +12,7 @@ import {
   hostPaths,
   LineTransportSpawnError,
   readHostRecord,
+  sessionHostSpawn,
   StdioLineTransport,
   terminateHost,
   terminateHostAt,
@@ -682,6 +683,34 @@ describe('the line transport factory', () => {
     cleanups.push(() => transport.close());
     expect(transport).toBeInstanceOf(StdioLineTransport);
     expect(fs.existsSync(rig.paths.dir)).toBe(false); // no host, no files
+  });
+
+  it('starts the host through systemd-run in the agent slice when one is configured', async () => {
+    expect(sessionHostSpawn('/node', ['host.js', '--x'], undefined)).toEqual({ file: '/node', args: ['host.js', '--x'] });
+    expect(sessionHostSpawn('/node', ['host.js'], 'app-agentsessions.slice')).toEqual({
+      file: 'systemd-run',
+      args: ['--user', '--scope', '--quiet', '--collect', '--slice=app-agentsessions.slice', '--', '/node', 'host.js'],
+    });
+    const rig = factoryRig();
+    // A stand-in systemd-run: records its arguments and the user-manager variable, then execs the host in place as the real one does.
+    const bin = scratch();
+    const seen = path.join(bin, 'seen');
+    fs.writeFileSync(path.join(bin, 'systemd-run'), `#!/bin/sh\nprintf '%s\\n' "$*" "$XDG_RUNTIME_DIR" > '${seen}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`, { mode: 0o755 });
+    const savedPath = process.env.PATH;
+    const savedRuntime = process.env.XDG_RUNTIME_DIR;
+    process.env.PATH = `${bin}:${savedPath ?? ''}`;
+    process.env.XDG_RUNTIME_DIR = '/run/user/test';
+    cleanups.push(() => {
+      process.env.PATH = savedPath;
+      if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = savedRuntime;
+    });
+    const factory = createLineTransportFactory({ runtimeDir: rig.runtimeDir, log, hostProgramPath: HOST_PROGRAM, agentSlice: 'app-agentsessions.slice' });
+    const { transport, lines } = await open(factory, rig.request());
+    await transport.write(line({ cmd: 'echo', text: 'scoped' }));
+    await waitUntil(() => lines.length === 1, 8_000, 'the scoped answer');
+    const [args, runtime] = fs.readFileSync(seen, 'utf8').split('\n');
+    expect(args).toMatch(/^--user --scope --quiet --collect --slice=app-agentsessions\.slice -- \S+ \S+session-host\.(js|ts) --socket /);
+    expect(runtime).toBe('/run/user/test');
   });
 
   it('starts a host the first time and reconnects to it after a backend restart without respawning the child', async () => {

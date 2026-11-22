@@ -23,6 +23,7 @@
 - `apps/web/src/components/` - sidebar, conversation pane shell, and app-level UI components.
 - `apps/web/e2e/` - Playwright browser coverage for settings and explicit project workflows.
 - `config/` - runtime config templates and project/proxy/auth settings shape.
+- `config/systemd/app-agentsessions.slice` - the low-CPU-weight user slice that `sessions.agentSlice` starts session hosts in; see "Config" in `docs/structured-providers.md`.
 - `packages/` - shared TypeScript contracts.
 - `scripts/` - operator or development scripts.
 - `test-results/` - ignored/generated Playwright failure artifacts, not source architecture.

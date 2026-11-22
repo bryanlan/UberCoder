@@ -1,0 +1,9 @@
+# Install as ~/.config/systemd/user/app-agentsessions.slice, run `systemctl --user daemon-reload`, and set
+# "sessions.agentSlice": "app-agentsessions.slice" in the Console config. Agent session hosts then start here,
+# beside agent-console.service (weight 100) in app.slice. Under CPU contention all agent sessions together get
+# about a sixth of the CPU the backend wants; on an idle machine they get all of it.
+[Unit]
+Description=Agent Console agent sessions
+
+[Slice]
+CPUWeight=20

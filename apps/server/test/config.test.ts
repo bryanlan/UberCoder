@@ -553,3 +553,16 @@ describe('ConfigService', () => {
     });
   });
 });
+
+describe('sessions.agentSlice', () => {
+  const sessions = appConfigSchema.shape.sessions;
+  it('is unset by default and accepts a systemd slice name', () => {
+    expect(sessions.parse({}).agentSlice).toBeUndefined();
+    expect(sessions.parse({ agentSlice: 'app-agentsessions.slice' }).agentSlice).toBe('app-agentsessions.slice');
+  });
+  it('rejects a value that is not a slice name', () => {
+    for (const agentSlice of ['app-agentsessions', 'a b.slice', '--user.slice;rm', '']) {
+      expect(sessions.safeParse({ agentSlice }).success, agentSlice).toBe(false);
+    }
+  });
+});

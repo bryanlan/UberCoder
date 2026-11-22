@@ -195,6 +195,16 @@ isolated Console (the proof script) gets its own runtime this way.
   `enabled` leaves the lane on); the example config lists the same values.
 - Turning a lane off later does not change bound rows; they keep working until released.
 
+`sessions.agentSlice` (optional) names a systemd user slice. Each session host then starts through
+`systemd-run --user --scope --slice=<slice>`, which execs the host in place, so the host, its provider process and every
+build or test an agent runs sit in that slice instead of `agent-console.service`. The checked-in
+`config/systemd/app-agentsessions.slice` gives the slice `CPUWeight=20` beside the backend's 100 in `app.slice`: under CPU
+contention the backend's event loop wins, and on an idle machine agents still get the whole CPU. The slice unit must be
+installed in `~/.config/systemd/user/`; without it systemd creates the slice with the default weight and nothing changes.
+If `systemd-run` fails, the host start fails with its log tail; there is no unscoped retry. Unset, hosts start in the
+backend's own group as before. A host started before the key was set stays in the old group until it is next started.
+The slice weighs CPU only: memory and disk are shared as before.
+
 ## Plugin contract (`apps/server/src/providers/transport/types.ts`)
 
 Three levels, as in T3: plugin (static) to instance (one binary and home, shared process if
