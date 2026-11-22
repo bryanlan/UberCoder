@@ -234,6 +234,25 @@ describe('Granted real-session launch pipeline', () => {
     await expect(f.launches.request(f.actor, 'close_session', { sessionId: randomUUID(), requestId })).rejects.toThrow('different session');
   });
 
+  it('retries a close still waiting for its transcript after ten minutes only every five minutes', async () => {
+    const f = await fixture(); await f.launch();
+    const session = f.launches.status(f.actor).requests[0]!.session!, requestId = randomUUID();
+    await f.launches.request(f.actor, 'close_session', { sessionId: session.id, requestId }); await f.launches.drain();
+    const age = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+    const attempted = () => f.launches.status(f.actor, requestId).requests[0]!;
+    // Old request, attempted a minute ago: skipped, so even an indexed transcript waits for the next slot.
+    f.db.sqlite.prepare('update agent_session_requests set created_at=?, updated_at=? where id=?').run(age(60), age(1), requestId);
+    indexHistory(f.db, f.row(session.id));
+    await f.launches.drain();
+    expect(attempted()).toMatchObject({ status: 'queued', reason: expect.stringContaining('transcript') });
+    expect(f.thread(session.id).closed).toBe(false);
+    // Five minutes after the last attempt it runs again and closes.
+    f.db.sqlite.prepare('update agent_session_requests set updated_at=? where id=?').run(age(6), requestId);
+    await f.launches.drain();
+    expect(attempted().status).toBe('completed');
+    expect(f.thread(session.id).closed).toBe(true);
+  });
+
   it('cancels a history-deferred close when the grant is revoked', async () => {
     const f = await fixture(); await f.launch();
     const session = f.launches.status(f.actor).requests[0]!.session!, requestId = randomUUID();

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { observeSqlite, type OperationObserver } from '../runtime/slow-operations.js';
+import { cacheStatements, observeSqlite, type OperationObserver } from '../runtime/slow-operations.js';
 import type { WikiHistoryEntry, WikiPage, WikiPageSummary, WikiSearchResponse } from '@agent-console/shared';
 import { checkoutIdentity } from '../coordination/git.js';
 
@@ -178,6 +178,7 @@ export class WikiService {
     fs.chmodSync(directory, 0o700);
     rejectSymlink(databasePath, 'Wiki database');
     this.sqlite = new Database(databasePath);
+    cacheStatements(this.sqlite);
     if (observe) observeSqlite(this.sqlite, 'wiki', observe);
     fs.chmodSync(databasePath, 0o600);
     this.backupPath = path.join(directory, 'agent-wiki.backup.sqlite');

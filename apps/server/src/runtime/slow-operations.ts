@@ -60,11 +60,37 @@ export async function observeAsync<T>(operation: string, run: () => Promise<T>, 
   }
 }
 
+const STATEMENT_CACHE_LIMIT = 1000;
+
+/**
+ * Reuse compiled statements by SQL text. Repositories call `prepare` inside hot loops; compiling the
+ * same SQL again was 17% of the backend's event loop on 2026-11-21. Statements are only ever used
+ * synchronously with `get`, `all` and `run` (no `iterate`, `pluck`, `raw` or `expand`), so sharing one
+ * per SQL text is safe. The bound covers SQL built with a variable number of placeholders.
+ */
+export function cacheStatements(db: Database.Database): void {
+  const prepare = db.prepare.bind(db);
+  const statements = new Map<string, Database.Statement>();
+  db.prepare = ((sql: string) => {
+    const cached = statements.get(sql);
+    if (cached) { statements.delete(sql); statements.set(sql, cached); return cached; }
+    const statement = prepare(sql);
+    statements.set(sql, statement);
+    if (statements.size > STATEMENT_CACHE_LIMIT) statements.delete(statements.keys().next().value!);
+    return statement;
+  }) as typeof db.prepare;
+}
+
+const observedStatements = new WeakSet<object>();
+
 /** Preserve native statement identity, bindings and fluent options. Never record SQL or parameters. */
 export function observeSqlite(db: Database.Database, scope: 'main' | 'wiki', observe: OperationObserver): void {
   const prepare = db.prepare.bind(db);
   db.prepare = ((sql: string) => {
     const statement = observeSync(`${scope}.sqlite.prepare`, () => prepare(sql), observe, sql);
+    // A cached statement is already wrapped; wrapping it again would nest the timers on every call.
+    if (observedStatements.has(statement)) return statement;
+    observedStatements.add(statement);
     for (const method of ['get', 'all', 'run'] as const) {
       const original = statement[method].bind(statement);
       Object.defineProperty(statement, method, { configurable: true, writable: true,

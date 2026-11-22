@@ -22,6 +22,9 @@ interface RequestRow { id: string; assignment_id: string; grant_id: string; acti
   status: 'queued' | 'starting' | 'completed' | 'failed' | 'cancelled'; session_id: string;
   input_json: string; reason: string | null; created_at: string; updated_at: string }
 
+const CLOSE_FAST_RETRY_MS = 10 * 60_000;
+const CLOSE_SLOW_RETRY_MS = 5 * 60_000;
+
 /** Durable session actions, using the same project/provider/session pipeline as the UI. */
 export class AgentSessionLaunches {
   private running?: Promise<void>;
@@ -218,9 +221,22 @@ export class AgentSessionLaunches {
       return true;
     })();
   }
+  /**
+   * A close put back in the queue (it is waiting for the transcript to be indexed) is retried on
+   * the 5 s poll for its first ten minutes, then every five minutes. Closes left waiting for weeks
+   * once made up 16% of the backend's work, re-checking grants and logging two writes each, every
+   * 5 s (2026-11-21).
+   */
+  private closeRetryPending(row: RequestRow, now = Date.now()): boolean {
+    if (row.status !== 'queued' || row.reason === null) return false;
+    const lastAttempt = Date.parse(row.updated_at), age = now - Date.parse(row.created_at);
+    if (!Number.isFinite(lastAttempt) || !Number.isFinite(age) || age < CLOSE_FAST_RETRY_MS) return false;
+    return now - lastAttempt < CLOSE_SLOW_RETRY_MS;
+  }
   private async process(row: RequestRow): Promise<void> {
     const input = JSON.parse(row.input_json) as LaunchInput;
     if (row.action === 'close_session') {
+      if (this.closeRetryPending(row)) return;
       const actor = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(row.assignment_id) as { status: string } | undefined;
       if (!actor || actor.status === 'finished') { this.update(row, 'cancelled', 'The requesting assignment has finished.'); return; }
       const authorized = () => this.grants.grantsFor(row.assignment_id).some(grant => grant.id === row.grant_id

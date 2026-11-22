@@ -60,6 +60,10 @@ export function setAwaiting(db: AppDatabase, id: string, description: string | n
 
 /** Durable, once-per-wait inbox alert, retried if the supervisor inbox is full. */
 export function alertOverdueAwait(db: AppDatabase, id: string, now = Date.now()): boolean {
+  // The wake pass asks this of every unfinished assignment (about 2,000 on 2026-11-21); only an
+  // un-alerted wait can produce an alert, so the rest skip the expiry sweep and the write transaction.
+  const candidate = continuationControl(db, id);
+  if (candidate.continuation !== 'unattended' || !candidate.awaiting || candidate.awaiting.alerted) return false;
   expireMessages(db, now);
   return db.sqlite.transaction(() => {
     const control = continuationControl(db, id), awaiting = control.awaiting;

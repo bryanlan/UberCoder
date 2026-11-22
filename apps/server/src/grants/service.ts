@@ -106,7 +106,9 @@ export class GrantService {
     const session = this.sessionFor(assignmentId);
     const inherited = session?.launchContext?.grantIds ?? [];
     const projectSlug = session?.projectSlug ?? this.db.meta.get(`assignment-project:${assignmentId}`);
-    return this.allGrants().filter(grant => grant.status === 'active' && (inherited.includes(grant.id)
+    // Only a stored active row can still be active; skip building the revoked, denied and expired history.
+    const active = this.grantsFromRows(this.db.sqlite.prepare("select * from agent_grants where status='active' order by created_at desc").all() as GrantRow[]);
+    return active.filter(grant => grant.status === 'active' && (inherited.includes(grant.id)
       || (grant.grantee.kind === 'assignment' && grant.grantee.id === assignmentId)
       || (grant.grantee.kind === 'session' && grant.grantee.id === session?.id)
       || (grant.grantee.kind === 'project' && grant.grantee.id === projectSlug)));

@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import Database from 'better-sqlite3';
 import { afterEach, expect, it, vi } from 'vitest';
-import { observeAsync, observeSqlite, type OperationObserver } from '../src/runtime/slow-operations.js';
+import { cacheStatements, observeAsync, observeSqlite, type OperationObserver } from '../src/runtime/slow-operations.js';
 import { readCoordinationTelemetry, recordCoordinationTelemetry, startCoordinationTelemetry } from '../src/coordination/telemetry.js';
 import type { CoordinationTelemetryRecord } from '../../../scripts/coordination-telemetry.mjs';
 import { AppDatabase } from '../src/db/database.js';
@@ -111,4 +111,21 @@ it('keeps only the longest 20 operation observations and 10 lag windows in a str
   expect(result.summary.operations.slowest).toHaveLength(20);
   expect(result.summary.operations.slowest[0]!.durationMs).toBe(1029);
   expect(result.summary.eventLoop.slowestWindows).toHaveLength(10);
+});
+
+it('reuses compiled statements and keeps one timing wrapper per cached statement', () => {
+  const db = new Database(':memory:');
+  cacheStatements(db);
+  const records: CoordinationTelemetryRecord[] = [];
+  observeSqlite(db, 'main', record => records.push(record));
+  db.exec('create table t(v integer)');
+  const first = db.prepare('insert into t values(?)'), second = db.prepare('insert into t values(?)');
+  expect(second).toBe(first);
+  const wrapped = first.run;
+  db.prepare('insert into t values(?)');
+  expect(first.run).toBe(wrapped);
+  for (let i = 0; i < 3; i++) db.prepare('insert into t values(?)').run(i);
+  expect(db.prepare('select count(*) as n from t').get()).toEqual({ n: 3 });
+  expect(() => db.prepare('select nope from missing')).toThrow();
+  db.close();
 });

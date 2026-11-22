@@ -567,7 +567,7 @@ export class SessionManager {
   }
 
   private listRestorableSessions(): BoundSession[] {
-    return this.db.boundSessions.list().filter((session) => session.shouldRestore && session.status !== 'ended');
+    return this.db.boundSessions.listRestorable();
   }
 
   listActiveSessions(): BoundSession[] {
@@ -647,7 +647,15 @@ export class SessionManager {
     // Historical unfinished assignments can vastly outnumber loaded bindings.
     // Read binding history once per pass, then revalidate each match under its lock.
     expireMessages(this.db);
-    const restorableSessions = this.listRestorableSessions();
+    // Index once per pass: the recipient list includes every unfinished assignment, most with no loaded session.
+    const restorableByNativeId = new Map<string, BoundSession[]>();
+    for (const session of this.listRestorableSessions()) {
+      for (const ref of new Set([session.conversationRef, session.resumeConversationRef])) {
+        if (!ref) continue;
+        const key = `${session.provider}\0${ref}`;
+        restorableByNativeId.set(key, [...(restorableByNativeId.get(key) ?? []), session]);
+      }
+    }
     const recipients = this.db.sqlite.prepare(`select distinct a.id, a.provider, a.native_session_id as nativeSessionId,
       a.pid, a.process_start as processStart from coordination_assignments a
       where a.status!='finished' or exists(select 1 from coordination_messages m where m.recipient_id=a.id and m.acknowledged_at is null)`).all() as Array<{
@@ -656,10 +664,9 @@ export class SessionManager {
     for (const recipient of recipients) {
       if (this.stopped) return;
       if (alertOverdueAwait(this.db, recipient.id)) this.requestAssignmentWake();
-      if (peerWakePaused(this.db, recipient.id)) continue;
-      const sessions = restorableSessions.filter((session) => session.provider === recipient.provider
-        && (session.conversationRef === recipient.nativeSessionId || session.resumeConversationRef === recipient.nativeSessionId));
+      const sessions = restorableByNativeId.get(`${recipient.provider}\0${recipient.nativeSessionId}`) ?? [];
       if (sessions.length !== 1) continue;
+      if (peerWakePaused(this.db, recipient.id)) continue;
       const session = sessions[0]!;
       await this.runtimes.run(session.id, 'assignmentWake', async () => {
         const pending = () => {

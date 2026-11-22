@@ -338,6 +338,12 @@ export class BoundSessionsRepo {
     return rows.map(row => this.mapRow(row));
   }
 
+  /** Sessions that still own a conversation: `list()` filtered to shouldRestore and not ended, in the same order. */
+  listRestorable(): BoundSession[] {
+    const rows = this.sqlite.prepare(`select * from bound_sessions where should_restore = 1 and status != 'ended' order by updated_at desc`).all() as SqliteRow[];
+    return rows.map(row => this.mapRow(row));
+  }
+
   /** Every retained agent launch the person has not replied in, including sessions that have ended and left the chat tree. */
   listAgentLaunchMarks(): AgentLaunchMark[] {
     const rows = this.sqlite.prepare(`
