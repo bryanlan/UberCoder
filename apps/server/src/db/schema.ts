@@ -1,7 +1,10 @@
 import Database from 'better-sqlite3';
 import { createCoordinationSchema, retireCoordinationEnforcement } from '../coordination/schema.js';
 
-export const CURRENT_SCHEMA_VERSION = 25;
+export const CURRENT_SCHEMA_VERSION = 26;
+
+/** Shared by migration 26's partial index and the flush query: SQLite uses the index only when the query repeats this text. */
+export const BLOCKED_SUPERVISOR_HANDOFF_SQL = "key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null";
 
 interface Migration {
   version: number;
@@ -353,6 +356,19 @@ const MIGRATIONS: Migration[] = [
       create trigger if not exists typed_input_records_no_delete before delete on typed_input_records
         begin select raise(abort, 'typed_input_records is append-only'); end;
     `);
+  } },
+  { version: 26, name: 'background-loop-indexes', up(sqlite) {
+    // Each assignment wake pass, every few seconds, asks which assignments have unacknowledged mail; each project tree read,
+    // and each session lookup by conversation, finds the newest row for a conversation. Without these indexes the
+    // first read every acknowledged message (~70k rows, 70 MB) and the second compared every session row with every
+    // other; on the live file that was 267 ms and 486 ms per call and kept the event loop busy (2026-11-22).
+    // The handoff index holds only blocked handoffs, which the flush loop looks for among thousands of delivered ones.
+    if (tableExists(sqlite, 'coordination_messages')) sqlite.exec(`create index if not exists coordination_messages_pending_recipient
+      on coordination_messages(recipient_id, created_at) where acknowledged_at is null`);
+    if (tableExists(sqlite, 'bound_sessions')) sqlite.exec(`create index if not exists bound_sessions_conversation
+      on bound_sessions(project_slug, provider, conversation_ref)`);
+    if (tableExists(sqlite, 'meta')) sqlite.exec(`create index if not exists meta_blocked_supervisor_handoffs on meta(key)
+      where ${BLOCKED_SUPERVISOR_HANDOFF_SQL}`);
   } },
 ];
 

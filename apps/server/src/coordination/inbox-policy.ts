@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { CoordinationMessage, MessageOptions, MessagePriority } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
+import { BLOCKED_SUPERVISOR_HANDOFF_SQL } from '../db/schema.js';
 
 export const MAIL_NOTICE_INTERVAL_MS = 15 * 60_000;
 export const DEFAULT_VALID_FOR = 3600;
@@ -56,7 +57,7 @@ export function migrateMessagePolicies(db: AppDatabase): void {
     const messages = db.sqlite.prepare('select id,sender_id sender,recipient_id recipient,text,created_at createdAt,acknowledged_at acknowledgedAt from coordination_messages')
       .all() as Array<{ id: string; sender: string; recipient: string; text: string; createdAt:string; acknowledgedAt: string | null }>;
     for (const m of messages) if (!db.meta.get(messagePolicyKey(m.id))) setMessagePolicy(db, m.id, m.sender, m.recipient, m.text, {origin:'migrated',createdAt:m.createdAt}, Date.now(), !m.acknowledgedAt);
-    const held = db.sqlite.prepare("select value from meta where key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null").all() as Array<{ value: string }>;
+    const held = db.sqlite.prepare(`select value from meta where ${BLOCKED_SUPERVISOR_HANDOFF_SQL}`).all() as Array<{ value: string }>;
     for (const row of held) {
       const h = JSON.parse(row.value);
       if (!db.meta.get(messagePolicyKey(h.messageId))) setMessagePolicy(db, h.messageId, h.workerId, h.recipientId, h.text);

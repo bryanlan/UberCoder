@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentReference, AssignmentContinuation, CoordinationAssignment, CoordinationEvent, CoordinationMessage, CoordinationScope, CoordinationSnapshot, CoordinationSendReceipt, MessageOptions } from '@agent-console/shared';
 import type { AppDatabase } from '../db/database.js';
+import { BLOCKED_SUPERVISOR_HANDOFF_SQL } from '../db/schema.js';
 import { checkoutIdentity } from './git.js';
 import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseDetailsKey, type PeerWakeAttempt, type AutomaticInputPause } from './wake.js';
 import { CONTINUATION_POLICY, continuationControl, setAwaiting, saveContinuation, setContinuation } from './continuation.js';
@@ -672,7 +673,7 @@ export class CoordinationService {
 
   private flushSupervisorHandoffs(): void {
     expireMessages(this.db);
-    const rows = this.db.sqlite.prepare("select key,value from meta where key>='supervisor-handoff:' and key<'supervisor-handoff;' and json_extract(value,'$.blockedReason') is not null")
+    const rows = this.db.sqlite.prepare(`select key,value from meta where ${BLOCKED_SUPERVISOR_HANDOFF_SQL}`)
       .all() as Array<{ key: string; value: string }>;
     for (const row of rows) {
       const handoff = JSON.parse(row.value) as { messageId: string; recipientId: string; workerId: string; timestamp: string; text: string; blockedReason?: string };
