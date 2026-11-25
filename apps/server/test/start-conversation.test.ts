@@ -10,7 +10,7 @@ const PROFILES = JSON.stringify({ profiles: {
   codex: { provider: 'openai', levels: { ultra: level('gpt-6-astra', 'GPT-6 Astra', 'xhigh'), high: level('gpt-6.1-sol', 'GPT-6.1 Sol', 'xhigh'), medium: level('gpt-6.1-terra', 'GPT-6.1 Terra', 'high'), low: level('gpt-6-luna', 'GPT-6 Luna', 'xhigh') } },
   claude: { provider: 'anthropic', levels: { ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high') } },
   // Grok has no Ultra or High model.
-  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
+  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.7', 'Grok 4.7', 'high') } },
 } });
 const routed = (vendor: string, model: string, label: string, effort: string, extra: Record<string, unknown> = {}) => JSON.stringify({
   status: 'route', schema_version: 2, selection_source: 'jev', provider: vendor, model, label, effort, launch_name: model, quota_state: 'tight',
@@ -293,7 +293,7 @@ describe('Grok sessions in the Console', () => {
       await expect(f.manager.requestModelProfile(id, profile)).rejects.toThrow(`Grok has no ${profile === 'ultra' ? 'Ultra' : 'High'} model.`);
       expect(f.row(id)).toMatchObject({ grokProfile: 'auto', modelProfileRequest: undefined });
     }
-    for (const [profile, model, effort] of [['medium', 'grok-4.7', 'high'], ['low', 'grok-4.6', 'medium']] as const) {
+    for (const [profile, model, effort] of [['medium', 'grok-4.7', 'high'], ['low', 'grok-4.7', 'high']] as const) {
       await f.manager.requestModelProfile(id, profile);
       await expect.poll(() => f.row(id).grokProfile).toBe(profile);
       expect(f.row(id)).toMatchObject({ modelProfileRequest: undefined, autoRoute: undefined });

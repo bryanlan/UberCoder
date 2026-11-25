@@ -27,7 +27,7 @@ const PROFILES_JSON = JSON.stringify({ profiles: {
     medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high'),
   } },
   grok: { provider: 'xai', levels: {
-    medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
+    medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.7', 'Grok 4.7', 'high'),
   } },
 } });
 const ROUTE_JSON = {
@@ -273,7 +273,7 @@ describe('Grok and the provider-neutral route', () => {
     const service = new ModelProfileService({}, runner({ profiles: () => PROFILES_JSON }).run);
     const profiles = await service.profiles();
     expect(profiles.providers.grok.routerProvider).toBe('xai');
-    expect(profiles.providers.grok.levels.low).toEqual({ model: 'grok-4.6', label: 'Grok 4.6', effort: 'medium', launchName: 'grok-4.6' });
+    expect(profiles.providers.grok.levels.low).toEqual({ model: 'grok-4.7', label: 'Grok 4.7', effort: 'high', launchName: 'grok-4.7' });
     expect(await service.entry('grok', 'medium')).toMatchObject({ launchName: 'grok-4.7', effort: 'high' });
   });
 

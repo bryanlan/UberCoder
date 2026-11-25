@@ -19,7 +19,7 @@ const PROFILES = JSON.stringify({ profiles: {
     high: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), medium: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'), low: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'),
   } },
   grok: { provider: 'xai', levels: {
-    high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium'),
+    high: level('grok-4.7', 'Grok 4.7', 'xhigh'), medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.7', 'Grok 4.7', 'high'),
   } },
 } });
 

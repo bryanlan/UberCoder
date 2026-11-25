@@ -31,7 +31,7 @@ const LEVELS = {
   },
   xai: {
     medium: at('grok-4.7', 'Grok 4.7', 'high'),
-    low: at('grok-4.6', 'Grok 4.6', 'medium'),
+    low: at('grok-4.7', 'Grok 4.7', 'high'),
   },
   mistral: {
     medium: { ...at('glm-5.3', 'GLM-5.3', 'high'), launch_name: 'glm-5-3' },

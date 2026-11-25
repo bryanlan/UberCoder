@@ -14,7 +14,7 @@ const PROFILES = JSON.stringify({ profiles: {
     ultra: level('claude-fable-5-1', 'Claude Fable 5.1', 'xhigh'), high: level('claude-opus-5-5', 'Claude Opus 5.5', 'xhigh'),
     medium: level('claude-sonnet-5-5', 'Claude Sonnet 5.5', 'high'), low: level('claude-haiku-5-5', 'Claude Haiku 5.5', 'high'),
   } },
-  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.6', 'Grok 4.6', 'medium') } },
+  grok: { provider: 'xai', levels: { medium: level('grok-4.7', 'Grok 4.7', 'high'), low: level('grok-4.7', 'Grok 4.7', 'high') } },
 } });
 const routed = (model: string, label: string, effort: string, extra: Record<string, unknown> = {}) => JSON.stringify({
   status: 'route', role: 'implementer', model, label, effort, launch_name: model, quota_state: 'on_pace',
