@@ -1,7 +1,7 @@
 // This fixed control notice carries no peer text and grants no task authority.
 // Providers record it as native input; transcript adapters classify it separately.
 import type { AppDatabase } from '../db/database.js';
-export { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, isCoordinationWakePrompt } from '../../../../scripts/coordination-notices.mjs';
+export { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, coordinationWakeStatus, isCoordinationWakePrompt, isScheduledWakePrompt, scheduledWakePrompt } from '../../../../scripts/coordination-notices.mjs';
 
 export const peerWakeAttemptKey = (messageId: string) => `peer-wake-attempt:${messageId}`;
 export const peerWakeFollowupKey = (messageId: string) => `peer-wake-followup:${messageId}`;

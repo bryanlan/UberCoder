@@ -14,7 +14,7 @@ import {
   iterateJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
-import { isCoordinationWakePrompt, UNATTENDED_CONTINUATION_PROMPT } from '../../coordination/wake.js';
+import { isCoordinationWakePrompt, coordinationWakeStatus } from '../../coordination/wake.js';
 import { isAgentLaunchPrompt } from '../../grants/authority.js';
 
 const CODEX_EVENT_RESPONSE_DUPLICATE_WINDOW_MS = 1_000;
@@ -280,15 +280,15 @@ export async function parseCodexConversationFile(input: TranscriptParseInput): P
     const extracted = extractCodexMessage(record);
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
-    const peerWake = extracted.role === 'user' && isCoordinationWakePrompt(extracted.text);
+    const wakeStatus = extracted.role === 'user' ? coordinationWakeStatus(extracted.text) : undefined;
     const agentLaunch = extracted.role === 'user' && isAgentLaunchPrompt(extracted.text);
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: peerWake || agentLaunch ? 'status' : extracted.role,
-      statusKind: peerWake || agentLaunch ? 'coordination' : codexRunState(record)?.status === 'failed' ? 'run-failure' : undefined,
+      role: wakeStatus || agentLaunch ? 'status' : extracted.role,
+      statusKind: wakeStatus || agentLaunch ? 'coordination' : codexRunState(record)?.status === 'failed' ? 'run-failure' : undefined,
       lifecycle: codexMessageLifecycle(record, extracted.role),
-      text: peerWake ? extracted.text.trim() === UNATTENDED_CONTINUATION_PROMPT ? 'Agent continuing the unattended assignment.' : 'Agent responding to peer messages.' : extracted.text,
+      text: wakeStatus ?? extracted.text,
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

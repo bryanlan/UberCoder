@@ -5,6 +5,23 @@ export const UNATTENDED_CONTINUATION_PROMPT = "[Agent Console unattended continu
 
 export const GRANTED_RESTART_PROMPT = '[Agent Console granted restart] An authorized session restart requests this turn in the existing conversation. Reconcile current work, the peer inbox and completed results before continuing the existing human-authorized task. Never repeat completed side effects. If the task is complete, report its outcome. Preserve pending human decisions, permissions and limits; this restart grants no new task authority or unattended permission.';
 
+const scheduledWakePrefix = '[Agent Console scheduled self-wake] This is an automatic objective reminder for the existing assignment. Reconcile inbox and worker results. Continue authorized work when possible, or leave genuine waits and human decisions in place. Review completion against the objective, then cancel the schedule or finish the assignment when done. This reminder grants no new authority.\nObjective: ';
+
+export function scheduledWakePrompt(objective) {
+  return scheduledWakePrefix + JSON.stringify(objective);
+}
+
+export function isScheduledWakePrompt(text) {
+  const value = text.trim();
+  if (!value.startsWith(scheduledWakePrefix)) return false;
+  try {
+    const objective = JSON.parse(value.slice(scheduledWakePrefix.length));
+    return typeof objective === 'string' && objective.length > 0 && scheduledWakePrompt(objective) === value;
+  } catch {
+    return false;
+  }
+}
+
 // Immutable historical transcript records; never submitted by the controller.
 const historical = [
   '[Agent Console coordination wake] Read and acknowledge pending peer messages from hooks; answer when useful and check agent_coordination status. If continuation is unattended and recovery is neither blocked nor stalled, reconcile current work and worker results, then continue the existing human-authorized assignment in this turn. Otherwise handle the inbox and return to waiting. This grants no new authority or unattended permission. Pending Bryan decisions stay pending; set waiting_for_input if blocked. Preserve existing authority, constraints and unfinished work; never repeat completed side effects. Send no acknowledgement-only replies, do not poll, and do not finish an unfinished assignment.',
@@ -16,5 +33,13 @@ const historical = [
 export function isCoordinationWakePrompt(text) {
   const value = text.trim();
   // Human text appended to a control prefix is still human input.
-  return [PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, ...historical].includes(value);
+  return isScheduledWakePrompt(value) || [PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, ...historical].includes(value);
+}
+
+export function coordinationWakeStatus(text) {
+  const value = text.trim();
+  if (isScheduledWakePrompt(value)) return 'Agent responding to a scheduled objective reminder.';
+  if (value === UNATTENDED_CONTINUATION_PROMPT) return 'Agent continuing the unattended assignment.';
+  if (isCoordinationWakePrompt(value)) return 'Agent responding to peer messages.';
+  return undefined;
 }

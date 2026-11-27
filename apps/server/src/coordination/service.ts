@@ -8,6 +8,7 @@ import { peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, peerWakePauseD
 import { CONTINUATION_POLICY, continuationControl, setAwaiting, saveContinuation, setContinuation } from './continuation.js';
 import type { GrantService } from '../grants/service.js';
 import { assignmentTask, dispatchEligible, updateTask, type TaskInput } from './tasks.js';
+import { cancelSelfWake, saveSelfWake, selfWakeSchedule, type SelfWakeInput, type SelfWakeSchedule } from './self-wake.js';
 import { BroadcastBoard } from './broadcasts.js';
 import { GRANT_POLICY } from '../grants/schema.js';
 import { MAIL_NOTICE_INTERVAL_MS, acceptsMessages, expiryKey, expireMessages, hasInboxSpace, messageHash, messagePolicy, messagePolicyKey, migrateMessagePolicies, setMessagePolicy, validateMessageOptions, sendOnlyKey, withMessagePolicy } from './inbox-policy.js';
@@ -241,6 +242,7 @@ export class CoordinationService {
       }
       if (input.task) {
         const task = updateTask(this.db, id, input.task);
+        if (task.state === 'done') cancelSelfWake(this.db, id);
         if (task.state !== current.task?.state || (task.state === 'blocked' && task.actionNeeded !== current.task?.actionNeeded)) {
           if (task.state === 'done') {
             this.notifySupervisor(id, 'A supervised worker completed its task.', input);
@@ -252,6 +254,33 @@ export class CoordinationService {
       }
       this.requestWake?.();
       return { assignment: this.assignment(id) };
+    }).immediate();
+  }
+
+  selfWake(id: string, input?: SelfWakeInput | null) {
+    return this.db.sqlite.transaction(() => {
+      const assignment = this.assignment(id);
+      if (input === undefined) return { schedule: selfWakeSchedule(this.db, id) ?? null };
+      if (input === null) {
+        cancelSelfWake(this.db, id);
+        return { schedule: null };
+      }
+      if (assignment.status !== 'active' && assignment.status !== 'waiting') throw new Error('Resume this assignment before scheduling a wake.');
+      if (assignment.continuation !== 'unattended' || peerWakePaused(this.db, id)
+        || ['done', 'blocked'].includes(assignment.task?.state ?? '')) {
+        throw new Error('Self-wake requires an unattended, unfinished assignment with automatic input enabled.');
+      }
+      if (['blocked', 'stalled', 'submitting'].includes(assignment.recovery?.status ?? '')) {
+        throw new Error('Review the existing continuation recovery before scheduling a wake.');
+      }
+      const binding = this.structuredBinding(assignment.provider, assignment.nativeSessionId);
+      if (!binding) throw new Error('Self-wake requires a unique, restorable Console conversation for this assignment.');
+      const schedule: SelfWakeSchedule = {
+        ...input, id: randomUUID(), sessionId: binding.id, state: 'scheduled',
+        nextWakeAt: new Date(Date.now() + input.intervalSeconds * 1000).toISOString(),
+      };
+      saveSelfWake(this.db, id, schedule);
+      return { schedule };
     }).immediate();
   }
 
@@ -527,6 +556,7 @@ export class CoordinationService {
   finish(id: string, summary: string, options: MessageOptions = {}, notifiedSupervisorId?: string) {
     return this.db.sqlite.transaction(() => {
       const current = this.assignment(id);
+      cancelSelfWake(this.db, id);
       if (current.status === 'finished') return { finished: true };
       if (current.supervisorId && current.task?.state !== 'done') validateMessageOptions(options);
       setContinuation(this.db, id, 'waiting_for_input');
@@ -572,6 +602,7 @@ export class CoordinationService {
       const finish = this.db.sqlite.prepare("update coordination_assignments set status='finished' where id=? and status='disconnected'");
       const closed = ids.filter((id) => finish.run(id).changes > 0);
       for (const id of closed) {
+        cancelSelfWake(this.db, id);
         setContinuation(this.db, id, 'waiting_for_input');
         this.event(id, null, 'finished', STALE_ASSIGNMENT_NOTE);
       }

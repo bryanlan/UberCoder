@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { NormalizedMessage } from '@agent-console/shared';
 import { stableTextHash } from '../../lib/text.js';
-import { isCoordinationWakePrompt, UNATTENDED_CONTINUATION_PROMPT } from '../../coordination/wake.js';
+import { coordinationWakeStatus } from '../../coordination/wake.js';
 import { isAgentLaunchPrompt } from '../../grants/authority.js';
 import { asObject, buildParsedTranscript, loadJsonlRecords } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
@@ -52,17 +52,15 @@ export async function parseGrokConversationFile(input: TranscriptParseInput): Pr
     const text = open.text;
     open = undefined;
     if (!text.trim()) return;
-    const peerWake = role === 'user' && isCoordinationWakePrompt(text);
+    const wakeStatus = role === 'user' ? coordinationWakeStatus(text) : undefined;
     const agentLaunch = role === 'user' && isAgentLaunchPrompt(text);
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${role}:${text}`),
       provider: input.provider,
-      role: peerWake || agentLaunch ? 'status' : role,
+      role: wakeStatus || agentLaunch ? 'status' : role,
       lifecycle: 'durable',
-      text: peerWake
-        ? text.trim() === UNATTENDED_CONTINUATION_PROMPT ? 'Agent continuing the unattended assignment.' : 'Agent responding to peer messages.'
-        : text,
-      ...(peerWake || agentLaunch ? { statusKind: 'coordination' as const } : {}),
+      text: wakeStatus ?? text,
+      ...(wakeStatus || agentLaunch ? { statusKind: 'coordination' as const } : {}),
       timestamp,
       conversationRef: input.conversationRef,
       source: 'history-file',

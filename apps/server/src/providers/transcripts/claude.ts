@@ -13,7 +13,7 @@ import {
   loadJsonlRecords,
 } from './base.js';
 import type { ParsedTranscript, TranscriptParseInput } from './types.js';
-import { isCoordinationWakePrompt, UNATTENDED_CONTINUATION_PROMPT } from '../../coordination/wake.js';
+import { isCoordinationWakePrompt, coordinationWakeStatus } from '../../coordination/wake.js';
 import { isAgentLaunchPrompt } from '../../grants/authority.js';
 import { claudeRunError } from './claude-run-state.js';
 
@@ -209,7 +209,7 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     if (!extracted) continue;
     const timestamp = extractTimestamp(record, fallbackTime);
     const isSummary = record.isCompactSummary === true;
-    const peerWake = extracted.role === 'user' && isCoordinationWakePrompt(extracted.text);
+    const wakeStatus = extracted.role === 'user' ? coordinationWakeStatus(extracted.text) : undefined;
     const agentLaunch = extracted.role === 'user' && isAgentLaunchPrompt(extracted.text);
     const runError = claudeRunError(record);
     const compactionTrigger = recordUuid !== undefined && compactionTriggers.has(recordUuid)
@@ -218,13 +218,13 @@ export async function parseClaudeConversationFile(input: TranscriptParseInput): 
     messages.push({
       id: stableTextHash(`${input.provider}:${input.conversationRef}:${input.filePath}:${index}:${extracted.role}:${extracted.text}`),
       provider: input.provider,
-      role: isSummary || peerWake || agentLaunch || runError ? 'status' : extracted.role,
+      role: isSummary || wakeStatus || agentLaunch || runError ? 'status' : extracted.role,
       lifecycle: 'durable',
       text: isSummary
         ? compactionTrigger === 'auto' ? '[Claude auto summarized]' : '[Claude summarized]'
-        : peerWake ? extracted.text.trim() === UNATTENDED_CONTINUATION_PROMPT ? 'Agent continuing the unattended assignment.' : 'Agent responding to peer messages.' : runError ? `Run stopped: ${runError.message}` : extracted.text,
+        : wakeStatus ? wakeStatus : runError ? `Run stopped: ${runError.message}` : extracted.text,
       ...(isSummary ? { statusKind: 'compaction' as const } : {}),
-      ...(peerWake || agentLaunch ? { statusKind: 'coordination' as const } : {}),
+      ...(wakeStatus || agentLaunch ? { statusKind: 'coordination' as const } : {}),
       ...(runError ? { statusKind: 'run-failure' as const } : {}),
       timestamp,
       conversationRef: input.conversationRef,

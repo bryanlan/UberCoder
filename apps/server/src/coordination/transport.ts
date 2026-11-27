@@ -18,7 +18,7 @@ const text = z.string().trim().min(1);
 // (it loads Claude's hooks), and is also a Console provider that runs on the structured transport.
 const coordinationProviders = PROVIDERS;
 const inputSchema = z.object({
-  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']),
+  action: z.enum(['register', 'poll', 'status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'disconnect', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch', 'self_wake']),
   assignmentId: z.string().uuid().optional(), token: z.string().min(32).max(256).optional(),
   provider: z.enum(coordinationProviders).optional(), nativeSessionId: text.max(160).optional(),
   pid: z.number().int().positive().optional(), cwd: text.max(4096).optional(), checkout: text.max(4096).optional(),
@@ -31,6 +31,7 @@ const inputSchema = z.object({
   status: z.enum(['active', 'waiting']).optional(),
   continuation: z.enum(['unattended', 'waiting_for_input']).optional(), supervisorId: z.string().uuid().nullable().optional(),
   task: z.object({ deliverable: text.max(500).optional(), doneWhen: text.max(500).optional(), evidencePath: text.max(1000).optional(), state: z.enum(['working', 'blocked', 'done']).optional(), actionNeeded: text.max(500).nullable().optional() }).strict().optional(),
+  schedule: z.object({ intervalSeconds: z.number().int().min(60).max(604800), objective: text.max(1000) }).strict().nullable().optional(),
   expectedTaskRevision: z.number().int().nonnegative().optional(), awaiting: text.max(500).nullable().optional(),
   offset: z.number().int().nonnegative().default(0),
   successorId: z.string().uuid().optional(),
@@ -56,6 +57,10 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     || (input.task?.state !== undefined && input.task.state !== 'working') || input.task?.actionNeeded)) {
     throw new Error('Dispatch activates a working task once within existing authority. Omit priority, validFor and blocked/done state; informational mail uses send.');
   }
+  if (input.schedule !== undefined && input.action !== 'self_wake') throw new Error('The schedule field requires action self_wake.');
+  if (input.action === 'self_wake' && (input.recipientId !== undefined || input.consoleSessionId !== undefined || input.priority !== undefined)) {
+    throw new Error('Self-wake is scoped to the calling assignment. Omit recipient, session and priority fields.');
+  }
   if (input.action === 'broadcast' && input.priority !== undefined) throw new Error('Broadcast posts use P3 category awareness and never wake recipients. Omit priority.');
   const need = <T>(value: T | undefined, name: string): T => {
     if (value === undefined) throw new Error(`${name} is required.`);
@@ -74,6 +79,7 @@ export async function dispatchCoordination(service: CoordinationService, raw: un
     case 'subscribe': return service.board.subscribe(id, need(input.categories,'categories'), input.checkout ? service.repository(input.checkout) : null);
     case 'tasks': return service.taskBoard(id, input.offset);
     case 'dispatch': return service.dispatch(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), expectedTaskRevision: need(input.expectedTaskRevision, 'expectedTaskRevision'), task: input.task });
+    case 'self_wake': return service.selfWake(id, input.schedule);
     case 'update': return service.update(id, input);
     case 'send': return service.send(id, { id: need(input.messageId, 'messageId'), recipientId: need(input.recipientId, 'recipientId'), text: need(input.text, 'text'), priority: input.priority, validFor: input.validFor, wakeReason: input.wakeReason });
     case 'ack': return service.acknowledge(id, need(input.messageIds, 'messageIds'));

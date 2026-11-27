@@ -1,6 +1,6 @@
 import type { ProviderId } from '@agent-console/shared';
 import { iterateJsonlRecords } from './base.js';
-import { isCoordinationWakePrompt } from '../../coordination/wake.js';
+import { isCoordinationWakePrompt, isScheduledWakePrompt } from '../../coordination/wake.js';
 
 export interface WakeTokens {
   inputTokens: number;
@@ -45,6 +45,8 @@ function sum(values: WakeTokens[]): WakeTokens {
 }
 
 /** Native, exact control-prompt turns only. No session-total or timestamp-only usage estimates. */
+const isAuditWake = (prompt: string) => isCoordinationWakePrompt(prompt) && !isScheduledWakePrompt(prompt);
+
 export async function readNativeWakeTurns(provider: ProviderId, filePath: string, until = Infinity): Promise<NativeWakeTurn[]> {
   const turns: NativeWakeTurn[] = [];
   let current: NativeWakeTurn | undefined;
@@ -67,7 +69,7 @@ export async function readNativeWakeTurns(provider: ProviderId, filePath: string
       } else if (r.type === 'turn_context') {
         model = typeof p.model === 'string' ? p.model : null;
         if (current && p.turn_id === current.turnId) current.model = model;
-      } else if (r.type === 'response_item' && p.role === 'user' && codexId && isCoordinationWakePrompt(text(p.content))) {
+      } else if (r.type === 'response_item' && p.role === 'user' && codexId && isAuditWake(text(p.content))) {
         if (!current) {
           current = { turnId: codexId, promptAt: timestamp, completedAt: null, outcome: 'running', model, usage: null };
           turns.push(current);
@@ -85,7 +87,7 @@ export async function readNativeWakeTurns(provider: ProviderId, filePath: string
       if (r.type === 'user' && r.isMeta !== true && r.isCompactSummary !== true && prompt.trim()) {
         finalizeClaude();
         current = undefined;
-        if (isCoordinationWakePrompt(prompt) && typeof r.uuid === 'string') {
+        if (isAuditWake(prompt) && typeof r.uuid === 'string') {
           current = { turnId: r.uuid, promptAt: timestamp, completedAt: null, outcome: 'running', model: null, usage: null };
           turns.push(current);
         }

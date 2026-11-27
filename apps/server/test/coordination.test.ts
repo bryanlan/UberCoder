@@ -982,6 +982,46 @@ describe('assignment coordination', () => {
     expect(service.poll(successor.id).messages).toHaveLength(1);
   });
 
+  it('sets, reads and cancels a self-wake through the CLI and MCP for the calling thread', async () => {
+    const { root, checkout, db, service, register } = fixture();
+    const other = register();
+    const ipc = await startCoordinationSocket(service, root); cleanups.push(() => ipc.close());
+    const nativeSessionId = randomUUID(), sessionId = randomUUID();
+    const registration = await runHelper(root, checkout, ['register'], { provider: 'codex', nativeSessionId, pid: process.pid, cwd: checkout });
+    expect(registration.code, registration.stderr).toBe(0);
+    const assignmentId = JSON.parse(registration.stdout).assignmentId;
+    service.update(assignmentId, { continuation: 'unattended' });
+    const now = new Date().toISOString();
+    db.boundSessions.upsert({ id: sessionId, projectSlug: 'demo', provider: 'codex', conversationRef: nativeSessionId,
+      status: 'bound', shouldRestore: true, startedAt: now, updatedAt: now });
+    const schedule = { intervalSeconds: 1800, objective: 'Verify the assignment is complete.' };
+
+    const cli = await runHelper(root, checkout, ['self_wake'], { schedule });
+    expect(cli.code, cli.stderr).toBe(0);
+    expect(JSON.parse(cli.stdout)).toMatchObject({ schedule: { ...schedule, sessionId } });
+    await expect(dispatchCoordination(service, { action: 'self_wake', assignmentId: other.id, token: other.token }))
+      .resolves.toEqual({ schedule: null });
+    await expect(dispatchCoordination(service, { action: 'self_wake', assignmentId: other.id, token: other.token, recipientId: assignmentId }))
+      .rejects.toThrow('scoped to the calling assignment');
+    await expect(dispatchCoordination(service, { action: 'self_wake', assignmentId, token: other.token, schedule: null }))
+      .rejects.toThrow('Invalid coordination credential');
+    await expect(dispatchCoordination(service, { action: 'self_wake', assignmentId: other.id, token: other.token, schedule }))
+      .rejects.toThrow('unique, restorable Console conversation');
+
+    const mcp = async (input: object) => {
+      const reply = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+        name: 'agent_coordination', arguments: { action: 'self_wake', ...input }, _meta: { threadId: nativeSessionId },
+      } });
+      expect(reply.code, reply.stderr).toBe(0);
+      const result = JSON.parse(reply.stdout).result;
+      expect(result.isError).toBe(false);
+      return JSON.parse(result.content[0].text);
+    };
+    expect(await mcp({})).toEqual(JSON.parse(cli.stdout));
+    expect(await mcp({ schedule: null })).toEqual({ schedule: null });
+    expect(service.selfWake(assignmentId)).toEqual({ schedule: null });
+  });
+
   it('removes enforcement actions from RPC and MCP discovery', async () => {
     const { root, checkout, service, register } = fixture();
     const a = register();
@@ -993,7 +1033,7 @@ describe('assignment coordination', () => {
     const result = await runHelper(root, checkout, ['mcp'], { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     expect(result.code, result.stderr).toBe(0);
     const tool = JSON.parse(result.stdout).result.tools[0];
-    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch']);
+    expect(tool.inputSchema.properties.action.enum).toEqual(['status', 'history', 'update', 'send', 'ack', 'finish', 'handoff', 'mail', 'broadcast', 'broadcasts', 'subscribe', 'tasks', 'dispatch', 'self_wake']);
     expect(tool.inputSchema.properties.offset).toEqual({ type: 'integer', minimum: 0 });
     expect(tool.inputSchema.properties).not.toHaveProperty('paths');
     expect(tool.inputSchema.properties).not.toHaveProperty('notifySupervisor');

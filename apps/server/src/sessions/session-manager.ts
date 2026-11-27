@@ -41,9 +41,10 @@ import { endTmuxSession } from './tmux-row-conversion.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { isTreeVisibleBoundSession } from '../lib/bound-session-state.js';
-import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerWakePauseDetailsKey, type PeerWakeAttempt, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
+import { PEER_WAKE_PROMPT, UNATTENDED_CONTINUATION_PROMPT, GRANTED_RESTART_PROMPT, scheduledWakePrompt, peerWakeAttemptKey, peerWakeFollowupKey, peerWakePaused, setPeerWakePaused, peerWakeRestoreKey, peerWakePauseDetailsKey, type PeerWakeAttempt, type WakeBlock, type AutomaticInputPause } from '../coordination/wake.js';
 import { expireMessages, messagePolicy, migrateMessagePolicies } from '../coordination/inbox-policy.js';
 import { alertOverdueAwait, continuationControl, CONTINUATION_DELAYS_MS, pendingContinuation, prepareContinuation, saveContinuation, setContinuation, signalContinuation } from '../coordination/continuation.js';
+import { saveSelfWake, selfWakeSchedule, type SelfWakeSchedule } from '../coordination/self-wake.js';
 
 const SESSION_COMPLETION_IDLE_MS = 60_000;
 /** A queued message that the transport keeps refusing before it writes anything fails after this long. */
@@ -723,11 +724,15 @@ export class SessionManager {
         if (current.runFailure) return; // Typed provider failures use the single RunRecovery budget.
         const peerResponse = pending().length > 0;
         if (!peerResponse && ['done', 'blocked'].includes(assignmentTask(this.db, recipient.id)?.state ?? '')) return;
+        const schedule = selfWakeSchedule(this.db, recipient.id);
+        const boundSchedule = schedule?.sessionId === session.id ? schedule : undefined;
+        // The opt-in schedule owns the cadence for this binding. Peer wake still
+        // takes precedence and doesn't consume a scheduled tick.
         // Inbox turns do not advance the work budget while delivering the result.
         // Preserve uncertain work submissions as blocked even on an inbox turn.
         const preserveWorkBudget = peerResponse && priorControl.recovery?.status !== 'submitting';
         let control = preserveWorkBudget ? priorControl
-          : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt);
+          : prepareContinuation(this.db, recipient.id, current.lastResponseAt ?? current.lastActivityAt, Date.now(), !boundSchedule);
         if (control.recovery?.status === 'stalled' && control.supervisorId) {
           const signalled = signalContinuation(this.db, control.supervisorId, {
             key: `worker-stalled:${recipient.id}:${control.revision}:${control.recovery.startedAt}`,
@@ -735,13 +740,26 @@ export class SessionManager {
           });
           if (signalled) this.requestAssignmentWake();
         }
-        const workResponse = !peerResponse;
-        if ((workResponse && !pendingContinuation(control)) || this.stopped) return;
+        const scheduledWake = peerResponse ? undefined : boundSchedule;
+        const workResponse = !peerResponse && !scheduledWake;
+        const scheduledAllowed = (permission: typeof control, state: SelfWakeSchedule['state']) => {
+          const latest = selfWakeSchedule(this.db, recipient.id);
+          return latest?.id === scheduledWake?.id && latest?.state === state
+            && !['blocked', 'stalled', 'submitting'].includes(permission.recovery?.status ?? '');
+        };
+        if (this.stopped || (workResponse && !pendingContinuation(control))
+          || (scheduledWake && (Date.now() < Date.parse(scheduledWake.nextWakeAt) || !scheduledAllowed(control, 'scheduled')))) return;
         const revision = control.revision;
-        const allowed = () => !this.stopped && !peerWakePaused(this.db, recipient.id)
-          && (!workResponse || !continuationControl(this.db, recipient.id).awaiting)
-          && (!workResponse || continuationControl(this.db, recipient.id).continuation === 'unattended')
-          && (!workResponse || continuationControl(this.db, recipient.id).revision === revision);
+        const permissionAllows = (permission: typeof control, state: SelfWakeSchedule['state']) =>
+          peerResponse || (permission.continuation === 'unattended' && permission.revision === revision
+            && !['done', 'blocked'].includes(assignmentTask(this.db, recipient.id)?.state ?? '')
+            && (scheduledWake ? scheduledAllowed(permission, state)
+              : !permission.awaiting && selfWakeSchedule(this.db, recipient.id)?.sessionId !== session.id));
+        const launchAuthorityAllows = (bound: BoundSession) =>
+          !scheduledWake || !bound.launchContext || this.hasActiveLaunchAuthority?.(bound) !== false;
+        const allowed = () => !this.stopped && !!current && launchAuthorityAllows(current) && !peerWakePaused(this.db, recipient.id)
+          && permissionAllows(continuationControl(this.db, recipient.id), 'scheduled');
+        if (!allowed()) return;
         const project = await this.recoveryDependencies?.projectService.getProjectBySlug(current.projectSlug);
         if (!project) return;
         if (!this.recoveryDependencies!.projectService.getMergedProviderSettings(project, current.provider).enabled) return;
@@ -758,6 +776,10 @@ export class SessionManager {
               for (const message of pending()) this.db.meta.set(message.key, JSON.stringify({
                 status: 'failed', sessionId: current.id, timestamp: nowIso(), reason,
               } satisfies PeerWakeAttempt));
+              return;
+            }
+            if (scheduledWake) {
+              if (allowed()) saveSelfWake(this.db, recipient.id, { ...scheduledWake, state: 'blocked', reason });
               return;
             }
             control = continuationControl(this.db, recipient.id);
@@ -777,16 +799,17 @@ export class SessionManager {
         if (this.stopped) return;
         current = this.db.boundSessions.getById(current.id);
         const assignment = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
-        const prompt = workResponse ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT;
+        const prompt = scheduledWake ? scheduledWakePrompt(scheduledWake.objective)
+          : workResponse ? UNATTENDED_CONTINUATION_PROMPT : PEER_WAKE_PROMPT;
         if (!allowed() || !current || this.getCurrentRestorableSession(current)?.id !== current.id
-          || !assignment || (workResponse && assignment.status === 'finished') || current.status !== 'bound'
-          || current.isWorking || this.providerTurnIsWorking(current.id)
+          || !assignment || (!peerResponse && assignment.status === 'finished') || current.status !== 'bound'
+          || current.runFailure || current.isWorking || this.providerTurnIsWorking(current.id)
           || current.modelProfileRequest || current.queuedInputs?.length || current.manualSuspendedAt || current.pressureSuspendedAt
           || !this.structured.alive(current) || this.structured.turnRunning(current)) return;
         const submissionBlock = (): WakeBlock | undefined => {
           const latest = this.db.boundSessions.getById(session.id);
           expireMessages(this.db);
-          if (!workResponse && !messages.some(m => !!this.db.sqlite.prepare('select 1 from coordination_messages where id=? and acknowledged_at is null').get(m.id)
+          if (peerResponse && !messages.some(m => !!this.db.sqlite.prepare('select 1 from coordination_messages where id=? and acknowledged_at is null').get(m.id)
             && (messagePolicy(this.db, m.id).priority === 'P1' || dispatchEligible(this.db, m.id))))
             return {code:'inbox_settled',reason:'All wake messages expired, were acknowledged or lost dispatch eligibility before submission.'};
           if (this.stopped) return { code: 'shutdown', reason: 'The Console backend is stopping.' };
@@ -796,14 +819,16 @@ export class SessionManager {
             return { code: pause?.code ?? 'paused_without_reason', reason: pause?.reason ?? 'Automatic input is paused; the existing record predates pause-reason capture.' };
           }
           const permission = continuationControl(this.db, recipient.id);
-          if (workResponse && (permission.awaiting || permission.continuation !== 'unattended' || permission.revision !== revision
-            || ['done', 'blocked'].includes(assignmentTask(this.db, recipient.id)?.state ?? '')))
-            return { code: 'permission_changed', reason: 'The unattended work permission changed during submission.' };
+          if (!permissionAllows(permission, 'submitting'))
+            return { code: 'permission_changed', reason: 'The unattended work permission or schedule changed during submission.' };
           const state = this.db.sqlite.prepare('select status from coordination_assignments where id=?').get(recipient.id) as { status: string } | undefined;
-          if (!state || (workResponse && state.status === 'finished')) return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
+          if (!state || (!peerResponse && state.status === 'finished')) return { code: 'assignment_finished', reason: 'The assignment finished during submission.' };
           if (latest?.status !== 'bound' || this.getCurrentRestorableSession(latest)?.id !== latest.id
-            || latest.pid !== current!.pid || latest.startedAt !== current!.startedAt)
+            || latest.pid !== current!.pid || latest.startedAt !== current!.startedAt
+            || latest.provider !== recipient.provider
+            || (latest.conversationRef !== recipient.nativeSessionId && latest.resumeConversationRef !== recipient.nativeSessionId))
             return { code: 'binding_changed', reason: 'The current provider binding changed during submission.' };
+          if (!launchAuthorityAllows(latest)) return { code: 'launch_authority_expired', reason: 'The agent-launched session no longer has active authority.' };
           if (latest.manualSuspendedAt) return { code: 'manual_suspend', reason: 'The session was manually suspended.' };
           if (latest.pressureSuspendedAt) return { code: 'pressure_suspend', reason: 'The session was suspended for memory pressure.' };
           if (latest.modelProfileRequest) return { code: 'model_change', reason: 'A model change is queued.' };
@@ -817,7 +842,12 @@ export class SessionManager {
           }
           return undefined;
         };
-        const messages = pending();
+        const readyMessages = pending();
+        if (!peerResponse && readyMessages.length) {
+          this.requestAssignmentWake();
+          return;
+        }
+        const messages = peerResponse ? readyMessages : [];
         control = continuationControl(this.db, recipient.id);
         if ((peerResponse && !messages.length) || (workResponse && !pendingContinuation(control))) return;
         const timestamp = nowIso();
@@ -833,6 +863,14 @@ export class SessionManager {
               ...(status === 'deferred' ? { nextAttemptAt: new Date(Date.now() + 15_000).toISOString() } : {}) } satisfies PeerWakeAttempt));
         };
         saveAttempt('submitting');
+        if (scheduledWake) saveSelfWake(this.db, recipient.id, { ...scheduledWake, state: 'submitting',
+          reason: 'If no provider acknowledgement is recorded, review the conversation before setting a new schedule.' });
+        const settleScheduledWake = (update: Pick<SelfWakeSchedule, 'state' | 'reason'> & Partial<Pick<SelfWakeSchedule, 'lastSubmittedAt' | 'nextWakeAt'>>) => {
+          if (!scheduledWake) return;
+          const latest = selfWakeSchedule(this.db, recipient.id);
+          if (latest?.id !== scheduledWake.id || latest.state !== 'submitting') return;
+          saveSelfWake(this.db, recipient.id, { ...scheduledWake, ...update });
+        };
         const consumedSignals = new Set(control.signals.map(signal => signal.key));
         if (workResponse) {
           const attempts = (control.recovery?.attempts ?? 0) + 1;
@@ -866,6 +904,10 @@ export class SessionManager {
           }
           if (delivery.status === 'failed') throw new Error(delivery.reason ?? 'The session did not accept the notice.');
           saveAttempt('submitted');
+          if (scheduledWake) settleScheduledWake({
+            state: 'scheduled', reason: undefined, lastSubmittedAt: timestamp,
+            nextWakeAt: new Date(Date.parse(timestamp) + scheduledWake.intervalSeconds * 1000).toISOString(),
+          });
           if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: 'submitted' };
@@ -874,7 +916,9 @@ export class SessionManager {
           }
           if (restoreRecord) this.db.meta.set(peerWakeRestoreKey(current.id), '');
           const updated = this.updateBoundSessionFields(current.id, { isWorking: true, lastActivityAt: timestamp, updatedAt: timestamp });
-          this.appendEvent(updated, { type: 'status', text: peerResponse ? 'Started peer-inbox response without changing continuation permission.' : 'Started unattended continuation of the existing authorized assignment.', timestamp });
+          this.appendEvent(updated, { type: 'status', text: scheduledWake ? 'Started scheduled objective reminder.'
+            : peerResponse ? 'Started peer-inbox response without changing continuation permission.'
+            : 'Started unattended continuation of the existing authorized assignment.', timestamp });
           this.eventBus.emit({ type: 'session.updated', session: updated });
         } catch (error) {
           // The durable attempt still prevents replay. A transport rejection
@@ -883,9 +927,11 @@ export class SessionManager {
           const deferred = !rejection && !submissionInvoked;
           const reason = error instanceof Error ? error.message : 'Provider input failed.';
           saveAttempt(deferred ? 'deferred' : 'failed', reason, block);
+          settleScheduledWake({ state: deferred ? 'scheduled' : 'blocked', reason });
+          const inputKind = scheduledWake ? 'scheduled reminder' : peerResponse ? 'inbox' : 'work';
           this.appendEvent(current, { type: 'status', timestamp: nowIso(), text: rejection
-            ? `Automatic ${peerResponse ? 'inbox' : 'work'} input was not sent, and sending it again would fail the same way: ${reason}`
-            : `Automatic ${peerResponse ? 'inbox' : 'work'} input ${deferred ? 'deferred before submission' : 'failed with uncertain delivery'}: ${reason}` });
+            ? `Automatic ${inputKind} input was not sent, and sending it again would fail the same way: ${reason}`
+            : `Automatic ${inputKind} input ${deferred ? 'deferred before submission' : 'failed with uncertain delivery'}: ${reason}` });
           if (workResponse && allowed()) {
             control = continuationControl(this.db, recipient.id);
             control.recovery = { ...control.recovery!, status: deferred ? 'scheduled' : 'blocked',

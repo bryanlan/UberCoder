@@ -26,6 +26,7 @@ Agents use `agent_coordination` through the `agent_console_coordination` MCP ser
 - `update`: announce or revise `description`, `checkout` and `summary`; mention intended files in the summary. `status` may be `active` or `waiting`. Independent `continuation` permission is `unattended` or `waiting_for_input`; `supervisorId` links a worker to its parent (null clears it), and `task` maintains the worker task record. Ordinary status updates never announce a handoff. The reply confirms the assignment without returning a repository snapshot.
 - `send`: exchange information with `recipientId` and `text`, with sender-chosen priority and validity. Only P1 requests a guarded response turn for an idle or automatically sleeping Console recipient. Direct messages reach any registered session, whichever repository either session is working in; repository enrollment controls activity views only. An optional `messageId` makes retries idempotent. The same receipt shape is returned on retries, derived from current message and recipient state.
 - `tasks`: read your assignment and worker board, with `offset` pagination. Each task has deliverable, doneWhen, evidencePath, working/blocked/done state, actionNeeded, owner, revision and last-moved time.
+- `self_wake`: inspect, set or cancel a recurring objective reminder for the calling assignment. See [scheduled self-wake](#scheduled-self-wake).
 - `dispatch`: an explicit task command to your assigned unattended worker. Pass recipientId, expectedTaskRevision (0 for a first record), optional task changes, and optional stable messageId. First dispatch requires deliverable, doneWhen and evidencePath. It requests one guarded activation without a restart, priority escalation, permission renewal or budget reset. Stop, approvals, pending decisions, external awaits, blocked/stalled recovery and resource limits still apply. Same-ID retries return the original receipt; an unchanged revision cannot be dispatched under another ID. Informational supervisor mail still uses send and normal priority rules.
 - `ack`: acknowledge delivered messages with `messageIds`; acknowledgement is receipt, not approval. Expired unsupplied IDs return `expiredUnread` and are never marked acknowledged. Unknown or wrong-recipient IDs still fail.
 - `handoff`: transfer active finish-bound grants and child supervision to an explicit unfinished `successorId`, then finish this assignment atomically. Include `summary`; see [Grant transfer](agent-grants.md#transfer-a-leads-assignment). It preserves inherited grant IDs, limits and worker waits, sends a P2 notice by default and starts no session. Ordinary finish still expires grants.
@@ -105,6 +106,53 @@ Non-P1 worker reports are batched into an existing-turn supervisor digest, at mo
 Reports include a bounded summary and task/evidence details; full summaries remain in `history`. Do not duplicate a task-state report with `send`. Changing ordinary summary wording does not create another notification. Links reject unknown, finished, self and cyclic supervisors. Reports cannot enable a waiting parent, change authority or replenish its recovery budget. Native provider failure and exhausted continuation remain bounded controller signals; genuine native child completion envelopes remain signals for their own parent.
 
 The backend checks every 15 seconds. A ready unattended assignment with unfinished work and five minutes of inactivity schedules continuation after 15 seconds. Native worker signals use that same first delay. Later continuations wait at least 45 and 120 seconds, with three attempts per permission generation. Informational P2/P3 arrivals cannot start an extra turn or bypass that budget. Explicit supervised dispatch is a separate, guarded task command. Foreground work, approvals, Stop and resource limits retain their guards. Typed provider failures use the separate bounded recovery controller described in [architecture](architecture.md#provider-run-failures-and-bounded-recovery).
+
+### Scheduled self-wake
+
+With Bryan's authorization, an unattended assignment can schedule a recurring turn
+for its own bound Console conversation. Set one objective and an interval in seconds
+from 60 to 604800. A new schedule replaces the previous one and starts the interval
+from the time it was set. An ordinary `awaiting` entry stays in place and the
+reminder can still start a turn to check it. The schedule controls the cadence of
+ordinary unattended continuation on that binding. Eligible peer wakes and
+supervised dispatch retain their normal behavior.
+
+Console checks due reminders every 15 seconds. Busy sessions and open provider
+requests, Stop, manual suspension, expired launch authority, resource limits,
+queued human input, explicit
+`waiting_for_input`, blocked tasks, and blocked or stalled continuation recovery
+retain their guards. Missed intervals coalesce into one reminder once the session is
+eligible again. A successful submission starts the next interval. A definite
+temporary refusal can be retried. An interrupted or uncertain delivery leaves the
+schedule in `submitting` or `blocked` for review and explicit replacement.
+The reminder is classified as coordination status. The objective goes to the
+provider as part of the scheduled turn, so use the same privacy boundaries as for
+other conversation inputs.
+
+After an authorized Console adoption, build and activate the backend and
+`scripts/agent-coord.mjs` from the same revision using the [normal installation
+procedure](#installation-and-activation). Keep the current conversation
+and assignment. From the lead's own session, call `agent_coordination` with
+`{"action":"self_wake","schedule":{"intervalSeconds":1800,"objective":"Continue the Boldin comparison through independent final verification. Cancel the reminder when complete."}}`.
+If the MCP schema is cached, use the canonical helper printed by the coordination
+hook from that same session.
+
+```bash
+node /path/from/coordination-hook/agent-coord.mjs self_wake <<'JSON'
+{"schedule":{"intervalSeconds":1800,"objective":"Continue the Boldin comparison through independent final verification. Cancel the reminder when complete."}}
+JSON
+node /path/from/coordination-hook/agent-coord.mjs self_wake </dev/null
+node /path/from/coordination-hook/agent-coord.mjs self_wake <<'JSON'
+{"schedule":null}
+JSON
+```
+
+Inspection returns the bound session ID, next due time, and last submitted time
+once available. Verify operational adoption by observing the conversation idle
+before the due time, a new turn in that same native conversation, the status
+`Started scheduled objective reminder.`, and an advanced next due time.
+Marking the task done or finishing the assignment removes the schedule. Manual
+cancellation removes future reminders and leaves a submitted turn to finish.
 
 ### Cooperative priority trial
 
