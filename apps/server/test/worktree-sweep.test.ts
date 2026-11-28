@@ -3,7 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { CURRENT_SCHEMA_VERSION, migrateDatabase } from '../src/db/schema.js';
 import { processStart, runSweep, summarize, SNAPSHOT_EXPIRY_DAYS, SUPPORTED_SCHEMA_VERSIONS, type SweepReport, type WorktreeResult } from '../../../scripts/worktree-sweep.mjs';
 
@@ -569,13 +569,76 @@ describe('scratch and Docker sweep', () => {
     git(outer, 'init', '-q', 'component');
     write(path.join(outer, 'component', '.gitignore'), 'target/\n');
     cache(path.join(outer, 'component'));
-    const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [repo], scratchRoots: [scratch] });
-    expect(Object.fromEntries(report.scratch.map((item) => [path.relative(scratch, item.path), item.outcome]))).toEqual({
-      'outer/component/target': expect.stringMatching(/^refused: holds tracked or untracked files of .*\/outer$/),
-      'job/target': expect.stringMatching(/^refused: protected entry at .*test-env\/pyvenv\.cfg$/),
-      'uv-env': expect.stringMatching(/^refused: virtual environment at .*uv-env$/),
+    const summaryPath = path.join(root, 'scratch-venv-summary.json');
+    const options = { configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), now: NOW, repoFilter: [root], scratchRoots: [scratch] };
+    const environment = path.join(scratch, 'uv-env');
+    const protectedResult = { path: environment, root: scratch, state: 'protected', action: 'none', reason: `virtual environment at ${environment}` };
+    const dry = runSweep(options);
+    expect(dry.scratch.find((item) => item.path === environment)).toEqual(protectedResult);
+    expect(summarize(dry)).toContain('Tagged scratch directories: 3, idle 2, protected 1');
+
+    const report = runSweep({ ...options, apply: true, summaryPath });
+    const nested = path.join(scratch, 'job', 'target');
+    const tracked = path.join(outer, 'component', 'target');
+    const nestedRefusal = `refused: protected entry at ${path.join(nested, 'test-env', 'pyvenv.cfg')}`;
+    const trackedRefusal = `refused: holds tracked or untracked files of ${outer}`;
+    expect(report.scratch.find((item) => item.path === environment)).toEqual(protectedResult);
+    expect(report.scratch.find((item) => item.path === nested)?.outcome).toBe(nestedRefusal);
+    expect(report.scratch.find((item) => item.path === tracked)?.outcome).toBe(trackedRefusal);
+    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8'))).toMatchObject({
+      status: 'updated',
+      issues: [],
+      targets: [
+        { path: nested, status: 'refused', plain_english_summary: nestedRefusal },
+        { path: tracked, status: 'refused', plain_english_summary: trackedRefusal },
+      ],
+      follow_up: [`${nested}: ${nestedRefusal}`, `${tracked}: ${trackedRefusal}`],
     });
     for (const kept of ['job/.venv/pyvenv.cfg', 'job/target/test-env/pyvenv.cfg', 'uv-env/debug/big.bin', 'outer/component/target/valuable.txt']) expect(fs.existsSync(path.join(scratch, kept)), kept).toBe(true);
+  });
+
+  it('refuses a cache when a virtual environment marker appears after planning', () => {
+    const scratch = path.join(root, 'scratch-venv-race');
+    const candidates = ['on-recheck', 'on-final-walk', 'before-removal'];
+    for (const name of candidates) cache(scratch, name);
+    const appearOnCheck = new Map(candidates.map((name, index) => [path.join(scratch, name, 'pyvenv.cfg'), index + 2]));
+    const lstat = fs.lstatSync;
+    const check = vi.spyOn(fs, 'lstatSync').mockImplementation((...args) => {
+      const marker = String(args[0]);
+      const remaining = appearOnCheck.get(marker);
+      if (remaining === 1) write(marker, 'home = /usr/bin\n');
+      if (remaining) appearOnCheck.set(marker, remaining - 1);
+      return lstat(...args);
+    });
+    try {
+      const report = runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [root], scratchRoots: [scratch] });
+      for (const name of candidates) {
+        const candidate = path.join(scratch, name);
+        expect(report.scratch.find((item) => item.path === candidate)).toMatchObject({
+          state: 'idle', action: 'reclaim-cache', outcome: `refused: virtual environment at ${candidate}`,
+        });
+        expect(fs.existsSync(path.join(candidate, 'debug', 'big.bin'))).toBe(true);
+        expect(fs.existsSync(path.join(candidate, 'pyvenv.cfg'))).toBe(true);
+      }
+    } finally {
+      check.mockRestore();
+    }
+  });
+
+  it('records operational failures as failed targets and issues in the scheduler summary', () => {
+    const summaryPath = path.join(root, 'docker-failure-summary.json');
+    const docker = (args: string[]) => {
+      if (args[0] === 'version') return '27.0\n';
+      if (args[0] === 'volume') return '';
+      throw new Error('prune failed');
+    };
+    runSweep({ configPath: path.join(root, 'config.json'), reportDir: path.join(root, 'reports'), apply: true, now: NOW, repoFilter: [root], summaryPath, docker });
+    expect(JSON.parse(fs.readFileSync(summaryPath, 'utf8'))).toMatchObject({
+      status: 'failed',
+      issues: ['Docker build cache: failed: prune failed'],
+      targets: [{ path: 'Docker build cache', status: 'failed', plain_english_summary: 'failed: prune failed' }],
+      follow_up: [],
+    });
   });
 
   it('removes only old anonymous Docker volumes no container uses, and prunes old build cache', () => {

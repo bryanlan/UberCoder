@@ -21,7 +21,7 @@ export interface SweepReport {
   };
 }
 export function runSweep(options?: {
-  configPath?: string; reportDir?: string; apply?: boolean; repoFilter?: string[]; now?: number; cooldownHours?: number;
+  configPath?: string; reportDir?: string; summaryPath?: string; apply?: boolean; repoFilter?: string[]; now?: number; cooldownHours?: number;
   onQuarantine?: (quarantinePath: string) => void;
   onBranchDelete?: (branch: BranchResult, stage: 'checks' | 'transaction') => void;
   scratchRoots?: string[]; docker?: (args: string[]) => string;

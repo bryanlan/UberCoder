@@ -434,13 +434,22 @@ function reassess(options, repository, entry, consolePath = entry.path) {
   return assess(options, repository, entry, gatherSignals(options, new Set([entry.path, consolePath])), consolePath);
 }
 
+function isVirtualEnvironment(directory) {
+  // uv tags virtual environments with CACHEDIR.TAG too.
+  try {
+    return fs.lstatSync(path.join(directory, 'pyvenv.cfg'), { throwIfNoEntry: false }) !== undefined;
+  } catch (error) {
+    if (error.code === 'ENOTDIR') return false;
+    throw error;
+  }
+}
+
 // Walks a disposable directory without following links; refuses Git data, secrets, environments
 // and device or mount boundaries anywhere below it. Returns its size in bytes.
 // `uid` refuses entries another user owns; `writtenBefore` skips a cache with any entry written later.
 function verifyDisposable(directory, rootDevice, { uid, writtenBefore } = {}) {
   assertNoMountsWithin(directory);
-  // uv tags virtual environments with CACHEDIR.TAG too.
-  if (fs.existsSync(path.join(directory, 'pyvenv.cfg'))) throw new Refusal(`virtual environment at ${directory}`);
+  if (isVirtualEnvironment(directory)) throw new Refusal(`virtual environment at ${directory}`);
   let bytes = 0;
   const pending = [directory];
   while (pending.length) {
@@ -500,6 +509,7 @@ function findScratchCaches(root) {
 }
 
 function assessScratch(cache, scan, now, cooldownMs) {
+  if (isVirtualEnvironment(cache)) return { path: cache, state: 'protected', action: 'none', reason: `virtual environment at ${cache}` };
   const pids = [...new Set(scan.references.filter((ref) => isWithin(ref.path, cache)).map((ref) => ref.pid))];
   if (pids.length) return { path: cache, state: 'in-use', action: 'none', reason: `process ${pids.slice(0, 5).join(', ')} references it` };
   if (!scan.complete) return { path: cache, state: 'in-use', action: 'none', reason: 'process visibility is incomplete' };
@@ -536,6 +546,8 @@ function reclaimScratchCache(cache, root, writtenBefore) {
     if (current === path.dirname(current)) break;
   }
   const bytes = verifyDisposable(cache, stat.dev, { uid: process.getuid(), writtenBefore });
+  // The walk may take time. Check the root again before removing it.
+  if (isVirtualEnvironment(cache)) throw new Refusal(`virtual environment at ${cache}`);
   fs.rmSync(cache, { recursive: true });
   return bytes;
 }
@@ -547,6 +559,7 @@ function sweepScratch(candidates, scan, options, apply) {
   for (const result of results.filter((item) => item.action === 'reclaim-cache')) {
     try {
       const current = assessScratch(result.path, scanProcesses(), options.now, options.cooldownMs);
+      if (current.state === 'protected') throw new Refusal(current.reason);
       if (current.action !== 'reclaim-cache') { result.outcome = `skipped: now ${current.state} (${current.reason})`; continue; }
       result.reclaimedBytes = reclaimScratchCache(result.path, result.root, options.now - options.cooldownMs);
       result.outcome = 'reclaimed';
@@ -929,7 +942,8 @@ function writeReport(reportDir, report) {
 
 // `onQuarantine` lets tests act inside the window between quarantine and the final check.
 // Scratch roots and Docker are opt-in, so a library caller never touches the host's /tmp or Docker by default.
-export function runSweep({ configPath, reportDir, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine, onBranchDelete, scratchRoots = [], docker } = {}) {
+export function runSweep({ configPath, reportDir, summaryPath, apply = false, repoFilter = [], now = Date.now(), cooldownHours = DEFAULT_COOLDOWN_HOURS, onQuarantine, onBranchDelete, scratchRoots = [], docker } = {}) {
+  const startedAt = new Date().toISOString();
   const config = loadConsoleConfig(configPath);
   const directory = expandHome(reportDir ?? '~/.local/share/agent-console/worktree-sweep');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -961,6 +975,7 @@ export function runSweep({ configPath, reportDir, apply = false, repoFilter = []
       docker: docker ? sweepDocker(docker, options, apply && usable) : { available: false, reason: 'not requested', volumes: [] },
     };
     report.file = writeReport(directory, report);
+    if (summaryPath) writeSummary(summaryPath, report, startedAt);
     return report;
   } finally { release(); }
 }
@@ -974,7 +989,7 @@ export function summarize(report) {
   lines.push(`Planned: remove ${planned.filter((item) => item.action === 'remove').length}, reclaim caches in ${planned.filter((item) => item.action === 'reclaim-cache').length}`);
   const deletable = report.branches.filter((item) => item.action === 'delete');
   lines.push(`${report.branches.length} local branches: delete ${deletable.filter((item) => item.state === 'landed').length} landed and ${deletable.filter((item) => item.state === 'snapshot-expired').length} expired snapshots; keep ${report.branches.filter((item) => item.state === 'unlanded').length} unlanded and ${report.branches.filter((item) => item.state === 'snapshot').length} snapshots`);
-  lines.push(`Scratch build caches: ${report.scratch.length}, idle ${report.scratch.filter((item) => item.action === 'reclaim-cache').length}`);
+  lines.push(`Tagged scratch directories: ${report.scratch.length}, idle ${report.scratch.filter((item) => item.action === 'reclaim-cache').length}, protected ${report.scratch.filter((item) => item.state === 'protected').length}`);
   lines.push(report.docker.available
     ? `Docker: ${report.docker.volumes.filter((item) => item.action === 'remove').length} orphaned anonymous volumes of ${report.docker.volumes.length} unused; build cache: ${report.docker.buildCache.outcome ?? report.docker.buildCache.action}`
     : `Docker: skipped (${report.docker.reason})`);
@@ -1009,6 +1024,9 @@ function writeSummary(file, report, startedAt) {
   const snapshots = deleted.length - landed;
   const failed = allItems(report).filter((item) => item.outcome?.startsWith('failed'));
   const refused = [...items, ...report.scratch].filter((item) => item.outcome?.startsWith('refused'));
+  const protectedScratch = report.scratch.filter((item) => item.state === 'protected').length;
+  const protectedSummary = protectedScratch
+    ? `It kept ${protectedScratch} tagged virtual environment${protectedScratch === 1 ? '' : 's'}. ` : '';
   const kept = items.filter((item) => ['dirty', 'local-files', 'unreleased', 'detached', 'git-operation', 'private-git-state', 'reflog-only-commits', 'hidden-index'].includes(item.state)).length;
   const status = !report.usable || failed.length ? 'failed' : 'updated';
   const dashboard = report.usable
@@ -1017,9 +1035,12 @@ function writeSummary(file, report, startedAt) {
   const summary = {
     job_key: process.env.WALTIUM_JOB_KEY ?? null, run_id: process.env.WALTIUM_RUN_ID ?? null,
     started_at: startedAt, finished_at: new Date().toISOString(), status, dashboard_summary: dashboard,
-    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories and ${report.scratch.length} build caches in scratch space such as /tmp. It deletes a local branch only after 24 idle hours when its commits are already in a kept branch (the default branch, a remote branch, a tag or a checked-out branch) and its reflog holds nothing else, and it deletes snapshot branches once their base reaches the default branch or after ${SNAPSHOT_EXPIRY_DAYS} days; ${report.branches.filter((item) => item.state === 'unlanded').length} branches with unlanded commits stay. It never deletes uncommitted work, ignored local files or a worktree a session can still resume. Docker: ${report.docker.available ? `${volumes} anonymous volumes no container used were removed and build cache unused for a week was ${report.docker.buildCache.outcome ?? 'left'}` : `skipped (${report.docker.reason})`}. ${refused.length ? `${refused.length} cache deletions were refused by a safety check and need a look. ` : ''}The full report is ${report.file}.`,
+    plain_english_summary: `${dashboard} The sweep checked ${items.length} agent worktrees across Console repositories and ${report.scratch.length} tagged directories in scratch space such as /tmp. ${protectedSummary}It deletes a local branch only after 24 idle hours when its commits are already in a kept branch (the default branch, a remote branch, a tag or a checked-out branch) and its reflog holds nothing else, and it deletes snapshot branches once their base reaches the default branch or after ${SNAPSHOT_EXPIRY_DAYS} days; ${report.branches.filter((item) => item.state === 'unlanded').length} branches with unlanded commits stay. It never deletes uncommitted work, ignored local files or a worktree a session can still resume. Docker: ${report.docker.available ? `${volumes} anonymous volumes no container used were removed and build cache unused for a week was ${report.docker.buildCache.outcome ?? 'left'}` : `skipped (${report.docker.reason})`}. ${refused.length ? `Safety checks blocked ${refused.length} planned cache deletions. ` : ''}The full report is ${report.file}.`,
     llm_usage: { provider: null, models: [], input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-    targets: [...failed, ...refused].map((item) => ({ path: item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`, status: 'failed', plain_english_summary: item.outcome })),
+    targets: [
+      ...failed.map((item) => ({ path: item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`, status: 'failed', plain_english_summary: item.outcome })),
+      ...refused.map((item) => ({ path: item.path, status: 'refused', plain_english_summary: item.outcome })),
+    ],
     issues: failed.map((item) => `${item.path ?? item.name ?? `${item.main} ${item.branch ?? 'branches'}`}: ${item.outcome}`), follow_up: refused.map((item) => `${item.path}: ${item.outcome}`),
     report_file: report.file,
   };
@@ -1034,8 +1055,6 @@ function main(argv) {
   }
   const options = { repoFilter: [] };
   let json = false;
-  let summaryPath;
-  const startedAt = new Date().toISOString();
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index];
     if (flag === '--apply' && command === 'sweep') options.apply = true;
@@ -1043,12 +1062,11 @@ function main(argv) {
     else if (flag === '--repo') options.repoFilter.push(rest[++index]);
     else if (flag === '--config') options.configPath = rest[++index];
     else if (flag === '--report-dir') options.reportDir = rest[++index];
-    else if (flag === '--summary-path') summaryPath = rest[++index];
+    else if (flag === '--summary-path') options.summaryPath = rest[++index];
     else { process.stderr.write(`Unknown option ${flag}\n`); return 64; }
   }
   const report = runSweep({ ...options, scratchRoots: [...new Set([os.tmpdir(), '/tmp'].map(realpathOrSelf))], docker: realDocker });
   process.stdout.write(`${json ? JSON.stringify(report, null, 1) : summarize(report)}\n`);
-  if (summaryPath) writeSummary(summaryPath, report, startedAt);
   if (!report.usable) return 2;
   return allItems(report).some((item) => item.outcome?.startsWith('failed')) ? 1 : 0;
 }
