@@ -58,11 +58,11 @@ Deletion follows a fresh assessment of the repository. One Git ref transaction t
 
 | What | Removed when |
 |---|---|
-| Build caches in `/tmp` (and `$TMPDIR`) up to four levels down: directories this user owns with a valid `CACHEDIR.TAG` | No process references anything inside, nothing in it was written in 24 hours, every entry is this user's, no mount point lies on its path, and the same disposable checks as worktree caches pass. Every enclosing Git checkout must report no tracked or untracked files in it. Protected names (`.venv`, `venv`, `var`, `dist`, `build`, `.env*`) are never searched, and any directory holding `pyvenv.cfg` is refused, because `uv` tags virtual environments with `CACHEDIR.TAG` too. |
+| Build caches in `/tmp` (and `$TMPDIR`) up to four levels down: directories this user owns with a valid `CACHEDIR.TAG` | No process references anything inside, nothing in it was written in 24 hours, every entry is this user's, no mount point lies on its path, and the same disposable checks as worktree caches pass. Every enclosing Git checkout must report no tracked or untracked files in it. The search skips protected names (`.venv`, `venv`, `var`, `dist`, `build`, `.env*`). |
 | Docker volumes | Anonymous (Docker created it for a container), no container uses it, and created over 24 hours ago. Docker itself refuses a volume in use. Named volumes are never removed. |
 | Docker build cache | Unused for 7 days (`docker builder prune --filter until=168h`). |
 
-Everything else in `/tmp` is left alone, including agents' notes and logs. If Docker is unavailable, that part is skipped and reported. `runSweep` touches scratch space and Docker only when its caller passes `scratchRoots` and `docker`; the command line passes both.
+A tagged scratch directory with `pyvenv.cfg` at its root is reported as `protected` with action `none`, because `uv` also tags virtual environments. Before removing a directory the sweep checks for the root marker again and walks the directory for nested markers. It checks the root once more after the walk. Everything else in `/tmp` is left alone, including agents' notes and logs. If Docker is unavailable, that part is skipped and reported. `runSweep` touches scratch space and Docker only when its caller passes `scratchRoots` and `docker`; the command line passes both.
 
 ## Running it
 
@@ -75,7 +75,7 @@ node scripts/worktree-sweep.mjs sweep --apply     # act
 
 Every run writes `~/.local/share/agent-console/worktree-sweep/<time>.json` and `latest.json`, keeping the last 72 runs. Each worktree and local branch has a state, reason, action and outcome. Kept worktrees list their owners and the reason they were kept.
 
-The Waltium scheduler runs `sweep --apply` hourly. It uses the main checkout so that it runs integrated, reviewed code.
+The Waltium scheduler runs `sweep --apply` hourly. It uses the main checkout so that it runs integrated, reviewed code. When cache removal reports a safety refusal, the scheduler summary records a `refused` target and a follow-up. A directory marked `protected` when planning needs no follow-up. Operational failures record a `failed` target and an issue. The command exits with status 1 for failures and status 2 for an unusable sweep. Refusals alone exit with status 0.
 
 ## Rules for agents
 
